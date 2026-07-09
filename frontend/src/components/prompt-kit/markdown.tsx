@@ -1,6 +1,6 @@
 import { marked } from "marked";
 import { ExternalLink } from "lucide-react";
-import { memo, type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { lazy, memo, type ReactNode, Suspense, useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -14,6 +14,9 @@ import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { reportClientError } from "@/lib/client-diagnostics";
 import { CodeBlock, CodeBlockCode } from "./code-block";
+
+// Lazy so recharts (bundled) only loads when a chart actually appears in chat.
+const ChatChart = lazy(() => import("@/components/chat/ChatChart"));
 
 export type MarkdownProps = {
   children: string;
@@ -451,9 +454,25 @@ const BASE_COMPONENTS: Partial<Components> = {
     }
 
     const language = extractLanguage(className);
+    const source = String(children);
+    if (language === "chart") {
+      // Declarative JSON chart spec → fixed, validated recharts renderer.
+      // No code executes; an invalid/streaming spec falls back to a code block.
+      return (
+        <Suspense
+          fallback={
+            <CodeBlock className={className}>
+              <CodeBlockCode code={source} language="json" />
+            </CodeBlock>
+          }
+        >
+          <ChatChart source={source} />
+        </Suspense>
+      );
+    }
     return (
       <CodeBlock className={className}>
-        <CodeBlockCode code={String(children)} language={language} />
+        <CodeBlockCode code={source} language={language} />
       </CodeBlock>
     );
   },

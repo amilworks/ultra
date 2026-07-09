@@ -79,6 +79,18 @@ function ChartContainer({
   )
 }
 
+// Guards for the CSS-variable injection below. Config is developer-authored
+// today, but if a config is ever driven by agent/user data these keep a color
+// string from breaking out of the CSS value (inject rules, url() exfil, etc.).
+const CHART_KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/
+function isSafeChartColor(value: string): boolean {
+  return (
+    value.length < 64 &&
+    !/[;{}<>\\]/.test(value) &&
+    !/url\(|@import|expression/i.test(value)
+  )
+}
+
 const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
   const colorConfig = Object.entries(config).filter(
     ([, config]) => config.theme ?? config.color
@@ -97,10 +109,11 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
 ${prefix} [data-chart=${id}] {
 ${colorConfig
   .map(([key, itemConfig]) => {
+    if (!CHART_KEY_RE.test(key)) return null
     const color =
       itemConfig.theme?.[theme as keyof typeof itemConfig.theme] ??
       itemConfig.color
-    return color ? `  --color-${key}: ${color};` : null
+    return color && isSafeChartColor(color) ? `  --color-${key}: ${color};` : null
   })
   .join("\n")}
 }

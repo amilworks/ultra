@@ -70,11 +70,30 @@
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
+  /* Ultra brand data palette — calm, ink-anchored, one hue per index across
+     light/dark. Colorblind-validated (dataviz Machado-2009 + WCAG). Keep in sync
+     with skills/plots-and-diagrams/references/palette.md (matplotlib shares it). */
+  --chart-1: oklch(0.375 0.018 264.3); /* graphite    #3c414b */
+  --chart-2: oklch(0.514 0.110 256.1); /* slate-blue  #3a68a5 */
+  --chart-3: oklch(0.560 0.121 41.8);  /* terracotta  #ae5937 */
+  --chart-4: oklch(0.583 0.101 189.5); /* teal        #008e88 */
+  --chart-5: oklch(0.630 0.115 81.4);  /* ochre       #ac8128 */
+  --chart-6: oklch(0.544 0.120 15.8);  /* muted-rose  #aa4f58 */
+  --chart-7: oklch(0.456 0.121 305.2); /* dusty-violet #67428c */
+  --chart-8: oklch(0.600 0.107 145.2); /* sage        #549157 */
+  /* chart chrome — quiet neutrals, never a hue */
+  --chart-grid: rgba(23, 23, 23, 0.08);
+  --chart-axis: rgba(23, 23, 23, 0.22);
+  --chart-label: #737373;
+  --chart-title: #171717;
+  /* sequential (single-hue slate, low->high) */
+  --chart-seq-1: #e4eefb; --chart-seq-2: #c1d6f2; --chart-seq-3: #96b7e2;
+  --chart-seq-4: #6791ca; --chart-seq-5: #3a6aa8; --chart-seq-6: #1f4577;
+  --chart-seq-7: #112845;
+  /* diverging (slate <- neutral -> clay) */
+  --chart-div-1: #275591; --chart-div-2: #6488b9; --chart-div-3: #b0c3db;
+  --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
+  --chart-div-7: #9a4729;
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -9806,6 +9825,23 @@ details {
   margin-top: 0.42rem;
 }
 
+/* Agent-emitted ```chart figure (declarative spec -> recharts). */
+.pk-chart {
+  margin: 0.5rem 0 0.6rem;
+  padding: 0.9rem 1rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--bg-panel-strong) 90%, var(--bg-main) 10%);
+}
+
+.pk-chart-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.86rem;
+  font-weight: 560;
+  color: var(--text-main);
+  letter-spacing: -0.01em;
+}
+
 .pk-table-wrap {
   margin: 0.28rem 0 0.34rem;
   width: 100%;
@@ -10367,6 +10403,9 @@ details {
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+  --color-chart-7: var(--chart-7);
+  --color-chart-8: var(--chart-8);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);
@@ -10415,11 +10454,25 @@ details {
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
+  /* Ultra brand data palette (dark) — same hue per index as light; only L/C shift. */
+  --chart-1: oklch(0.800 0.016 260.7); /* graphite    #b8bec8 */
+  --chart-2: oklch(0.660 0.115 256.4); /* slate-blue  #6294d8 */
+  --chart-3: oklch(0.665 0.121 42.1);  /* terracotta  #d17956 */
+  --chart-4: oklch(0.600 0.110 189.6); /* teal        #00958e (CVD fix vs graphite) */
+  --chart-5: oklch(0.666 0.120 82.4);  /* ochre       #b88c2e */
+  --chart-6: oklch(0.604 0.122 16.2);  /* muted-rose  #bf6068 */
+  --chart-7: oklch(0.585 0.120 304.5); /* dusty-violet #8c68b5 */
+  --chart-8: oklch(0.662 0.107 145.0); /* sage        #67a469 */
+  --chart-grid: rgba(255, 255, 255, 0.10);
+  --chart-axis: rgba(255, 255, 255, 0.24);
+  --chart-label: #a1a1aa;
+  --chart-title: #f5f5f5;
+  --chart-seq-1: #16223b; --chart-seq-2: #1f3a63; --chart-seq-3: #2f5991;
+  --chart-seq-4: #4f7cbb; --chart-seq-5: #7ba0da; --chart-seq-6: #a8c4ec;
+  --chart-seq-7: #d3e2f8;
+  --chart-div-1: #6294d8; --chart-div-2: #47709f; --chart-div-3: #3a5069;
+  --chart-div-mid: #3a3936; --chart-div-5: #7a4f3e; --chart-div-6: #b06f52;
+  --chart-div-7: #d17956;
   --sidebar: oklch(0.205 0 0);
   --sidebar-foreground: oklch(0.985 0 0);
   --sidebar-primary: oklch(0.488 0.243 264.376);

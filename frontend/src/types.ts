@@ -486,6 +486,20 @@ export type TrainingRunningBenchmark = {
   started_at: string;
 };
 
+// Live finetune progress echoed on the status read from the in-flight job's
+// latest training.progress event (completed/total epochs + best mAP so far).
+export type TrainingRunningFinetune = {
+  job_id: string;
+  job_type: string;
+  status: string;
+  started_at: string;
+  message?: string;
+  completed?: number;
+  total?: number;
+  map50?: number;
+  map50_95?: number;
+};
+
 // The PINNED metadata.guardrails.clauses[] element shape (plan section 7.6,
 // stamped by the M2 gate engine at benchmark time).
 export type GateClauseWire = {
@@ -521,6 +535,7 @@ export type TrainingModelStatus = PrairieStatusResponse & {
   gold?: TrainingGoldEcho | null;
   canary?: TrainingCanaryEcho | null;
   running_benchmark?: TrainingRunningBenchmark | null;
+  running_finetune?: TrainingRunningFinetune | null;
   recent_events?: TrainingRecentEvent[];
 };
 

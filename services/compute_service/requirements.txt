@@ -1,0 +1,30 @@
+# Ultra compute service — GPU node image deps.
+# torch/torchvision are the cu121 wheels (installed with the pytorch extra-index in
+# the Dockerfile). ultra_deepagents is NOT pip-installed: the Dockerfile COPYs its
+# source to /opt/ultra and puts it on PYTHONPATH, so ONLY the packages its
+# rarespot/training compute submodules import at runtime need to be here — the
+# langchain/nats agent stack is deliberately NOT pulled in.
+
+# --- service framework ---
+fastapi==0.115.8
+uvicorn[standard]==0.34.0
+pydantic==2.10.6
+python-multipart==0.0.20
+
+# --- deep-learning runtime (yolov5 finetune + rarespot detect) ---
+torch==2.3.1
+torchvision==0.18.1
+numpy==1.26.4
+Pillow==9.5.0
+opencv-python-headless==4.10.0.84
+pandas==2.2.2
+matplotlib==3.9.2
+seaborn==0.13.2
+scipy==1.13.1
+tqdm==4.66.5
+PyYAML==6.0.2
+requests==2.32.3
+psutil==6.0.0
+GitPython==3.1.43
+thop==0.1.1.post2209072238
+tensorboard==2.17.1

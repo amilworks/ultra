@@ -832,7 +832,11 @@ def test_build_finetune_command_refuses_scratch_training() -> None:
         build_finetune_command({"weights_uri": "", "data_yaml": "/d.yaml", "run_dir": "/r"})
 
 
-def test_train_raises_the_m3_not_implemented_branch(tmp_path) -> None:
+def test_train_raises_the_m3_not_implemented_branch(tmp_path, monkeypatch) -> None:
+    # Neither the compute service nor the legacy ssh executor configured => the
+    # trainer fails cleanly with the reason (never wedges the job).
+    monkeypatch.delenv("ULTRA_COMPUTE_SERVICE_URL", raising=False)
+    monkeypatch.delenv("ULTRA_TRAINING_GPU_SSH_HOST", raising=False)
     adapter = RareSpotAdapter()
     ctx = TrainContext(
         params={
@@ -842,8 +846,96 @@ def test_train_raises_the_m3_not_implemented_branch(tmp_path) -> None:
         },
         workdir=tmp_path,
     )
-    with pytest.raises(NotImplementedError, match="GPU-node worker deployment"):
+    with pytest.raises(NotImplementedError, match="compute service"):
         adapter.train(ctx)
+
+
+class _FakeComputeClient:
+    """Stands in for ComputeServiceClient in adapter routing tests."""
+
+    def __init__(self, result: dict) -> None:
+        self.result = result
+        self.calls: list[dict] = []
+
+    def submit_and_wait(self, *, executor, spec, idempotency_key=None, on_progress=None, should_cancel=None):
+        self.calls.append({"executor": executor, "spec": spec, "idempotency_key": idempotency_key})
+        if on_progress is not None:
+            on_progress({"completed": 1, "total": 1, "message": "done", "metrics": {"map50": 0.7}})
+        return self.result
+
+
+def test_train_routes_to_compute_service_when_configured(tmp_path, monkeypatch) -> None:
+    import ultra_deepagents.training.rarespot_adapter as ra
+
+    best = tmp_path / "best.pt"
+    best.write_bytes(b"weights")
+    fake = _FakeComputeClient({"weights_uri": str(best), "epochs": 40, "best_map50": 0.72})
+    monkeypatch.setattr(ra, "_compute_service_client", lambda: fake)
+
+    weights = tmp_path / "warm.pt"
+    weights.write_bytes(b"warm")
+    data_yaml = tmp_path / "data.yaml"
+    data_yaml.write_text("path: x\ntrain: images/train\nval: images/val\n", encoding="utf-8")
+
+    adapter = RareSpotAdapter()
+    ctx = TrainContext(
+        params={
+            "weights_uri": str(weights),
+            "data_yaml": str(data_yaml),
+            "run_dir": str(tmp_path / "runs"),
+            "data_manifest_sha256": "manifestsha",
+            "new_tile_count": 321,
+        },
+        workdir=tmp_path,
+        job_id="job42",
+    )
+    out = adapter.train(ctx)
+    assert out["weights_uri"] == str(best)
+    assert out["gpu_host"] == "compute-service"
+    assert out["data_manifest_sha256"] == "manifestsha"
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["executor"] == "rarespot.train"
+    assert call["idempotency_key"] == "job42:finetune"
+    assert call["spec"]["data_yaml"] == str(data_yaml)
+    # Warm weights + hyp are STAGED onto the shared workdir so the service can read
+    # them by path; the spec points at the staged copies, which now exist.
+    assert call["spec"]["weights_uri"] == str(tmp_path / "warmstart.pt")
+    assert (tmp_path / "warmstart.pt").is_file()
+    assert call["spec"]["hyp_path"] == str(tmp_path / "hyp.yaml")
+    assert (tmp_path / "hyp.yaml").is_file()
+    assert call["spec"]["new_tile_count"] == 321
+    assert call["spec"]["output_dir"].endswith("service-out")
+
+
+def test_evaluate_routes_to_compute_service_when_configured(monkeypatch) -> None:
+    import ultra_deepagents.training.rarespot_adapter as ra
+
+    detection = {"schema": "detection.v1", "aggregate": {"map50": 0.81}}
+    fake = _FakeComputeClient({"detection": detection})
+    monkeypatch.setattr(ra, "_compute_service_client", lambda: fake)
+
+    adapter = RareSpotAdapter()
+    out = adapter.evaluate("/weights/best.pt", {"slices": {}}, None)
+    assert out == detection
+    assert fake.calls[0]["executor"] == "rarespot.evaluate"
+    assert fake.calls[0]["spec"]["weights_uri"] == "/weights/best.pt"
+
+
+def test_evaluate_falls_through_to_local_when_service_unconfigured(monkeypatch) -> None:
+    import ultra_deepagents.training.rarespot_adapter as ra
+
+    monkeypatch.setattr(ra, "_compute_service_client", lambda: None)
+    captured: dict = {}
+
+    def _fake_local(self, weights_uri, gold_manifest, slice=None):  # noqa: A002
+        captured["called"] = True
+        return {"schema": "detection.v1"}
+
+    monkeypatch.setattr(ra.RareSpotAdapter, "evaluate_local", _fake_local)
+    out = RareSpotAdapter().evaluate("/w.pt", {"slices": {}}, None)
+    assert captured.get("called") is True
+    assert out == {"schema": "detection.v1"}
 
 
 def test_bn_freeze_patch_source_freezes_batchnorm() -> None:

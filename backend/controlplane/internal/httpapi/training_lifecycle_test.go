@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -755,6 +756,43 @@ func TestTrainingStatusEchoesGoldAndRunningBenchmark(t *testing.T) {
 	_, status = doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/status", nil)
 	if status["running_benchmark"] == nil {
 		t.Fatal("an in-flight benchmark must echo running_benchmark")
+	}
+}
+
+// An in-flight finetune surfaces live progress (completed/total + best mAP from
+// the latest training.progress event) on the status read.
+func TestTrainingStatusEchoesRunningFinetuneProgress(t *testing.T) {
+	t.Parallel()
+	router, mem, _ := newTrainingTestRouter(t)
+	ctx := context.Background()
+	if _, err := mem.CreateTrainingJob(ctx, domain.CreateTrainingJobInput{
+		JobID: "ft-progress-1", ModelKey: "yolov5_rarespot", JobType: "training.finetune",
+		Params: domain.JSONMap{}, OwnerUserID: "u1",
+	}); err != nil {
+		t.Fatalf("create finetune job: %v", err)
+	}
+	if _, err := mem.AppendTrainingJobEvent(ctx, domain.AppendTrainingJobEventInput{
+		JobID: "ft-progress-1", EventType: "training.progress", Message: "epoch 12/40",
+		Metadata: domain.JSONMap{"completed": 12, "total": 40, "map50": 0.78},
+	}); err != nil {
+		t.Fatalf("append progress event: %v", err)
+	}
+	_, status := doJSON(t, router, http.MethodGet, "/v2/training/models/yolov5_rarespot/status", nil)
+	rf, ok := status["running_finetune"].(map[string]any)
+	if !ok {
+		t.Fatalf("an in-flight finetune must echo running_finetune, got %v", status["running_finetune"])
+	}
+	if rf["message"] != "epoch 12/40" {
+		t.Fatalf("running_finetune.message = %v want epoch 12/40", rf["message"])
+	}
+	if completed, _ := rf["completed"].(float64); completed != 12 {
+		t.Fatalf("running_finetune.completed = %v want 12", rf["completed"])
+	}
+	if total, _ := rf["total"].(float64); total != 40 {
+		t.Fatalf("running_finetune.total = %v want 40", rf["total"])
+	}
+	if mAP, _ := rf["map50"].(float64); mAP != 0.78 {
+		t.Fatalf("running_finetune.map50 = %v want 0.78", rf["map50"])
 	}
 }
 

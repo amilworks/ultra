@@ -39,6 +39,7 @@ type trainingWriteStore interface {
 	GetTrainingJob(ctx context.Context, jobID string) (domain.TrainingJobRecord, error)
 	UpdateTrainingJobStatus(ctx context.Context, input domain.UpdateTrainingJobStatusInput) (domain.TrainingJobRecord, error)
 	AppendTrainingJobEvent(ctx context.Context, input domain.AppendTrainingJobEventInput) (domain.TrainingJobEventRecord, error)
+	ListTrainingJobEvents(ctx context.Context, jobID string, limit int) ([]domain.TrainingJobEventRecord, error)
 	AcquireTrainingJobLease(ctx context.Context, input domain.AcquireTrainingJobLeaseInput) (domain.TrainingJobLeaseRecord, domain.TrainingJobRecord, error)
 	RenewTrainingJobLease(ctx context.Context, input domain.RenewTrainingJobLeaseInput) (domain.TrainingJobLeaseRecord, error)
 	ReleaseTrainingJobLease(ctx context.Context, input domain.ReleaseTrainingJobLeaseInput) error

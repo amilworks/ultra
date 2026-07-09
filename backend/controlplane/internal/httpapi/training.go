@@ -174,11 +174,12 @@ func (deps ServerDeps) writeTrainingModelStatus(w http.ResponseWriter, r *http.R
 	if value, ok := activeMetrics["promotion_benchmark_ready"].(bool); ok {
 		promotionReady = value
 	}
-	goldEcho, canaryEcho, runningBenchmark := deps.trainingStatusEchoes(r, status)
+	goldEcho, canaryEcho, runningBenchmark, runningFinetune := deps.trainingStatusEchoes(r, status)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"gold":                        goldEcho,
 		"canary":                      canaryEcho,
 		"running_benchmark":           runningBenchmark,
+		"running_finetune":            runningFinetune,
 		"model_key":                   status.ModelKey,
 		"dataset_name":                status.DatasetName,
 		"dataset_id":                  nullableString(status.DatasetID),
@@ -280,10 +281,10 @@ func nullableString(value string) any {
 // deployment lacks the write store.
 func (deps ServerDeps) trainingStatusEchoes(
 	r *http.Request, status domain.TrainingModelStatusRecord,
-) (any, any, any) {
+) (any, any, any, any) {
 	training, ok := deps.trainingWriteStore()
 	if !ok {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	ctx := r.Context()
 
@@ -326,30 +327,32 @@ func (deps ServerDeps) trainingStatusEchoes(
 	}
 
 	var runningBenchmark any
+	var runningFinetune any
 	for _, jobStatus := range []string{"running", "queued"} {
 		jobs, err := training.ListTrainingJobs(ctx, status.ModelKey, jobStatus, 10)
 		if err != nil {
 			break
 		}
 		for _, job := range jobs {
-			if job.JobType != "training.benchmark" {
-				continue
-			}
-			versionID := jsonMapString(job.Params, "model_version_id")
-			if versionID == "" || versionID == status.ActiveModelVersion {
-				versionID = "baseline"
-			}
 			startedAt := job.CreatedAt
 			if !job.StartedAt.IsZero() {
 				startedAt = job.StartedAt
 			}
-			runningBenchmark = map[string]any{
-				"version_id": versionID,
-				"started_at": startedAt.UTC().Format(time.RFC3339),
+			switch {
+			case job.JobType == "training.benchmark" && runningBenchmark == nil:
+				versionID := jsonMapString(job.Params, "model_version_id")
+				if versionID == "" || versionID == status.ActiveModelVersion {
+					versionID = "baseline"
+				}
+				runningBenchmark = map[string]any{
+					"version_id": versionID,
+					"started_at": startedAt.UTC().Format(time.RFC3339),
+				}
+			case job.JobType == "training.finetune" && runningFinetune == nil:
+				runningFinetune = deps.runningFinetuneEcho(ctx, training, job, startedAt)
 			}
-			break
 		}
-		if runningBenchmark != nil {
+		if runningBenchmark != nil && runningFinetune != nil {
 			break
 		}
 	}
@@ -377,7 +380,45 @@ func (deps ServerDeps) trainingStatusEchoes(
 		}
 	}
 
-	return goldEcho, canaryEcho, runningBenchmark
+	return goldEcho, canaryEcho, runningBenchmark, runningFinetune
+}
+
+// runningFinetuneEcho surfaces live finetune progress on the status read: the
+// in-flight job plus the completed/total (and best mAP) from its latest
+// training.progress event. Read-time, best-effort — a missing event store or no
+// progress yet simply omits the fields, never fails the status read.
+func (deps ServerDeps) runningFinetuneEcho(
+	ctx context.Context, training trainingWriteStore, job domain.TrainingJobRecord, startedAt time.Time,
+) map[string]any {
+	echo := map[string]any{
+		"job_id":     job.JobID,
+		"job_type":   job.JobType,
+		"status":     job.Status,
+		"started_at": startedAt.UTC().Format(time.RFC3339),
+	}
+	events, err := training.ListTrainingJobEvents(ctx, job.JobID, 200)
+	if err != nil {
+		return echo
+	}
+	var latest *domain.TrainingJobEventRecord
+	for i := range events {
+		if events[i].EventType == "training.progress" {
+			if latest == nil || events[i].Sequence > latest.Sequence {
+				latest = &events[i]
+			}
+		}
+	}
+	if latest != nil {
+		if latest.Message != "" {
+			echo["message"] = latest.Message
+		}
+		for _, key := range []string{"completed", "total", "map50", "map50_95"} {
+			if value, ok := latest.Metadata[key]; ok {
+				echo[key] = value
+			}
+		}
+	}
+	return echo
 }
 
 func envIntDefault(name string, fallback int) int {

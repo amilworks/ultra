@@ -9,6 +9,7 @@ import importlib.metadata
 import json
 import logging
 import socket
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -410,10 +411,13 @@ async def acquire_control_plane_run_lease(
     )
 
 
-async def renew_control_plane_run_lease(
+def _renew_run_lease_sync(
     lease: ControlPlaneRunLease,
     settings: RuntimeSettings,
 ) -> ControlPlaneRunLease | None:
+    """Synchronous lease renewal (PATCH). Raises RunLeaseConflict on an
+    authoritative 409. Shared by the async renewal path and the loop-
+    independent keepalive thread so both speak the identical wire call."""
     base_url = settings.control_base_url.rstrip("/")
     if not base_url:
         return lease
@@ -423,17 +427,10 @@ async def renew_control_plane_run_lease(
         "lease_token": lease.lease_token,
         "ttl_seconds": settings.control_run_lease_ttl_seconds,
     }
-    renewed = await asyncio.to_thread(
-        _request_control_plane_run_lease,
-        url,
-        "PATCH",
-        payload,
-        settings,
-    )
-    # A failed renewal must be visible (None), never masked by returning the
-    # stale lease: masking silently extends trust in a lease the control
-    # plane may already have handed to another worker.
-    return renewed
+    # A failed renewal must surface as None (or raise), never be masked by
+    # returning the stale lease: masking silently extends trust in a lease the
+    # control plane may already have handed to another worker.
+    return _request_control_plane_run_lease(url, "PATCH", payload, settings)
 
 
 async def release_control_plane_run_lease(
@@ -455,13 +452,16 @@ async def release_control_plane_run_lease(
     )
 
 
-async def post_control_plane_worker_heartbeat(
+def _post_worker_heartbeat_sync(
     settings: RuntimeSettings,
     *,
     status: str,
     current_run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
+    """Synchronous worker-heartbeat POST. Shared by the async heartbeat path and
+    the loop-independent keepalive thread so both keep the control plane's
+    worker-liveness record fresh with the identical wire call."""
     base_url = settings.control_base_url.rstrip("/")
     if not base_url:
         return
@@ -475,11 +475,157 @@ async def post_control_plane_worker_heartbeat(
         "version": _package_version(),
         "metadata": metadata or {},
     }
+    _request_control_plane_worker_heartbeat(url, payload, settings)
+
+
+def lease_keepalive_interval(settings: RuntimeSettings) -> float:
+    """Wall-clock cadence for the loop-independent lease keepalive thread.
+
+    Renew well inside the TTL so a couple of missed HTTP calls (a control-plane
+    hiccup) still leave the lease valid, and no slower than the ack-progress
+    interval so an authoritative 409 (the run was handed elsewhere) is detected
+    promptly.
+    """
+    ttl = max(1.0, float(settings.control_run_lease_ttl_seconds))
+    target = ttl / 4.0
+    configured = float(settings.worker_ack_progress_interval_seconds)
+    if configured > 0:
+        target = min(target, configured)
+    # Default deployment: ttl 600s, progress interval 60s -> renew every 60s
+    # (10 missed renewals of headroom). The 0.1s floor only guards a
+    # misconfigured 0 and lets tests drive sub-second intervals.
+    return max(0.1, target)
+
+
+class _LeaseKeepalive:
+    """Renew a control-plane run lease from a dedicated OS thread on a
+    wall-clock timer.
+
+    The async heartbeat renews on the run's event loop, so a synchronous,
+    loop-blocking stretch of a heavy turn (large frame extraction, a stalled
+    tool, a long GC pause) stops renewals; the lease then lapses after its TTL
+    and another worker — or control-plane recovery — steals and RESTARTS the
+    run from scratch. Single-superstep turns cannot checkpoint-resume, so they
+    lose all their work. This thread is immune to loop stalls: as long as the
+    worker PROCESS is alive it holds the lease, so every redelivery/recovery is
+    rejected and the original run keeps going. If the process truly dies the
+    thread dies with it, the lease expires, and recovery correctly takes over.
+
+    It is the SOLE lease renewer while active (the async heartbeat only emits
+    progress events), so a rotating lease token never races between two
+    renewers. On an authoritative 409 the control plane has handed the run
+    elsewhere: signal the run task to stop, matching _run_heartbeat_loop's
+    kill-on-conflict behavior (a 409 renewal is the one kill signal a worker
+    trusts).
+    """
+
+    def __init__(
+        self,
+        lease: ControlPlaneRunLease,
+        settings: RuntimeSettings,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        interval_seconds: float,
+        on_lost: Callable[[], None],
+        renew_func: Callable[
+            [ControlPlaneRunLease, RuntimeSettings], ControlPlaneRunLease | None
+        ] = _renew_run_lease_sync,
+        heartbeat_func: Callable[..., None] = _post_worker_heartbeat_sync,
+    ) -> None:
+        self._settings = settings
+        self._loop = loop
+        self._interval = max(0.1, float(interval_seconds))
+        self._on_lost = on_lost
+        self._renew = renew_func
+        self._heartbeat = heartbeat_func
+        self._lock = threading.Lock()
+        self._lease = lease
+        self._stop = threading.Event()
+        self._lost = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        thread = threading.Thread(
+            target=self._run,
+            name=f"lease-keepalive-{self._lease.run_id[:16]}",
+            daemon=True,
+        )
+        self._thread = thread
+        thread.start()
+
+    def current_lease(self) -> ControlPlaneRunLease:
+        with self._lock:
+            return self._lease
+
+    @property
+    def lost(self) -> bool:
+        return self._lost
+
+    def stop(self, *, timeout: float = 5.0) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=timeout)
+
+    def _run(self) -> None:
+        # stop.wait returns True the instant stop() is called, so a running
+        # keepalive tears down promptly; it returns False on timeout, i.e. a
+        # tick is due.
+        while not self._stop.wait(self._interval):
+            with self._lock:
+                lease = self._lease
+            # (1) Lease renewal — keeps the run OUT of the control plane's
+            # "expired lease" recovery path.
+            try:
+                renewed = self._renew(lease, self._settings)
+            except RunLeaseConflict:
+                # Authoritative hand-off: another worker owns the run now. Stop
+                # the local run task and end the keepalive.
+                self._lost = True
+                with contextlib.suppress(RuntimeError):
+                    self._loop.call_soon_threadsafe(self._on_lost)
+                return
+            except Exception:
+                # Transient (control plane unreachable / timeout): the TTL still
+                # has headroom, so keep the run alive and retry next tick. A real
+                # hand-off surfaces as the 409 above.
+                logger.warning(
+                    "Control-plane lease keepalive renewal failed; retrying next tick.",
+                    extra={"run_id": lease.run_id},
+                    exc_info=True,
+                )
+            else:
+                if renewed is not None:
+                    with self._lock:
+                        self._lease = renewed
+            # (2) Worker heartbeat — keeps the run OUT of the control plane's
+            # "stale worker heartbeat" recovery path, which requeues a run even
+            # while its lease is still valid. Both signals ride the event loop in
+            # the async heartbeat, so a loop stall would otherwise trip recovery
+            # despite a live worker. Best-effort: a hiccup only logs.
+            try:
+                self._heartbeat(self._settings, status="busy", current_run_id=lease.run_id)
+            except Exception:
+                logger.debug(
+                    "Control-plane worker heartbeat keepalive failed; retrying next tick.",
+                    extra={"run_id": lease.run_id},
+                    exc_info=True,
+                )
+
+
+async def post_control_plane_worker_heartbeat(
+    settings: RuntimeSettings,
+    *,
+    status: str,
+    current_run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
     await asyncio.to_thread(
-        _request_control_plane_worker_heartbeat,
-        url,
-        payload,
+        _post_worker_heartbeat_sync,
         settings,
+        status=status,
+        current_run_id=current_run_id,
+        metadata=metadata,
     )
 
 
@@ -595,10 +741,9 @@ class NATSDeepAgentsWorker:
         run_lease_func: Callable[
             [str, RuntimeSettings], Awaitable[ControlPlaneRunLease | None]
         ] = acquire_control_plane_run_lease,
-        renew_run_lease_func: Callable[
-            [ControlPlaneRunLease, RuntimeSettings],
-            Awaitable[ControlPlaneRunLease | None],
-        ] = renew_control_plane_run_lease,
+        lease_renew_sync_func: Callable[
+            [ControlPlaneRunLease, RuntimeSettings], ControlPlaneRunLease | None
+        ] = _renew_run_lease_sync,
         release_run_lease_func: Callable[
             [ControlPlaneRunLease, RuntimeSettings], Awaitable[None]
         ] = release_control_plane_run_lease,
@@ -611,7 +756,7 @@ class NATSDeepAgentsWorker:
         self._run_job = run_job_func
         self._run_status = run_status_func
         self._run_lease = run_lease_func
-        self._renew_run_lease = renew_run_lease_func
+        self._lease_renew_sync = lease_renew_sync_func
         self._release_run_lease = release_run_lease_func
         self._worker_heartbeat = worker_heartbeat_func
         self._user_profile = user_profile_func
@@ -785,6 +930,7 @@ class NATSDeepAgentsWorker:
             message,
             interval_seconds=job_ack_extension_interval(self.settings),
         )
+        loop = asyncio.get_running_loop()
         user_context_token: contextvars.Token | None = None
         try:
             try:
@@ -831,32 +977,15 @@ class NATSDeepAgentsWorker:
             control_lease: ControlPlaneRunLease | None = None
 
             async def publish_worker_heartbeat() -> None:
-                nonlocal heartbeat_index, control_lease
+                nonlocal heartbeat_index
                 async with publish_lock:
                     if terminal_event_published:
                         return
-                    if control_lease is not None:
-                        try:
-                            renewed = await self._renew_run_lease(control_lease, self.settings)
-                        except RunLeaseConflict:
-                            # Another worker owns the run now: stop immediately.
-                            raise
-                        except RunLeaseUnavailable:
-                            # The control plane is unreachable. GPU work in
-                            # flight is expensive; keep computing and retry the
-                            # renewal on every heartbeat. The control plane's
-                            # token-matched renewal revives even an expired
-                            # lease after it heals, and if it requeued the run
-                            # meanwhile the next renewal gets an authoritative
-                            # 409 (RunLeaseConflict) which stops this worker
-                            # within one heartbeat interval.
-                            logger.warning(
-                                "Control-plane lease renewal unavailable; continuing compute and retrying.",
-                                extra={"run_id": job.run_id},
-                            )
-                            renewed = None
-                        if renewed is not None:
-                            control_lease = renewed
+                    # The control-plane lease is renewed by the loop-independent
+                    # keepalive thread (_LeaseKeepalive), which survives a run
+                    # that momentarily blocks this event loop. This heartbeat is
+                    # therefore progress-only: best-effort, and it never stalls
+                    # the run on a control-plane hiccup.
                     heartbeat_index += 1
                     sequence = run_sequencer.next_sequence()
                     await self._publish_event(
@@ -975,6 +1104,7 @@ class NATSDeepAgentsWorker:
             should_ack = True
             status_monitor_task: asyncio.Task | None = None
             heartbeat_task: asyncio.Task | None = None
+            lease_keepalive: _LeaseKeepalive | None = None
             control_terminal_status: str | None = None
             control_lease_lost = False
 
@@ -1039,6 +1169,25 @@ class NATSDeepAgentsWorker:
                         worker_task=current_task,
                         on_lease_lost=mark_control_lease_lost,
                     )
+                    if control_lease is not None:
+
+                        def _abort_run_on_lease_lost() -> None:
+                            # Scheduled onto this loop via call_soon_threadsafe by
+                            # the keepalive thread, so touching the run task and
+                            # the nonlocal flag here is loop-safe.
+                            mark_control_lease_lost()
+                            if current_task is not None and not current_task.done():
+                                current_task.cancel()
+
+                        lease_keepalive = _LeaseKeepalive(
+                            control_lease,
+                            self.settings,
+                            loop=loop,
+                            interval_seconds=lease_keepalive_interval(self.settings),
+                            on_lost=_abort_run_on_lease_lost,
+                            renew_func=self._lease_renew_sync,
+                        )
+                        lease_keepalive.start()
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
                     user_profile = await self._load_user_profile(job.run_id)
@@ -1125,6 +1274,14 @@ class NATSDeepAgentsWorker:
             finally:
                 await _stop_run_heartbeat_task(heartbeat_task)
                 await _stop_control_status_monitor_task(status_monitor_task)
+                if lease_keepalive is not None:
+                    # Stop the sole lease renewer before releasing, and release
+                    # with the token it last rotated to (not the stale acquire
+                    # token) so the DELETE matches the control plane's record.
+                    # Offloaded: stop() joins the thread, which must not block
+                    # the event loop.
+                    await asyncio.to_thread(lease_keepalive.stop)
+                    control_lease = lease_keepalive.current_lease()
                 if self._active_tasks.get(job.run_id) is current_task:
                     self._active_tasks.pop(job.run_id, None)
                 # Kill any sandbox container still running for this run on this host.
@@ -1626,8 +1783,14 @@ def _start_ack_progress_task(message: Any | None, *, interval_seconds: float) ->
 async def _ack_progress_loop(message: Any, *, interval_seconds: float) -> None:
     while True:
         await asyncio.sleep(interval_seconds)
-        with contextlib.suppress(Exception):
+        try:
             await message.in_progress()
+        except Exception:
+            # Best-effort JetStream ack extension. The lease keepalive thread is
+            # the authoritative liveness signal, so a failure here is not fatal —
+            # but log it (don't silently swallow) so a persistently failing
+            # in_progress is diagnosable after a redelivery incident.
+            logger.debug("JetStream ack in_progress failed; continuing.", exc_info=True)
 
 
 async def _stop_ack_progress_task(task: asyncio.Task | None) -> None:

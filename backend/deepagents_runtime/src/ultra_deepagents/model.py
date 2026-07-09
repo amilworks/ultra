@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
 
 from ultra_deepagents.config import RuntimeSettings
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class UltraChatOpenAI(ChatOpenAI):
-    """ChatOpenAI that preserves vLLM reasoning stream deltas.
+    """ChatOpenAI that preserves DeepSeek/vLLM reasoning across streaming and tools.
 
     vLLM serves hybrid-reasoning models with the thinking stream in
     ``choices[].delta.reasoning`` (older reasoning parsers used
@@ -20,6 +21,19 @@ class UltraChatOpenAI(ChatOpenAI):
     the text into the LangChain-conventional
     ``additional_kwargs["reasoning_content"]`` so the runner can surface it.
     """
+
+    def _get_request_payload(
+        self,
+        input_: Any,
+        *,
+        stop: list[str] | None = None,
+        **kwargs: Any,
+    ) -> dict:
+        messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(messages, stop=stop, **kwargs)
+        if _is_deepseek_v4_model(getattr(self, "model_name", None)):
+            _preserve_deepseek_reasoning_content(payload, messages)
+        return payload
 
     def _convert_chunk_to_generation_chunk(
         self,
@@ -39,6 +53,23 @@ class UltraChatOpenAI(ChatOpenAI):
                 str(kwargs.get("reasoning_content") or "") + reasoning
             )
         return generation_chunk
+
+
+def _is_deepseek_v4_model(model_name: str | None) -> bool:
+    normalized = str(model_name or "").lower().replace("-", "_").replace("/", "_")
+    return "deepseek_v4" in normalized
+
+
+def _preserve_deepseek_reasoning_content(payload: dict, messages: list[Any]) -> None:
+    request_messages = payload.get("messages")
+    if not isinstance(request_messages, list):
+        return
+    for source, target in zip(messages, request_messages, strict=False):
+        if not isinstance(source, AIMessage) or not isinstance(target, dict):
+            continue
+        reasoning = source.additional_kwargs.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning:
+            target["reasoning_content"] = reasoning
 
 
 def _chunk_reasoning_text(chunk: dict) -> str:

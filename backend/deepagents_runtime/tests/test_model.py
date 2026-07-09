@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.model import build_chat_model
 
@@ -99,6 +99,51 @@ def test_chunk_conversion_leaves_content_chunks_unchanged():
     assert generation_chunk is not None
     assert generation_chunk.message.content == "Hello"
     assert "reasoning_content" not in generation_chunk.message.additional_kwargs
+
+
+def test_deepseek_v4_request_payload_preserves_assistant_reasoning_content():
+    model = build_chat_model(
+        RuntimeSettings(openai_base_url="http://127.0.0.1:8003/v1", openai_model="deepseek_v4")
+    )
+    messages = [
+        HumanMessage(content="Look up the probe value."),
+        AIMessage(
+            content="",
+            additional_kwargs={"reasoning_content": "Need lookup before answering."},
+            tool_calls=[
+                {
+                    "name": "lookup_value",
+                    "args": {"key": "probe"},
+                    "id": "call_probe",
+                }
+            ],
+        ),
+        ToolMessage(content='{"value": 323}', tool_call_id="call_probe"),
+    ]
+
+    payload = model._get_request_payload(messages)
+
+    assistant_payload = payload["messages"][1]
+    assert assistant_payload["role"] == "assistant"
+    assert assistant_payload["reasoning_content"] == "Need lookup before answering."
+    assert assistant_payload["tool_calls"][0]["function"]["name"] == "lookup_value"
+
+
+def test_request_payload_reasoning_content_preservation_is_deepseek_v4_specific():
+    model = build_chat_model(
+        RuntimeSettings(openai_base_url="http://127.0.0.1:8003/v1", openai_model="gpt-oss-120b")
+    )
+    messages = [
+        HumanMessage(content="Continue."),
+        AIMessage(
+            content="Visible answer.",
+            additional_kwargs={"reasoning_content": "Hidden reasoning."},
+        ),
+    ]
+
+    payload = model._get_request_payload(messages)
+
+    assert "reasoning_content" not in payload["messages"][1]
 
 
 def test_build_chat_model_publishes_context_window_for_adaptive_summarization():

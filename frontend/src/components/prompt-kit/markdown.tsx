@@ -22,10 +22,156 @@ export type MarkdownProps = {
   components?: Partial<Components>;
 };
 
-function parseMarkdownIntoBlocks(markdown: string): string[] {
+// Sentinels from the Unicode private-use area. marked treats them as ordinary
+// inline text, so a masked span is never split across block boundaries.
+const MATH_MASK_OPEN = "";
+const MATH_MASK_CLOSE = "";
+const MATH_MASK_PATTERN = /(\d+)/g;
+const DISPLAY_MATH_PATTERN = /\$\$[\s\S]*?\$\$/g;
+
+// --- GFM pipe-table repair ------------------------------------------------
+// remark-gfm follows the spec strictly: a pipe table is only recognized when
+// the header row and the delimiter row have the *same* number of cells. Models
+// routinely miscount the `---|---` delimiter (or add/lose a column), and the
+// whole table then renders as raw `| ... |` text. When a block clearly attempts
+// a table but only the delimiter count is off, rebuild the delimiter to match
+// the header so the table renders. We deliberately do NOT touch blocks whose
+// header disagrees with the data rows (e.g. an unescaped `|` inside a cell): the
+// intended columns are ambiguous there and guessing would produce a misaligned,
+// misleading table — that case is handled model-side by escaping pipes.
+const DELIMITER_CELL_PATTERN = /^\s*:?-+:?\s*$/;
+const DELIMITER_ROW_SHAPE = /^[\s|:-]+$/;
+
+function splitTableCells(row: string): string[] {
+  let cells = row.trim();
+  if (cells.startsWith("|")) {
+    cells = cells.slice(1);
+  }
+  if (cells.endsWith("|")) {
+    cells = cells.slice(0, -1);
+  }
+  // Split on unescaped pipes only, matching how GFM delimits cells.
+  return cells.split(/(?<!\\)\|/);
+}
+
+function isDelimiterRow(row: string): boolean {
+  const trimmed = row.trim();
+  // Require an actual pipe and dash so a thematic break (`---`) or ordinary
+  // prose is never mistaken for a one-column delimiter row.
+  if (!trimmed.includes("|") || !trimmed.includes("-")) {
+    return false;
+  }
+  if (!DELIMITER_ROW_SHAPE.test(trimmed)) {
+    return false;
+  }
+  const cells = splitTableCells(row);
+  return cells.length >= 1 && cells.every((cell) => DELIMITER_CELL_PATTERN.test(cell));
+}
+
+function delimiterCellForAlignment(cell: string): string {
+  const trimmed = cell.trim();
+  const left = trimmed.startsWith(":");
+  const right = trimmed.endsWith(":");
+  if (left && right) {
+    return ":-:";
+  }
+  if (right) {
+    return "--:";
+  }
+  if (left) {
+    return ":--";
+  }
+  return "---";
+}
+
+function buildDelimiterRow(columns: number, existing: string[]): string {
+  const cells: string[] = [];
+  for (let index = 0; index < columns; index += 1) {
+    const source = existing[index];
+    cells.push(source ? delimiterCellForAlignment(source) : "---");
+  }
+  return `| ${cells.join(" | ")} |`;
+}
+
+export function repairTableDelimiters(block: string): string {
+  if (!block.includes("|") || !block.includes("-")) {
+    return block;
+  }
+  const lines = block.split("\n");
+  let changed = false;
+  for (let index = 1; index < lines.length; index += 1) {
+    if (!isDelimiterRow(lines[index])) {
+      continue;
+    }
+    const header = lines[index - 1];
+    if (!header.includes("|") || header.trim() === "") {
+      continue;
+    }
+    // Blockquote / list-nested tables carry a line prefix (`>`, `- `) that our
+    // rebuilt delimiter would drop, breaking the container. Leave those alone.
+    if (/^\s*(?:>|[-*+]\s|\d+[.)]\s)/.test(header) || /^\s*>/.test(lines[index])) {
+      continue;
+    }
+    const headerColumns = splitTableCells(header).length;
+    const delimiterColumns = splitTableCells(lines[index]).length;
+    if (headerColumns === delimiterColumns) {
+      continue;
+    }
+    // Only repair when the header agrees with EVERY contiguous data row. A lone
+    // header+delimiter with no data rows is too often a setext heading, a
+    // thematic rule, or prose describing table syntax; a disagreeing data row
+    // means stray/ambiguous pipes. In both cases a rebuild would fabricate or
+    // mangle a table, so we leave the block raw and rely on the model to escape
+    // pipes and keep column counts consistent.
+    const dataCounts: number[] = [];
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const row = lines[cursor];
+      if (row.trim() === "" || !row.includes("|")) {
+        break;
+      }
+      dataCounts.push(splitTableCells(row).length);
+    }
+    if (
+      dataCounts.length === 0 ||
+      !dataCounts.every((count) => count === headerColumns)
+    ) {
+      continue;
+    }
+    lines[index] = buildDelimiterRow(headerColumns, splitTableCells(lines[index]));
+    changed = true;
+  }
+  return changed ? lines.join("\n") : block;
+}
+
+export function parseMarkdownIntoBlocks(markdown: string): string[] {
   try {
-    const tokens = marked.lexer(markdown);
-    return tokens.map((token) => token.raw);
+    // marked's lexer has no math awareness. A multi-line `$$ ... $$` display
+    // block whose body contains markdown-significant lines — `- term`, `# 2`,
+    // a blank line — gets split into a broken paragraph plus a list, which then
+    // renders as a red KaTeX error over raw-LaTeX bullets. Mask each display
+    // span as an opaque placeholder before lexing so the block stays intact,
+    // then restore the spans in every token's raw text after splitting.
+    const displaySpans: string[] = [];
+    const masked = markdown.replace(DISPLAY_MATH_PATTERN, (span) => {
+      const index = displaySpans.push(span) - 1;
+      return `${MATH_MASK_OPEN}${index}${MATH_MASK_CLOSE}`;
+    });
+    const tokens = marked.lexer(masked);
+    const restore = (raw: string): string =>
+      displaySpans.length === 0
+        ? raw
+        : raw.replace(
+            MATH_MASK_PATTERN,
+            (whole, index: string) => displaySpans[Number(index)] ?? whole
+          );
+    return tokens.map((token) => {
+      // Never rewrite fenced/indented code — pipes and dashes there are literal.
+      // Table repair runs on the masked text so display math stays invisible.
+      if (token.type === "code") {
+        return restore(token.raw);
+      }
+      return restore(repairTableDelimiters(token.raw));
+    });
   } catch (error) {
     // marked's lexer can throw on pathological model output (e.g. extreme
     // nesting). This runs in a render-path useMemo, so an uncaught throw would
@@ -36,7 +182,20 @@ function parseMarkdownIntoBlocks(markdown: string): string[] {
   }
 }
 
-const normalizeMathMarkdown = (source: string): string => {
+// KaTeX display environments that models frequently emit *without* any `$$`
+// fence. remark-math only recognizes math inside delimiters, so a bare
+// `\begin{bmatrix} ... \end{bmatrix}` renders as raw LaTeX prose. We auto-fence
+// these so the equation renders as math.
+const MATH_ENVIRONMENTS =
+  "bmatrix|pmatrix|vmatrix|Vmatrix|Bmatrix|smallmatrix|matrix|" +
+  "cases|aligned|alignedat|align\\*?|alignat\\*?|gather\\*?|gathered|" +
+  "equation\\*?|multline\\*?|split|array|eqnarray\\*?";
+const BARE_ENVIRONMENT_PATTERN = new RegExp(
+  String.raw`(?<![$\\])\\begin\{(${MATH_ENVIRONMENTS})\}([\s\S]*?)\\end\{\1\}`,
+  "g"
+);
+
+export const normalizeMathMarkdown = (source: string): string => {
   let normalized = source;
 
   // Normalize only explicit TeX delimiters so we do not accidentally turn
@@ -52,6 +211,21 @@ const normalizeMathMarkdown = (source: string): string => {
   normalized = normalized.replace(
     /\\\((.+?)\\\)/g,
     (_match, expr: string) => `$${String(expr).replace(/^[ \t]*>[ \t]?/gm, "").trim()}$`
+  );
+
+  // Auto-fence bare display environments, but skip any that already sit inside
+  // an open `$$ ... $$` block (an odd number of `$$` before the match means we
+  // are inside one) so we never double-wrap already-delimited math.
+  normalized = normalized.replace(
+    BARE_ENVIRONMENT_PATTERN,
+    (match, _env: string, _body: string, offset: number, full: string) => {
+      const dollarDollarBefore = (full.slice(0, offset).match(/\$\$/g) ?? [])
+        .length;
+      if (dollarDollarBefore % 2 === 1) {
+        return match;
+      }
+      return `\n\n$$\n${match}\n$$\n\n`;
+    }
   );
 
   return normalized;

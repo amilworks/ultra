@@ -519,6 +519,26 @@ def reconcile_class(raw_name: str) -> tuple[str, str]:
 # -------------------------------------------------------------------- adapter
 
 
+def _compute_service_client() -> Any | None:
+    """Return a GPU compute-service client if configured (the CPU worker sets
+    ``ULTRA_COMPUTE_SERVICE_URL``), else None (local/legacy path).
+
+    Imported lazily: the compute-service image installs ``ultra_deepagents``
+    WITHOUT its agent deps (no httpx), yet imports this adapter for the evaluate
+    executor — a module-level httpx import would break that. The service node also
+    deliberately leaves ``ULTRA_COMPUTE_SERVICE_URL`` unset, so the executor's
+    ``evaluate_local`` call never routes back out to a service."""
+    try:
+        from ultra_deepagents.training.compute_client import (
+            ComputeServiceClient,
+            ComputeServiceConfig,
+        )
+    except Exception:  # noqa: BLE001 - httpx absent on the service image
+        return None
+    config = ComputeServiceConfig.from_env()
+    return ComputeServiceClient(config) if config is not None else None
+
+
 class RareSpotAdapter(ModelAdapter):
     model_key = MODEL_KEY
     implemented_leakage_checks = ("aerial_geospatial_overlap",)
@@ -812,9 +832,41 @@ class RareSpotAdapter(ModelAdapter):
         gold_manifest: dict[str, Any],
         slice: str | None = None,  # noqa: A002 - plan-3.5 contract name
     ) -> dict[str, Any]:
+        """Benchmark hook. On a CPU worker (``ULTRA_COMPUTE_SERVICE_URL`` set) this
+        offloads the two-pass kernel to the GPU compute service; otherwise it runs
+        the kernel locally. The service node deliberately does NOT set that env, so
+        the service executor's ``evaluate_local`` call never recurses back out."""
+        service = _compute_service_client()
+        if service is not None:
+            return self._evaluate_via_service(service, weights_uri, gold_manifest, slice)
+        return self.evaluate_local(weights_uri, gold_manifest, slice)
+
+    def _evaluate_via_service(
+        self,
+        service: Any,
+        weights_uri: str,
+        gold_manifest: dict[str, Any],
+        slice: str | None,  # noqa: A002 - contract name
+    ) -> dict[str, Any]:
+        result = service.submit_and_wait(
+            executor="rarespot.evaluate",
+            spec={"weights_uri": weights_uri, "gold_manifest": gold_manifest, "slice": slice},
+        )
+        detection = result.get("detection")
+        if not isinstance(detection, dict) or not detection:
+            raise RuntimeError(f"compute service returned no detection blob for evaluate: {result!r}")
+        return detection
+
+    def evaluate_local(
+        self,
+        weights_uri: str,
+        gold_manifest: dict[str, Any],
+        slice: str | None = None,  # noqa: A002 - plan-3.5 contract name
+    ) -> dict[str, Any]:
         """Two-pass kernel (``yolov5_two_pass/v1``): val.py at conf 0.001 per
         populated slice (curve metrics), the production detect path at
-        conf 0.25 over the gold tiles (operating-point metrics)."""
+        conf 0.25 over the gold tiles (operating-point metrics). Runs where torch +
+        a GPU are available (the compute service, or a GPU worker directly)."""
         started = time.monotonic()
         weights_uri = _resolve_weights_uri(weights_uri)
         manifest = dict(gold_manifest or {})
@@ -987,6 +1039,21 @@ class RareSpotAdapter(ModelAdapter):
     # -------------------------------------------------------------- smoke/train
 
     def smoke_test(self, weights_uri: str, gold_sample: Any) -> None:
+        """Structural sanity check on candidate weights (plan 6.2). Offloaded to the
+        GPU compute service on a CPU worker — it needs torch + the yolov5 fork, which
+        the worker doesn't have; the service node runs the kernel locally. A failed
+        smoke makes the service job fail, so ComputeServiceError bubbles up and the
+        training phase fails BEFORE version registration."""
+        service = _compute_service_client()
+        if service is not None:
+            service.submit_and_wait(
+                executor="rarespot.smoke",
+                spec={"weights_uri": weights_uri, "gold_sample": gold_sample},
+            )
+            return
+        self.smoke_test_local(weights_uri, gold_sample)
+
+    def smoke_test_local(self, weights_uri: str, gold_sample: Any) -> None:
         """Plan 6.2: assert names/nc on the checkpoint, then one real detect
         pass over a sample tile dir asserting parseable YOLO-txt labels."""
         from ultra_deepagents.rarespot.tiling import yolo_line_to_xyxy
@@ -1069,28 +1136,93 @@ class RareSpotAdapter(ModelAdapter):
         params.setdefault("run_dir", str(workdir / "runs"))
         build_finetune_command(params)  # validate the full command NOW
 
-        gpu_host = _config_value(params.get("gpu_ssh_host"), "ULTRA_TRAINING_GPU_SSH_HOST")
-        if not gpu_host:
-            raise NotImplementedError(
-                "GPU execution runs on the GPU-node worker deployment "
-                "(set ULTRA_TRAINING_GPU_SSH_HOST to enable the remote executor)"
-            )
-
         hyp_path = Path(str(params.get("hyp_path") or HYP_PATH))
-        best_path = self._run_remote_finetune(
-            workdir=workdir,
-            params=params,
-            weights_uri=weights_uri,
-            gpu_host=gpu_host,
-            hyp_path=hyp_path,
-        )
+
+        # GPU execution routing. Preferred: the model-agnostic compute service
+        # (ULTRA_COMPUTE_SERVICE_URL) — a Bearer-authed FastAPI job runner that
+        # replaces ssh+rsync+docker and gives idempotent, cancellable, progress-
+        # reporting launches. Legacy fallback: the direct ssh executor. Neither
+        # configured => fail cleanly with the reason (the original M3 marker).
+        service = _compute_service_client()
+        if service is not None:
+            best_path = self._run_finetune_via_service(
+                service, ctx, params, weights_uri=weights_uri, hyp_path=hyp_path
+            )
+            executor_ref = "compute-service"
+        else:
+            gpu_host = _config_value(params.get("gpu_ssh_host"), "ULTRA_TRAINING_GPU_SSH_HOST")
+            if not gpu_host:
+                raise NotImplementedError(
+                    "GPU execution requires the compute service "
+                    "(set ULTRA_COMPUTE_SERVICE_URL) or the legacy ssh executor "
+                    "(set ULTRA_TRAINING_GPU_SSH_HOST)"
+                )
+            best_path = self._run_remote_finetune(
+                workdir=workdir,
+                params=params,
+                weights_uri=weights_uri,
+                gpu_host=gpu_host,
+                hyp_path=hyp_path,
+            )
+            executor_ref = gpu_host
         return {
             "weights_uri": str(best_path),
             "hyp_sha256": _sha256_file(hyp_path),
             "data_manifest_sha256": manifest_sha,
             "new_tile_count": int(params.get("new_tile_count") or 0),
-            "gpu_host": gpu_host,
+            "gpu_host": executor_ref,
         }
+
+    def _run_finetune_via_service(
+        self,
+        service: Any,
+        ctx: TrainContext,
+        params: dict[str, Any],
+        *,
+        weights_uri: str,
+        hyp_path: Path,
+    ) -> Path:
+        """Offload the finetune to the compute service and bring best.pt home.
+
+        The dataset was assembled locally (CPU); every path passed here must be
+        readable inside the service container (worker + service share the training
+        volume at the same mount path). ``output_dir`` is where the service copies
+        best.pt so we read a stable path independent of its ephemeral workspace.
+        The job is keyed on the training job id so a redelivery resumes rather than
+        relaunches."""
+        output_dir = ctx.workdir / "service-out"
+        # Stage the warm-start weights onto the shared workdir so the service reads
+        # them by path. The default seed weights resolve to the WORKER's checkout
+        # (data/models/yolo/RareSpotWeights.pt) which is not present in the service
+        # container; the legacy ssh path copied them into the rsynced workdir too.
+        ctx.workdir.mkdir(parents=True, exist_ok=True)
+        staged_weights = ctx.workdir / "warmstart.pt"
+        staged_hyp = ctx.workdir / "hyp.yaml"
+        try:
+            if Path(weights_uri).resolve() != staged_weights.resolve():
+                shutil.copy2(weights_uri, staged_weights)
+            shutil.copy2(hyp_path, staged_hyp)
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"finetune input not found on the worker: {exc}") from exc
+        spec: dict[str, Any] = {
+            "weights_uri": str(staged_weights),
+            "data_yaml": params["data_yaml"],
+            "new_tile_count": int(params.get("new_tile_count") or 0),
+            "batch_size": int(params.get("batch_size") or 16),
+            "hyp_path": str(staged_hyp),
+            "output_dir": str(output_dir),
+        }
+        result = service.submit_and_wait(
+            executor="rarespot.train",
+            spec=spec,
+            idempotency_key=(f"{ctx.job_id}:finetune" if ctx.job_id else None),
+            on_progress=ctx.progress_cb,
+            should_cancel=ctx.should_cancel,
+        )
+        best = Path(str(result.get("weights_uri") or ""))
+        if not best.is_file():
+            raise RuntimeError(f"compute service finetune returned unusable weights: {result!r}")
+        return best
 
     def _assemble_finetune_dataset(self, ctx: TrainContext) -> tuple[str, str, int]:
         """Materialize the reviewed pool and lay it out as a YOLO dataset

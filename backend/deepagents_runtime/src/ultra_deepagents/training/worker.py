@@ -508,16 +508,50 @@ class TrainingJobProcessor:
     # ------------------------------------------------- assemble / finetune (M3)
 
     async def _train_phase(self, job: TrainingJobEnvelope, adapter: ModelAdapter) -> dict[str, Any]:
+        # Forward compute-service progress (epoch N/M + best mAP) to the control
+        # plane as training.progress events so the Training page shows live
+        # progress. Runs on the compute client's poll thread; best-effort — a
+        # progress-report failure must never fail the training job.
+        def _emit_progress(progress: dict[str, Any]) -> None:
+            completed = int(progress.get("completed") or 0)
+            total = int(progress.get("total") or 0)
+            metrics = progress.get("metrics") or {}
+            metadata: dict[str, Any] = {"completed": completed, "total": total}
+            if isinstance(metrics, dict):
+                if metrics.get("map50") is not None:
+                    metadata["map50"] = metrics["map50"]
+                if metrics.get("map50_95") is not None:
+                    metadata["map50_95"] = metrics["map50_95"]
+            try:
+                self._client.append_event(
+                    job.job_id,
+                    event_type="training.progress",
+                    message=str(progress.get("message") or (f"{completed}/{total}" if total else "training")),
+                    metadata=metadata,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("training progress event failed", exc_info=True)
+
         ctx = TrainContext(
             params=dict(job.params),
             workdir=self._job_workdir(job),
             settings=self._settings.runtime,
+            job_id=job.job_id,
+            progress_cb=_emit_progress,
         )
         try:
             artifact = await asyncio.to_thread(adapter.train, ctx)
         except NotImplementedError as exc:
             # The M3 branch: fail cleanly with the reason, never wedge the job.
             return {"terminal_status": "failed", "error": str(exc) or "trainer not implemented"}
+        except Exception as exc:  # noqa: BLE001
+            # A compute-service cancel (operator freed the GPU) surfaces as a clean
+            # "canceled" terminal status instead of a generic failure.
+            from ultra_deepagents.training.compute_client import ComputeJobCancelled
+
+            if isinstance(exc, ComputeJobCancelled):
+                return {"terminal_status": "canceled", "error": str(exc)}
+            raise
         # Reached once an adapter's trainer exists: smoke-test BEFORE version
         # registration (plan 6.2), then register the candidate.
         weights_uri = str((artifact or {}).get("weights_uri") or "")

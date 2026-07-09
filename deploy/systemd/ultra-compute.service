@@ -1,0 +1,25 @@
+[Unit]
+Description=Ultra model-agnostic GPU compute service (training + inference executors)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/ultra/compute-service.env
+# jobs/ = job records; work/ = training scratch (best.pt is copied out to the
+# shared root's output_dir). SHARED_ROOT is mounted rw at the SAME path as in the
+# training worker so the worker's assembled dataset + warm weights are readable and
+# best.pt is written back. MODELS_ROOT is the read-only canonical weights store.
+ExecStartPre=/bin/mkdir -p /srv/ultra/compute-service/jobs /srv/ultra/compute-service/work
+ExecStartPre=/bin/sh -lc '/bin/mkdir -p "${ULTRA_COMPUTE_SHARED_ROOT:-/srv/ultra/training-data}" "${ULTRA_COMPUTE_MODELS_ROOT:-/srv/ultra/training-data/models}"'
+ExecStartPre=-/usr/bin/docker rm -f ultra-compute
+ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-compute --gpus ${ULTRA_COMPUTE_DOCKER_GPUS:-all} --shm-size ${ULTRA_COMPUTE_SHM_SIZE:-8g} --env-file /etc/ultra/compute-service.env -p ${ULTRA_COMPUTE_BIND_ADDRESS:-0.0.0.0}:${ULTRA_COMPUTE_SERVICE_PORT:-8030}:8030 -v /srv/ultra/compute-service/jobs:/srv/ultra/compute-service/jobs -v /srv/ultra/compute-service/work:/srv/ultra/compute-service/work -v ${ULTRA_COMPUTE_SHARED_ROOT:-/srv/ultra/training-data}:${ULTRA_COMPUTE_SHARED_ROOT:-/srv/ultra/training-data} -v ${ULTRA_COMPUTE_MODELS_ROOT:-/srv/ultra/training-data/models}:${ULTRA_COMPUTE_MODELS_ROOT:-/srv/ultra/training-data/models}:ro ultra-compute:current'
+ExecStop=/usr/bin/docker stop ultra-compute
+Restart=always
+RestartSec=5
+TimeoutStartSec=0
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

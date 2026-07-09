@@ -9,6 +9,7 @@ leases work it can't do.
 from __future__ import annotations
 
 import abc
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,11 +41,22 @@ class MaterializeContext:
 
 @dataclass(frozen=True)
 class TrainContext:
-    """Context for ``train`` (the assemble/finetune phases)."""
+    """Context for ``train`` (the assemble/finetune phases).
+
+    ``job_id`` / ``progress_cb`` / ``should_cancel`` are optional runtime handles the
+    worker injects so an adapter that offloads GPU work to the compute service can
+    (a) key the job idempotently on the training job id — a redelivery RESUMES the
+    running service job rather than launching a duplicate; (b) forward live progress
+    back to the control plane; (c) observe run cancellation and stop the GPU job.
+    They are None for pure-local adapters and callers that don't need them.
+    """
 
     params: dict[str, Any] = field(default_factory=dict)
     workdir: Path = Path(".")
     settings: Any | None = None
+    job_id: str = ""
+    progress_cb: Callable[[dict[str, Any]], None] | None = None
+    should_cancel: Callable[[], bool] | None = None
 
 
 class ModelAdapter(abc.ABC):

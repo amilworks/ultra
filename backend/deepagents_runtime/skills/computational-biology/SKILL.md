@@ -34,6 +34,11 @@ Two Python environments are baked into the sandbox. Pick per task; state which y
 
 ### 1. Use the field-standard method, name it, and pin its parameters
 Do not substitute a generic surrogate when a canonical tool exists.
+**Before writing analysis code, copy the vetted recipe** — correct call + a runnable self-check +
+the named anti-pattern — from **[references/singlecell-recipes.md](references/singlecell-recipes.md)**
+(preprocessing order, Leiden stability, DE double-dipping control, batch integration — ComBat is the
+only integrator installed —, PAGA/DPT pseudotime, markers, liana CCC, squidpy under /opt/biograph).
+Hand-rolling these is how wrong-but-plausible results ship; run the self-check before trusting output.
 - **Community detection:** use **Leiden** (`scanpy.tl.leiden` / `leidenalg`), not Louvain,
   as the default — Leiden guarantees well-connected communities; Louvain does not. State
   the objective (RBConfiguration/modularity/CPM), the resolution, the seed, and the graph

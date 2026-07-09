@@ -29,6 +29,11 @@ fiona or richdem, stop — you are on an unbaked path.
 
 ### 1. Use the field-standard named tool, name the method, pin its parameters
 Do not hand-roll a spatial primitive when the canonical library exists.
+**Before writing analysis code, copy the vetted recipe** — correct call + a runnable self-check +
+the named anti-pattern — from **[references/geospatial-recipes.md](references/geospatial-recipes.md)**
+(CRS-before-area, Moran's I, spatially-blocked SDM CV, rarefied diversity, landscape metrics,
+Ripley's K, pysheds hydrology, spatial regression). Hand-rolling these is how wrong-but-plausible
+results ship; run the self-check before trusting output.
 - **Vector/raster IO + CRS:** `geopandas`(pyogrio)/`shapely`/`rioxarray`/`rasterio`; reproject
   with `pyproj`. Reproject to an appropriate **equal-area or projected CRS before any
   distance/area/weights computation** — never compute distance or area in EPSG:4326 degrees.

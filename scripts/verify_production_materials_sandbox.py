@@ -690,6 +690,20 @@ def _strict_tree_manifest(root: Path, *, label: str) -> dict[str, Any]:
     return _manifest_for_files(root, relatives)
 
 
+def _harden_retained_tree_permissions(root: Path, *, label: str) -> None:
+    """Remove shared write bits after copying private sandbox evidence."""
+
+    _strict_tree_regular_files(root, label=label)
+    for path in [root, *sorted(root.rglob("*"))]:
+        mode = os.lstat(path).st_mode
+        permissions = stat.S_IMODE(mode)
+        hardened = permissions & ~(stat.S_IWGRP | stat.S_IWOTH)
+        try:
+            os.chmod(path, hardened, follow_symlinks=False)
+        except OSError as exc:
+            raise VerificationError(f"could not harden {label} permissions: {path}") from exc
+
+
 def _retain_tree(
     source: Path,
     output_dir: Path,
@@ -727,6 +741,7 @@ def _retain_tree(
         observed = _strict_tree_manifest(destination, label="retained evidence tree")
         if observed != source_manifest:
             raise VerificationError("retained evidence tree changed while it was copied")
+    _harden_retained_tree_permissions(destination, label="retained evidence tree")
     try:
         relative = destination.relative_to(output_dir)
     except ValueError as exc:
@@ -2074,6 +2089,10 @@ def _execution_command(
     )
     return f"""set -euo pipefail
 {exports}
+# The verifier's temporary root is host-private (0700), but the sandbox runs as
+# container UID 0.  Keep its nested bind-mount outputs removable by the non-root
+# host verifier on Linux, including when execution exits before normal cleanup.
+umask 000
 mkdir -p "$TMPDIR" /outputs/domain
 python /workspace/.ultra-parity/calphad_probe.py /outputs/{CALPHAD_REPORT.as_posix()}
 python -m pytest \
@@ -4052,6 +4071,10 @@ def run_verification(
                 shutil.rmtree(retained)
             if (outputs / "domain").is_dir():
                 shutil.copytree(outputs / "domain", retained)
+                _harden_retained_tree_permissions(
+                    retained,
+                    label="retained deterministic materials domain evidence",
+                )
             if calphad_path.is_file():
                 shutil.copyfile(calphad_path, output_dir / CALPHAD_REPORT)
             if calphad_runtime_junit_path.is_file():

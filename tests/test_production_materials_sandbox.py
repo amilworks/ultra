@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -833,8 +834,41 @@ def test_parity_execution_keeps_pytest_temps_off_the_staged_source_tree() -> Non
     )
 
     assert f"export TMPDIR={_VERIFY.PARITY_TMPDIR}" in command
+    assert command.index("umask 000") < command.index('mkdir -p "$TMPDIR" /outputs/domain')
     assert 'mkdir -p "$TMPDIR" /outputs/domain' in command
     assert "/workspace/.tmp" not in command
+
+
+def test_retained_tree_removes_shared_write_bits_without_stripping_execution(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    executable = nested / "probe.sh"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    data = nested / "evidence.json"
+    data.write_text("{}\n", encoding="utf-8")
+    source.chmod(0o777)
+    nested.chmod(0o777)
+    executable.chmod(0o777)
+    data.chmod(0o666)
+
+    output = tmp_path / "output"
+    output.mkdir()
+    record = _VERIFY._retain_tree(
+        source,
+        output,
+        directory=Path("bundle"),
+        stem="evidence",
+        label="permissive sandbox evidence",
+    )
+    retained = output / record["relative_path"]
+
+    assert stat.S_IMODE(retained.stat().st_mode) == 0o755
+    assert stat.S_IMODE((retained / "nested").stat().st_mode) == 0o755
+    assert stat.S_IMODE((retained / "nested/probe.sh").stat().st_mode) == 0o755
+    assert stat.S_IMODE((retained / "nested/evidence.json").stat().st_mode) == 0o644
 
 
 @pytest.mark.parametrize(

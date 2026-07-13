@@ -215,6 +215,42 @@ def test_snapshot_parser_checks_denominators_order_and_hashes(tmp_path: Path) ->
     assert snapshot.tasks[0].question_sha256 == gate.sha256_file(snapshot.tasks[0].question_path)
 
 
+def test_non_strict_snapshot_uses_explicit_order_across_filesystems(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _write_synthetic_snapshot(tmp_path / "baseline")
+    real_listdir = gate.os.listdir
+
+    def reversed_task_list(path: str | Path) -> list[str]:
+        if Path(path).name == "pymatgen_analysis_defects":
+            return ["public_beta", "public_alpha"]
+        return real_listdir(path)
+
+    monkeypatch.setattr(gate.os, "listdir", reversed_task_list)
+
+    snapshot = _write_synthetic_snapshot(tmp_path / "benchmark")
+
+    assert [task.task_id for task in snapshot.tasks] == ["public_alpha", "public_beta"]
+    assert [task.subtask_count for task in snapshot.tasks] == [1, 2]
+    assert snapshot.manifest_sha256 == baseline.manifest_sha256
+
+
+def test_snapshot_parser_requires_explicit_task_order(tmp_path: Path) -> None:
+    root = tmp_path / "benchmark"
+    _write_synthetic_snapshot(root)
+
+    with pytest.raises(gate.GateError, match="explicit expected task order"):
+        gate.load_benchmark_snapshot(
+            root,
+            strict_official=False,
+            expected_parent_count=2,
+            expected_subtask_count=3,
+            expected_task_order=None,
+            expected_manifest_sha256=None,
+        )
+
+
 def test_snapshot_parser_rejects_reordered_runner_vector(tmp_path: Path) -> None:
     root = tmp_path / "benchmark"
     _write_synthetic_snapshot(root)

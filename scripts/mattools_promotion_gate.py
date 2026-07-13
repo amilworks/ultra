@@ -645,16 +645,24 @@ def load_benchmark_snapshot(
     else:
         manifest_paths = []
 
-    raw_order = tuple(name for name in os.listdir(question_root) if (question_root / name).is_dir())
-    if len(raw_order) != expected_parent_count:
+    discovered_order = tuple(
+        name for name in os.listdir(question_root) if (question_root / name).is_dir()
+    )
+    if len(discovered_order) != expected_parent_count:
         raise GateError(
-            f"benchmark has {len(raw_order)} parent tasks; expected {expected_parent_count}"
+            f"benchmark has {len(discovered_order)} parent tasks; expected {expected_parent_count}"
         )
-    if expected_task_order is not None and tuple(expected_task_order) != raw_order:
+    if expected_task_order is None:
+        raise GateError("an explicit expected task order is required")
+    pinned_order = tuple(expected_task_order)
+    if len(pinned_order) != expected_parent_count or set(pinned_order) != set(discovered_order):
+        raise GateError("benchmark task directories differ from the expected task set")
+    if strict_official and pinned_order != discovered_order:
         raise GateError(
             "benchmark directory order differs from the pinned official order; "
             "use a git checkout whose os.listdir order matches the upstream runner"
         )
+    task_order = discovered_order if strict_official else pinned_order
 
     assignments = _literal_assignments(runner_path)
     runner_parent_count = assignments.get("total_tasks_number")
@@ -681,7 +689,7 @@ def load_benchmark_snapshot(
         )
 
     if not strict_official:
-        manifest_paths = _snapshot_manifest_files(repository_root, raw_order)
+        manifest_paths = _snapshot_manifest_files(repository_root, task_order)
     missing = [
         path
         for path in manifest_paths
@@ -706,7 +714,7 @@ def load_benchmark_snapshot(
 
     tasks: list[BenchmarkTask] = []
     for index, (task_id, runner_count) in enumerate(
-        zip(raw_order, runner_vector, strict=True), start=1
+        zip(task_order, runner_vector, strict=True), start=1
     ):
         task_root = question_root / task_id
         question_path = task_root / "question.txt"

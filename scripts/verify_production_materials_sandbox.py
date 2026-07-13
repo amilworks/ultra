@@ -1687,8 +1687,8 @@ from ultra_deepagents.materials import inspect_calphad_input
 EXPECTED_MANIFEST_SHA256 = "a5dfb3aac68f119a8fe0ee751255a16f31fe8e8515cfa9739320ba21aa28fb09"
 EXPECTED_CALPHAD_SOURCE_HASHES = {
     "calphad.py": "c17c9158457c4aa236fa58865372f59325d479226418f28c1c7e998ce68cdc85",
-    "calphad_cli.py": "68cfbb3ca78560c686f43c7bb790e8f97a3e770ca5fc802bbf13eecc56ad466e",
-    "calphad_tools.py": "51587074ea751e0af1a07b4b4d9e169a1b4067ff8d11b356a6f2ac92f4f5fd82",
+    "calphad_cli.py": "9a917c3650768ccc89f3dcd1fce048eeee72f4fb28a2ac701e3defb03cfc962c",
+    "calphad_tools.py": "5bce33c39548e566bdcbdd6f67367451e9aa391a310bcb19c221f1e7c78e9c4b",
 }
 
 def sha(path):

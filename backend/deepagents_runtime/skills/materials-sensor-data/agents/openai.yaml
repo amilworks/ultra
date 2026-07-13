@@ -1,0 +1,3 @@
+interface:
+  display_name: "Materials Sensor Data"
+  short_description: "Validate calibrated Zarr waveforms and telemetry"

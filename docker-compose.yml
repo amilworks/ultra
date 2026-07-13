@@ -122,13 +122,21 @@ services:
     image: ultra-ngff-service:local
     environment:
       ULTRA_NGFF_WORKERS: "${ULTRA_NGFF_WORKERS:-2}"
-      # Decoded-plane cache (application chunk cache, layered above the OS page cache).
+      # Process-wide decoded-plane cache. This is one 256 MiB ceiling per worker,
+      # not 256 MiB multiplied by every entry in the open-image metadata LRU.
       ULTRA_NGFF_DECODE_CACHE_BYTES: "${ULTRA_NGFF_DECODE_CACHE_BYTES:-268435456}"
+      ULTRA_NGFF_DECODE_CACHE_PLANE_BYTES: "${ULTRA_NGFF_DECODE_CACHE_PLANE_BYTES:-50331648}"
+      ULTRA_NGFF_DECODE_CACHE_ENTRIES: "${ULTRA_NGFF_DECODE_CACHE_ENTRIES:-4096}"
       ULTRA_NGFF_TILE_THRESHOLD: "${ULTRA_NGFF_TILE_THRESHOLD:-2048}"
+      ULTRA_NGFF_INTENSITY_RANGE_MAX_ELEMENTS: "${ULTRA_NGFF_INTENSITY_RANGE_MAX_ELEMENTS:-5000000}"
+      ULTRA_NGFF_INTENSITY_RANGE_MAX_BYTES: "${ULTRA_NGFF_INTENSITY_RANGE_MAX_BYTES:-67108864}"
     volumes:
       - ultra-uploads:/data/uploads
     ports:
-      - "${NGFF_SERVICE_PORT:-8092}:8091"
+      # The sidecar accepts trusted filesystem paths from the control plane and has no
+      # client authentication of its own. Keep the host-development proxy reachable while
+      # preventing direct LAN access that could bypass tenant-scoped resource resolution.
+      - "127.0.0.1:${NGFF_SERVICE_PORT:-8092}:8091"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8091/healthz').status==200 else 1)"]
       interval: 5s
@@ -144,6 +152,26 @@ services:
       dockerfile: deploy/docker/deepagents-sandbox.Dockerfile
     image: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
     command: ["sh", "-c", "echo 'code-exec sandbox image ready'"]
+    restart: "no"
+
+  # Build-only, separately pinned NumPy-2/Kawin runtime. The worker resolves
+  # this reference through the mounted host Docker daemon and registers typed
+  # kinetics tools only when it exactly matches the authorized immutable ID.
+  materials-kinetics-runtime:
+    build:
+      context: .
+      dockerfile: deploy/docker/materials-kinetics.Dockerfile
+      args:
+        VCS_REF: ${GITHUB_SHA:-local-compose}
+    image: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-ultra-materials-kinetics:py311}
+    command: ["python", "-I", "-m", "ultra_deepagents.kinetics_runtime.cli", "--self-check"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001
     restart: "no"
 
   control-plane:
@@ -214,6 +242,8 @@ services:
       # ULTRA_DATA_DIR host-bind below (not a named volume).
       ULTRA_DEEPAGENTS_SANDBOX_IMAGE: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
       ULTRA_DEEPAGENTS_SANDBOX_NETWORK: ${ULTRA_SANDBOX_NETWORK:-none}
+      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-ultra-materials-kinetics:py311}
+      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID:-}
       # Aggregate per-worker cap on simultaneous sandbox containers. 0 = unbounded
       # (fine for ONE worker). Set a finite value BEFORE `make scale-workers N=...`
       # so N workers cannot oversubscribe this single host's Docker daemon.
@@ -228,6 +258,10 @@ services:
       QWEN_VLM_ENABLED: ${ULTRA_QWEN_VLM_ENABLED:-false}
       QWEN_VLM_BASE_URL: ${ULTRA_QWEN_VLM_BASE_URL:-}
       QWEN_VLM_MODEL: ${ULTRA_QWEN_VLM_MODEL:-}
+      QWEN_VLM_MODEL_REVISION: ${ULTRA_QWEN_VLM_MODEL_REVISION:-}
+      QWEN_VLM_RUNTIME_IDENTITY: ${ULTRA_QWEN_VLM_RUNTIME_IDENTITY:-}
+      QWEN_VLM_DEPLOYMENT_ATTESTATION_PATH: ${ULTRA_QWEN_VLM_DEPLOYMENT_ATTESTATION_PATH:-}
+      QWEN_VLM_DEPLOYMENT_ATTESTATION_SHA256: ${ULTRA_QWEN_VLM_DEPLOYMENT_ATTESTATION_SHA256:-}
       QWEN_VLM_API_KEY: ${ULTRA_QWEN_VLM_API_KEY:-}
       # Optional external GPU MegaSeg inference service — off unless a URL is set.
       MEGASEG_SERVICE_URL: ${ULTRA_MEGASEG_SERVICE_URL:-}
@@ -245,6 +279,8 @@ services:
         condition: service_healthy
       control-plane:
         condition: service_started
+      materials-kinetics-runtime:
+        condition: service_completed_successfully
 
   frontend:
     build:

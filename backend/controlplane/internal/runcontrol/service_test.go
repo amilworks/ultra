@@ -122,6 +122,67 @@ func TestServiceCreateRunStampsRuntimeFacts(t *testing.T) {
 	}
 }
 
+func TestServiceCreateRunStampsOnlyServerAuthorizedCalphadRuntimePolicy(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	runtimeImage := "sha256:" + strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name       string
+		configured string
+		wantPolicy bool
+	}{
+		{name: "configured immutable image", configured: runtimeImage, wantPolicy: true},
+		{name: "missing configuration fails closed", wantPolicy: false},
+		{name: "mutable configuration fails closed", configured: "materials:latest", wantPolicy: false},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			mem := store.NewMemoryStore()
+			bus := eventbus.NewMemoryBus()
+			service := NewServiceWithOptions(mem, bus, ServiceOptions{
+				CalphadRuntimePolicy: CalphadRuntimePolicyConfig{RuntimeImageID: test.configured},
+			})
+			thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "calphad-user", Title: "CALPHAD"})
+			if err != nil {
+				t.Fatalf("CreateThread: %v", err)
+			}
+			run, err := service.CreateRun(ctx, CreateRunRequest{
+				ThreadID: thread.ThreadID, UserID: "calphad-user", Goal: "Inspect TDB",
+				Metadata: domain.JSONMap{
+					domain.CalphadRuntimePolicyMetadataKey: domain.JSONMap{
+						"schema_version": domain.CalphadRuntimePolicySchema,
+						"authority":      "control_plane", "runtime_image_id": "sha256:" + strings.Repeat("f", 64),
+						"pycalphad_version": domain.CalphadPycalphadVersion,
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			policy, found := run.Metadata[domain.CalphadRuntimePolicyMetadataKey].(domain.JSONMap)
+			if found != test.wantPolicy {
+				t.Fatalf("policy found=%t value=%#v, want found=%t", found, policy, test.wantPolicy)
+			}
+			if test.wantPolicy {
+				if len(policy) != 11 || policy["schema_version"] != domain.CalphadRuntimePolicySchema ||
+					policy["authority"] != "control_plane" ||
+					policy["runtime_image_id"] != runtimeImage ||
+					policy["pycalphad_version"] != domain.CalphadPycalphadVersion ||
+					policy["network"] != domain.CalphadRuntimeNetwork ||
+					policy["no_new_privileges"] != true ||
+					policy["read_only_root_filesystem"] != true ||
+					policy["cap_drop_all"] != true ||
+					policy["cpus_at_most"] != domain.CalphadRuntimeCPUsAtMost ||
+					policy["memory_bytes_at_most"] != domain.CalphadRuntimeMemoryBytesAtMost ||
+					policy["pids_at_most"] != domain.CalphadRuntimePIDsAtMost {
+					t.Fatalf("server policy = %#v", policy)
+				}
+			}
+		})
+	}
+}
+
 func TestServiceCreateRunWithRetiredRareSpotToolUsesDeepAgentsPathAndPreservesMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3393,6 +3454,92 @@ func TestServiceCreateRunIdempotentRetryDispatchesQueuedRunAfterAcceptedPersiste
 	}
 }
 
+func TestServiceCreateRunIdempotentQueuedRetryDispatchesOnlyStoredInputContract(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "user-1", Title: "Stored retry contract"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	const idempotencyKey = "stored-input-contract-retry"
+	storedDescriptor := domain.JSONMap{
+		"type":           "selected_resource",
+		"binding_schema": "ultra.selected_resource.v1",
+		"authority":      "control_resource_catalog",
+		"resource_id":    "file-original",
+		"file_id":        "file-original",
+		"sha256":         strings.Repeat("a", 64),
+		"size_bytes":     int64(1234),
+	}
+	stored, err := mem.CreateRun(ctx, domain.CreateRunInput{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Analyze the originally authorized TDB.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze original.tdb"}},
+		Metadata: domain.JSONMap{
+			"idempotency_key":      idempotencyKey,
+			"file_ids":             []string{"file-original"},
+			"resource_uris":        []string{"catalog://file-original"},
+			"knowledge_context":    domain.JSONMap{"source": "stored"},
+			"resource_descriptors": []domain.JSONMap{storedDescriptor},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun seed: %v", err)
+	}
+	if _, err := mem.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		RunID: stored.RunID, ThreadID: stored.ThreadID, EventKind: "run.accepted",
+		Message: "Run accepted.", Payload: domain.JSONMap{"status": string(stored.Status)},
+	}); err != nil {
+		t.Fatalf("AppendRunEvent: %v", err)
+	}
+
+	retried, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID:         thread.ThreadID,
+		UserID:           "user-1",
+		Goal:             "Try to replace the stored contract.",
+		Messages:         []domain.ThreadMessage{{Role: "user", Content: "Analyze foreign.tdb"}},
+		FileIDs:          []string{"file-foreign"},
+		ResourceURIs:     []string{"catalog://file-foreign"},
+		KnowledgeContext: domain.JSONMap{"source": "retry"},
+		ResourceDescriptors: []domain.JSONMap{{
+			"type": "selected_resource", "resource_id": "file-foreign", "file_id": "file-foreign",
+			"sha256": strings.Repeat("f", 64), "size_bytes": int64(1),
+		}},
+		IdempotencyKey: idempotencyKey,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun retry: %v", err)
+	}
+	if retried.RunID != stored.RunID {
+		t.Fatalf("retried run id = %s, want stored %s", retried.RunID, stored.RunID)
+	}
+	select {
+	case job := <-bus.Jobs():
+		if got := job.FileIDs; len(got) != 1 || got[0] != "file-original" {
+			t.Fatalf("retry job file_ids = %#v, want stored original", got)
+		}
+		if got := job.ResourceURIs; len(got) != 1 || got[0] != "catalog://file-original" {
+			t.Fatalf("retry job resource_uris = %#v, want stored original", got)
+		}
+		if len(job.ResourceDescriptors) != 1 || job.ResourceDescriptors[0]["resource_id"] != "file-original" || job.ResourceDescriptors[0]["sha256"] != strings.Repeat("a", 64) {
+			t.Fatalf("retry job descriptors = %#v, want stored binding", job.ResourceDescriptors)
+		}
+		if len(job.Messages) != 1 || job.Messages[0].Content != "Analyze original.tdb" {
+			t.Fatalf("retry job messages = %#v, want stored transcript", job.Messages)
+		}
+		if job.KnowledgeContext["source"] != "stored" || strings.Contains(fmt.Sprint(job), "file-foreign") {
+			t.Fatalf("retry request contaminated stored job: %+v", job)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected queued retry dispatch")
+	}
+}
+
 func TestServiceCancelRunPersistsDurableCancellationWhenCancelSignalFails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3918,6 +4065,43 @@ func TestServiceCreateRunIncludesPriorArtifactsInFollowupJob(t *testing.T) {
 		t.Fatalf("IngestRunEvent artifact: %v", err)
 	}
 
+	foreignThread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-2",
+		Title:  "Foreign artifact source",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread foreign: %v", err)
+	}
+	foreignRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: foreignThread.ThreadID,
+		UserID:   "user-2",
+		Goal:     "Create a private foreign table.",
+	})
+	if err != nil {
+		t.Fatalf("CreateRun foreign: %v", err)
+	}
+	drainJobs(bus)
+	if _, err := mem.CreateArtifact(ctx, domain.CreateArtifactInput{
+		ArtifactID: "artifact-foreign",
+		RunID:      foreignRun.RunID,
+		ThreadID:   foreignThread.ThreadID,
+		Kind:       "table",
+		Path:       "outputs/private.csv",
+		SourcePath: "/tmp/artifacts/" + foreignRun.RunID + "/outputs/private.csv",
+	}); err != nil {
+		t.Fatalf("CreateArtifact foreign: %v", err)
+	}
+	// A caller-controlled transcript reference must not turn another owner's run
+	// into a prior-artifact capability for this thread.
+	if _, err := mem.AppendThreadMessage(ctx, domain.ThreadMessage{
+		ThreadID: thread.ThreadID,
+		Role:     "assistant",
+		Content:  "Guessed a foreign run id.",
+		RunID:    foreignRun.RunID,
+	}); err != nil {
+		t.Fatalf("AppendThreadMessage foreign run reference: %v", err)
+	}
+
 	_, err = service.CreateRun(ctx, CreateRunRequest{
 		ThreadID: thread.ThreadID,
 		UserID:   "user-1",
@@ -3949,6 +4133,87 @@ func TestServiceCreateRunIncludesPriorArtifactsInFollowupJob(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("expected followup job")
+	}
+}
+
+func TestServiceCreateRunDropsCallerArtifactsButKeepsServerSelectedResources(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-1",
+		Title:  "Descriptor trust boundary",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	selected := domain.JSONMap{
+		"type":           "selected_resource",
+		"binding_schema": "ultra.selected_resource.v1",
+		"authority":      "control_resource_catalog",
+		"resource_id":    "file-owned",
+		"file_id":        "file-owned",
+		"sha256":         strings.Repeat("a", 64),
+		"size_bytes":     int64(123),
+		"metadata": domain.JSONMap{
+			"calphad": domain.JSONMap{"database_id": "owned-db"},
+		},
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Analyze the selected database.",
+		ResourceDescriptors: []domain.JSONMap{
+			selected,
+			{
+				"type": "artifact", "artifact_id": "artifact-foreign",
+				"run_id": "run-foreign", "path": "outputs/private.csv",
+			},
+			{
+				"artifact_id": "artifact-foreign-untyped",
+				"run_id":      "run-foreign",
+				"path":        "outputs/private.csv",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	select {
+	case job := <-bus.Jobs():
+		if len(job.ResourceDescriptors) != 1 {
+			t.Fatalf("job descriptors = %#v, want only selected resource", job.ResourceDescriptors)
+		}
+		if job.ResourceDescriptors[0]["resource_id"] != "file-owned" ||
+			job.ResourceDescriptors[0]["authority"] != "control_resource_catalog" {
+			t.Fatalf("selected resource binding changed: %#v", job.ResourceDescriptors[0])
+		}
+		metadata, ok := job.ResourceDescriptors[0]["metadata"].(domain.JSONMap)
+		if !ok {
+			t.Fatalf("selected CALPHAD metadata type = %T", job.ResourceDescriptors[0]["metadata"])
+		}
+		calphad, ok := metadata["calphad"].(domain.JSONMap)
+		if !ok || calphad["database_id"] != "owned-db" {
+			t.Fatalf("selected CALPHAD metadata changed: %#v", metadata)
+		}
+	default:
+		t.Fatal("CreateRun did not dispatch a job")
+	}
+	stored, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	descriptors, ok := stored.Metadata["resource_descriptors"].([]domain.JSONMap)
+	if !ok || len(descriptors) != 1 || descriptors[0]["resource_id"] != "file-owned" {
+		t.Fatalf("stored descriptors = %T %#v, want only selected resource", stored.Metadata["resource_descriptors"], stored.Metadata["resource_descriptors"])
+	}
+	if strings.Contains(fmt.Sprint(stored.Metadata), "artifact-foreign") ||
+		strings.Contains(fmt.Sprint(stored.Metadata), "run-foreign") {
+		t.Fatalf("caller artifact capability persisted: %#v", stored.Metadata)
 	}
 }
 

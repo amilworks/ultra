@@ -1010,6 +1010,18 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
                   toFiniteNumber(item, 0)
                 )
                 : null,
+              cell_data_path:
+                toRecord(toRecord(hdf5Source.summary).geometry).cell_data_path == null
+                  ? null
+                  : String(toRecord(toRecord(hdf5Source.summary).geometry).cell_data_path),
+              cell_data_consistent:
+                toRecord(toRecord(hdf5Source.summary).geometry).cell_data_consistent == null
+                  ? null
+                  : Boolean(toRecord(toRecord(hdf5Source.summary).geometry).cell_data_consistent),
+              complete:
+                toRecord(toRecord(hdf5Source.summary).geometry).complete == null
+                  ? null
+                  : Boolean(toRecord(toRecord(hdf5Source.summary).geometry).complete),
             }
             : null,
       },
@@ -1043,6 +1055,14 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
               phase_names: Array.isArray(toRecord(hdf5Source.materials).phase_names)
                 ? (toRecord(hdf5Source.materials).phase_names as Array<unknown>).map((item) => String(item))
                 : [],
+              phase_names_source:
+                toRecord(hdf5Source.materials).phase_names_source == null
+                  ? null
+                  : String(toRecord(hdf5Source.materials).phase_names_source),
+              phase_names_provenance:
+                toRecord(hdf5Source.materials).phase_names_provenance == null
+                  ? null
+                  : String(toRecord(hdf5Source.materials).phase_names_provenance),
               feature_count:
                 toRecord(hdf5Source.materials).feature_count == null
                   ? null
@@ -1051,6 +1071,34 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
                 toRecord(hdf5Source.materials).grain_count == null
                   ? null
                   : clampNonNegativeInt(toRecord(hdf5Source.materials).grain_count, 0),
+              declared_feature_tuple_count:
+                toRecord(hdf5Source.materials).declared_feature_tuple_count == null
+                  ? null
+                  : clampNonNegativeInt(
+                      toRecord(hdf5Source.materials).declared_feature_tuple_count,
+                      0
+                    ),
+              referenced_positive_feature_count:
+                toRecord(hdf5Source.materials).referenced_positive_feature_count == null
+                  ? null
+                  : clampNonNegativeInt(
+                      toRecord(hdf5Source.materials).referenced_positive_feature_count,
+                      0
+                    ),
+              feature_id_scan_complete: toBoolean(
+                toRecord(hdf5Source.materials).feature_id_scan_complete,
+                false
+              ),
+              feature_id_consistency:
+                toRecord(hdf5Source.materials).feature_id_consistency == null
+                  ? null
+                  : typeof toRecord(hdf5Source.materials).feature_id_consistency === "boolean"
+                    ? (toRecord(hdf5Source.materials).feature_id_consistency as boolean)
+                    : null,
+              feature_zero_reserved:
+                toRecord(hdf5Source.materials).feature_zero_reserved == null
+                  ? null
+                  : Boolean(toRecord(hdf5Source.materials).feature_zero_reserved),
               recommended_view:
                 String(toRecord(hdf5Source.materials).recommended_view ?? "explorer") === "materials"
                   ? "materials"

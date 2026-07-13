@@ -17,14 +17,23 @@ def _enable_async_subagents(monkeypatch):
 def test_runtime_settings_load_vllm_defaults(monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8003/v1")
     monkeypatch.setenv("OPENAI_MODEL", "deepseek_v4")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID", "self-hosted-vllm")
 
     settings = RuntimeSettings.from_env()
 
     assert settings.openai_base_url == "http://127.0.0.1:8003/v1"
     assert settings.openai_model == "deepseek_v4"
+    assert settings.model_provider_id == "self-hosted-vllm"
     assert settings.openai_api_key == "EMPTY"
     assert settings.sandbox_network == "none"
     assert settings.model_supports_multimodal is False
+
+
+def test_runtime_settings_reject_unsafe_provider_identity(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID", "https://user:secret@example.test")
+
+    with pytest.raises(ValueError, match="stable provider identifier"):
+        RuntimeSettings.from_env()
 
 
 def test_runtime_settings_can_enable_multimodal_model(monkeypatch):

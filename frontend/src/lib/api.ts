@@ -1413,6 +1413,7 @@ export class ApiClient {
 
   private buildV2RunRequest(request: ChatRequest): Record<string, unknown> {
     const selectionContext = isRecord(request.selection_context) ? request.selection_context : {};
+    const evaluationProfile = request.evaluation_profile ?? null;
     return {
       goal: asOptionalString(request.goal) ?? lastUserMessageContent(request),
       messages: request.messages.map((message) => ({
@@ -1423,6 +1424,8 @@ export class ApiClient {
       resource_uris: mergeStringArrays(request.resource_uris, selectionContext.resource_uris),
       dataset_uris: mergeStringArrays(request.dataset_uris, selectionContext.dataset_uris),
       selected_tool_names: request.selected_tool_names ?? [],
+      remote_mutation_intents: request.remote_mutation_intents ?? [],
+      ...(evaluationProfile ? { evaluation_profile: evaluationProfile } : {}),
       knowledge_context: request.knowledge_context ?? null,
       selection_context: request.selection_context ?? null,
       workflow_hint: request.workflow_hint ?? null,

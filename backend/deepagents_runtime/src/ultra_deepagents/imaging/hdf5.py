@@ -29,6 +29,7 @@ Entry points used by the engine:
 from __future__ import annotations
 
 import io
+import itertools
 import math
 import os
 from typing import Any
@@ -72,6 +73,35 @@ ATLAS_CELL_CAP = 256           # matches viewerinfo.ATLAS_CELL_CAP (kept local t
 SAMPLE_CORNER = 4              # per-axis size of the sample_values corner block
 MAX_ATTRS = 48                 # attributes materialized per node
 MAX_ATTR_ARRAY = 32            # elements kept from an array-valued attribute
+MATERIAL_PHASE_MAX_NAMES = 256  # stored ensemble labels read by the materials probe
+MATERIAL_PHASE_MAX_ITEM_BYTES = 1024
+MATERIAL_PHASE_MAX_TOTAL_BYTES = 16 * 1024
+MATERIAL_ORIENTATION_MAX_ROWS = 2000
+FEATURE_ID_SCAN_CHUNK_VALUES = 1_000_000
+FEATURE_ID_MAX_TRACKED_IDENTITIES = 1_000_000
+MAX_METADATA_ITEM_BYTES = 4096
+MAX_METADATA_TOTAL_BYTES = 64 * 1024
+
+_PHASE_NAMES_PROVENANCE = (
+    "Read from stored DREAM.3D PhaseName/MaterialName metadata; "
+    "no phase-identification algorithm was run."
+)
+_FEATURE_GROUP_NAMES = frozenset(
+    {
+        "cellfeaturedata",
+        "featuredata",
+        "grainfeaturedata",
+        "graindata",
+        "cellgraindata",
+    }
+)
+_ENSEMBLE_GROUP_NAMES = frozenset(
+    {
+        "cellensembledata",
+        "ensembledata",
+        "phaseensembledata",
+    }
+)
 
 # Volume preview kinds the frontend renders through the slice/atlas/volume surface.
 _VOLUME_KINDS = frozenset({"scalar_volume", "label_volume", "rgb_volume", "vector_volume"})
@@ -145,22 +175,82 @@ def _to_jsonable(value: Any, *, _depth: int = 0) -> Any:
     return str(value)
 
 
+def _metadata_payload_bytes(value: Any, *, _depth: int = 0) -> int:
+    """Conservative decoded-size estimate for already-bounded metadata values."""
+    if _depth > 8:
+        return MAX_METADATA_TOTAL_BYTES + 1
+    if value is None or isinstance(value, (bool, int, float)):
+        return 8
+    if isinstance(value, bytes):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8", "replace"))
+    if isinstance(value, (list, tuple)):
+        return sum(_metadata_payload_bytes(item, _depth=_depth + 1) for item in value)
+    if isinstance(value, dict):
+        return sum(
+            len(str(key).encode("utf-8", "replace"))
+            + _metadata_payload_bytes(item, _depth=_depth + 1)
+            for key, item in value.items()
+        )
+    return len(str(value).encode("utf-8", "replace"))
+
+
+def _iter_bounded_attrs(obj: Any):
+    """Yield at most :data:`MAX_ATTRS` small attributes without eager key/value lists.
+
+    Attribute array shape and fixed-width storage are checked through the attribute
+    ID before reading. Variable-length attributes are accepted only as scalars and
+    are rejected from the response if their decoded payload exceeds the per-item or
+    cumulative byte budget.
+    """
+    import numpy as np
+
+    total_bytes = 0
+    try:
+        keys = itertools.islice(obj.attrs.keys(), MAX_ATTRS)
+        for key in keys:
+            try:
+                attr_id = obj.attrs.get_id(key)
+                shape = tuple(int(value) for value in attr_id.shape)
+                element_count = int(np.prod(shape)) if shape else 1
+                dtype = attr_id.dtype
+                if element_count > MAX_ATTR_ARRAY:
+                    continue
+                itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+                kind = getattr(dtype, "kind", "")
+                if kind == "O" and element_count != 1:
+                    continue
+                if kind != "O" and (
+                    itemsize <= 0
+                    or itemsize > MAX_METADATA_ITEM_BYTES
+                    or element_count * itemsize > MAX_METADATA_TOTAL_BYTES
+                ):
+                    continue
+                raw = obj.attrs[key]
+                value = _to_jsonable(raw)
+                value_bytes = _metadata_payload_bytes(value)
+                if (
+                    value_bytes > MAX_METADATA_ITEM_BYTES
+                    or total_bytes + value_bytes > MAX_METADATA_TOTAL_BYTES
+                ):
+                    continue
+                total_bytes += value_bytes
+                yield str(key), raw
+            except Exception:  # noqa: BLE001 - one malformed attribute is isolated
+                continue
+    except Exception:  # noqa: BLE001 - a broken attribute block must not fail the walk
+        return
+
+
 def _read_attrs(obj: Any) -> dict[str, Any]:
     """A bounded, JSON-safe view of an h5py object's attributes."""
     out: dict[str, Any] = {}
-    try:
-        items = list(obj.attrs.items())
-    except Exception:  # noqa: BLE001 - a broken attribute block must not fail the walk
-        return out
-    for key, raw in items[:MAX_ATTRS]:
+    for key, raw in _iter_bounded_attrs(obj):
         try:
-            import numpy as np
-
-            if isinstance(raw, np.ndarray) and raw.size > MAX_ATTR_ARRAY:
-                raw = raw[:MAX_ATTR_ARRAY]
-            out[str(key)] = _to_jsonable(raw)
+            out[key] = _to_jsonable(raw)
         except Exception:  # noqa: BLE001
-            out[str(key)] = None
+            out[key] = None
     return out
 
 
@@ -192,6 +282,101 @@ def _is_numeric_dtype(dt: Any) -> bool:
 
 def _is_integer_dtype(dt: Any) -> bool:
     return getattr(dt, "kind", "") in ("i", "u", "b")
+
+
+def _hard_child(group: Any, key: str) -> Any | None:
+    """Resolve one direct child only when its HDF5 link is a hard link.
+
+    Calling ``group[key]`` or ``group.get(key)`` without this check follows soft and
+    external links. Files uploaded by users are untrusted, so every structural walk
+    and endpoint resolution uses this gate before object access.
+    """
+    import h5py
+
+    if not _is_group(group):
+        return None
+    try:
+        link = group.get(str(key), getlink=True)
+        if not isinstance(link, h5py.HardLink):
+            return None
+        return group.get(str(key))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _hard_object_at_path(h5: Any, path: str) -> Any | None:
+    """Resolve ``path`` component-by-component without following any non-hard link."""
+    text = str(path or "")
+    if "\x00" in text:
+        return None
+    parts = text.split("/")
+    if text.startswith("/"):
+        parts = parts[1:]
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return h5 if text in {"/", ""} else None
+    current = h5
+    for index, part in enumerate(parts):
+        current = _hard_child(current, part)
+        if current is None:
+            return None
+        if index < len(parts) - 1 and not _is_group(current):
+            return None
+    return current
+
+
+def _bounded_child_names(group: Any, limit: int = MAX_GROUP_CHILDREN):
+    """Iterate child names lazily; obtaining a name does not dereference its link."""
+    try:
+        yield from itertools.islice(group.keys(), max(0, int(limit)))
+    except Exception:  # noqa: BLE001
+        return
+
+
+def _object_address(obj: Any) -> int | None:
+    try:
+        import h5py
+
+        return int(h5py.h5o.get_info(obj.id).addr)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _visit_hard_objects(h5: Any, callback: Any) -> None:
+    """Bounded depth-first visitor over hard-linked groups/datasets only."""
+    seen: set[int] = set()
+    root_address = _object_address(h5)
+    if root_address is not None:
+        seen.add(root_address)
+    state = {"nodes": 0, "stop": False}
+
+    def _walk(group: Any, prefix: str, depth: int) -> None:
+        if state["stop"] or depth > MAX_TREE_DEPTH:
+            return
+        for key in _bounded_child_names(group):
+            if state["nodes"] >= MAX_TREE_NODES:
+                state["stop"] = True
+                return
+            child = _hard_child(group, key)
+            if child is None:
+                continue
+            address = _object_address(child)
+            if address is not None and address in seen:
+                continue
+            if address is not None:
+                seen.add(address)
+            state["nodes"] += 1
+            name = f"{prefix}/{key}" if prefix else str(key)
+            if callback(name, child) is True:
+                state["stop"] = True
+                return
+            if _is_group(child):
+                _walk(child, name, depth + 1)
+                if state["stop"]:
+                    return
+
+    _walk(h5, "", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -539,32 +724,506 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
 # ---------------------------------------------------------------------------
 # Geometry (DREAM.3D _SIMPL_GEOMETRY) + materials probe
 # ---------------------------------------------------------------------------
-def _find_geometry(h5: Any) -> dict[str, Any] | None:
-    """Find a DREAM.3D image geometry (dimensions/spacing/origin) anywhere in the file."""
-    found: dict[str, Any] | None = None
+def _bounded_geometry_vector(dset: Any) -> list[Any] | None:
+    """Read one tiny geometry vector without trusting its dataset name alone.
 
-    def _visit(name: str, obj: Any) -> None:
-        nonlocal found
-        if found is not None:
-            return
-        base = name.rsplit("/", 1)[-1]
-        if base != "_SIMPL_GEOMETRY":
-            return
+    DREAM.3D geometry vectors normally contain three values.  A malformed file can
+    attach that name to an arbitrarily large dataset, so reject rather than eagerly
+    materialize anything beyond the existing attribute-array bound.
+    """
+    import numpy as np
+
+    if dset is None or not _is_dataset(dset):
+        return None
+    try:
+        dtype = dset.dtype
+        itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+        if getattr(dtype, "kind", "") not in {"i", "u", "f"} or not (0 < itemsize <= 8):
+            return None
+        shape = tuple(int(value) for value in dset.shape)
+        size = int(np.prod(shape)) if shape else 1
+        if size < 3 or size > MAX_ATTR_ARRAY:
+            return None
+        values = np.asarray(dset[...]).ravel()
+        return [_to_jsonable(value) for value in values[:3]]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _valid_geometry_vector(values: Any, *, positive: bool) -> bool:
+    if not isinstance(values, list) or len(values) < 3:
+        return False
+    try:
+        numbers = [float(value) for value in values[:3]]
+    except (TypeError, ValueError):
+        return False
+    return all(math.isfinite(value) and (not positive or value > 0) for value in numbers)
+
+
+def _normalized_group_name(path: str) -> str:
+    """Normalize only the final group segment for DREAM.3D naming variants."""
+    segment = str(path).rstrip("/").rsplit("/", 1)[-1]
+    return "".join(char for char in segment.casefold() if char.isalnum())
+
+
+def _is_feature_group_path(path: str) -> bool:
+    return _normalized_group_name(path) in _FEATURE_GROUP_NAMES
+
+
+def _is_cell_data_group_path(path: str) -> bool:
+    return _normalized_group_name(path) == "celldata"
+
+
+def _is_ensemble_group_path(path: str) -> bool:
+    return _normalized_group_name(path) in _ENSEMBLE_GROUP_NAMES
+
+
+def _is_orientation_array(name: str, dset: Any, shape: tuple[int, ...]) -> bool:
+    """Require a typed multi-component Euler/quaternion array, not a group hint."""
+    if not _is_dataset(dset) or len(shape) < 2:
+        return False
+    itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+    if getattr(dset.dtype, "kind", "") not in {"i", "u", "f"} or not (
+        0 < itemsize <= 8
+    ):
+        return False
+    normalized = "".join(char for char in str(name).casefold() if char.isalnum())
+    components = int(shape[-1]) if shape else 0
+    return ("euler" in normalized and components >= 3) or (
+        "quat" in normalized and components >= 4
+    )
+
+
+def _read_bounded_phase_names(
+    dset: Any,
+    *,
+    max_names: int,
+    max_bytes: int,
+) -> tuple[list[str], int, int]:
+    """Read stored string labels one scalar at a time within count/byte caps."""
+    import h5py
+    import numpy as np
+
+    if not _is_dataset(dset) or max_names <= 0 or max_bytes <= 0:
+        return [], 0, 0
+    try:
+        dtype = dset.dtype
+        string_info = h5py.check_string_dtype(dtype)
+        if string_info is None and getattr(dtype, "kind", "") not in {"S", "U"}:
+            return [], 0, 0
+        itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+        # Fixed-width strings have a trustworthy pre-read bound. Vlen strings have
+        # an object descriptor and are read one scalar at a time, then byte-checked.
+        if getattr(dtype, "kind", "") != "O" and not (
+            0 < itemsize <= MATERIAL_PHASE_MAX_ITEM_BYTES
+        ):
+            return [], 0, 0
+        shape = tuple(int(value) for value in dset.shape)
+        total_items = int(np.prod(shape)) if shape else 1
+        limit = min(total_items, max_names, MATERIAL_PHASE_MAX_NAMES)
+        indices = (iter([()]) if not shape else itertools.islice(np.ndindex(shape), limit))
+        names: list[str] = []
+        decoded_bytes = 0
+        items_read = 0
+        for index in indices:
+            raw = dset[index]
+            items_read += 1
+            if isinstance(raw, np.ndarray):
+                if raw.size != 1:
+                    continue
+                raw = raw.reshape(-1)[0]
+            if isinstance(raw, np.generic):
+                raw = raw.item()
+            if isinstance(raw, bytes):
+                raw_bytes = raw.rstrip(b"\x00")
+                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                    continue
+                text = raw_bytes.decode("utf-8", "replace")
+            elif isinstance(raw, str):
+                raw_bytes = raw.encode("utf-8", "replace")
+                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                    continue
+                text = raw
+            else:
+                continue
+            text = text.strip()
+            item_bytes = len(text.encode("utf-8", "replace"))
+            if item_bytes > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                continue
+            if decoded_bytes + item_bytes > max_bytes:
+                break
+            decoded_bytes += item_bytes
+            names.append(text)
+        return names, decoded_bytes, items_read
+    except Exception:  # noqa: BLE001
+        return [], 0, 0
+
+
+def _feature_id_dataset(h5: Any, geometry: dict[str, Any] | None) -> Any | None:
+    if not isinstance(geometry, dict):
+        return None
+    cell_data_path = geometry.get("cell_data_path")
+    dimensions = geometry.get("dimensions")
+    if not isinstance(cell_data_path, str) or not isinstance(dimensions, list):
+        return None
+    cell_group = _hard_object_at_path(h5, cell_data_path)
+    if not _is_group(cell_group):
+        return None
+    candidates: list[tuple[int, Any]] = []
+    for key in _bounded_child_names(cell_group):
+        normalized = "".join(char for char in str(key).casefold() if char.isalnum())
+        if normalized not in {"featureids", "grainids"}:
+            continue
+        dset = _hard_child(cell_group, key)
+        if not _is_dataset(dset):
+            continue
         try:
-            dims = obj.get("DIMENSIONS")
-            spacing = obj.get("SPACING")
-            origin = obj.get("ORIGIN")
-            found = {
-                "path": "/" + name,
-                "dimensions": _to_jsonable(dims[()]) if dims is not None else None,
-                "spacing": _to_jsonable(spacing[()]) if spacing is not None else None,
-                "origin": _to_jsonable(origin[()]) if origin is not None else None,
-            }
+            shape = tuple(int(value) for value in dset.shape)
+            itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+            if (
+                getattr(dset.dtype, "kind", "") in {"i", "u"}
+                and 0 < itemsize <= 8
+                and _cell_dataset_matches_geometry(shape, dimensions)
+            ):
+                candidates.append((0 if normalized == "featureids" else 1, dset))
         except Exception:  # noqa: BLE001
-            found = None
+            continue
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def _bounded_hyperslabs(shape: tuple[int, ...], max_values: int):
+    """Yield selections whose element count never exceeds ``max_values``."""
+    if not shape or any(dimension <= 0 for dimension in shape):
+        return
+    remaining = max(1, int(max_values))
+    block_shape = [1] * len(shape)
+    for index in range(len(shape) - 1, -1, -1):
+        take = min(int(shape[index]), remaining)
+        block_shape[index] = max(1, take)
+        remaining = max(1, remaining // block_shape[index])
+    starts = [range(0, shape[index], block_shape[index]) for index in range(len(shape))]
+    for origin in itertools.product(*starts):
+        yield tuple(
+            slice(start, min(start + block_shape[index], shape[index]))
+            for index, start in enumerate(origin)
+        )
+
+
+def _scan_feature_ids(dset: Any) -> dict[str, Any]:
+    """Completely scan a valid cell FeatureIds array in bounded hyperslabs.
+
+    The set of distinct identities is itself capped. Crossing that cap makes the
+    relationship unverified (``complete=False``) rather than silently sampling.
+    """
+    import numpy as np
+
+    empty = {
+        "complete": False,
+        "positive_count": None,
+        "positive_min": None,
+        "positive_max": None,
+        "has_negative": None,
+    }
+    if not _is_dataset(dset):
+        return empty
+    try:
+        shape = tuple(int(value) for value in dset.shape)
+        itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+        if (
+            not shape
+            or getattr(dset.dtype, "kind", "") not in {"i", "u"}
+            or not (0 < itemsize <= 8)
+        ):
+            return empty
+        positive_ids: set[int] = set()
+        has_negative = False
+        for selection in _bounded_hyperslabs(shape, FEATURE_ID_SCAN_CHUNK_VALUES):
+            block = np.asarray(dset[selection])
+            if block.size > FEATURE_ID_SCAN_CHUNK_VALUES:
+                return empty
+            unique = np.unique(block)
+            if getattr(dset.dtype, "kind", "") == "i" and unique.size:
+                has_negative = has_negative or bool(unique[0] < 0)
+            for value in unique:
+                identity = int(value)
+                if identity > 0:
+                    positive_ids.add(identity)
+                    if len(positive_ids) > FEATURE_ID_MAX_TRACKED_IDENTITIES:
+                        return empty
+        return {
+            "complete": True,
+            "positive_count": len(positive_ids),
+            "positive_min": min(positive_ids) if positive_ids else None,
+            "positive_max": max(positive_ids) if positive_ids else None,
+            "has_negative": has_negative,
+        }
+    except Exception:  # noqa: BLE001
+        return empty
+
+
+def _feature_group_declaration(
+    h5: Any,
+    *,
+    group_path: str,
+    geometry_container: str | None,
+    geometry_dimensions: list[Any] | None,
+) -> dict[str, Any] | None:
+    group = _hard_object_at_path(h5, group_path)
+    if not _is_group(group):
+        return None
+    row_length_frequency: dict[int, int] = {}
+    orientation = False
+    for key in _bounded_child_names(group):
+        dset = _hard_child(group, key)
+        if not _is_dataset(dset):
+            continue
+        try:
+            shape = tuple(int(value) for value in dset.shape)
+            if len(shape) >= 1 and int(shape[0]) >= 1:
+                row_count = int(shape[0])
+                row_length_frequency[row_count] = row_length_frequency.get(row_count, 0) + 1
+            orientation = orientation or _is_orientation_array(str(key), dset, shape)
+        except Exception:  # noqa: BLE001
+            continue
+    if not row_length_frequency:
+        return None
+    stored_rows = max(
+        row_length_frequency,
+        key=lambda rows: (row_length_frequency[rows], -rows),
+    )
+    reserved_zero = _feature_group_has_reserved_zero(
+        h5,
+        group=group,
+        geometry_container=geometry_container,
+        geometry_dimensions=geometry_dimensions,
+        stored_rows=stored_rows,
+    )
+    return {
+        "path": group_path,
+        "stored_rows": stored_rows,
+        "declared_count": max(0, stored_rows - int(reserved_zero)),
+        "modal_support": row_length_frequency[stored_rows],
+        "reserved_zero": reserved_zero,
+        "orientation": orientation,
+    }
+
+
+_RESERVED_ZERO_ATTRIBUTE_NAMES = {
+    "haszerotuple",
+    "reservedfeaturezero",
+    "reservedtuplezero",
+    "tuple0isreserved",
+    "tuplezeroisreserved",
+    "zerotupleisreserved",
+}
+
+
+def _attribute_bool(value: Any) -> bool | None:
+    try:
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        while isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"1", "true", "yes", "reserved"}:
+                return True
+            if normalized in {"0", "false", "no", "not reserved"}:
+                return False
+            return None
+        if isinstance(value, (bool, int)):
+            return bool(value)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _feature_group_has_reserved_zero(
+    h5: Any,
+    *,
+    group: Any,
+    geometry_container: str | None,
+    geometry_dimensions: list[Any] | None,
+    stored_rows: int,
+) -> bool:
+    """Require file/schema evidence before dropping per-feature tuple zero.
+
+    An explicit group attribute is authoritative. Otherwise, a typed
+    ``FeatureIds``/``GrainIds`` cell array in the selected DREAM.3D container
+    establishes the schema relationship in which cell label zero refers to the
+    reserved feature tuple. A group name alone is not sufficient evidence.
+    """
+
+    if stored_rows <= 0:
+        return False
+    try:
+        for key, value in _iter_bounded_attrs(group):
+            normalized = "".join(char for char in str(key).casefold() if char.isalnum())
+            if normalized in _RESERVED_ZERO_ATTRIBUTE_NAMES:
+                declared = _attribute_bool(value)
+                if declared is not None:
+                    return declared
+    except Exception:  # noqa: BLE001
+        pass
+    if not geometry_container:
+        return False
+    for cell_name in ("CellData", "Cell Data", "Cell_Data"):
+        cell_group = _hard_object_at_path(
+            h5, geometry_container.rstrip("/") + "/" + cell_name
+        )
+        if not _is_group(cell_group):
+            continue
+        for child_key in _bounded_child_names(cell_group):
+            normalized = "".join(
+                char for char in str(child_key).casefold() if char.isalnum()
+            )
+            if normalized not in {"featureids", "grainids"}:
+                continue
+            try:
+                dataset = _hard_child(cell_group, child_key)
+                if dataset is None:
+                    continue
+                shape = tuple(int(value) for value in dataset.shape)
+                if (
+                    _is_dataset(dataset)
+                    and getattr(dataset.dtype, "kind", "") in {"i", "u"}
+                    and 0 < int(getattr(dataset.dtype, "itemsize", 0) or 0) <= 8
+                    and isinstance(geometry_dimensions, list)
+                    and _cell_dataset_matches_geometry(shape, geometry_dimensions)
+                ):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
+
+
+def _cell_dataset_matches_geometry(shape: tuple[int, ...], dimensions: list[Any]) -> bool:
+    """Return whether a CellData tuple shape is consistent with image dimensions.
+
+    DREAM.3D stores ``DIMENSIONS`` as X/Y/Z while its HDF5 image arrays are
+    normally Z/Y/X/(components). Some writers flatten cell tuples instead. Both
+    representations are accepted; a merely present ``CellData`` group is not.
+    """
 
     try:
-        h5.visititems(_visit)
+        xyz = tuple(int(value) for value in dimensions[:3])
+    except (TypeError, ValueError):
+        return False
+    if len(xyz) != 3 or any(value <= 0 for value in xyz):
+        return False
+    if len(shape) >= 3 and tuple(shape[:3]) in {xyz, tuple(reversed(xyz))}:
+        return True
+    voxel_count = math.prod(xyz)
+    return bool(shape) and int(shape[0]) == voxel_count and len(shape) <= 2
+
+
+def _geometry_cell_data_evidence(parent: Any, dimensions: list[Any] | None) -> tuple[bool, bool, str | None]:
+    """Inspect bounded CellData metadata for geometry/tuple-shape consistency."""
+
+    if parent is None or not isinstance(dimensions, list):
+        return False, False, None
+    has_cell_data = False
+    first_cell_data_path: str | None = None
+    for key in ("CellData", "Cell Data", "Cell_Data"):
+        group = _hard_child(parent, key)
+        if not _is_group(group):
+            continue
+        has_cell_data = True
+        group_path = str(getattr(group, "name", "") or "") or None
+        if first_cell_data_path is None:
+            first_cell_data_path = group_path
+        for child_key in _bounded_child_names(group):
+            try:
+                child = _hard_child(group, child_key)
+                if child is None:
+                    continue
+                shape = tuple(int(value) for value in child.shape)
+            except Exception:  # noqa: BLE001
+                continue
+            itemsize = int(getattr(getattr(child, "dtype", None), "itemsize", 0) or 0)
+            if (
+                _is_dataset(child)
+                and getattr(child.dtype, "kind", "") in {"i", "u", "f", "b"}
+                and 0 < itemsize <= 16
+                and _cell_dataset_matches_geometry(shape, dimensions)
+            ):
+                return has_cell_data, True, group_path
+    return has_cell_data, False, first_cell_data_path
+
+
+def _find_geometry(h5: Any) -> dict[str, Any] | None:
+    """Find the best DREAM.3D image geometry, not merely the first marker.
+
+    StatsGenerator data containers commonly carry an empty ``_SIMPL_GEOMETRY``
+    before the populated image container.  Candidates are ranked by valid geometry
+    fields and then by an associated CellData group.  Only the three small geometry
+    vectors are read, and metadata traversal stops at :data:`MAX_TREE_NODES`.
+    """
+    found: dict[str, Any] | None = None
+    found_score: tuple[int, int, int, int, float] = (-1, -1, -1, -1, -1.0)
+    visited = 0
+
+    def _visit(name: str, obj: Any) -> bool | None:
+        nonlocal found, found_score, visited
+        visited += 1
+        if visited > MAX_TREE_NODES:
+            return True
+        base = name.rsplit("/", 1)[-1]
+        if base != "_SIMPL_GEOMETRY":
+            return None
+        try:
+            dims = _hard_child(obj, "DIMENSIONS")
+            spacing = _hard_child(obj, "SPACING")
+            origin = _hard_child(obj, "ORIGIN")
+            dimensions = _bounded_geometry_vector(dims)
+            spacing_values = _bounded_geometry_vector(spacing)
+            origin_values = _bounded_geometry_vector(origin)
+            valid_dimensions = _valid_geometry_vector(dimensions, positive=True)
+            valid_spacing = _valid_geometry_vector(spacing_values, positive=True)
+            valid_origin = _valid_geometry_vector(origin_values, positive=False)
+            valid_fields = sum((valid_dimensions, valid_spacing, valid_origin))
+            parent = getattr(obj, "parent", None)
+            has_cell_data, cell_data_consistent, cell_data_path = _geometry_cell_data_evidence(
+                parent, dimensions
+            )
+            complete = bool(
+                valid_dimensions
+                and valid_spacing
+                and valid_origin
+                and cell_data_consistent
+            )
+            voxel_count = (
+                math.prod(float(value) for value in dimensions[:3])
+                if valid_dimensions and dimensions is not None
+                else 0.0
+            )
+            score = (
+                int(complete),
+                valid_fields,
+                int(cell_data_consistent),
+                int(has_cell_data),
+                voxel_count,
+            )
+            candidate = {
+                "path": "/" + name,
+                "dimensions": dimensions,
+                "spacing": spacing_values,
+                "origin": origin_values,
+                "cell_data_path": cell_data_path,
+                "cell_data_consistent": cell_data_consistent,
+                "complete": complete,
+            }
+            if score > found_score:
+                found = candidate
+                found_score = score
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    try:
+        _visit_hard_objects(h5, _visit)
     except Exception:  # noqa: BLE001
         return None
     return found
@@ -573,15 +1232,13 @@ def _find_geometry(h5: Any) -> dict[str, Any] | None:
 def _looks_like_dream3d(h5: Any) -> bool:
     """DREAM.3D heuristic: a ``/DataContainers`` group (or ``/DataStructure`` in
     DREAM3D-NX), plus a version root attribute or an image geometry marker."""
-    try:
-        keys = set(h5.keys())
-    except Exception:  # noqa: BLE001
-        return False
-    has_container = "DataContainers" in keys or "DataStructure" in keys
+    has_container = any(
+        _is_group(_hard_child(h5, key)) for key in ("DataContainers", "DataStructure")
+    )
     if not has_container:
         return False
     try:
-        attrs = {str(k).lower() for k in h5.attrs.keys()}
+        attrs = {str(k).lower() for k in itertools.islice(h5.attrs.keys(), MAX_ATTRS)}
     except Exception:  # noqa: BLE001
         attrs = set()
     version_attr = any("dream" in a or "fileversion" in a or a == "version" for a in attrs)
@@ -617,96 +1274,202 @@ def _semantic_role(name: str, kind: str) -> str:
 
 def _materials_probe(h5: Any) -> dict[str, Any]:
     """Detect DREAM.3D and collect the materials capabilities/roles/phase names +
-    renderable cell-data maps and feature/grain tables. Shared by the viewerinfo
-    payload and the dashboard. Bounded: walks group structure, reads only small
-    string/ensemble arrays eagerly."""
-    import numpy as np
+    renderable cell-data maps and relationally validated feature/grain tables.
+
+    Traversal is hard-link-only. Phase labels must be typed string datasets in an
+    ensemble group belonging to the selected geometry container. Grain count is not
+    inferred from table rows: it is published only after a complete cell FeatureIds
+    scan proves that declared tuples and referenced positive identities agree.
+    """
 
     detected = _looks_like_dream3d(h5)
     result: dict[str, Any] = {
         "detected": detected,
         "geometry": None,
         "phase_names": [],
+        "phase_names_source": None,
+        "phase_names_provenance": None,
         "roles": {},
         "capabilities": [],
         "feature_count": None,
         "grain_count": None,
+        "declared_feature_tuple_count": None,
+        "referenced_positive_feature_count": None,
+        "feature_id_scan_complete": False,
+        "feature_id_consistency": None,
         "maps": [],          # list of (path, name, kind, role)
-        "feature_groups": [],  # list of group paths holding per-feature 1-D arrays
+        "feature_groups": [],  # selected relationship-backed feature group
+        "feature_group_reserved_zero": {},
+        "feature_zero_reserved": None,
         "recommended": None,
     }
     if not detected:
         return result
     result["geometry"] = _find_geometry(h5)
+    geometry = result["geometry"]
+    geometry_container = None
+    if isinstance(geometry, dict) and isinstance(geometry.get("path"), str):
+        geometry_container = geometry["path"].rsplit("/", 1)[0]
 
     maps: list[tuple[str, str, str, str]] = []
-    feature_groups: list[str] = []
+    feature_group_paths: list[str] = []
     phase_names: list[str] = []
+    phase_names_seen: set[str] = set()
+    phase_bytes = 0
+    phase_items_read = 0
+    map_orientation = False
 
-    def _visit(name: str, obj: Any) -> None:
+    def _visit(name: str, obj: Any) -> bool | None:
+        nonlocal phase_bytes, phase_items_read, map_orientation
         base = name.rsplit("/", 1)[-1]
-        # Phase / material names live in a small 1-D string ensemble array.
+        dataset_path = "/" + name
+        parent = "/" + name.rsplit("/", 1)[0] if "/" in name else "/"
+        in_selected_container = bool(
+            geometry_container
+            and dataset_path.startswith(geometry_container.rstrip("/") + "/")
+        )
+
+        # Phase/material labels are accepted only from a direct, typed ensemble
+        # group inside the geometry container selected by _find_geometry.
         if base in ("PhaseName", "MaterialName", "PhaseNames") and _is_dataset(obj):
-            try:
-                for v in np.asarray(obj[()]).ravel().tolist():
-                    text = v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v)
-                    text = text.strip()
-                    if text and text.lower() not in ("invalid phase", "unknown phase"):
-                        phase_names.append(text)
-            except Exception:  # noqa: BLE001
-                pass
-            return
+            ensemble_parent = parent.rsplit("/", 1)[0] if "/" in parent.rstrip("/") else "/"
+            if not (
+                in_selected_container
+                and _is_ensemble_group_path(parent)
+                and ensemble_parent == geometry_container
+            ):
+                return None
+            remaining_names = MATERIAL_PHASE_MAX_NAMES - phase_items_read
+            remaining_bytes = MATERIAL_PHASE_MAX_TOTAL_BYTES - phase_bytes
+            stored_names, used_bytes, items_read = _read_bounded_phase_names(
+                obj, max_names=remaining_names, max_bytes=remaining_bytes
+            )
+            phase_bytes += used_bytes
+            phase_items_read += items_read
+            for text in stored_names:
+                normalized = text.casefold()
+                if (
+                    text
+                    and normalized not in ("invalid phase", "unknown phase")
+                    and normalized not in phase_names_seen
+                ):
+                    phase_names_seen.add(normalized)
+                    phase_names.append(text)
+            return None
         if not _is_dataset(obj):
-            return
+            return None
         try:
             dt = obj.dtype
             shape = tuple(int(s) for s in obj.shape)
         except Exception:  # noqa: BLE001
-            return
+            return None
         if _is_compound(dt) or _is_string_dtype(dt):
-            return
+            return None
         kind = _classify_shallow(base, dt, shape)
-        parent = "/" + name.rsplit("/", 1)[0] if "/" in name else "/"
-        low_parent = parent.lower()
         # Renderable spatial maps: volumes under a *CellData* group (the per-voxel
-        # spatial arrays). "celldata" is a substring test that deliberately EXCLUDES
-        # CellFeatureData/CellEnsembleData (per-feature/per-phase tables), so a
-        # (num_features, 3) orientation array never leaks in as a spatial map.
-        if kind in _VOLUME_KINDS and ("celldata" in low_parent or "cell_data" in low_parent):
+        # spatial arrays). Match the final normalized segment so similarly named
+        # per-feature/per-phase groups never leak into the map list.
+        if in_selected_container and kind in _VOLUME_KINDS and _is_cell_data_group_path(parent):
             vol = _interpret_volume(shape, dt)
             if vol is not None and (vol["z"] > 1 or (vol["y"] > 1 and vol["x"] > 1)):
-                maps.append(("/" + name, base, kind, _semantic_role(base, kind)))
-        # Per-feature 1-D arrays (grain metrics) live under a *FeatureData*-like group.
-        if ("featuredata" in low_parent or "feature_data" in low_parent) and len(shape) in (1, 2):
+                role = _semantic_role(base, kind)
+                maps.append((dataset_path, base, kind, role))
+                map_orientation = map_orientation or _is_orientation_array(base, obj, shape)
+        # Per-feature arrays may use classic CellFeatureData or the real pipeline's
+        # ``Grain Data`` spelling. Keep this to known final group names.
+        if in_selected_container and _is_feature_group_path(parent) and len(shape) in (1, 2):
             grp = parent
-            if grp not in feature_groups:
-                feature_groups.append(grp)
+            if grp not in feature_group_paths:
+                feature_group_paths.append(grp)
+        return None
 
     try:
-        h5.visititems(_visit)
+        _visit_hard_objects(h5, _visit)
     except Exception:  # noqa: BLE001
         pass
 
-    # Feature / grain count = first-dim of a feature-data group (minus the phantom
-    # feature 0 that DREAM.3D reserves). Best-effort.
+    geometry_dimensions = geometry.get("dimensions") if isinstance(geometry, dict) else None
+    declarations = [
+        declaration
+        for group_path in feature_group_paths
+        if (
+            declaration := _feature_group_declaration(
+                h5,
+                group_path=group_path,
+                geometry_container=geometry_container,
+                geometry_dimensions=geometry_dimensions,
+            )
+        )
+        is not None
+    ]
+    feature_id_dset = _feature_id_dataset(h5, geometry)
+    feature_id_scan = _scan_feature_ids(feature_id_dset)
+    referenced_count = feature_id_scan["positive_count"]
+
+    for declaration in declarations:
+        consistency: bool | None = None
+        declared_count = declaration["declared_count"]
+        if feature_id_scan["complete"] and referenced_count is not None:
+            consistency = bool(
+                not feature_id_scan["has_negative"]
+                and referenced_count == declared_count
+                and (
+                    (declared_count == 0 and feature_id_scan["positive_min"] is None)
+                    or (
+                        declared_count > 0
+                        and feature_id_scan["positive_min"] == 1
+                        and feature_id_scan["positive_max"] == declared_count
+                    )
+                )
+            )
+        declaration["consistency"] = consistency
+
+    selected_declaration = None
+    if declarations:
+        def _relationship_score(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int, int]:
+            index, declaration = item
+            consistency = declaration["consistency"]
+            relationship_rank = 2 if consistency is True else (1 if consistency is False else 0)
+            difference = (
+                abs(declaration["declared_count"] - referenced_count)
+                if referenced_count is not None
+                else 0
+            )
+            # Relationship dominates; modal support resolves unverified ties. The
+            # final tie preserves bounded traversal order rather than filename sort.
+            return (
+                relationship_rank,
+                -difference,
+                declaration["modal_support"],
+                -index,
+            )
+
+        selected_declaration = max(enumerate(declarations), key=_relationship_score)[1]
+
+    feature_groups: list[str] = []
+    feature_group_reserved_zero: dict[str, bool] = {}
+    feature_zero_reserved: bool | None = None
+    declared_feature_tuple_count = None
+    feature_id_consistency = None
     feature_count = None
-    for grp_path in feature_groups:
-        try:
-            grp = h5[grp_path]
-            for k in grp.keys():
-                d = grp[k]
-                if _is_dataset(d) and len(d.shape) >= 1 and d.shape[0] > 1:
-                    feature_count = int(d.shape[0])
-                    break
-        except Exception:  # noqa: BLE001
-            continue
-        if feature_count is not None:
-            break
+    grain_count = None
+    selected_orientation = False
+    if selected_declaration is not None:
+        selected_path = selected_declaration["path"]
+        feature_groups = [selected_path]
+        feature_zero_reserved = selected_declaration["reserved_zero"]
+        feature_group_reserved_zero[selected_path] = feature_zero_reserved
+        declared_feature_tuple_count = selected_declaration["declared_count"]
+        feature_count = declared_feature_tuple_count
+        feature_id_consistency = selected_declaration["consistency"]
+        selected_orientation = selected_declaration["orientation"]
+        if feature_id_consistency is True:
+            grain_count = referenced_count
 
     caps: list[str] = ["maps"] if maps else []
     if feature_groups:
         caps.append("grain_metrics")
-    if any(role == "euler_angles" or role == "quaternions" for (_p, _n, _k, role) in maps) or feature_groups:
+    if map_orientation or selected_orientation:
         caps.append("orientation")
 
     roles = {role: path for (path, _n, _k, role) in maps}
@@ -727,12 +1490,20 @@ def _materials_probe(h5: Any) -> dict[str, Any]:
     result.update(
         {
             "phase_names": phase_names,
+            "phase_names_source": "stored_metadata" if phase_names else None,
+            "phase_names_provenance": _PHASE_NAMES_PROVENANCE if phase_names else None,
             "roles": roles,
             "capabilities": caps,
             "feature_count": feature_count,
-            "grain_count": feature_count,
+            "grain_count": grain_count,
+            "declared_feature_tuple_count": declared_feature_tuple_count,
+            "referenced_positive_feature_count": referenced_count,
+            "feature_id_scan_complete": bool(feature_id_scan["complete"]),
+            "feature_id_consistency": feature_id_consistency,
             "maps": maps,
             "feature_groups": feature_groups,
+            "feature_group_reserved_zero": feature_group_reserved_zero,
+            "feature_zero_reserved": feature_zero_reserved,
             "recommended": recommended,
         }
     )
@@ -766,6 +1537,10 @@ def _walk_tree(h5: Any) -> tuple[list[dict[str, Any]], dict[str, int], bool, int
     state = {"nodes": 0, "truncated": False, "groups": 0, "datasets": 0}
     dataset_kinds: dict[str, int] = {}
     best_default = {"path": None, "score": -1.0}
+    seen: set[int] = set()
+    root_address = _object_address(h5)
+    if root_address is not None:
+        seen.add(root_address)
 
     def _node(name: str, obj: Any, path: str, depth: int) -> dict[str, Any] | None:
         if state["nodes"] >= MAX_TREE_NODES or depth > MAX_TREE_DEPTH:
@@ -780,29 +1555,33 @@ def _walk_tree(h5: Any) -> tuple[list[dict[str, Any]], dict[str, int], bool, int
         if _is_group(obj):
             state["groups"] += 1
             try:
-                child_keys = list(obj.keys())
+                child_count = len(obj)
             except Exception:  # noqa: BLE001
-                child_keys = []
+                child_count = 0
             children: list[dict[str, Any]] = []
-            for key in child_keys[:MAX_GROUP_CHILDREN]:
+            for key in _bounded_child_names(obj):
                 if state["nodes"] >= MAX_TREE_NODES:
                     state["truncated"] = True
                     break
-                try:
-                    child = obj[key]
-                except Exception:  # noqa: BLE001
+                child = _hard_child(obj, key)
+                if child is None:
                     continue
+                address = _object_address(child)
+                if address is not None and address in seen:
+                    continue
+                if address is not None:
+                    seen.add(address)
                 child_path = (path.rstrip("/") + "/" + key) if path != "/" else "/" + key
                 built = _node(key, child, child_path, depth + 1)
                 if built is not None:
                     children.append(built)
-            if len(child_keys) > MAX_GROUP_CHILDREN:
+            if child_count > MAX_GROUP_CHILDREN:
                 state["truncated"] = True
             return {
                 "path": path,
                 "name": name,
                 "node_type": "group",
-                "child_count": len(child_keys),
+                "child_count": int(child_count),
                 "attributes_count": int(attrs_count),
                 "shape": None,
                 "dtype": None,
@@ -839,18 +1618,22 @@ def _walk_tree(h5: Any) -> tuple[list[dict[str, Any]], dict[str, int], bool, int
 
     tree: list[dict[str, Any]] = []
     try:
-        root_keys = list(h5.keys())
+        root_child_count = len(h5)
     except Exception:  # noqa: BLE001
-        root_keys = []
-    for key in root_keys[:MAX_GROUP_CHILDREN]:
-        try:
-            child = h5[key]
-        except Exception:  # noqa: BLE001
+        root_child_count = 0
+    for key in _bounded_child_names(h5):
+        child = _hard_child(h5, key)
+        if child is None:
             continue
+        address = _object_address(child)
+        if address is not None and address in seen:
+            continue
+        if address is not None:
+            seen.add(address)
         built = _node(key, child, "/" + key, 1)
         if built is not None:
             tree.append(built)
-    if len(root_keys) > MAX_GROUP_CHILDREN:
+    if root_child_count > MAX_GROUP_CHILDREN:
         state["truncated"] = True
 
     return (
@@ -895,7 +1678,7 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
         return top
 
     try:
-        root_keys = list(h5.keys())
+        root_keys = [str(key) for key in _bounded_child_names(h5)]
         root_attributes = _read_attrs(h5)
         tree, dataset_kinds, truncated, group_count, dataset_count, default_path = _walk_tree(h5)
         materials_probe = _materials_probe(h5)
@@ -909,8 +1692,19 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
                 "capabilities": materials_probe["capabilities"],
                 "roles": materials_probe["roles"],
                 "phase_names": materials_probe["phase_names"],
+                "phase_names_source": materials_probe["phase_names_source"],
+                "phase_names_provenance": materials_probe["phase_names_provenance"],
                 "feature_count": materials_probe["feature_count"],
                 "grain_count": materials_probe["grain_count"],
+                "declared_feature_tuple_count": materials_probe[
+                    "declared_feature_tuple_count"
+                ],
+                "referenced_positive_feature_count": materials_probe[
+                    "referenced_positive_feature_count"
+                ],
+                "feature_id_scan_complete": materials_probe["feature_id_scan_complete"],
+                "feature_id_consistency": materials_probe["feature_id_consistency"],
+                "feature_zero_reserved": materials_probe["feature_zero_reserved"],
                 "recommended_view": recommended_view,
             }
             top["modality"] = "materials"
@@ -938,7 +1732,7 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
             "supported": True,
             "status": "ready",
             "error": None,
-            "root_keys": [str(k) for k in root_keys],
+            "root_keys": root_keys,
             "root_attributes": root_attributes,
             "summary": {
                 "group_count": int(group_count),
@@ -1003,10 +1797,7 @@ def _open(path: str):
 def _resolve_dataset(h5: Any, dataset_path: str):
     if not dataset_path or not str(dataset_path).strip():
         raise Hdf5DatasetNotFound("dataset not found: empty dataset_path")
-    try:
-        obj = h5.get(dataset_path)
-    except Exception:  # noqa: BLE001
-        obj = None
+    obj = _hard_object_at_path(h5, str(dataset_path).strip())
     if obj is None:
         raise Hdf5DatasetNotFound(f"dataset not found: {dataset_path}")
     if not _is_dataset(obj):
@@ -1119,7 +1910,7 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             "dataset_name": name,
             "preview_kind": preview_kind,
             "semantic_role": _semantic_role(name, preview_kind or "") if is_volume_kind else None,
-            "units_hint": _units_hint(name),
+            "units_hint": _units_hint(name, dset),
             "materials_domain_tags": [],
             "dtype": _dtype_str(dt),
             "shape": list(shape),
@@ -1186,12 +1977,37 @@ def _delivery_mode(preview_kind: str | None, render_policy: str) -> str:
     return "direct"
 
 
-def _units_hint(name: str) -> str | None:
-    low = name.strip().lower()
-    if "euler" in low:
-        return "radians"
-    if "diameter" in low or "size" in low:
-        return "µm"
+def _units_hint(name: str, dataset: Any | None = None) -> str | None:
+    """Return only bounded units declared in dataset metadata.
+
+    Dataset names such as ``EulerAngles`` and ``EquivalentDiameters`` do not
+    establish radians or micrometres; DREAM.3D pipelines can store either with
+    other conventions. Unknown units stay unknown instead of becoming a
+    scientifically false display label.
+    """
+
+    _ = name
+    if dataset is None:
+        return None
+    try:
+        for key, value in _iter_bounded_attrs(dataset):
+            normalized = "".join(char for char in str(key).casefold() if char.isalnum())
+            if normalized not in {"unit", "units", "unitname", "unitsname"}:
+                continue
+            value = _to_jsonable(value)
+            while isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if (
+                text
+                and len(text) <= 128
+                and all(ord(char) >= 32 and char != "\x7f" for char in text)
+            ):
+                return text
+    except Exception:  # noqa: BLE001
+        return None
     return None
 
 
@@ -1701,8 +2517,17 @@ def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
             "geometry": geometry,
             "spacing_note": spacing_note,
             "phase_names": probe["phase_names"],
+            "phase_names_source": probe["phase_names_source"],
+            "phase_names_provenance": probe["phase_names_provenance"],
             "feature_count": probe["feature_count"],
             "grain_count": probe["grain_count"],
+            "declared_feature_tuple_count": probe["declared_feature_tuple_count"],
+            "referenced_positive_feature_count": probe[
+                "referenced_positive_feature_count"
+            ],
+            "feature_id_scan_complete": probe["feature_id_scan_complete"],
+            "feature_id_consistency": probe["feature_id_consistency"],
+            "feature_zero_reserved": probe["feature_zero_reserved"],
             "capabilities": probe["capabilities"],
             "recommended_map_dataset_path": probe["recommended"],
         }
@@ -1720,28 +2545,68 @@ def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
         _safe_close(h5)
 
 
+def _bounded_feature_row_sample(
+    dset,
+    np,
+    *,
+    max_rows: int,
+    max_columns: int | None = None,
+    reserved_zero: bool,
+):
+    """Sample feature rows, excluding tuple zero only with schema evidence.
+
+    The slice stride is computed before reading, so a multi-gigabyte feature table
+    never enters memory in full. When tuple zero is established as reserved,
+    exclusion is positional: zero-valued measurements in rows 1..N remain valid.
+    """
+    try:
+        shape = tuple(int(value) for value in dset.shape)
+        start_row = 1 if reserved_zero else 0
+        if len(shape) not in (1, 2) or not shape or shape[0] <= start_row:
+            return np.asarray([], dtype="float64")
+        available_rows = shape[0] - start_row
+        step = max(1, math.ceil(available_rows / max(1, max_rows)))
+        row_slice = slice(start_row, shape[0], step)
+        if len(shape) == 1:
+            block = dset[row_slice]
+        else:
+            column_count = shape[1]
+            if max_columns is not None:
+                column_count = min(column_count, max_columns)
+            if column_count <= 0:
+                return np.asarray([], dtype="float64")
+            block = dset[row_slice, :column_count]
+        return np.asarray(block, dtype="float64")
+    except Exception:  # noqa: BLE001
+        return np.asarray([], dtype="float64")
+
+
 def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
     """Grain-scale distributions from per-feature 1-D arrays (EquivalentDiameters,
     NumNeighbors, ...). Bounded sampling; empty list if nothing suitable."""
     charts: list[dict[str, Any]] = []
     wanted = ("equivalentdiameters", "numneighbors", "numelements", "volumes", "size")
     for grp_path in probe["feature_groups"]:
-        try:
-            grp = h5[grp_path]
-        except Exception:  # noqa: BLE001
+        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
+        grp = _hard_object_at_path(h5, grp_path)
+        if not _is_group(grp):
             continue
-        for key in list(grp.keys()):
+        for key in _bounded_child_names(grp):
             low = key.lower()
             if not any(w in low for w in wanted):
                 continue
             try:
-                d = grp[key]
+                d = _hard_child(grp, key)
                 if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
                     continue
-                vals = np.asarray(d[()], dtype="float64").ravel()
+                vals = _bounded_feature_row_sample(
+                    d,
+                    np,
+                    max_rows=TABLE_CHART_MAX_ROWS,
+                    max_columns=1,
+                    reserved_zero=reserved_zero,
+                ).ravel()
                 vals = vals[np.isfinite(vals)]
-                # Drop the reserved feature-0 sentinel (0-value) that DREAM.3D writes.
-                vals = vals[vals != 0] if vals.size > 1 else vals
                 if vals.size < 2:
                     continue
                 counts, edges = np.histogram(vals, bins=min(24, max(8, int(math.sqrt(vals.size)))))
@@ -1754,8 +2619,15 @@ def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
                     "y_key": "count",
                     "data": data,
                     "source_paths": [grp_path.rstrip("/") + "/" + key],
-                    "units_hint": _units_hint(key),
-                    "provenance": "Per-feature values, feature 0 (reserved) excluded.",
+                    "units_hint": _units_hint(key, d),
+                    "provenance": (
+                        "Bounded sample of per-feature values; reserved feature row 0 "
+                        "excluded by index based on selected-container FeatureIds/GrainIds "
+                        "schema evidence. Zero-valued measurements in real rows are retained."
+                        if reserved_zero
+                        else "Bounded sample of per-feature values; no reserved feature row "
+                        "was established by file/schema evidence, so row 0 is retained."
+                    ),
                 })
             except Exception:  # noqa: BLE001
                 continue
@@ -1766,38 +2638,52 @@ def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
 
 def _orientation_charts(h5, probe, np) -> list[dict[str, Any]]:
     """An orientation scatter (phi1 vs Phi) from a per-feature AvgEulerAngles array,
-    if present. Bounded to 2000 points."""
+    if present. Bounded to :data:`MATERIAL_ORIENTATION_MAX_ROWS` points."""
     charts: list[dict[str, Any]] = []
     for grp_path in probe["feature_groups"]:
-        try:
-            grp = h5[grp_path]
-        except Exception:  # noqa: BLE001
+        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
+        grp = _hard_object_at_path(h5, grp_path)
+        if not _is_group(grp):
             continue
-        for key in list(grp.keys()):
+        for key in _bounded_child_names(grp):
             if "euler" not in key.lower():
                 continue
             try:
-                d = grp[key]
+                d = _hard_child(grp, key)
                 if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
                     continue
-                arr = np.asarray(d[()], dtype="float64")
+                arr = _bounded_feature_row_sample(
+                    d,
+                    np,
+                    max_rows=MATERIAL_ORIENTATION_MAX_ROWS,
+                    max_columns=3,
+                    reserved_zero=reserved_zero,
+                )
                 if arr.ndim != 2 or arr.shape[1] < 2:
                     continue
-                n = min(arr.shape[0], 2000)
-                sel = arr[:n]
-                data = [{"phi1": _num(sel[i, 0]), "value": _num(sel[i, 1])} for i in range(n)
-                        if math.isfinite(sel[i, 0]) and math.isfinite(sel[i, 1])]
+                data = [
+                    {"phi1": _num(arr[i, 0]), "value": _num(arr[i, 1])}
+                    for i in range(arr.shape[0])
+                    if math.isfinite(arr[i, 0]) and math.isfinite(arr[i, 1])
+                ]
                 if data:
                     charts.append({
                         "kind": "scatter",
                         "title": f"{_titleize(key)}: φ1 vs Φ",
-                        "description": f"{len(data)} features",
+                        "description": f"{len(data)} features sampled",
                         "x_key": "phi1",
                         "y_key": "value",
                         "data": data,
                         "source_paths": [grp_path.rstrip("/") + "/" + key],
-                        "units_hint": "radians",
-                        "provenance": "Per-feature average orientation angles.",
+                        "units_hint": _units_hint(key, d),
+                        "provenance": (
+                            "Bounded sample of stored per-feature orientation angles; reserved "
+                            "feature row 0 excluded by index based on selected-container "
+                            "FeatureIds/GrainIds schema evidence."
+                            if reserved_zero
+                            else "Bounded sample of stored per-feature orientation angles; no "
+                            "reserved feature row was established, so row 0 is retained."
+                        ),
                     })
             except Exception:  # noqa: BLE001
                 continue

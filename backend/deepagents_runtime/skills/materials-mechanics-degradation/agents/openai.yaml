@@ -1,0 +1,4 @@
+interface:
+  display_name: "Materials Degradation Mechanics"
+  short_description: "Bounded fracture and degradation models"
+  default_prompt: "Use $materials-mechanics-degradation to evaluate this fracture or degradation problem inside its calibrated domain."

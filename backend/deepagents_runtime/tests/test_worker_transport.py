@@ -6,6 +6,7 @@ import inspect
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib import error as urllib_error
 
 import nats.errors
@@ -14,6 +15,7 @@ import ultra_deepagents.nats_worker as nats_worker_module
 from nats.js.api import AckPolicy
 from PIL import Image
 from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.evaluation_profiles import EvaluationProfileError
 from ultra_deepagents.nats_worker import (
     ControlPlaneRunLease,
     NATSDeepAgentsWorker,
@@ -27,8 +29,35 @@ from ultra_deepagents.nats_worker import (
     job_ack_extension_interval,
     post_control_plane_worker_heartbeat,
 )
-from ultra_deepagents.runner import run_job
+from ultra_deepagents.runner import _tool_end_payload, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
+
+
+def test_tool_end_payload_preserves_typed_materials_result_identity() -> None:
+    result_sha256 = "a" * 64
+    validation_sha256 = "b" * 64
+    payload = _tool_end_payload(
+        {
+            "name": "materials_analyze_crystal_slip",
+            "run_id": "cp-call-1",
+            "data": {
+                "output": json.dumps(
+                    {
+                        "ok": True,
+                        "operation": "analytical_slip_geometry",
+                        "analysis_artifact": {"sha256": result_sha256},
+                        "materials_validation_artifact": {"sha256": validation_sha256},
+                    }
+                )
+            },
+        }
+    )
+
+    assert payload["tool_call_id"] == "cp-call-1"
+    assert payload["scientific_operation"] == "analytical_slip_geometry"
+    assert payload["result_artifact_sha256"] == result_sha256
+    assert payload["materials_validation_artifact_sha256"] == validation_sha256
+    assert payload["scientific_result_ok"] is True
 
 
 def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
@@ -62,7 +91,12 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
         }
     )
 
-    context = job.to_context(artifact_root=str(tmp_path / "artifacts"), workspace_root=str(tmp_path / "workspace"))
+    context = job.to_context(
+        artifact_root=str(tmp_path / "artifacts"),
+        workspace_root=str(tmp_path / "workspace"),
+        run_lease_worker_id="worker-secret-id",
+        run_lease_token="lease-secret-token",
+    )
 
     assert context.run_id == "run-1"
     assert context.thread_id == "thread-1"
@@ -87,6 +121,79 @@ def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
         "public_url": "https://ultra.example.edu",
     }
     assert context.auth_claims["role"] == "researcher"
+    assert context.run_lease_worker_id == "worker-secret-id"
+    assert context.run_lease_token == "lease-secret-token"
+    assert "worker-secret-id" not in repr(context)
+    assert "lease-secret-token" not in repr(context)
+    assert "run_lease_worker_id" not in context.to_payload()
+    assert "run_lease_token" not in context.to_payload()
+
+
+def test_run_job_envelope_uses_only_typed_remote_mutation_scope(tmp_path: Path):
+    job = RunJobEnvelope.from_dict(
+        {
+            "run_id": "run-mutation",
+            "thread_id": "thread-mutation",
+            "user_id": "researcher-1",
+            "goal": "Upload the selected result and create a BisQue dataset.",
+            "remote_mutation_intents": [
+                "bisque.create_dataset",
+                "bisque.upload",
+                "bisque.upload",
+            ],
+            "metadata": {
+                "principal": {"org_id": "allen", "role": "researcher"},
+                "remote_mutation_intents": ["attacker.arbitrary_write"],
+            },
+        }
+    )
+
+    assert job.remote_mutation_intents == (
+        "bisque.upload",
+        "bisque.create_dataset",
+    )
+    context = job.to_context(
+        artifact_root=str(tmp_path / "artifacts"),
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    assert context.remote_mutation_intents == (
+        "bisque.upload",
+        "bisque.create_dataset",
+    )
+    assert "remote_mutation_intents" not in context.run_metadata
+    assert "remote_mutation_intents" not in context.to_payload()
+
+
+@pytest.mark.parametrize(
+    "raw_scope",
+    ["bisque.upload", ["bisque.upload", "unknown.write"], ["bisque.upload", 1]],
+)
+def test_run_job_envelope_fails_closed_for_malformed_remote_mutation_scope(raw_scope):
+    job = RunJobEnvelope.from_dict(
+        {
+            "run_id": "run-malformed",
+            "thread_id": "thread-malformed",
+            "user_id": "researcher-1",
+            "goal": "Upload the selected result to BisQue.",
+            "remote_mutation_intents": raw_scope,
+        }
+    )
+
+    assert job.remote_mutation_intents == ()
+
+
+def test_protected_evaluation_profile_rejects_remote_mutation_scope():
+    with pytest.raises(EvaluationProfileError, match="remote_mutation_intents"):
+        RunJobEnvelope.from_dict(
+            {
+                "run_id": "run-cleanroom",
+                "thread_id": "thread-cleanroom",
+                "user_id": "evaluator",
+                "goal": "Solve the sealed materials case.",
+                "evaluation_profile": "materials_cleanroom_v1",
+                "remote_mutation_intents": ["bisque.upload"],
+            }
+        )
 
 
 class FakeStreamingAgent:
@@ -479,8 +586,7 @@ class FakeV3ProtocolAsyncValidationFailureAgent:
                     "tool_call_id": "async-start-blank",
                     "tool_name": "start_async_task",
                     "output": (
-                        "start_async_task description is required for async "
-                        "subagent delegation."
+                        "start_async_task description is required for async subagent delegation."
                     ),
                 },
             },
@@ -496,8 +602,7 @@ class FakeV3ProtocolAsyncValidationFailureAgent:
                     "tool_name": "update_async_task",
                     "input": {"task_id": "async-thread-1"},
                     "output": (
-                        "update_async_task message is required for async "
-                        "subagent delegation."
+                        "update_async_task message is required for async subagent delegation."
                     ),
                 },
             },
@@ -809,7 +914,11 @@ class FakeToolLifecycleAgent:
             "event": "on_tool_end",
             "name": "execute",
             "run_id": "tool-run-1",
-            "data": {"output": "analysis complete\nsaved plot.png"},
+            "data": {
+                "output": (
+                    "analysis complete\nsaved plot.png\n[Command succeeded with exit code 0]"
+                )
+            },
             "metadata": {"lc_agent_name": "ultra-research-agent"},
         }
         yield {
@@ -1292,7 +1401,9 @@ class FakeMarkdownReportAgent:
         assert version == "v3"
         output_dir = Path(context.workspace_root) / "outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / "rarespot_combined_report.md").write_text("# RareSpot report\n\nMetrics table.\n")
+        (output_dir / "rarespot_combined_report.md").write_text(
+            "# RareSpot report\n\nMetrics table.\n"
+        )
         yield {
             "type": "event",
             "method": "messages",
@@ -1744,9 +1855,7 @@ def test_run_job_completed_event_carries_summed_token_usage(tmp_path: Path):
         "run-1:model:model-call-1",
         "run-1:model:model-call-2",
     ]
-    assert all(
-        event["payload"]["usage_event_id"] != event["event_id"] for event in usage_events
-    )
+    assert all(event["payload"]["usage_event_id"] != event["event_id"] for event in usage_events)
     assert [event["payload"]["total_tokens"] for event in usage_events] == [120, 60]
     assert all(event["message"] == "" for event in usage_events)
 
@@ -1789,7 +1898,9 @@ def test_run_job_scopes_subagent_token_usage_events(tmp_path: Path):
     assert usage_event["payload"]["total_tokens"] == 42
 
 
-def _v3_message_finish_event(usage, *, checkpoint_ns, namespace=None, model="deepseek_v4"):
+def _v3_message_finish_event(
+    usage, *, checkpoint_ns, namespace=None, model="deepseek_v4", provider="openai"
+):
     """A real v3 Pregel 'messages' event carrying per-call token usage.
 
     Mirrors the shape the compiled graph actually emits under
@@ -1811,6 +1922,7 @@ def _v3_message_finish_event(usage, *, checkpoint_ns, namespace=None, model="dee
                     "langgraph_checkpoint_ns": checkpoint_ns,
                     "checkpoint_ns": checkpoint_ns,
                     "ls_model_name": model,
+                    "ls_provider": provider,
                     **({"lc_agent_name": namespace[-1]} if namespace else {}),
                 },
             ],
@@ -1862,6 +1974,7 @@ def test_run_job_captures_v3_message_finish_token_usage(tmp_path: Path):
         settings = RuntimeSettings(
             openai_base_url="http://example.test/v1",
             openai_model="deepseek_v4",
+            model_provider_id="self-hosted-vllm",
             workspace_root=str(tmp_path / "workspaces"),
             artifact_root=str(tmp_path / "artifacts"),
         )
@@ -1893,6 +2006,7 @@ def test_run_job_captures_v3_message_finish_token_usage(tmp_path: Path):
     ids = [event["payload"]["usage_event_id"] for event in usage_events]
     assert len(usage_events) == 3
     assert ids[0] == ids[2] != ids[1]
+    assert {event["payload"]["provider"] for event in usage_events} == {"self-hosted-vllm"}
     # Coordinator call is unscoped; the subagent call is scoped by namespace.
     scoped = {
         event["payload"]["usage_event_id"]: event["payload"].get("subagent_name")
@@ -1960,7 +2074,9 @@ def test_seed_user_profile_memory_writes_profile_without_clobbering_preferences(
     memory_root = tmp_path / "users" / "ada"
     learned_preferences = memory_root / "preferences.md"
     memory_root.mkdir(parents=True)
-    learned_preferences.write_text("## Learned preference\nUse concise equations.\n", encoding="utf-8")
+    learned_preferences.write_text(
+        "## Learned preference\nUse concise equations.\n", encoding="utf-8"
+    )
     _seed_user_profile_memory(
         memory_root,
         {
@@ -1976,7 +2092,10 @@ def test_seed_user_profile_memory_writes_profile_without_clobbering_preferences(
     assert "Ada Lovelace" in profile
     assert "Analytical Engine Lab" in profile
     assert "symbolic computation" in profile
-    assert learned_preferences.read_text(encoding="utf-8") == "## Learned preference\nUse concise equations.\n"
+    assert (
+        learned_preferences.read_text(encoding="utf-8")
+        == "## Learned preference\nUse concise equations.\n"
+    )
 
 
 def test_seed_user_profile_memory_skips_empty_or_blank_profiles(tmp_path: Path):
@@ -2106,8 +2225,7 @@ def test_run_job_scopes_subagent_tool_events_in_stream(tmp_path: Path):
     execute_started = next(
         event
         for event in events
-        if event["event_kind"] == "tool_call.started"
-        and event["payload"]["tool_name"] == "execute"
+        if event["event_kind"] == "tool_call.started" and event["payload"]["tool_name"] == "execute"
     )
     assert execute_started["agent_role"] == "data-analyst"
     assert execute_started["node_name"] == "data-analyst:tool:execute"
@@ -2124,8 +2242,7 @@ def test_run_job_scopes_subagent_tool_events_in_stream(tmp_path: Path):
     task_started = next(
         event
         for event in events
-        if event["event_kind"] == "tool_call.started"
-        and event["payload"]["tool_name"] == "task"
+        if event["event_kind"] == "tool_call.started" and event["payload"]["tool_name"] == "task"
     )
     assert task_started["agent_role"] == "tool"
     assert task_started["payload"]["subagent_type"] == "data-analyst"
@@ -2167,16 +2284,14 @@ def test_run_job_maps_dynamic_task_namespace_to_parent_subagent_type(tmp_path: P
     task_started = next(
         event
         for event in events
-        if event["event_kind"] == "tool_call.started"
-        and event["payload"]["tool_name"] == "task"
+        if event["event_kind"] == "tool_call.started" and event["payload"]["tool_name"] == "task"
     )
     assert task_started["payload"]["subagent_type"] == "code-runner"
 
     execute_started = next(
         event
         for event in events
-        if event["event_kind"] == "tool_call.started"
-        and event["payload"]["tool_name"] == "execute"
+        if event["event_kind"] == "tool_call.started" and event["payload"]["tool_name"] == "execute"
     )
     assert execute_started["agent_role"] == "code-runner"
     assert execute_started["node_name"] == "code-runner:tool:execute"
@@ -2509,7 +2624,15 @@ def test_run_job_includes_generated_conversation_title_in_completed_event(tmp_pa
     }
 
 
-def test_run_job_publishes_tool_lifecycle_without_polluting_response(tmp_path: Path):
+def test_run_job_publishes_tool_lifecycle_without_polluting_response(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    image_id = "sha256:" + "b" * 64
+    monkeypatch.setattr(
+        "ultra_deepagents.runner.resolve_docker_image_id",
+        lambda _image_ref: image_id,
+    )
+
     async def scenario():
         settings = RuntimeSettings(
             openai_base_url="http://example.test/v1",
@@ -2549,7 +2672,12 @@ def test_run_job_publishes_tool_lifecycle_without_polluting_response(tmp_path: P
     assert events[1]["payload"]["tool_name"] == "execute"
     assert events[1]["payload"]["command"] == "python analysis.py"
     assert events[1]["payload"]["tool_call_id"] == "tool-run-1"
-    assert events[2]["payload"]["output_preview"] == "analysis complete\nsaved plot.png"
+    assert events[1]["payload"]["runtime_image_digest"] == image_id
+    assert events[2]["payload"]["output_preview"] == (
+        "analysis complete\nsaved plot.png\n[Command succeeded with exit code 0]"
+    )
+    assert events[2]["payload"]["exit_code"] == 0
+    assert events[2]["payload"]["runtime_image_digest"] == image_id
     assert events[-1]["payload"]["response_text"] == "Finished analysis."
 
 
@@ -2681,8 +2809,7 @@ def test_run_job_does_not_label_underlying_timeout_as_idle_recovery(tmp_path: Pa
     assert [event["event_kind"] for event in events] == ["run.started", "run.failed"]
     assert events[-1]["payload"]["error"] == "upstream subagent stream timed out"
     assert not any(
-        event.get("payload", {}).get("reason") == "model_stream_idle"
-        for event in events
+        event.get("payload", {}).get("reason") == "model_stream_idle" for event in events
     )
 
 
@@ -2781,9 +2908,7 @@ def test_run_job_recovers_from_within_turn_progress_stall(tmp_path: Path):
     assert fake_agent.calls == 2
     assert result == "Diagnosed the empty CSV and finalized with current results."
     stall_events = [
-        event
-        for event in events
-        if event.get("payload", {}).get("reason") == "progress_stall"
+        event for event in events if event.get("payload", {}).get("reason") == "progress_stall"
     ]
     assert len(stall_events) == 1
     payload = stall_events[0]["payload"]
@@ -2840,9 +2965,7 @@ def test_run_job_progress_stall_recoveries_exhausted_still_completes(tmp_path: P
     result, events, fake_agent = asyncio.run(scenario())
 
     stall_events = [
-        event
-        for event in events
-        if event.get("payload", {}).get("reason") == "progress_stall"
+        event for event in events if event.get("payload", {}).get("reason") == "progress_stall"
     ]
     assert len(stall_events) >= 2
     assert stall_events[-1]["payload"]["recoveries_exhausted"] is True
@@ -2927,7 +3050,9 @@ def test_run_job_prefers_final_values_answer_over_process_stream(tmp_path: Path)
     assert events[-1]["payload"]["response_text"] == result
 
 
-def test_run_job_ignores_prior_assistant_when_followup_final_state_has_no_new_answer(tmp_path: Path):
+def test_run_job_ignores_prior_assistant_when_followup_final_state_has_no_new_answer(
+    tmp_path: Path,
+):
     async def scenario():
         settings = RuntimeSettings(
             openai_base_url="http://example.test/v1",
@@ -3044,7 +3169,9 @@ def test_run_job_publishes_artifacts_from_explicit_outputs_directory(tmp_path: P
         "artifact.created",
         "run.completed",
     ]
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    ]
     assert [payload["path"] for payload in artifact_payloads] == [
         "outputs/plot_squared.png",
         "outputs/plot_squared.py",
@@ -3093,7 +3220,9 @@ def test_run_job_normalizes_collected_plot_artifacts_to_publication_ppi(tmp_path
     result, events = asyncio.run(scenario())
 
     assert result == "Created plot."
-    artifact_payload = next(event["payload"] for event in events if event["event_kind"] == "artifact.created")
+    artifact_payload = next(
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    )
     copied = tmp_path / "artifacts" / "run-1" / artifact_payload["path"]
     with Image.open(copied) as image:
         dpi = image.info.get("dpi")
@@ -3174,7 +3303,9 @@ def test_run_job_deduplicates_same_file_saved_in_workspace_root_and_outputs(tmp_
 
     events = asyncio.run(scenario())
 
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    ]
     assert [payload["path"] for payload in artifact_payloads] == [
         "outputs/plot_squared.png",
         "outputs/plot_squared.py",
@@ -3213,7 +3344,9 @@ def test_run_job_collects_top_level_workspace_deliverables_without_frames(tmp_pa
 
     events = asyncio.run(scenario())
 
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    ]
     assert [payload["path"] for payload in artifact_payloads] == [
         "plot_squared.png",
         "plot_squared.py",
@@ -3263,8 +3396,7 @@ def test_run_job_continues_when_explicit_plot_request_only_saves_code(tmp_path: 
 
     assert fake_agent.calls == 2
     assert result == (
-        "Executed the plotting script and saved the code (plot_x2.py) and "
-        "figure (plot_x2.png)."
+        "Executed the plotting script and saved the code (plot_x2.py) and figure (plot_x2.png)."
     )
     assert "figure" in fake_agent.continuation_prompt
     assert [event["event_kind"] for event in events] == [
@@ -3274,7 +3406,9 @@ def test_run_job_continues_when_explicit_plot_request_only_saves_code(tmp_path: 
         "artifact.created",
         "run.completed",
     ]
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    ]
     assert [payload["kind"] for payload in artifact_payloads] == ["figure", "code"]
     assert {payload["path"] for payload in artifact_payloads} == {"plot_x2.png", "plot_x2.py"}
 
@@ -3327,7 +3461,9 @@ def test_run_job_continues_when_training_request_omits_model_weights(tmp_path: P
     assert "model" in fake_agent.continuation_prompt
     trace_events = [event for event in events if event["event_kind"] == "trace.message.delta"]
     assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [["model"]]
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
+    ]
     assert {payload["kind"] for payload in artifact_payloads} == {"code", "figure", "model"}
     assert {payload["path"] for payload in artifact_payloads} == {
         "outputs/best_model.pth",
@@ -3386,10 +3522,10 @@ def test_run_job_continues_when_requested_explanation_is_missing(tmp_path: Path)
     assert "Saved durable outputs:" not in result
     assert "final response" in fake_agent.continuation_prompt
     trace_events = [event for event in events if event["event_kind"] == "trace.message.delta"]
-    assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [
-        ["response"]
+    assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [["response"]]
+    artifact_payloads = [
+        event["payload"] for event in events if event["event_kind"] == "artifact.created"
     ]
-    artifact_payloads = [event["payload"] for event in events if event["event_kind"] == "artifact.created"]
     assert {payload["kind"] for payload in artifact_payloads} == {"code", "figure"}
 
 
@@ -3435,9 +3571,7 @@ def test_run_job_continues_when_only_process_text_precedes_final_tool(tmp_path: 
     assert events[-1]["event_kind"] == "run.completed"
     assert events[-1]["payload"]["response_text"] == result
     trace_events = [event for event in events if event["event_kind"] == "trace.message.delta"]
-    assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [
-        ["response"]
-    ]
+    assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [["response"]]
 
 
 def test_run_job_writes_workspace_lease_lifecycle(tmp_path: Path):
@@ -3779,7 +3913,9 @@ def test_worker_publishes_run_events_to_deterministic_partition_subject():
         }
 
         await worker._publish_event(js, event)
-        await worker._publish_event(js, {**event, "event_id": "evt-run-partition-second", "sequence": 2})
+        await worker._publish_event(
+            js, {**event, "event_id": "evt-run-partition-second", "sequence": 2}
+        )
 
         return js
 
@@ -4095,9 +4231,11 @@ def test_worker_clears_checkpoint_runtime_state_after_terminal_job(mode: str, tm
 
 def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_path: Path):
     calls: list[tuple[str, str]] = []
+    run_job_kwargs: dict[str, Any] = {}
 
-    async def run_job_returns(*_args, **_kwargs):
+    async def run_job_returns(*_args, **kwargs):
         calls.append(("run_job", "run-1"))
+        run_job_kwargs.update(kwargs)
         return "ok"
 
     async def acquire_lease(run_id, settings):
@@ -4144,6 +4282,8 @@ def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_p
         ("run_job", "run-1"),
         ("release", "lease-token-1"),
     ]
+    assert run_job_kwargs["run_lease_worker_id"] == "worker-a"
+    assert run_job_kwargs["run_lease_token"] == "lease-token-1"
 
 
 def test_worker_naks_when_control_plane_run_lease_is_held(tmp_path: Path):
@@ -4700,7 +4840,9 @@ def test_worker_naks_duplicate_delivery_for_active_run_without_starting_second_c
         duplicate_message = FakeNATSMessage(
             b'{"run_id":"run-1","thread_id":"thread-1","user_id":"user-1","goal":"long"}'
         )
-        first_task = asyncio.create_task(worker._process_message(first_message, CapturingJetStream()))
+        first_task = asyncio.create_task(
+            worker._process_message(first_message, CapturingJetStream())
+        )
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
 
         await worker._process_message(duplicate_message, CapturingJetStream())
@@ -4748,7 +4890,9 @@ def test_worker_naks_cross_worker_duplicate_delivery_for_locked_run(tmp_path: Pa
             b'{"run_id":"run-1","thread_id":"thread-1","user_id":"user-1","goal":"long"}'
         )
 
-        first_task = asyncio.create_task(first_worker._process_message(first_message, CapturingJetStream()))
+        first_task = asyncio.create_task(
+            first_worker._process_message(first_message, CapturingJetStream())
+        )
         await asyncio.wait_for(first_started.wait(), timeout=1.0)
 
         await second_worker._process_message(duplicate_message, CapturingJetStream())
@@ -5555,9 +5699,7 @@ def test_control_plane_run_sequence_floor_paginates_events_with_worker_identity(
             }
         )
         if call_index == 0:
-            return FakeResponse(
-                {"events": [{"sequence": sequence} for sequence in range(1, 501)]}
-            )
+            return FakeResponse({"events": [{"sequence": sequence} for sequence in range(1, 501)]})
         return FakeResponse({"events": [{"sequence": 501}, {"sequence": 513}]})
 
     monkeypatch.setattr(nats_worker_module.urllib_request, "urlopen", fake_urlopen)
@@ -5758,9 +5900,7 @@ def test_missing_rigor_contract_kinds_flags_absent_markers(tmp_path: Path):
     job = _study_job({"id": "pro_mode"})
     context = _context_for_job(job, tmp_path)
 
-    missing = _missing_rigor_contract_kinds(
-        context, job, _attempt("Only A=1.5 is chaotic. Done.")
-    )
+    missing = _missing_rigor_contract_kinds(context, job, _attempt("Only A=1.5 is chaotic. Done."))
     assert missing == [
         "rigor:uncertainty",
         "rigor:sampling",
@@ -5876,12 +6016,15 @@ def test_missing_rigor_contract_kinds_requires_artifact_references(tmp_path: Pat
     ) == ["rigor:artifact_references"]
 
     referenced = _attempt(answer.final_response_text + "\n\nArtifacts: /outputs/metrics.csv")
-    assert _missing_rigor_contract_kinds(
-        context,
-        job,
-        referenced,
-        artifact_events=artifact_events,
-    ) == []
+    assert (
+        _missing_rigor_contract_kinds(
+            context,
+            job,
+            referenced,
+            artifact_events=artifact_events,
+        )
+        == []
+    )
 
 
 def test_missing_rigor_contract_kinds_gates_on_intelligence_and_goal(tmp_path: Path):
@@ -5918,6 +6061,31 @@ def test_missing_rigor_contract_kinds_gates_on_intelligence_and_goal(tmp_path: P
     pro_job = _study_job({"id": "pro_mode"})
     pro_context = _context_for_job(pro_job, tmp_path)
     assert _missing_rigor_contract_kinds(pro_context, pro_job, _attempt("")) == []
+
+
+def test_missing_rigor_contract_does_not_reprompt_typed_materials_refusal(tmp_path: Path):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = RunJobEnvelope(
+        run_id="run-hcp-refusal",
+        thread_id="thread-hcp-refusal",
+        user_id="researcher-1",
+        goal=(
+            "Generate the HCP pyramidal c+a slip-system geometry without a supplied c/a. "
+            "Call materials_analyze_crystal_slip and report whether a numerical result "
+            "is scientifically supportable."
+        ),
+        messages=[],
+        workflow_hint={"id": "pro_mode"},
+    )
+    context = _context_for_job(job, tmp_path)
+    answer = _attempt(
+        "The typed tool returned invalid_crystal_plasticity_input: c_over_a must be a "
+        "finite positive number. No numerical systems were generated; the request is "
+        "scientifically incomplete."
+    )
+
+    assert _missing_rigor_contract_kinds(context, job, answer) == []
 
 
 def test_requested_artifacts_ignore_code_blocks_and_negated_plot_requests():
@@ -5974,13 +6142,9 @@ def test_collect_output_artifacts_skips_unreferenced_top_level_scripts(tmp_path:
     (workspace / "scratch_v2.py").write_text("print('scratch')\n")
     (workspace / "diagnostics").mkdir()
     (workspace / "diagnostics" / "probe.py").write_text("print('probe')\n")
-    (workspace / "outputs" / "report.md").write_text(
-        "# Report\nFinal code: final_sim.py\n"
-    )
+    (workspace / "outputs" / "report.md").write_text("# Report\nFinal code: final_sim.py\n")
 
-    reference_text = _artifact_reference_text(
-        _attempt("Study complete; see report.md."), workspace
-    )
+    reference_text = _artifact_reference_text(_attempt("Study complete; see report.md."), workspace)
     events = _collect_output_artifacts(
         context, workspace, artifact_dir, reference_text=reference_text
     )
@@ -6161,7 +6325,9 @@ def test_run_job_requires_failed_task_delegation_fallback_disclosure(tmp_path: P
             thread_id="thread-delegation-fallback",
             user_id="researcher-1",
             goal="Run a simulation and verify the classification.",
-            messages=[{"role": "user", "content": "Run a simulation and verify the classification."}],
+            messages=[
+                {"role": "user", "content": "Run a simulation and verify the classification."}
+            ],
             workflow_hint={"id": "pro_mode"},
         )
         agent = FakeFailedTaskThenFallbackDisclosureAgent()
@@ -6230,8 +6396,7 @@ def test_run_job_treats_invalid_subagent_task_output_as_failed_delegation(tmp_pa
     task_completed = [
         event
         for event in events
-        if event["event_kind"] == "tool_call.completed"
-        and event["payload"]["tool_name"] == "task"
+        if event["event_kind"] == "tool_call.completed" and event["payload"]["tool_name"] == "task"
     ]
     assert task_completed[0]["payload"]["delegation_failure"] is True
     completed = next(event for event in events if event["event_kind"] == "run.completed")

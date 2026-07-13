@@ -43,6 +43,20 @@ def test_control_stack_launcher_keeps_background_services_alive_after_exit():
     assert "nohup" in text
 
 
+def test_control_stack_launcher_does_not_serialize_secrets_into_executable_runner():
+    script = ROOT / "scripts" / "restart_control_stack.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert 'env_file="$STATE_DIR/run-$session_name.env"' in text
+    assert "umask 077" in text
+    assert "printf 'export %s=%q\\n'" in text
+    assert "printf 'source %q\\n' \"$env_file\"" in text
+    assert "printf 'rm -f %q\\n' \"$env_file\"" in text
+    assert 'chmod 0600 "$env_file"' in text
+    assert 'chmod 0700 "$runner"' in text
+    assert 'chmod +x "$runner"' not in text
+
+
 def test_control_stack_launcher_uses_long_model_idle_watchdog():
     script = ROOT / "scripts" / "restart_control_stack.sh"
     text = script.read_text(encoding="utf-8")
@@ -57,6 +71,62 @@ def test_control_stack_launcher_defaults_deepagents_worker_to_vllm_capacity():
 
     assert "ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-64" in text
     assert "ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-2" not in text
+
+
+def test_control_stack_launcher_binds_typed_calphad_to_one_immutable_image():
+    script = ROOT / "scripts" / "restart_control_stack.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "resolve_local_calphad_runtime_image" in text
+    assert "docker image inspect --format '{{.Id}}'" in text
+    assert (
+        'ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID="$ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID"'
+        in text
+    )
+    assert 'ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$ULTRA_DEEPAGENTS_SANDBOX_IMAGE"' in text
+    assert 'ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$actual"' in text
+
+
+def test_control_stack_launcher_builds_and_binds_separate_kinetics_image():
+    script = ROOT / "scripts" / "restart_control_stack.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert "resolve_local_kinetics_runtime_image" in text
+    assert "deploy/docker/materials-kinetics.Dockerfile" in text
+    assert "Ultra isolated materials kinetics runtime" in text
+    assert 'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$actual"' in text
+    assert 'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$actual"' in text
+    assert (
+        'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE"'
+        in text
+    )
+    assert (
+        'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID"'
+        in text
+    )
+    start = text.index("start_services()")
+    assert text.index("resolve_local_kinetics_runtime_image", start) < text.index(
+        "start_deepagents_worker", start
+    )
+
+
+def test_control_stack_launcher_has_finite_local_calphad_sandbox_defaults():
+    script = ROOT / "scripts" / "restart_control_stack.sh"
+    text = script.read_text(encoding="utf-8")
+
+    assert 'ULTRA_DEEPAGENTS_SANDBOX_CPUS="${ULTRA_DEEPAGENTS_SANDBOX_CPUS:-2}"' in text
+    assert (
+        'ULTRA_DEEPAGENTS_SANDBOX_MEMORY="${ULTRA_DEEPAGENTS_SANDBOX_MEMORY:-4g}"'
+        in text
+    )
+    assert (
+        'ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT="${ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT:-512}"'
+        in text
+    )
+    assert (
+        'ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES="${ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES:-52428800}"'
+        in text
+    )
 
 
 def test_control_stack_launcher_reports_model_endpoint_health():

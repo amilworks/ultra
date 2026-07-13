@@ -56,9 +56,7 @@ class ToolCallingFakeOpenAIModel(FakeMessagesListChatModel):
 
     def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         _ = tool_choice, kwargs
-        self.bound_tool_names.append(
-            [str(getattr(tool, "name", "") or "") for tool in tools]
-        )
+        self.bound_tool_names.append([str(getattr(tool, "name", "") or "") for tool in tools])
         return self
 
     def _get_ls_params(self, stop=None, **kwargs):
@@ -142,7 +140,11 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     # RareSpot detection is now a sandbox-run Skill (prairie-dog-detection), not a
     # registered tool — assert the dispatch tool is gone, not present.
     assert "rarespot_ecology_inference" not in tool_names
-    manifest_tool = next(tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest")
+    manifest_tool = next(
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
+    )
     manifest = manifest_tool.invoke({})
     assert "execute" in manifest
     assert "artifact_manifest" in manifest
@@ -157,10 +159,7 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     ]
     # App-owned and org-owned memory are write-protected (read-only to the agent).
     deny_paths = {
-        path
-        for rule in captured["permissions"]
-        if rule.mode == "deny"
-        for path in rule.paths
+        path for rule in captured["permissions"] if rule.mode == "deny" for path in rule.paths
     }
     assert "/memories/user_profile.md" in deny_paths
     assert "/policies/**" in deny_paths
@@ -178,10 +177,7 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert "sandbox execution" in captured["system_prompt"].lower()
     assert "caption immediately after each figure" in captured["system_prompt"].lower()
     assert "do not call read_file on image" in captured["system_prompt"].lower()
-    assert any(
-        isinstance(item, TextOnlyMultimodalMiddleware)
-        for item in captured["middleware"]
-    )
+    assert any(isinstance(item, TextOnlyMultimodalMiddleware) for item in captured["middleware"])
 
     assert captured["subagents"] == []
 
@@ -205,9 +201,16 @@ def test_tool_capability_manifest_describes_builtin_storage_and_registered_tools
         for tool in manifest["deepagents_builtin_tools"]
         if isinstance(tool, dict)
     }
-    assert {"execute", "write_file", "read_file", "edit_file", "ls", "glob", "grep", "write_todos"}.issubset(
-        builtin_names
-    )
+    assert {
+        "execute",
+        "write_file",
+        "read_file",
+        "edit_file",
+        "ls",
+        "glob",
+        "grep",
+        "write_todos",
+    }.issubset(builtin_names)
     assert "task" not in builtin_names
     assert manifest["available_subagents"] == []
     assert manifest["available_async_subagents"] == []
@@ -315,9 +318,7 @@ def test_sandbox_resources_guidance_adapts_to_gpu_and_network():
 def test_sandbox_resources_adapt_when_network_enabled():
     # With a non-"none" network the coordinator must be told the network is ON and how to
     # install (the rootfs is read-only, so naive `pip install` fails — `--user` works).
-    settings = RuntimeSettings(
-        openai_base_url="x", openai_model="m", sandbox_network="bridge"
-    )
+    settings = RuntimeSettings(openai_base_url="x", openai_model="m", sandbox_network="bridge")
 
     guidance = build_sandbox_resources_guidance(settings)
     assert "NETWORK-ENABLED" in guidance
@@ -353,7 +354,14 @@ def test_sandbox_compute_resources_unset_fallbacks():
     assert cr_nocap["wall_clock_cap_seconds"] == "none"
 
 
-def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
+def test_build_sandbox_backend_uses_runtime_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    image_id = "sha256:" + "a" * 64
+    monkeypatch.setattr(
+        "ultra_deepagents.agent.resolve_docker_image_id",
+        lambda _image_ref: image_id,
+    )
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
         openai_model="deepseek_v4",
@@ -381,7 +389,7 @@ def test_build_sandbox_backend_uses_runtime_settings(tmp_path: Path):
     mpl_config_rc = (tmp_path / "workspace" / ".cache" / "matplotlib" / "matplotlibrc").read_text()
     assert "savefig.dpi: 300" in matplotlibrc
     assert "savefig.dpi: 300" in mpl_config_rc
-    assert backend.config.image == "bisque-ultra-codeexec:test"
+    assert backend.config.image == image_id
     assert backend.config.network == "none"
     assert backend.config.cpus == 3.5
     assert backend.config.memory == "8g"
@@ -441,8 +449,7 @@ def test_build_research_agent_skips_text_only_sanitizer_for_multimodal_model(mon
 
     assert agent == "compiled-agent"
     assert all(
-        not isinstance(item, TextOnlyMultimodalMiddleware)
-        for item in captured["middleware"]
+        not isinstance(item, TextOnlyMultimodalMiddleware) for item in captured["middleware"]
     )
     assert captured["subagents"] == []
     assert "do not call read_file on image" not in captured["system_prompt"].lower()
@@ -492,7 +499,9 @@ def test_research_agent_registers_configured_async_subagents_and_manifest(monkey
         }
     ]
     manifest_tool = next(
-        tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
     )
     manifest = json.loads(manifest_tool.invoke({}))
     builtin_names = {
@@ -716,9 +725,7 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
         {
             "thread_id": "async-thread-1",
             "assistant_id": "ultra-training-agent",
-            "input": {
-                "messages": [{"role": "user", "content": "Run a concise analysis."}]
-            },
+            "input": {"messages": [{"role": "user", "content": "Run a concise analysis."}]},
             "context": {
                 "assistant_id": "ultra-research-agent",
                 "org_id": "local-org",
@@ -780,9 +787,7 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
             "durability": "async",
         }
     ]
-    assert clients[0].runs.checked == [
-        {"thread_id": "async-thread-1", "run_id": "async-run-1"}
-    ]
+    assert clients[0].runs.checked == [{"thread_id": "async-thread-1", "run_id": "async-run-1"}]
     assert any("start_async_task" in tool_names for tool_names in model.bound_tool_names)
     assert any("check_async_task" in tool_names for tool_names in model.bound_tool_names)
     assert all("task" not in tool_names for tool_names in model.bound_tool_names)
@@ -864,11 +869,12 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     assert "data-inspection" in code_runner["system_prompt"].lower()
     assert "do not paste raw stdout" in code_runner["system_prompt"].lower()
     assert all(
-        isinstance(item, TextOnlyMultimodalMiddleware)
-        for item in code_runner.get("middleware", [])
+        isinstance(item, TextOnlyMultimodalMiddleware) for item in code_runner.get("middleware", [])
     )
     manifest_tool = next(
-        tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
     )
     manifest = json.loads(manifest_tool.invoke({}))
     builtin_names = {
@@ -962,9 +968,7 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
         not isinstance(item, TextOnlyMultimodalMiddleware)
         for item in by_name["qwen-code-runner"].get("middleware", [])
     )
-    qwen_tool_names = {
-        getattr(tool, "name", "") for tool in by_name["qwen-code-runner"]["tools"]
-    }
+    qwen_tool_names = {getattr(tool, "name", "") for tool in by_name["qwen-code-runner"]["tools"]}
     assert qwen_tool_names == {
         "artifact_manifest",
         "stage_artifact_for_analysis",
@@ -1150,16 +1154,32 @@ def test_system_prompt_requires_delegation_for_complex_code_workflows():
 
     prompt = " ".join(build_system_prompt(settings).lower().split())
 
-    assert "for complex code, simulation, model-training, or multi-file implementation work" in prompt
+    assert (
+        "for complex code, simulation, model-training, or multi-file implementation work" in prompt
+    )
     assert "call tool_capability_manifest early" in prompt
     assert "delegate at least one focused verification" in prompt
-    assert "bounded by the user's requested seeds, durations, data size, and artifact scope" in prompt
+    assert (
+        "bounded by the user's requested seeds, durations, data size, and artifact scope" in prompt
+    )
     assert "run a small smoke check before any expensive cross-check" in prompt
     assert "do not expand into exhaustive convergence sweeps" in prompt
     assert "code-runner" in prompt
     assert "start_async_task" in prompt
     assert "configured async subagents" in prompt
     assert "before the final answer" in prompt
+
+
+def test_system_prompt_requires_explicit_user_request_for_bisque_mutations():
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+
+    prompt = " ".join(build_system_prompt(settings).lower().split())
+
+    assert "only when the user explicitly asks" in prompt
+    assert "not permission to upload them to bisque" in prompt
 
 
 def test_system_prompt_does_not_carry_retired_rarespot_dispatch():
@@ -1382,7 +1402,9 @@ def test_research_agent_does_not_expose_async_subagents_for_rarespot_report_only
 
     assert captured["subagents"] == []
     manifest_tool = next(
-        tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
     )
     manifest = json.loads(manifest_tool.invoke({}))
     builtin_names = {
@@ -1432,8 +1454,7 @@ def test_research_agent_keeps_paper_tools_when_paper_context_exists(monkeypatch)
     literature_tool_names = {getattr(tool, "name", "") for tool in literature["tools"]}
     assert "read_paper_pages" in literature_tool_names
     assert all(
-        isinstance(item, TextOnlyMultimodalMiddleware)
-        for item in literature.get("middleware", [])
+        isinstance(item, TextOnlyMultimodalMiddleware) for item in literature.get("middleware", [])
     )
 
 
@@ -1469,6 +1490,50 @@ def test_stage_artifact_copies_prior_output_into_current_workspace(tmp_path: Pat
     staged = Path(result["staged_path"])
     assert staged.read_text() == "print('old plot')\n"
     assert result["sandbox_path"] == "/workspace/staged_artifacts/run-1/plot_squared.py"
+
+
+def test_stage_artifact_rejects_untyped_forged_descriptor(tmp_path: Path):
+    artifact_store = tmp_path / "artifacts"
+    foreign_source = artifact_store / "run-foreign" / "outputs" / "private.csv"
+    foreign_source.parent.mkdir(parents=True)
+    foreign_source.write_text("private,data\n")
+    workspace = tmp_path / "workspaces" / "run-current"
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-a",
+        user_id="user-a",
+        project_id="project-a",
+        thread_id="thread-a",
+        run_id="run-current",
+        artifact_root=str(artifact_store / "run-current"),
+        workspace_root=str(workspace),
+        resource_descriptors=(
+            {
+                # Missing type is untrusted input, not an implicit artifact capability.
+                "artifact_id": "artifact-foreign",
+                "run_id": "run-foreign",
+                "path": "outputs/private.csv",
+                "source_path": str(foreign_source),
+            },
+        ),
+    )
+
+    by_id = stage_artifact(context, artifact_id="artifact-foreign")
+    by_path = stage_artifact(context, path="outputs/private.csv")
+
+    assert by_id == {
+        "ok": False,
+        "error": "artifact_not_found",
+        "artifact_id": "artifact-foreign",
+        "path": "",
+    }
+    assert by_path == {
+        "ok": False,
+        "error": "artifact_not_found",
+        "artifact_id": "",
+        "path": "outputs/private.csv",
+    }
+    assert not (workspace / "staged_artifacts" / "run-foreign" / "private.csv").exists()
 
 
 def test_artifact_manifest_text_uses_public_virtual_paths(tmp_path: Path):
@@ -1535,9 +1600,7 @@ def test_artifact_manifest_text_exposes_remote_safe_storage_uri():
 
     artifact = payload["prior_artifacts"][0]
     assert artifact["artifact_id"] == "artifact-object"
-    assert artifact["remote_storage_uri"] == (
-        "s3://ultra-artifacts/local-org/run-1/result.csv"
-    )
+    assert artifact["remote_storage_uri"] == ("s3://ultra-artifacts/local-org/run-1/result.csv")
     assert artifact["access"] == "remote_storage_uri"
     assert "storage_uri" not in artifact
     assert "source_path" not in artifact
@@ -1608,7 +1671,9 @@ def test_stage_uploaded_files_copies_selected_uploads_into_current_workspace(tmp
     assert len(result["staged_files"]) == 1
     staged = Path(result["staged_files"][0]["staged_path"])
     assert staged.read_bytes() == b"image-bytes"
-    assert result["staged_files"][0]["sandbox_path"] == "/workspace/staged_uploads/file-1/prairie.jpg"
+    assert (
+        result["staged_files"][0]["sandbox_path"] == "/workspace/staged_uploads/file-1/prairie.jpg"
+    )
 
 
 def test_stage_uploaded_files_for_analysis_text_returns_sandbox_paths_only(tmp_path: Path):
@@ -1642,6 +1707,101 @@ def test_stage_uploaded_files_for_analysis_text_returns_sandbox_paths_only(tmp_p
     assert (workspace / "staged_uploads" / "file-1" / "prairie.jpg").read_bytes() == b"image-bytes"
 
 
+def test_stage_selected_tdb_returns_catalog_binding_and_only_declared_calphad_metadata(
+    tmp_path: Path,
+):
+    upload_root = tmp_path / "uploads"
+    source = upload_root / "file-tdb__Al-Co-W.tdb"
+    source.parent.mkdir(parents=True)
+    source.write_text("ELEMENT AL FCC_A1 26.9815386 4577.3 28.3215 !\n")
+    workspace = tmp_path / "workspaces" / "run-calphad"
+    catalog_sha256 = "c" * 64
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-a",
+        user_id="user-a",
+        project_id="local-project",
+        thread_id="thread-calphad",
+        run_id="run-calphad",
+        workspace_root=str(workspace),
+        selected_file_ids=("file-tdb",),
+        resource_descriptors=(
+            {
+                "type": "selected_resource",
+                "binding_schema": "ultra.selected_resource.v1",
+                "authority": "control_resource_catalog",
+                "resource_id": "file-tdb",
+                "file_id": "file-tdb",
+                "original_name": "Al-Co-W.tdb",
+                "content_type": "application/x-thermocalc-tdb",
+                "resource_kind": "document",
+                "source_type": "upload",
+                "sha256": catalog_sha256,
+                "size_bytes": 21274,
+                "metadata": {
+                    "source": "upload_store",
+                    "calphad": {
+                        "database_id": "nist-al-co-w-wang-2017",
+                        "citation": "Wang et al., CALPHAD 2017",
+                        "source": "https://vendor-user:credential-secret@example.org/private",
+                        "source_uri": "https://materialsdata.nist.gov/handle/11256/948",
+                        "license_id": "CC0-1.0",
+                        "license_identifier": "Confidential proprietary license agreement",
+                        "assessment_scope": "owner-declared Al-Co-W assessment",
+                        "assessment_pressure_limits_Pa": [101325.0, 101325.0],
+                        "validation_status": "validated",
+                        "scientific_status": "verified",
+                        "content_sha256": "f" * 64,
+                        "size_bytes": 1,
+                        "format": "forged-format",
+                        "credentials": {"token": "catalog-secret"},
+                    },
+                    "credentials": {"password": "outer-secret"},
+                },
+            },
+        ),
+    )
+
+    payload = json.loads(
+        stage_uploaded_files_for_analysis_text(context, upload_roots=(upload_root,))
+    )
+
+    assert payload["ok"] is True
+    staged = payload["staged_files"][0]
+    assert staged["file_id"] == "file-tdb"
+    assert staged["resource_id"] == "file-tdb"
+    assert staged["binding_schema"] == "ultra.selected_resource.v1"
+    assert staged["binding_authority"] == "control_resource_catalog"
+    assert staged["sha256"] == catalog_sha256
+    assert staged["size_bytes"] == 21274
+    assert staged["original_name"] == "Al-Co-W.tdb"
+    assert staged["content_type"] == "application/x-thermocalc-tdb"
+    calphad = staged["metadata"]["calphad"]
+    assert calphad["database_id"] == "nist-al-co-w-wang-2017"
+    assert calphad["citation"] == "Wang et al., CALPHAD 2017"
+    assert calphad["license_id"] == "CC0-1.0"
+    assert calphad["assessment_scope"] == "owner-declared Al-Co-W assessment"
+    assert calphad["assessment_pressure_limits_Pa"] == [101325.0, 101325.0]
+    assert calphad["declaration_authority"] == "resource_owner"
+    assert "source" not in calphad
+    assert "license_identifier" not in calphad
+    assert not {
+        "format",
+        "validation_status",
+        "scientific_status",
+        "content_sha256",
+        "size_bytes",
+        "credentials",
+    }.intersection(calphad)
+    encoded = json.dumps(payload)
+    assert "catalog-secret" not in encoded
+    assert "outer-secret" not in encoded
+    assert "credential-secret" not in encoded
+    assert "Confidential proprietary license agreement" not in encoded
+    assert "f" * 64 not in encoded
+    assert str(upload_root) not in encoded
+
+
 def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
     upload_root = tmp_path / "uploads"
     source = upload_root / "file-1__prairie.jpg"
@@ -1656,6 +1816,7 @@ def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
         thread_id="thread-1",
         run_id="run-1",
         workspace_root=str(workspace),
+        selected_file_ids=("file-1",),
     )
 
     result = stage_uploaded_files(
@@ -1666,7 +1827,44 @@ def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
 
     assert result["ok"] is True
     assert result["missing_file_ids"] == []
-    assert result["staged_files"][0]["sandbox_path"] == "/workspace/staged_uploads/file-1/prairie.jpg"
+    assert (
+        result["staged_files"][0]["sandbox_path"] == "/workspace/staged_uploads/file-1/prairie.jpg"
+    )
+
+
+def test_stage_uploaded_files_rejects_ids_not_selected_on_the_run(tmp_path: Path):
+    upload_root = tmp_path / "uploads"
+    selected = upload_root / "file-owned__owned.tdb"
+    foreign = upload_root / "file-foreign__foreign.tdb"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("ELEMENT /- ELECTRON_GAS 0 0 0 !\n")
+    foreign.write_text("$ private commercial database\n")
+    workspace = tmp_path / "workspaces" / "run-tenant-boundary"
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-a",
+        user_id="user-a",
+        project_id="local-project",
+        thread_id="thread-tenant-boundary",
+        run_id="run-tenant-boundary",
+        workspace_root=str(workspace),
+        selected_file_ids=("file-owned",),
+    )
+
+    result = stage_uploaded_files(
+        context,
+        upload_roots=(upload_root,),
+        file_ids='["file-owned", "file-foreign"]',
+    )
+
+    assert result == {
+        "ok": False,
+        "error": "file_ids_not_selected",
+        "staged_files": [],
+        "missing_file_ids": [],
+        "rejected_file_ids": ["file-foreign"],
+    }
+    assert not (workspace / "staged_uploads").exists()
 
 
 def _code_execution_context(run_id: str = "run-skills") -> AgentRunContext:
@@ -1865,9 +2063,7 @@ def test_runtime_prompt_suffix_appends_contract_only_for_pro_intelligence():
     assert "Results contract" not in high_suffix
     assert "Active run context:" in high_suffix
 
-    chat = AgentRunContext(
-        **{**base, "goal": "Say hello.", "workflow_hint": {"id": "pro_mode"}}
-    )
+    chat = AgentRunContext(**{**base, "goal": "Say hello.", "workflow_hint": {"id": "pro_mode"}})
     assert "Results contract" not in build_runtime_prompt_suffix(chat, elapsed_seconds=5)
 
     code_debug = AgentRunContext(
@@ -1899,8 +2095,13 @@ def test_domain_guidance_is_gated_to_relevant_runs():
     settings = _settings_factory()
 
     generic = AgentRunContext(
-        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
-        run_id="r1", goal="Explain what a Lyapunov exponent measures in 3 sentences.",
+        assistant_id="a",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="r1",
+        goal="Explain what a Lyapunov exponent measures in 3 sentences.",
     )
     prompt = build_system_prompt(settings, generic)
     assert "rarespot_ecology_inference" not in prompt
@@ -1908,8 +2109,13 @@ def test_domain_guidance_is_gated_to_relevant_runs():
     assert "search_paper" not in prompt
 
     paper_ctx = AgentRunContext(
-        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
-        run_id="r2", goal="Summarize this https://arxiv.org/abs/1706.03762 paper.",
+        assistant_id="a",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="r2",
+        goal="Summarize this https://arxiv.org/abs/1706.03762 paper.",
     )
     assert "render_paper_page" in build_system_prompt(settings, paper_ctx)
     assert "rarespot_ecology_inference" not in build_system_prompt(settings, paper_ctx)
@@ -1917,8 +2123,13 @@ def test_domain_guidance_is_gated_to_relevant_runs():
     # A prairie-dog detection goal no longer injects rarespot dispatch guidance —
     # the prairie-dog-detection Skill owns that path via progressive disclosure.
     rarespot_ctx = AgentRunContext(
-        assistant_id="a", org_id="o", user_id="u", project_id="p", thread_id="t",
-        run_id="r3", goal="Detect prairie dog burrows in these survey images.",
+        assistant_id="a",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="r3",
+        goal="Detect prairie dog burrows in these survey images.",
     )
     assert "rarespot_ecology_inference" not in build_system_prompt(settings, rarespot_ctx)
 
@@ -1942,13 +2153,19 @@ def test_literature_reviewer_subagent_does_not_carry_skills(monkeypatch, tmp_pat
     )
     # Goal triggers BOTH paper review (arxiv) and computational delegation.
     context = AgentRunContext(
-        assistant_id="ultra-research-agent", org_id="o", user_id="u", project_id="p",
-        thread_id="t", run_id="run-lit-skills",
+        assistant_id="ultra-research-agent",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="run-lit-skills",
         goal="Reproduce the simulation from https://arxiv.org/abs/1706.03762 and analyze the metrics.",
     )
     build_research_agent(
-        settings, model=object(),
-        workspace_dir=tmp_path / "workspaces" / "run-lit-skills", context=context,
+        settings,
+        model=object(),
+        workspace_dir=tmp_path / "workspaces" / "run-lit-skills",
+        context=context,
     )
 
     by_name = {s["name"]: s for s in captured["subagents"]}
@@ -1979,13 +2196,19 @@ def test_subagents_never_set_permissions_so_they_inherit_parent_denies(monkeypat
         artifact_root=str(tmp_path / "artifacts"),
     )
     context = AgentRunContext(
-        assistant_id="ultra-research-agent", org_id="o", user_id="u", project_id="p",
-        thread_id="t", run_id="run-perm",
+        assistant_id="ultra-research-agent",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="run-perm",
         goal="Reproduce the simulation from https://arxiv.org/abs/1706.03762 and analyze metrics.",
     )
     build_research_agent(
-        settings, model=object(),
-        workspace_dir=tmp_path / "workspaces" / "run-perm", context=context,
+        settings,
+        model=object(),
+        workspace_dir=tmp_path / "workspaces" / "run-perm",
+        context=context,
     )
     assert captured["subagents"], "expected scoped + paper subagents to register"
     for subagent in captured["subagents"]:
@@ -2017,13 +2240,19 @@ def _build_real_research_agent(tmp_path: Path, skills_root: Path):
         skills_root=str(skills_root),
     )
     context = AgentRunContext(
-        assistant_id="ultra-research-agent", org_id="o", user_id="u",
-        project_id="p", thread_id="t", run_id="run-skills",
+        assistant_id="ultra-research-agent",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="run-skills",
         goal="Summarize findings.",
     )
     return build_research_agent(
-        settings, model=model,
-        workspace_dir=tmp_path / "ws" / "run-skills", context=context,
+        settings,
+        model=model,
+        workspace_dir=tmp_path / "ws" / "run-skills",
+        context=context,
     )
 
 
@@ -2039,7 +2268,9 @@ def test_resolve_memory_permissions_drops_skills_deny_only_when_skills_absent(tm
     }
     deny_present = {
         path
-        for rule in resolve_memory_permissions(RuntimeSettings(**base, skills_root=str(with_skills)))
+        for rule in resolve_memory_permissions(
+            RuntimeSettings(**base, skills_root=str(with_skills))
+        )
         for path in rule.paths
     }
     # The /skills/** deny must drop in lockstep with the (absent) /skills/ route...
@@ -2051,7 +2282,9 @@ def test_resolve_memory_permissions_drops_skills_deny_only_when_skills_absent(tm
     assert "/skills/**" in deny_present
 
 
-def test_build_research_agent_with_real_sandbox_backend_builds_with_and_without_skills(tmp_path: Path):
+def test_build_research_agent_with_real_sandbox_backend_builds_with_and_without_skills(
+    tmp_path: Path,
+):
     # Regression: an unconditional /skills/** deny against a conditional /skills/
     # route made FilesystemMiddleware raise NotImplementedError at agent
     # construction (execute-capable sandbox default) whenever skills were absent.

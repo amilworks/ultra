@@ -20,6 +20,7 @@ type Config struct {
 	WriteTimeout               time.Duration
 	IdleTimeout                time.Duration
 	DatabaseURL                string
+	MigrationDatabaseURL       string
 	DatabaseMaxConns           int
 	DatabaseMinConns           int
 	DatabaseStatementTimeout   time.Duration
@@ -73,6 +74,7 @@ type Config struct {
 	RetentionGCBatch          int
 	RunEventDeltaRetention    time.Duration
 	WorkerToken               string
+	CalphadRuntimeImageID     string
 }
 
 func Load() Config {
@@ -90,9 +92,10 @@ func Load() Config {
 		ReadTimeout:       envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
 		WriteTimeout:      envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
 		IdleTimeout:       envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
-		DatabaseURL:       envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
-		DatabaseMaxConns:  envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
-		DatabaseMinConns:  envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
+		DatabaseURL:          envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
+		MigrationDatabaseURL: envString("ULTRA_CONTROL_MIGRATION_DATABASE_URL", ""),
+		DatabaseMaxConns:     envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
+		DatabaseMinConns:     envInt("ULTRA_CONTROL_DATABASE_MIN_CONNS", 0),
 		// Per-query server-side timeout for the SERVING pool so one stuck/runaway query
 		// can't hold a connection from the small pool forever. Off by default (0), like
 		// ReadTimeout/WriteTimeout — operators opt in per their workload. Migrations are
@@ -155,10 +158,14 @@ func Load() Config {
 		// forever / disabled). The durable answer is in control_thread_messages, so this is lossless.
 		RunEventDeltaRetention: envDurationSeconds("ULTRA_CONTROL_RUN_EVENT_DELTA_TTL_SECONDS", 0),
 		WorkerToken:            envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
+		CalphadRuntimeImageID:  strings.ToLower(strings.TrimSpace(envString("ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID", ""))),
 	}
 }
 
 func (c Config) Validate() error {
+	if value := strings.ToLower(strings.TrimSpace(c.CalphadRuntimeImageID)); value != "" && !isImmutableImageID(value) {
+		return errors.New("ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID must be sha256:<64 lowercase hexadecimal characters>")
+	}
 	if c.Environment != "production" {
 		return nil
 	}
@@ -168,6 +175,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.NATSURL) == "" {
 		missing = append(missing, "ULTRA_CONTROL_NATS_URL")
+	}
+	if !isImmutableImageID(strings.ToLower(strings.TrimSpace(c.CalphadRuntimeImageID))) {
+		missing = append(missing, "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID=sha256:<64hex>")
 	}
 	if strings.TrimSpace(c.BisqueRootURL) != "" && strings.TrimSpace(c.SecretEncryptionKey) == "" {
 		missing = append(missing, "ULTRA_CONTROL_SECRET_ENCRYPTION_KEY")
@@ -194,6 +204,18 @@ func (c Config) Validate() error {
 		return errors.New("production control plane requires durable backends: set " + strings.Join(missing, " and "))
 	}
 	return nil
+}
+
+func isImmutableImageID(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func envString(key string, fallback string) string {

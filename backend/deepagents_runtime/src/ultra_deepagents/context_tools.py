@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from langchain.tools import ToolRuntime, tool
 
@@ -24,7 +26,7 @@ from ultra_deepagents.context import AgentRunContext
 def build_prior_artifact_manifest(context: AgentRunContext) -> dict[str, Any]:
     artifacts = []
     for descriptor in context.resource_descriptors:
-        if str(descriptor.get("type") or "artifact") != "artifact":
+        if str(descriptor.get("type") or "").strip() != "artifact":
             continue
         entry = _public_descriptor(descriptor)
         entry["access"] = (
@@ -53,13 +55,28 @@ def stage_uploaded_files(
     upload_roots: Iterable[str | Path] = (),
     file_ids: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
-    requested = _unique_upload_file_ids(file_ids if file_ids is not None else context.selected_file_ids)
+    selected = _unique_upload_file_ids(context.selected_file_ids)
+    requested = _unique_upload_file_ids(file_ids if file_ids is not None else selected)
+    selected_set = set(selected)
+    rejected = [file_id for file_id in requested if file_id not in selected_set]
+    if rejected:
+        # The upload root is shared by workers, so a model-supplied id must never
+        # become filesystem authority. Only ids catalog-authorized and stamped on
+        # this run by the control plane may reach the host-side upload lookup.
+        return {
+            "ok": False,
+            "error": "file_ids_not_selected",
+            "staged_files": [],
+            "missing_file_ids": [],
+            "rejected_file_ids": rejected,
+        }
     if not requested:
         return {
             "ok": False,
             "error": "no_file_ids",
             "staged_files": [],
             "missing_file_ids": [],
+            "rejected_file_ids": [],
         }
 
     roots = _resolved_upload_roots(upload_roots)
@@ -75,20 +92,22 @@ def stage_uploaded_files(
         token = _safe_path_token(file_id)
         target = stage_root / token / target_name
         is_bundle = _stage_source_into(source, target)
-        staged_files.append(
-            {
-                "file_id": file_id,
-                "source_path": str(source),
-                "staged_path": str(target),
-                "sandbox_path": f"/workspace/staged_uploads/{token}/{target_name}",
-                "kind": "directory" if is_bundle else "file",
-            }
-        )
+        staged_file = {
+            "file_id": file_id,
+            "source_path": str(source),
+            "staged_path": str(target),
+            "sandbox_path": f"/workspace/staged_uploads/{token}/{target_name}",
+            "kind": "directory" if is_bundle else "file",
+        }
+        if binding := _selected_resource_binding(context, file_id=file_id):
+            staged_file.update(binding)
+        staged_files.append(staged_file)
 
     return {
         "ok": len(staged_files) > 0 and not missing,
         "staged_files": staged_files,
         "missing_file_ids": missing,
+        "rejected_file_ids": [],
     }
 
 
@@ -127,8 +146,8 @@ def stage_catalog_resources(
             unavailable.append(
                 {
                     "resource_id": resource_id,
-                    "original_name": str(resource.get("original_name") or ""),
-                    "source_type": str(resource.get("source_type") or ""),
+                    "original_name": _safe_path_token(str(resource.get("original_name") or "")),
+                    "source_type": _bounded_metadata_string(resource.get("source_type"), 512),
                     "reason": "file_not_in_upload_store",
                 }
             )
@@ -137,17 +156,16 @@ def stage_catalog_resources(
         token = _safe_path_token(resource_id)
         target = stage_root / token / target_name
         is_bundle = _stage_source_into(source, target)
-        staged.append(
-            {
-                "resource_id": resource_id,
-                "original_name": str(resource.get("original_name") or target_name),
-                "resource_kind": str(resource.get("resource_kind") or ""),
-                "source_path": str(source),
-                "staged_path": str(target),
-                "sandbox_path": f"/workspace/staged_resources/{token}/{target_name}",
-                "kind": "directory" if is_bundle else "file",
-            }
-        )
+        staged_resource = {
+            "resource_id": resource_id,
+            "original_name": target_name,
+            "source_path": str(source),
+            "staged_path": str(target),
+            "sandbox_path": f"/workspace/staged_resources/{token}/{target_name}",
+            "kind": "directory" if is_bundle else "file",
+        }
+        staged_resource.update(_catalog_resource_binding(resource, resource_id=resource_id))
+        staged.append(staged_resource)
     return {
         "ok": len(staged) > 0,
         "staged_resources": staged,
@@ -221,7 +239,9 @@ def stage_git_repo_for_analysis_text(
     )
 
 
-def stage_artifact(context: AgentRunContext, *, artifact_id: str = "", path: str = "") -> dict[str, Any]:
+def stage_artifact(
+    context: AgentRunContext, *, artifact_id: str = "", path: str = ""
+) -> dict[str, Any]:
     descriptor = _find_artifact_descriptor(context, artifact_id=artifact_id, path=path)
     if descriptor is None:
         return {
@@ -493,9 +513,7 @@ def _public_subagent_descriptors(
         )
         if tool_names:
             descriptor["tool_names"] = tool_names
-        response_format = _public_response_format_descriptor(
-            subagent.get("response_format")
-        )
+        response_format = _public_response_format_descriptor(subagent.get("response_format"))
         if response_format:
             descriptor["response_format"] = response_format
         descriptors.append(descriptor)
@@ -560,9 +578,12 @@ def _find_artifact_descriptor(
     target_artifact_id = artifact_id.strip()
     target_path = path.strip()
     for descriptor in context.resource_descriptors:
-        if str(descriptor.get("type") or "artifact") != "artifact":
+        if str(descriptor.get("type") or "").strip() != "artifact":
             continue
-        if target_artifact_id and str(descriptor.get("artifact_id") or "").strip() == target_artifact_id:
+        if (
+            target_artifact_id
+            and str(descriptor.get("artifact_id") or "").strip() == target_artifact_id
+        ):
             return dict(descriptor)
         if target_path:
             candidate_paths = {
@@ -646,11 +667,7 @@ def _public_stage_result(result: dict[str, Any]) -> dict[str, Any]:
             public[key] = _public_descriptor(value)
             continue
         if key in {"staged_files", "staged_resources"} and isinstance(value, list):
-            public[key] = [
-                _public_staged_file(item)
-                for item in value
-                if isinstance(item, dict)
-            ]
+            public[key] = [_public_staged_file(item) for item in value if isinstance(item, dict)]
             continue
         if key == "staged_path":
             public[key] = _sandbox_path_or_value(result, value)
@@ -698,6 +715,386 @@ def _unique_upload_file_ids(file_ids: Iterable[str] | str) -> list[str]:
 
 def _safe_upload_file_id(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_.:-]+", value))
+
+
+def _selected_resource_binding(
+    context: AgentRunContext,
+    *,
+    file_id: str,
+) -> dict[str, Any]:
+    """Return the bounded catalog binding stamped on this selected run input.
+
+    The control plane is authoritative for the top-level checksum and byte size.
+    Nested CALPHAD metadata remains explicitly owner-declared and is filtered a
+    second time here so a malformed/legacy job cannot expose arbitrary metadata.
+    """
+    for descriptor in context.resource_descriptors:
+        if str(descriptor.get("type") or "").strip() != "selected_resource":
+            continue
+        if str(descriptor.get("binding_schema") or "").strip() != "ultra.selected_resource.v1":
+            continue
+        if str(descriptor.get("authority") or "").strip() != "control_resource_catalog":
+            continue
+        resource_id = str(descriptor.get("resource_id") or "").strip()
+        descriptor_file_id = str(descriptor.get("file_id") or "").strip()
+        if resource_id != file_id or descriptor_file_id != file_id:
+            continue
+
+        return _bounded_catalog_binding(
+            descriptor,
+            resource_id=resource_id,
+            binding_schema="ultra.selected_resource.v1",
+        )
+    return {}
+
+
+def _catalog_resource_binding(resource: dict[str, Any], *, resource_id: str) -> dict[str, Any]:
+    """Project a run-resolved catalog record into a bounded staging binding."""
+    return _bounded_catalog_binding(
+        resource,
+        resource_id=resource_id,
+        binding_schema="ultra.catalog_resource.v1",
+    )
+
+
+def _bounded_catalog_binding(
+    descriptor: dict[str, Any],
+    *,
+    resource_id: str,
+    binding_schema: str,
+) -> dict[str, Any]:
+    binding: dict[str, Any] = {
+        "resource_id": resource_id,
+        "binding_schema": binding_schema,
+        "binding_authority": "control_resource_catalog",
+    }
+    sha256 = str(descriptor.get("sha256") or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", sha256):
+        binding["sha256"] = sha256
+    # A directory identity is catalog authority only when it is bound to the
+    # same immutable top-level digest. Reconstruct the closed object instead of
+    # forwarding arbitrary nested fields from a legacy/malformed descriptor.
+    tree_identity = _bounded_tree_identity(descriptor.get("tree_identity"), sha256)
+    if tree_identity:
+        binding["tree_identity"] = tree_identity
+    sensor_format = _bounded_sensor_format(descriptor.get("sensor_format"), sha256)
+    if sensor_format:
+        binding["sensor_format"] = sensor_format
+    size_bytes = _safe_nonnegative_int(descriptor.get("size_bytes"))
+    if size_bytes is not None:
+        binding["size_bytes"] = size_bytes
+    original_name = _bounded_metadata_string(descriptor.get("original_name"), 512)
+    if original_name:
+        binding["original_name"] = _safe_path_token(original_name) or "upload"
+    database_format = str(descriptor.get("database_format") or "").strip()
+    if database_format in {"tdb", "dat"}:
+        binding["database_format"] = database_format
+    for key in ("content_type", "resource_kind", "source_type"):
+        value = _bounded_metadata_string(descriptor.get(key), 512)
+        if value:
+            binding[key] = value
+    governance_scope = str(descriptor.get("calphad_governance_scope") or "").strip()
+    if governance_scope in {"owner_validation", "read_only_usage"}:
+        binding["calphad_governance_scope"] = governance_scope
+    metadata = _public_selected_resource_metadata(descriptor.get("metadata"))
+    if metadata:
+        binding["metadata"] = metadata
+    return binding
+
+
+def public_selected_resource_descriptor(value: Any) -> dict[str, Any]:
+    """Return a bounded selected-resource descriptor safe for delegated context."""
+
+    if not isinstance(value, dict):
+        return {}
+    if str(value.get("type") or "").strip() != "selected_resource":
+        return {}
+    if str(value.get("binding_schema") or "").strip() != "ultra.selected_resource.v1":
+        return {}
+    if str(value.get("authority") or "").strip() != "control_resource_catalog":
+        return {}
+    resource_id = str(value.get("resource_id") or "").strip()
+    file_id = str(value.get("file_id") or "").strip()
+    if not resource_id or resource_id != file_id or not _safe_upload_file_id(resource_id):
+        return {}
+    sha256 = str(value.get("sha256") or "").strip().lower()
+    size_bytes = _safe_nonnegative_int(value.get("size_bytes"))
+    if not re.fullmatch(r"[0-9a-f]{64}", sha256) or size_bytes is None:
+        return {}
+    public: dict[str, Any] = {
+        "type": "selected_resource",
+        "binding_schema": "ultra.selected_resource.v1",
+        "authority": "control_resource_catalog",
+        "resource_id": resource_id,
+        "file_id": file_id,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+    }
+    # Preserve the server-authored directory identity across delegation. The
+    # validator requires it to match the catalog's top-level digest.
+    tree_identity = _bounded_tree_identity(value.get("tree_identity"), sha256)
+    if tree_identity:
+        public["tree_identity"] = tree_identity
+    sensor_format = _bounded_sensor_format(value.get("sensor_format"), sha256)
+    if sensor_format:
+        public["sensor_format"] = sensor_format
+    for key in ("original_name", "content_type", "resource_kind", "source_type"):
+        text = _bounded_metadata_string(value.get(key), 512)
+        if text:
+            public[key] = text
+    database_format = str(value.get("database_format") or "").strip()
+    if database_format in {"tdb", "dat"}:
+        public["database_format"] = database_format
+    governance_scope = str(value.get("calphad_governance_scope") or "").strip()
+    if governance_scope in {"owner_validation", "read_only_usage"}:
+        public["calphad_governance_scope"] = governance_scope
+    metadata = _public_selected_resource_metadata(value.get("metadata"))
+    if metadata:
+        public["metadata"] = metadata
+    return public
+
+
+def _bounded_tree_identity(value: Any, expected_sha256: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        return {}
+    manifest_sha256 = str(value.get("tree_manifest_sha256") or "").strip().lower()
+    if manifest_sha256 != expected_sha256:
+        return {}
+    expected = {
+        "schema": "ultra.resource-tree-identity.v1",
+        "authority": "control_resource_catalog",
+        "canonical_json_schema": "ultra.canonical-json.v1",
+        "tree_manifest_schema": "ultra.tree-manifest.v1",
+        "tree_manifest_path": ".ultra/tree-manifest.json",
+        "tree_manifest_sha256": expected_sha256,
+        "scope": "all_regular_files_except_tree_manifest",
+    }
+    if any(
+        str(value.get(key) or "").strip() != expected_value
+        for key, expected_value in expected.items()
+    ):
+        return {}
+    return expected
+
+
+def _bounded_sensor_format(value: Any, expected_sha256: str) -> dict[str, Any]:
+    """Reconstruct the closed server-authored sensor marker bound to catalog bytes."""
+
+    if not isinstance(value, dict) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        return {}
+    expected = {
+        "schema": "ultra.sensor-format-binding.v1",
+        "authority": "control_resource_catalog",
+        "container": "zarr",
+        "sensor_schema": "ultra.sensor-series.v1",
+        "resource_sha256": expected_sha256,
+        "detection": "bounded_root_attributes",
+    }
+    if set(value) != set(expected) or any(
+        str(value.get(key) or "").strip() != expected_value
+        for key, expected_value in expected.items()
+    ):
+        return {}
+    return expected
+
+
+def _public_selected_resource_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    public: dict[str, Any] = {}
+    source = _safe_owner_declaration(value.get("source"), max_length=1024)
+    if source:
+        public["source"] = source
+    for key in ("caption", "description"):
+        scalar = _bounded_metadata_scalar(value.get(key), max_string=4096)
+        if scalar is not None:
+            public[key] = scalar
+    descriptors = _bounded_string_list(value.get("scientific_descriptors"), max_items=256)
+    if descriptors:
+        public["scientific_descriptors"] = descriptors
+    calphad = _public_selected_calphad_metadata(value.get("calphad"))
+    if calphad:
+        public["calphad"] = calphad
+    return public
+
+
+def _public_selected_calphad_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    public: dict[str, Any] = {}
+    # These are owner declarations, not validation or content-identity claims.
+    for key, max_length in (
+        ("database_id", 512),
+        ("database_name", 512),
+        ("database_version", 256),
+        ("title", 1024),
+        ("citation", 1024),
+        ("publication_doi", 512),
+        ("source", 1024),
+        ("authorized_scope", 512),
+        ("assessment_scope", 1024),
+        ("reference_state", 512),
+    ):
+        declaration = _safe_owner_declaration(value.get(key), max_length=max_length)
+        if declaration:
+            public[key] = declaration
+    for key in ("license_id", "license_identifier"):
+        identifier = _safe_license_identifier(value.get(key))
+        if identifier:
+            public[key] = identifier
+    for key in ("component_count", "phase_count"):
+        scalar = _bounded_metadata_scalar(value.get(key), max_string=0)
+        if isinstance(scalar, int | float) and not isinstance(scalar, bool):
+            public[key] = scalar
+    for key in ("source_uri", "license_uri"):
+        uri = _safe_public_metadata_uri(value.get(key))
+        if uri:
+            public[key] = uri
+    for key in ("authors", "components", "elements", "phases", "required_provenance_fields"):
+        items = _bounded_string_list(value.get(key), max_items=256)
+        if items:
+            public[key] = items
+    temperature_limits = _bounded_scalar_list(value.get("tdb_temperature_limits_K"), max_items=64)
+    if temperature_limits:
+        public["tdb_temperature_limits_K"] = temperature_limits
+    pressure_limits = _bounded_scalar_list(value.get("assessment_pressure_limits_Pa"), max_items=2)
+    if pressure_limits:
+        public["assessment_pressure_limits_Pa"] = pressure_limits
+    limits = value.get("limits")
+    if isinstance(limits, dict):
+        safe_limits: dict[str, Any] = {}
+        for key in (
+            "max_source_bytes",
+            "max_file_bytes",
+            "max_result_bytes",
+            "max_components",
+            "max_phases",
+            "max_conditions",
+            "max_grid_points",
+            "temperature_min_k",
+            "temperature_max_k",
+            "pressure_min_pa",
+            "pressure_max_pa",
+            "composition_min",
+            "composition_max",
+            "total_amount_mol",
+        ):
+            scalar = _bounded_metadata_scalar(limits.get(key), max_string=512)
+            if scalar is not None:
+                safe_limits[key] = scalar
+        if safe_limits:
+            public["limits"] = safe_limits
+    if public:
+        public["declaration_authority"] = "resource_owner"
+    return public
+
+
+def _bounded_metadata_string(value: Any, max_length: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value or len(value) > max_length:
+        return ""
+    return value
+
+
+def _bounded_metadata_scalar(value: Any, *, max_string: int) -> Any | None:
+    if isinstance(value, str):
+        return _bounded_metadata_string(value, max_string) or None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return value
+    return None
+
+
+def _bounded_string_list(value: Any, *, max_items: int) -> list[str]:
+    if not isinstance(value, list | tuple) or not value or len(value) > max_items:
+        return []
+    items = [_bounded_metadata_string(item, 512) for item in value]
+    if any(not item for item in items):
+        return []
+    return items
+
+
+def _bounded_scalar_list(value: Any, *, max_items: int) -> list[Any]:
+    if not isinstance(value, list | tuple) or not value or len(value) > max_items:
+        return []
+    items = [_bounded_metadata_scalar(item, max_string=512) for item in value]
+    if any(item is None for item in items):
+        return []
+    return items
+
+
+def _safe_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value >= 0 and value.is_integer():
+        return int(value)
+    return None
+
+
+def _safe_public_metadata_uri(value: Any) -> str:
+    raw = _bounded_metadata_string(value, 4096)
+    if not raw:
+        return ""
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return raw
+
+
+def _safe_license_identifier(value: Any) -> str:
+    identifier = _safe_owner_declaration(value, max_length=128)
+    if not identifier or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+/() -]{0,127}", identifier):
+        return ""
+    return identifier
+
+
+def _safe_owner_declaration(value: Any, *, max_length: int) -> str:
+    text = _bounded_metadata_string(value, max_length)
+    if not text or any(character in text for character in "\r\n\t"):
+        return ""
+    lowered = text.lower()
+    sensitive_phrases = (
+        "password",
+        "api key",
+        "api_key",
+        "access token",
+        "bearer ",
+        "secret",
+        "credential",
+        "confidential",
+        "proprietary",
+        "non-disclosure",
+        "nondisclosure",
+        "do not distribute",
+        "private license",
+        "license agreement",
+        "license text",
+        "commercial terms",
+        "vendor terms",
+        "eula",
+    )
+    if any(phrase in lowered for phrase in sensitive_phrases):
+        return ""
+    if "://" in text or lowered.startswith("www."):
+        return _safe_public_metadata_uri(text)
+    return text
 
 
 def _parse_upload_file_ids(value: str) -> list[str]:
@@ -767,7 +1164,7 @@ def _find_uploaded_file(file_id: str, roots: tuple[Path, ...]) -> Path | None:
 def _uploaded_original_name(filename: str, file_id: str) -> str:
     prefix = f"{file_id}__"
     if filename.startswith(prefix):
-        return _safe_path_token(filename[len(prefix):]) or "upload"
+        return _safe_path_token(filename[len(prefix) :]) or "upload"
     return _safe_path_token(filename) or "upload"
 
 

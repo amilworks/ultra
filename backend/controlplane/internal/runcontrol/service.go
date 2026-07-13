@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -91,20 +92,22 @@ type workerHeartbeatReader interface {
 const heartbeatStatusWriteInterval = 15 * time.Second
 
 type Service struct {
-	store            Store
-	bus              eventbus.Bus
-	now              func() time.Time
-	runtimeFacts     RuntimeFactsConfig
-	idempotencyLocks [64]sync.Mutex
-	eventIDLocks     [128]sync.Mutex
+	store                Store
+	bus                  eventbus.Bus
+	now                  func() time.Time
+	runtimeFacts         RuntimeFactsConfig
+	calphadRuntimePolicy CalphadRuntimePolicyConfig
+	idempotencyLocks     [64]sync.Mutex
+	eventIDLocks         [128]sync.Mutex
 
 	heartbeatMu           sync.Mutex
 	heartbeatStatusWrites map[string]time.Time
 }
 
 type ServiceOptions struct {
-	Now          func() time.Time
-	RuntimeFacts RuntimeFactsConfig
+	Now                  func() time.Time
+	RuntimeFacts         RuntimeFactsConfig
+	CalphadRuntimePolicy CalphadRuntimePolicyConfig
 }
 
 type RuntimeFactsConfig struct {
@@ -116,6 +119,13 @@ type RuntimeFactsConfig struct {
 	DefaultUserTimezone string
 }
 
+// CalphadRuntimePolicyConfig is control-plane configuration, never request
+// metadata. A blank or mutable image reference intentionally stamps no policy,
+// causing CALPHAD validation append to fail closed.
+type CalphadRuntimePolicyConfig struct {
+	RuntimeImageID string
+}
+
 type CreateThreadRequest struct {
 	UserID          string
 	Title           string
@@ -124,24 +134,26 @@ type CreateThreadRequest struct {
 }
 
 type CreateRunRequest struct {
-	ThreadID            string
-	UserID              string
-	Goal                string
-	Messages            []domain.ThreadMessage
-	FileIDs             []string
-	ResourceURIs        []string
-	DatasetURIs         []string
-	SelectedToolNames   []string
-	KnowledgeContext    domain.JSONMap
-	WorkflowHint        domain.JSONMap
-	SelectionContext    domain.JSONMap
-	ReasoningMode       string
-	Budgets             domain.JSONMap
-	Benchmark           domain.JSONMap
-	ResourceDescriptors []domain.JSONMap
-	IdempotencyKey      string
-	Metadata            domain.JSONMap
-	JobMetadata         domain.JSONMap
+	ThreadID              string
+	UserID                string
+	Goal                  string
+	EvaluationProfile     domain.EvaluationProfile
+	RemoteMutationIntents []domain.RemoteMutationIntent
+	Messages              []domain.ThreadMessage
+	FileIDs               []string
+	ResourceURIs          []string
+	DatasetURIs           []string
+	SelectedToolNames     []string
+	KnowledgeContext      domain.JSONMap
+	WorkflowHint          domain.JSONMap
+	SelectionContext      domain.JSONMap
+	ReasoningMode         string
+	Budgets               domain.JSONMap
+	Benchmark             domain.JSONMap
+	ResourceDescriptors   []domain.JSONMap
+	IdempotencyKey        string
+	Metadata              domain.JSONMap
+	JobMetadata           domain.JSONMap
 }
 
 type CancelRunRequest struct {
@@ -227,6 +239,7 @@ func NewServiceWithOptions(store Store, bus eventbus.Bus, opts ServiceOptions) *
 		bus:                   bus,
 		now:                   now,
 		runtimeFacts:          normalizeRuntimeFactsConfig(opts.RuntimeFacts),
+		calphadRuntimePolicy:  normalizeCalphadRuntimePolicyConfig(opts.CalphadRuntimePolicy),
 		heartbeatStatusWrites: map[string]time.Time{},
 	}
 }
@@ -241,6 +254,27 @@ func (s *Service) CreateThread(ctx context.Context, req CreateThreadRequest) (do
 }
 
 func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.RunRecord, error) {
+	evaluationProfile, valid := domain.ParseEvaluationProfile(string(req.EvaluationProfile))
+	if !valid {
+		return domain.RunRecord{}, ErrInvalidEvaluationProfile
+	}
+	req.EvaluationProfile = evaluationProfile
+	remoteMutationIntents, valid := domain.ParseRemoteMutationIntents(
+		domain.RemoteMutationIntentStrings(req.RemoteMutationIntents),
+	)
+	if !valid {
+		return domain.RunRecord{}, ErrInvalidRemoteMutationIntent
+	}
+	if evaluationProfile != "" && len(remoteMutationIntents) > 0 {
+		return domain.RunRecord{}, ErrEvaluationProfileMutation
+	}
+	req.RemoteMutationIntents = remoteMutationIntents
+	// Artifact descriptors are capabilities over the shared artifact store. No
+	// caller (including an internal caller that bypasses HTTP) may mint one in a
+	// CreateRunRequest. Server-resolved prior artifacts are merged only after the
+	// thread and owning user have been established below. A missing type is also
+	// rejected because older runtimes interpreted it as an implicit artifact.
+	req.ResourceDescriptors = withoutCallerArtifactDescriptors(req.ResourceDescriptors)
 	metadata := buildRunMetadata(req)
 	idempotencyKey := normalizedIdempotencyKey(req, metadata)
 	if idempotencyKey != "" {
@@ -252,18 +286,25 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 			return domain.RunRecord{}, err
 		}
 		if found {
+			if !storedEvaluationProfileMatches(existing, req.EvaluationProfile) {
+				return domain.RunRecord{}, store.ErrConflict
+			}
+			if !storedRemoteMutationIntentsMatch(existing, req.RemoteMutationIntents) {
+				return domain.RunRecord{}, store.ErrConflict
+			}
 			reconciled, err := s.reconcileStoredTerminalEvent(ctx, existing)
 			if err != nil {
 				return domain.RunRecord{}, err
 			}
 			if reconciled.Status == domain.RunStatusQueued {
-				return s.recoverQueuedRunDispatch(ctx, reconciled, req)
+				return s.recoverQueuedRunDispatch(ctx, reconciled)
 			}
 			return reconciled, nil
 		}
 		metadata["idempotency_key"] = idempotencyKey
 	}
 	s.stampRuntimeFacts(metadata)
+	s.stampCalphadRuntimePolicy(metadata)
 	workflowKind := workflowKindForRun(req, metadata)
 	thread, err := s.store.GetThread(ctx, req.ThreadID)
 	if err != nil {
@@ -273,7 +314,9 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 	if err != nil {
 		return domain.RunRecord{}, err
 	}
-	priorResourceDescriptors, err := s.priorArtifactResourceDescriptors(ctx, existingMessages)
+	priorResourceDescriptors, err := s.priorArtifactResourceDescriptors(
+		ctx, req.UserID, existingMessages,
+	)
 	if err != nil {
 		return domain.RunRecord{}, err
 	}
@@ -313,7 +356,7 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 	if err != nil {
 		return domain.RunRecord{}, err
 	}
-	job := jobForRun(run, req, resourceDescriptors, metadata)
+	job := jobForRun(run, req, resourceDescriptors)
 	if err := s.bus.PublishJob(ctx, job); err != nil {
 		return s.markRunDispatchFailed(ctx, run, err)
 	}
@@ -322,26 +365,28 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 	return run, nil
 }
 
-func jobForRun(run domain.RunRecord, req CreateRunRequest, resourceDescriptors []domain.JSONMap, metadata domain.JSONMap) eventbus.Job {
+func jobForRun(run domain.RunRecord, req CreateRunRequest, resourceDescriptors []domain.JSONMap) eventbus.Job {
 	return eventbus.Job{
-		RunID:               run.RunID,
-		ThreadID:            run.ThreadID,
-		UserID:              run.UserID,
-		Goal:                run.Goal,
-		WorkflowKind:        run.WorkflowKind,
-		Messages:            copyMessages(req.Messages),
-		FileIDs:             copyStrings(req.FileIDs),
-		ResourceURIs:        copyStrings(req.ResourceURIs),
-		DatasetURIs:         copyStrings(req.DatasetURIs),
-		SelectedToolNames:   copyStrings(req.SelectedToolNames),
-		KnowledgeContext:    cloneMap(req.KnowledgeContext),
-		WorkflowHint:        cloneMap(req.WorkflowHint),
-		SelectionContext:    cloneMap(req.SelectionContext),
-		ReasoningMode:       req.ReasoningMode,
-		Budgets:             cloneMap(req.Budgets),
-		Benchmark:           cloneMap(req.Benchmark),
-		ResourceDescriptors: copyJSONMaps(resourceDescriptors),
-		Metadata:            mergeJobMetadata(metadata, req.JobMetadata),
+		RunID:                 run.RunID,
+		ThreadID:              run.ThreadID,
+		UserID:                run.UserID,
+		Goal:                  run.Goal,
+		WorkflowKind:          run.WorkflowKind,
+		EvaluationProfile:     storedEvaluationProfile(run),
+		RemoteMutationIntents: append([]domain.RemoteMutationIntent(nil), req.RemoteMutationIntents...),
+		Messages:              copyMessages(req.Messages),
+		FileIDs:               copyStrings(req.FileIDs),
+		ResourceURIs:          copyStrings(req.ResourceURIs),
+		DatasetURIs:           copyStrings(req.DatasetURIs),
+		SelectedToolNames:     copyStrings(req.SelectedToolNames),
+		KnowledgeContext:      cloneMap(req.KnowledgeContext),
+		WorkflowHint:          cloneMap(req.WorkflowHint),
+		SelectionContext:      cloneMap(req.SelectionContext),
+		ReasoningMode:         req.ReasoningMode,
+		Budgets:               cloneMap(req.Budgets),
+		Benchmark:             cloneMap(req.Benchmark),
+		ResourceDescriptors:   copyJSONMaps(resourceDescriptors),
+		Metadata:              mergeJobMetadata(metadataWithStoredEvaluationProfile(run, run.Metadata), req.JobMetadata),
 	}
 }
 
@@ -353,41 +398,50 @@ func (s *Service) recoverConflictingIdempotentRun(ctx context.Context, req Creat
 	if !found {
 		return domain.RunRecord{}, store.ErrConflict
 	}
+	if !storedEvaluationProfileMatches(existing, req.EvaluationProfile) {
+		return domain.RunRecord{}, store.ErrConflict
+	}
+	if !storedRemoteMutationIntentsMatch(existing, req.RemoteMutationIntents) {
+		return domain.RunRecord{}, store.ErrConflict
+	}
 	reconciled, err := s.reconcileStoredTerminalEvent(ctx, existing)
 	if err != nil {
 		return domain.RunRecord{}, err
 	}
 	if reconciled.Status == domain.RunStatusQueued {
-		return s.recoverQueuedRunDispatch(ctx, reconciled, req)
+		return s.recoverQueuedRunDispatch(ctx, reconciled)
 	}
 	return reconciled, nil
 }
 
 func jobForStoredRun(run domain.RunRecord, messages []domain.ThreadMessage, metadata domain.JSONMap, dispatchID string) eventbus.Job {
+	metadata = metadataWithStoredEvaluationProfile(run, metadata)
 	return eventbus.Job{
-		RunID:               run.RunID,
-		DispatchID:          dispatchID,
-		ThreadID:            run.ThreadID,
-		UserID:              run.UserID,
-		Goal:                run.Goal,
-		WorkflowKind:        run.WorkflowKind,
-		Messages:            copyMessages(messages),
-		FileIDs:             metadataStringSlice(metadata["file_ids"]),
-		ResourceURIs:        metadataStringSlice(metadata["resource_uris"]),
-		DatasetURIs:         metadataStringSlice(metadata["dataset_uris"]),
-		SelectedToolNames:   metadataStringSlice(metadata["selected_tool_names"]),
-		KnowledgeContext:    metadataJSONMap(metadata["knowledge_context"]),
-		WorkflowHint:        metadataJSONMap(metadata["workflow_hint"]),
-		SelectionContext:    metadataJSONMap(metadata["selection_context"]),
-		ReasoningMode:       strings.TrimSpace(anyString(metadata["reasoning_mode"])),
-		Budgets:             metadataJSONMap(metadata["budgets"]),
-		Benchmark:           metadataJSONMap(metadata["benchmark"]),
-		ResourceDescriptors: metadataResourceDescriptors(metadata),
-		Metadata:            metadata,
+		RunID:                 run.RunID,
+		DispatchID:            dispatchID,
+		ThreadID:              run.ThreadID,
+		UserID:                run.UserID,
+		Goal:                  run.Goal,
+		WorkflowKind:          run.WorkflowKind,
+		EvaluationProfile:     storedEvaluationProfile(run),
+		RemoteMutationIntents: storedRemoteMutationIntents(run),
+		Messages:              copyMessages(messages),
+		FileIDs:               metadataStringSlice(metadata["file_ids"]),
+		ResourceURIs:          metadataStringSlice(metadata["resource_uris"]),
+		DatasetURIs:           metadataStringSlice(metadata["dataset_uris"]),
+		SelectedToolNames:     metadataStringSlice(metadata["selected_tool_names"]),
+		KnowledgeContext:      metadataJSONMap(metadata["knowledge_context"]),
+		WorkflowHint:          metadataJSONMap(metadata["workflow_hint"]),
+		SelectionContext:      metadataJSONMap(metadata["selection_context"]),
+		ReasoningMode:         strings.TrimSpace(anyString(metadata["reasoning_mode"])),
+		Budgets:               metadataJSONMap(metadata["budgets"]),
+		Benchmark:             metadataJSONMap(metadata["benchmark"]),
+		ResourceDescriptors:   metadataResourceDescriptors(metadata),
+		Metadata:              metadata,
 	}
 }
 
-func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRecord, req CreateRunRequest) (domain.RunRecord, error) {
+func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRecord) (domain.RunRecord, error) {
 	if runJobDispatched(run) {
 		return run, nil
 	}
@@ -414,7 +468,16 @@ func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRe
 			return domain.RunRecord{}, err
 		}
 	}
-	job := jobForRun(run, req, metadataResourceDescriptors(run.Metadata), cloneMap(run.Metadata))
+	messages, err := s.store.ListThreadMessages(ctx, run.ThreadID)
+	if err != nil {
+		return domain.RunRecord{}, err
+	}
+	job := jobForStoredRun(
+		run,
+		messagesForRunRequeue(messages, run),
+		cloneMap(run.Metadata),
+		"",
+	)
 	if err := s.bus.PublishJob(ctx, job); err != nil {
 		return s.markRunDispatchFailed(ctx, run, err)
 	}
@@ -426,7 +489,9 @@ func (s *Service) recoverQueuedRunDispatch(ctx context.Context, run domain.RunRe
 func mergeJobMetadata(metadata domain.JSONMap, jobMetadata domain.JSONMap) domain.JSONMap {
 	merged := cloneMap(metadata)
 	for key, value := range jobMetadata {
-		if key == "runtime_facts" {
+		if key == "runtime_facts" || key == domain.EvaluationProfileMetadataKey ||
+			key == domain.RemoteMutationIntentsMetadataKey ||
+			key == domain.BisqueAccountBindingMetadataKey {
 			continue
 		}
 		merged[key] = value
@@ -442,6 +507,7 @@ func (s *Service) appendAcceptedRunEvent(ctx context.Context, run domain.RunReco
 		return existing, nil
 	}
 	payload := domain.JSONMap{"status": string(run.Status), "workflow_kind": run.WorkflowKind}
+	attestEvaluationProfile(payload, run)
 	if recoveredDispatch {
 		payload["recovered_dispatch"] = true
 	}
@@ -566,6 +632,10 @@ func (s *Service) RequeueRun(ctx context.Context, req RequeueRunRequest) (domain
 	metadata["requeue_reason"] = reason
 	metadata["requeue_dispatch_id"] = dispatchID
 	for key, value := range req.Metadata {
+		if key == domain.EvaluationProfileMetadataKey || key == domain.RemoteMutationIntentsMetadataKey ||
+			key == domain.BisqueAccountBindingMetadataKey {
+			continue
+		}
 		metadata[key] = value
 	}
 	job := jobForStoredRun(
@@ -583,6 +653,10 @@ func (s *Service) RequeueRun(ctx context.Context, req RequeueRunRequest) (domain
 	}
 	run = s.markRunJobDispatched(ctx, run)
 	payload := cloneMap(req.Metadata)
+	delete(payload, domain.EvaluationProfileMetadataKey)
+	delete(payload, domain.RemoteMutationIntentsMetadataKey)
+	delete(payload, domain.BisqueAccountBindingMetadataKey)
+	attestEvaluationProfile(payload, run)
 	payload["reason"] = reason
 	payload["dispatch_id"] = dispatchID
 	if leaseEvicted {
@@ -1427,12 +1501,22 @@ func failedDispatchRunEventID(runID string) string {
 	return "evt_" + runID + "_dispatch_failed"
 }
 
-func (s *Service) priorArtifactResourceDescriptors(ctx context.Context, existingMessages []domain.ThreadMessage) ([]domain.JSONMap, error) {
+func (s *Service) priorArtifactResourceDescriptors(
+	ctx context.Context,
+	userID string,
+	existingMessages []domain.ThreadMessage,
+) ([]domain.JSONMap, error) {
 	runIDs := priorRunIDsFromMessages(existingMessages)
 	descriptors := make([]domain.JSONMap, 0)
 	seen := map[string]bool{}
 	for _, runID := range runIDs {
-		artifacts, err := s.store.ListRunArtifacts(ctx, runID, 100)
+		artifacts, err := s.store.ListRunArtifactsForUser(ctx, runID, userID, 100)
+		if errors.Is(err, store.ErrNotFound) {
+			// A transcript can contain caller-authored run ids. Treat an unreadable
+			// id exactly like an absent prior run instead of leaking its artifacts or
+			// failing the new run based on whether the guessed id exists.
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1447,6 +1531,18 @@ func (s *Service) priorArtifactResourceDescriptors(ctx context.Context, existing
 		}
 	}
 	return descriptors, nil
+}
+
+func withoutCallerArtifactDescriptors(descriptors []domain.JSONMap) []domain.JSONMap {
+	filtered := make([]domain.JSONMap, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		descriptorType := strings.TrimSpace(anyString(descriptor["type"]))
+		if descriptorType == "" || descriptorType == "artifact" {
+			continue
+		}
+		filtered = append(filtered, cloneMap(descriptor))
+	}
+	return filtered
 }
 
 func priorRunIDsFromMessages(messages []domain.ThreadMessage) []string {
@@ -1548,6 +1644,15 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 	for key, value := range req.Metadata {
 		metadata[key] = value
 	}
+	delete(metadata, domain.EvaluationProfileMetadataKey)
+	delete(metadata, domain.RemoteMutationIntentsMetadataKey)
+	if req.EvaluationProfile != "" {
+		metadata[domain.EvaluationProfileMetadataKey] = string(req.EvaluationProfile)
+	}
+	if len(req.RemoteMutationIntents) > 0 {
+		metadata[domain.RemoteMutationIntentsMetadataKey] =
+			domain.RemoteMutationIntentStrings(req.RemoteMutationIntents)
+	}
 	if len(req.FileIDs) > 0 {
 		metadata["file_ids"] = copyStrings(req.FileIDs)
 	}
@@ -1584,6 +1689,27 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 	return metadata
 }
 
+func storedRemoteMutationIntents(run domain.RunRecord) []domain.RemoteMutationIntent {
+	intents, valid := domain.RemoteMutationIntentsFromMetadata(run.Metadata)
+	if !valid {
+		return nil
+	}
+	return intents
+}
+
+func storedRemoteMutationIntentsMatch(run domain.RunRecord, requested []domain.RemoteMutationIntent) bool {
+	stored, valid := domain.RemoteMutationIntentsFromMetadata(run.Metadata)
+	if !valid || len(stored) != len(requested) {
+		return false
+	}
+	for index := range stored {
+		if stored[index] != requested[index] {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeRuntimeFactsConfig(config RuntimeFactsConfig) RuntimeFactsConfig {
 	config.ProductName = strings.TrimSpace(config.ProductName)
 	if config.ProductName == "" {
@@ -1607,6 +1733,38 @@ func normalizeRuntimeFactsConfig(config RuntimeFactsConfig) RuntimeFactsConfig {
 		config.DefaultUserTimezone = "UTC"
 	}
 	return config
+}
+
+var calphadRuntimeImageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+func normalizeCalphadRuntimePolicyConfig(config CalphadRuntimePolicyConfig) CalphadRuntimePolicyConfig {
+	config.RuntimeImageID = strings.ToLower(strings.TrimSpace(config.RuntimeImageID))
+	if !calphadRuntimeImageIDPattern.MatchString(config.RuntimeImageID) {
+		config.RuntimeImageID = ""
+	}
+	return config
+}
+
+func (s *Service) stampCalphadRuntimePolicy(metadata domain.JSONMap) {
+	// This key is reserved even when the server has no configured policy. A
+	// caller-provided copy must never become authorization for a worker claim.
+	delete(metadata, domain.CalphadRuntimePolicyMetadataKey)
+	if s.calphadRuntimePolicy.RuntimeImageID == "" {
+		return
+	}
+	metadata[domain.CalphadRuntimePolicyMetadataKey] = domain.JSONMap{
+		"schema_version":            domain.CalphadRuntimePolicySchema,
+		"authority":                 "control_plane",
+		"runtime_image_id":          s.calphadRuntimePolicy.RuntimeImageID,
+		"pycalphad_version":         domain.CalphadPycalphadVersion,
+		"network":                   domain.CalphadRuntimeNetwork,
+		"no_new_privileges":         true,
+		"read_only_root_filesystem": true,
+		"cap_drop_all":              true,
+		"cpus_at_most":              domain.CalphadRuntimeCPUsAtMost,
+		"memory_bytes_at_most":      domain.CalphadRuntimeMemoryBytesAtMost,
+		"pids_at_most":              domain.CalphadRuntimePIDsAtMost,
+	}
 }
 
 func (s *Service) stampRuntimeFacts(metadata domain.JSONMap) {

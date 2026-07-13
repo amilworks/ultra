@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.cookiejar
 import json
+import math
 import os
+import posixpath
 import re
+import stat
 import time
 import uuid
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib import parse, request
+
+from ultra_deepagents.materials.trace_binding import (
+    MATERIALS_TYPED_SCIENTIFIC_TOOL_OPERATIONS,
+)
+from ultra_deepagents.materials.validation import (
+    canonical_record_json,
+    parse_assessment_record,
+)
 
 RARESPOT_SKILL_NAME = "prairie-dog-detection"
 MEDICAL_VOLUME_SKILL_NAME = "medical-volume-slices"
@@ -21,6 +33,41 @@ SKILL_SCRIPT_PATHS = {
     MEDICAL_VOLUME_SCRIPT_PATH: MEDICAL_VOLUME_SKILL_NAME,
 }
 SKILL_READ_PATTERN = re.compile(r"/skills/([A-Za-z0-9_.-]+)/SKILL\.md\b")
+MATERIALS_SKILL_NAMES = {
+    "computational-materials",
+    "materials-characterization-advanced",
+    "materials-characterization",
+    "materials-crystal-plasticity",
+    "materials-mechanics-degradation",
+    "materials-processing-kinetics",
+    "materials-sensor-data",
+    "materials-structure-thermo",
+}
+# First-party, closed-schema materials operations are execution evidence in their own
+# right. Requiring a generic sandbox ``execute`` call for these paths would both
+# mis-score the preferred integration and encourage the model to rediscover stable
+# scientific APIs in a code runner. Inventory/inspection-only and static support tools
+# are deliberately absent.
+MATERIALS_TYPED_SCIENTIFIC_TOOL_NAMES = set(MATERIALS_TYPED_SCIENTIFIC_TOOL_OPERATIONS)
+MATERIALS_TYPED_SCIENTIFIC_OPERATIONS = frozenset(
+    operation
+    for operations in MATERIALS_TYPED_SCIENTIFIC_TOOL_OPERATIONS.values()
+    for operation in operations
+)
+MATERIALS_VALIDATION_FILENAME = "materials_validation.json"
+MATERIALS_VALIDATION_MAX_BYTES = 1_000_000
+CALPHAD_UPLOAD_MANIFEST_MAX_BYTES = 1_000_000
+CALPHAD_UPLOAD_MANIFEST_SCHEMA = "1"
+IMMUTABLE_RUNTIME_IMAGE_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+TYPED_MATERIALS_EVIDENCE_ID_PATTERN = re.compile(r"^typed-([a-z0-9][a-z0-9_.-]*):([0-9a-f]{64})$")
+TYPED_MATERIALS_EVIDENCE_PATH_PATTERNS = (
+    re.compile(r"^outputs/calphad/(equilibrium|scheil)/([0-9a-f]{64})\.json$"),
+    re.compile(
+        r"^outputs/kinetics/"
+        r"(transport_coefficients|single_phase_diffusion_1d|binary_precipitation_kwn)/"
+        r"([0-9a-f]{64})\.json$"
+    ),
+)
 
 
 class ControlPlaneClient:
@@ -62,6 +109,7 @@ class ControlPlaneClient:
         idempotency_key: str,
         file_ids: list[str] | None = None,
         workflow_hint: dict[str, Any] | None = None,
+        selection_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "goal": goal,
@@ -71,6 +119,8 @@ class ControlPlaneClient:
         }
         if workflow_hint:
             body["workflow_hint"] = workflow_hint
+        if selection_context:
+            body["selection_context"] = selection_context
         payload = self._request(
             "POST",
             f"/v2/threads/{parse.quote(thread_id, safe='')}/runs",
@@ -95,6 +145,18 @@ class ControlPlaneClient:
             if file_id:
                 file_ids.append(file_id)
         return file_ids
+
+    def patch_resource_metadata(
+        self,
+        file_id: str,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        payload = self._request(
+            "PATCH",
+            f"/v2/resources/{parse.quote(file_id, safe='')}",
+            {"metadata": metadata},
+        )
+        return _unwrap(payload, "resource")
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         return _unwrap(self._request("GET", f"/v2/runs/{parse.quote(run_id, safe='')}"), "run")
@@ -175,7 +237,7 @@ class ControlPlaneClient:
         req.add_header("X-Ultra-Role", "researcher")
         self._add_extra_headers(req)
         with self.opener.open(req, timeout=self.timeout_seconds) as response:
-            return response.read()
+            return cast(bytes, response.read())
 
     def _request_multipart(self, path: str, files: list[Path]) -> dict[str, Any]:
         boundary = f"----ultra-trace-{uuid.uuid4().hex}"
@@ -241,6 +303,7 @@ def summarize_run_trace(
     terminal_ms: float | None = None,
     download_checks: dict[str, bool] | None = None,
     linked_artifacts: list[dict[str, Any]] | None = None,
+    materials_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks = download_checks or {}
     event_counts = Counter(str(event.get("event_kind") or "") for event in events)
@@ -261,6 +324,9 @@ def summarize_run_trace(
     context_tool_hygiene = _context_tool_output_hygiene(events)
     delegation = _delegation_evidence(events)
     async_delegation = _async_delegation_evidence(events)
+    tool_lifecycle = _tool_lifecycle_evidence(events)
+    token_usage = _token_usage_evidence(events)
+    mutation_intents, mutation_scope_valid = _run_remote_mutation_intents(run)
     return {
         "run_id": run.get("run_id"),
         "thread_id": run.get("thread_id"),
@@ -278,6 +344,10 @@ def summarize_run_trace(
         "context_tool_hygiene": context_tool_hygiene,
         "delegation": delegation,
         "async_delegation": async_delegation,
+        "tool_lifecycle": tool_lifecycle,
+        "token_usage": token_usage,
+        "remote_mutation_intents": mutation_intents,
+        "remote_mutation_scope_valid": mutation_scope_valid,
         "event_counts": dict(sorted(event_counts.items())),
         "accepted_ms": _round_ms(accepted_ms),
         "first_event_ms": _round_ms(first_event_ms),
@@ -294,6 +364,7 @@ def summarize_run_trace(
         "artifact_count": len(artifacts),
         "artifacts": [_summarize_artifact(artifact, checks) for artifact in artifacts],
         "linked_artifacts": linked_artifacts or [],
+        "materials_validation": materials_validation,
     }
 
 
@@ -308,7 +379,9 @@ def trace_prompt(
     timeout_seconds: float = 300.0,
     poll_interval_seconds: float = 1.0,
     verify_downloads: bool = False,
+    materials_evidence_dir: Path | None = None,
     workflow_hint: dict[str, Any] | None = None,
+    selection_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     key = idempotency_key or f"trace-{uuid.uuid4().hex}"
     accepted_started = time.monotonic()
@@ -319,6 +392,7 @@ def trace_prompt(
         idempotency_key=key,
         file_ids=file_ids,
         workflow_hint=workflow_hint,
+        selection_context=selection_context,
     )
     accepted_ms = (time.monotonic() - accepted_started) * 1000
     run_id = str(run["run_id"])
@@ -369,6 +443,11 @@ def trace_prompt(
             events = final_events
     artifacts = client.list_run_artifacts(run_id)
     downloads = _verify_downloads(client, artifacts) if verify_downloads else {}
+    materials_validation = _inspect_materials_validation_artifact(
+        client,
+        artifacts,
+        evidence_dir=materials_evidence_dir,
+    )
     linked_artifacts = (
         _summarize_linked_artifacts(client, str(run.get("response_text") or ""))
         if verify_downloads
@@ -388,8 +467,220 @@ def trace_prompt(
         terminal_ms=terminal_ms,
         download_checks=downloads,
         linked_artifacts=linked_artifacts,
+        materials_validation=materials_validation,
     )
     return run, summary
+
+
+def _read_bounded_regular_file(path: Path, *, maximum: int, label: str) -> bytes:
+    resolved = path.expanduser()
+    try:
+        before = resolved.lstat()
+    except OSError as exc:
+        raise ValueError(f"{label} is missing or unreadable") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
+        raise ValueError(f"{label} must be a bounded regular non-symlink file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} could not be opened securely") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != before.st_size
+        ):
+            raise ValueError(f"{label} changed while it was opened")
+        remaining = opened.st_size
+        chunks: list[bytes] = []
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError(f"{label} was truncated while it was read")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError(f"{label} grew while it was read")
+        after = os.fstat(descriptor)
+        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns):
+            raise ValueError(f"{label} changed while it was read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
+def _load_unique_json_object(payload: bytes, *, label: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{label} contains duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=reject_duplicates,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ValueError(f"{label} contains non-finite number {token}")
+            ),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is not finite UTF-8 JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _bounded_manifest_text(record: dict[str, Any], key: str, maximum: int) -> str:
+    value = str(record.get(key) or "").strip()
+    if not value or len(value) > maximum or any(ord(character) < 32 for character in value):
+        raise ValueError(f"CALPHAD upload manifest has invalid {key}")
+    return value
+
+
+def _calphad_upload_metadata_from_manifest(
+    upload_path: str | Path,
+    manifest_path: str | Path,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    upload = Path(upload_path).expanduser().absolute()
+    upload_payload = _read_bounded_regular_file(
+        upload,
+        maximum=64 * 1024 * 1024,
+        label="CALPHAD upload",
+    )
+    manifest_file = Path(manifest_path).expanduser().absolute()
+    manifest_payload = _read_bounded_regular_file(
+        manifest_file,
+        maximum=CALPHAD_UPLOAD_MANIFEST_MAX_BYTES,
+        label="CALPHAD upload manifest",
+    )
+    manifest = _load_unique_json_object(manifest_payload, label="CALPHAD upload manifest")
+    databases = manifest.get("databases")
+    if manifest.get("schema_version") != CALPHAD_UPLOAD_MANIFEST_SCHEMA or not isinstance(
+        databases, list
+    ):
+        raise ValueError("CALPHAD upload manifest schema is invalid")
+    matching = [
+        record
+        for record in databases
+        if isinstance(record, dict) and record.get("filename") == upload.name
+    ]
+    if len(matching) != 1:
+        raise ValueError("CALPHAD upload manifest must bind the upload filename exactly once")
+    record = matching[0]
+    expected_format = {".tdb": "tdb", ".dat": "dat"}.get(upload.suffix.casefold())
+    if expected_format is None:
+        raise ValueError("CALPHAD upload must use a readable .tdb or .dat suffix")
+    if str(record.get("format") or "").strip().casefold() != expected_format:
+        raise ValueError("CALPHAD upload manifest format does not match the upload suffix")
+    upload_sha256 = hashlib.sha256(upload_payload).hexdigest()
+    if record.get("sha256") != upload_sha256 or record.get("size_bytes") != len(upload_payload):
+        raise ValueError("CALPHAD upload bytes do not match the reviewed manifest")
+    database_id = _bounded_manifest_text(record, "database_id", 512)
+    source = _bounded_manifest_text(record, "source_uri", 2048)
+    source_uri = parse.urlsplit(source)
+    if source_uri.scheme != "https" or not source_uri.hostname or source_uri.username:
+        raise ValueError("CALPHAD upload manifest source_uri must be a public HTTPS URI")
+    license_id = _bounded_manifest_text(record, "license_id", 256)
+    assessment_scope = _bounded_manifest_text(record, "assessment_scope", 4096)
+    reference_state = _bounded_manifest_text(record, "reference_state", 1024)
+    raw_limits = record.get("tdb_temperature_limits_K")
+    if not isinstance(raw_limits, list) or len(raw_limits) != 2:
+        raise ValueError("CALPHAD upload manifest must declare two temperature limits")
+    limits: list[float] = []
+    for value in raw_limits:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("CALPHAD upload temperature limits must be finite numbers")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("CALPHAD upload temperature limits must be finite numbers")
+        limits.append(number)
+    if limits[0] <= 0 or limits[0] >= limits[1] or limits[1] > 10_000:
+        raise ValueError("CALPHAD upload temperature limits are invalid")
+    raw_pressure_limits = record.get("assessment_pressure_limits_Pa")
+    if not isinstance(raw_pressure_limits, list) or len(raw_pressure_limits) != 2:
+        raise ValueError("CALPHAD upload manifest must declare two pressure limits")
+    pressure_limits: list[float] = []
+    for value in raw_pressure_limits:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("CALPHAD upload pressure limits must be finite numbers")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("CALPHAD upload pressure limits must be finite numbers")
+        pressure_limits.append(number)
+    if (
+        pressure_limits[0] < 1e-9
+        or pressure_limits[0] > pressure_limits[1]
+        or pressure_limits[1] > 1e12
+    ):
+        raise ValueError("CALPHAD upload pressure limits are invalid")
+    metadata = {
+        "calphad": {
+            "database_id": database_id,
+            "source": source,
+            "license_id": license_id,
+            "assessment_scope": assessment_scope,
+            "reference_state": reference_state,
+            "tdb_temperature_limits_K": limits,
+            "assessment_pressure_limits_Pa": pressure_limits,
+            "declaration_authority": "resource_owner",
+        }
+    }
+    evidence = {
+        "file_name": upload.name,
+        "file_sha256": upload_sha256,
+        "file_size_bytes": len(upload_payload),
+        "manifest_sha256": hashlib.sha256(manifest_payload).hexdigest(),
+        "database_id": database_id,
+        "database_format": expected_format,
+        "assessment_pressure_limits_Pa": pressure_limits,
+        "declaration_authority": "resource_owner",
+    }
+    return metadata, evidence
+
+
+def _apply_upload_calphad_manifests(
+    client: ControlPlaneClient,
+    *,
+    upload_paths: list[str | Path],
+    file_ids: list[str],
+    manifest_paths: list[str | Path],
+) -> list[dict[str, Any]]:
+    if not manifest_paths:
+        return []
+    if len(manifest_paths) != len(upload_paths):
+        raise ValueError("each CALPHAD upload manifest must correspond to one --upload-file")
+    if len(file_ids) != len(upload_paths):
+        raise ValueError("the control plane did not return one file_id per CALPHAD upload")
+    applied: list[dict[str, Any]] = []
+    for upload_path, file_id, manifest_path in zip(
+        upload_paths, file_ids, manifest_paths, strict=True
+    ):
+        metadata, evidence = _calphad_upload_metadata_from_manifest(
+            upload_path,
+            manifest_path,
+        )
+        resource = client.patch_resource_metadata(file_id, metadata)
+        resource_metadata = resource.get("metadata")
+        actual_calphad = (
+            resource_metadata.get("calphad") if isinstance(resource_metadata, dict) else None
+        )
+        expected_calphad = metadata["calphad"]
+        if not isinstance(actual_calphad, dict) or any(
+            actual_calphad.get(key) != value for key, value in expected_calphad.items()
+        ):
+            raise ValueError("control plane did not persist exact CALPHAD owner declarations")
+        applied.append({**evidence, "file_id": file_id})
+    return applied
 
 
 def run_trace(args: argparse.Namespace) -> dict[str, Any]:
@@ -400,10 +691,17 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
     client = ControlPlaneClient(args.base_url, **client_kwargs)
     bisque_session = _login_bisque_from_args(client, args)
     file_ids = client.upload_files(args.upload_file) if args.upload_file else []
+    calphad_upload_provenance = _apply_upload_calphad_manifests(
+        client,
+        upload_paths=args.upload_file,
+        file_ids=file_ids,
+        manifest_paths=getattr(args, "upload_calphad_manifest", []),
+    )
     thread = client.create_thread(title=args.title)
     thread_id = str(thread["thread_id"])
     transcript = [{"role": "user", "content": args.prompt}]
     workflow_hint = _workflow_hint_from_args(args)
+    selection_context = _selection_context_from_args(args)
     first_run, first_summary = trace_prompt(
         client,
         thread_id=thread_id,
@@ -413,7 +711,9 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
         timeout_seconds=args.timeout,
         poll_interval_seconds=args.poll_interval,
         verify_downloads=args.verify_downloads,
+        materials_evidence_dir=getattr(args, "materials_evidence_dir", None),
         workflow_hint=workflow_hint,
+        selection_context=selection_context,
     )
     result: dict[str, Any] = {
         "thread_id": thread_id,
@@ -421,6 +721,8 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
     }
     if file_ids:
         result["uploaded_file_ids"] = file_ids
+    if calphad_upload_provenance:
+        result["upload_calphad_provenance"] = calphad_upload_provenance
     if bisque_session:
         result["bisque_session"] = bisque_session
     followups = _followup_prompts(args)
@@ -441,7 +743,9 @@ def run_trace(args: argparse.Namespace) -> dict[str, Any]:
             timeout_seconds=args.timeout,
             poll_interval_seconds=args.poll_interval,
             verify_downloads=args.verify_downloads,
+            materials_evidence_dir=getattr(args, "materials_evidence_dir", None),
             workflow_hint=workflow_hint,
+            selection_context=selection_context,
         )
         followup_summaries.append(followup_summary)
     if followup_summaries:
@@ -490,10 +794,427 @@ def evaluate_trace_requirements(
                     continue
                 artifact_id = artifact.get("artifact_id") or "<unknown>"
                 issues.append(
-                    f"{label} run {run_id} artifact {artifact_id} "
-                    "download verification failed"
+                    f"{label} run {run_id} artifact {artifact_id} download verification failed"
                 )
     return issues
+
+
+def _typed_completions_match_validation(
+    completions: list[dict[str, Any]],
+    validation: Any,
+) -> bool:
+    """Bind each typed completion to this turn's exact validation evidence."""
+
+    if not completions:
+        return True
+    if not isinstance(validation, dict) or validation.get("valid") is not True:
+        return False
+    raw_bindings = validation.get("typed_result_bindings")
+    if not isinstance(raw_bindings, list):
+        return False
+    validation_bindings = {
+        (
+            str(binding.get("operation") or "").strip().lower(),
+            str(binding.get("result_artifact_sha256") or "").strip().lower(),
+        )
+        for binding in raw_bindings
+        if isinstance(binding, dict)
+    }
+    record_sha256 = str(validation.get("record_sha256") or "").strip().lower()
+    for completion in completions:
+        tool_name = str(completion.get("tool_name") or "").strip()
+        tool_call_id = str(completion.get("tool_call_id") or "").strip()
+        operation = str(completion.get("scientific_operation") or "").strip().lower()
+        result_sha256 = str(completion.get("result_artifact_sha256") or "").strip().lower()
+        allowed_operations = MATERIALS_TYPED_SCIENTIFIC_TOOL_OPERATIONS.get(tool_name, ())
+        if (
+            not tool_call_id
+            or completion.get("scientific_result_ok") is not True
+            or operation not in allowed_operations
+            or (operation, result_sha256) not in validation_bindings
+        ):
+            return False
+        emitted_validation_sha256 = (
+            str(completion.get("materials_validation_artifact_sha256") or "").strip().lower()
+        )
+        if emitted_validation_sha256 and emitted_validation_sha256 != record_sha256:
+            return False
+    return True
+
+
+def evaluate_materials_trace_quality(
+    result: dict[str, Any],
+    *,
+    min_score: float = 9.0,
+) -> dict[str, Any]:
+    """Evaluate whether materials traces contain auditable scientific evidence.
+
+    This checks trace completeness and the internal consistency of the generated
+    validation record. It does not replace an independent MatTools verifier.
+    """
+
+    turns = _trace_turn_summaries(result)
+    issues: list[str] = []
+    if not turns:
+        return {
+            "score": 0.0,
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+        }
+
+    terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
+    lifecycle_records: list[dict[str, Any]] = []
+    for turn in turns:
+        lifecycle = turn.get("tool_lifecycle")
+        lifecycle_records.append(
+            cast(dict[str, Any], lifecycle) if isinstance(lifecycle, dict) else {}
+        )
+    matched_skill_read_completion = all(
+        any(
+            str(record.get("skill") or "") in MATERIALS_SKILL_NAMES
+            for record in (lifecycle.get("matched_skill_read_completions") or [])
+            if isinstance(record, dict)
+        )
+        for lifecycle in lifecycle_records
+    )
+    execute_completion_records = [
+        [
+            record
+            for record in (lifecycle.get("matched_execute_completions") or [])
+            if isinstance(record, dict)
+        ]
+        for lifecycle in lifecycle_records
+    ]
+    typed_scientific_completion_records = [
+        [
+            record
+            for record in (lifecycle.get("matched_typed_scientific_completions") or [])
+            if isinstance(record, dict)
+        ]
+        for lifecycle in lifecycle_records
+    ]
+    matched_execute_completion = all(bool(records) for records in execute_completion_records)
+    matched_typed_scientific_completion = all(
+        bool(records) for records in typed_scientific_completion_records
+    )
+    validations = [turn.get("materials_validation") for turn in turns]
+    typed_validation_binding_by_turn = [
+        _typed_completions_match_validation(records, validation)
+        for records, validation in zip(
+            typed_scientific_completion_records,
+            validations,
+            strict=True,
+        )
+    ]
+    typed_validation_binding_ok = all(typed_validation_binding_by_turn)
+    scientific_execution_present = all(
+        bool(execute_records or typed_records)
+        for execute_records, typed_records in zip(
+            execute_completion_records,
+            typed_scientific_completion_records,
+            strict=True,
+        )
+    )
+    # A typed scientific operation does not need a redundant generic execute call.
+    # If an execute call is present, however, it must still carry an immutable image
+    # identity and a successful exit; a typed success must not mask a bad side path.
+    execute_runtime_image_attested = all(
+        all(record.get("runtime_image_digest_matched") is True for record in records)
+        for records in execute_completion_records
+    )
+    execute_exit_code_ok = all(
+        all(record.get("exit_code_ok") is True for record in records)
+        for records in execute_completion_records
+    )
+    no_failed_tool_terminal = all(
+        int(lifecycle.get("failed_terminal_count") or 0) == 0 for lifecycle in lifecycle_records
+    )
+    execution_ok = (
+        scientific_execution_present
+        and typed_validation_binding_ok
+        and execute_runtime_image_attested
+        and execute_exit_code_ok
+        and no_failed_tool_terminal
+    )
+    validation_present = all(isinstance(record, dict) for record in validations)
+    validation_valid = validation_present and all(
+        bool(record.get("valid")) for record in validations if isinstance(record, dict)
+    )
+    first_party_scientific_record_valid = (
+        validation_valid
+        and typed_validation_binding_ok
+        and all(
+            record.get("scientific_status") == "verified"
+            for record in validations
+            if isinstance(record, dict)
+        )
+    )
+    no_silent_success = validation_valid and all(
+        record.get("silent_success") is False for record in validations if isinstance(record, dict)
+    )
+    hashed_evidence = validation_valid and all(
+        int(record.get("evidence_count") or 0) > 0 and record.get("evidence_verified") is True
+        for record in validations
+        if isinstance(record, dict)
+    )
+    durable_validation_artifact = all(
+        any(
+            _durable_artifact_output_path(artifact) == f"outputs/{MATERIALS_VALIDATION_FILENAME}"
+            for artifact in _summary_artifacts(turn)
+        )
+        for turn in turns
+    )
+    remote_mutation_scope_valid = all(
+        turn.get("remote_mutation_scope_valid") is True for turn in turns
+    )
+    remote_mutation_aligned = remote_mutation_scope_valid and all(
+        _remote_mutations_match_scope(turn) for turn in turns
+    )
+
+    if not scientific_execution_present:
+        execution_issue = (
+            "materials result has no matched successful execute completion or "
+            "typed scientific operation"
+        )
+    elif not execute_runtime_image_attested:
+        execution_issue = "completed execute call lacks a matched immutable runtime image digest"
+    elif not execute_exit_code_ok:
+        execution_issue = "completed execute call did not report exit code 0"
+    elif not no_failed_tool_terminal:
+        execution_issue = "trace contains a failed tool terminal"
+    elif not typed_validation_binding_ok:
+        execution_issue = (
+            "typed scientific completion is not bound to compatible validation evidence by "
+            "tool-call ID, operation, and result-artifact SHA-256"
+        )
+    else:
+        execution_issue = "materials result has no successful code-execution evidence"
+
+    score = 0.0
+    signals = (
+        (terminal_ok, 1.0, "one or more orchestration turns did not succeed"),
+        (
+            matched_skill_read_completion,
+            1.5,
+            "a focused materials skill read has no matched successful completion",
+        ),
+        (execution_ok, 1.0, execution_issue),
+        (validation_present, 1.5, "materials_validation.json was not inspected"),
+        (validation_valid, 1.5, "materials validation record is invalid or self-inconsistent"),
+        (
+            first_party_scientific_record_valid,
+            1.5,
+            "first-party scientific record does not self-report verified status",
+        ),
+        (no_silent_success, 1.0, "a succeeded run contains a silent scientific failure"),
+        (hashed_evidence, 0.75, "validation checks have no content-addressed evidence"),
+        (durable_validation_artifact, 0.75, "validation record is not a durable run artifact"),
+        (
+            remote_mutation_aligned,
+            0.5,
+            "a remote BisQue mutation exceeded the immutable run capability",
+        ),
+    )
+    for passed, weight, issue in signals:
+        if passed:
+            score += weight
+        else:
+            issues.append(issue)
+    maximum_score = sum(weight for _, weight, _ in signals)
+    rounded_score = round(min(score / maximum_score * 10.0, 10.0), 1)
+    return {
+        "score": rounded_score,
+        "passed": rounded_score >= min_score and not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "quality_scope": "trace_and_first_party_validation_record",
+        "independent_scientific_verification": False,
+        "scientific_conclusion_verified": False,
+        "signals": {
+            "terminal_ok": terminal_ok,
+            "materials_skill": matched_skill_read_completion,
+            "matched_skill_read_completion": matched_skill_read_completion,
+            "code_execution": execution_ok,
+            "first_party_scientific_execution": execution_ok,
+            "scientific_execution_present": scientific_execution_present,
+            "matched_execute_completion": matched_execute_completion,
+            "matched_typed_scientific_completion": matched_typed_scientific_completion,
+            "typed_validation_binding_ok": typed_validation_binding_ok,
+            "typed_validation_binding_by_turn": typed_validation_binding_by_turn,
+            "execute_runtime_image_attested": execute_runtime_image_attested,
+            "execute_exit_code_ok": execute_exit_code_ok,
+            "no_failed_tool_terminal": no_failed_tool_terminal,
+            "validation_present": validation_present,
+            "validation_valid": validation_valid,
+            "first_party_scientific_record_valid": first_party_scientific_record_valid,
+            "no_silent_success": no_silent_success,
+            "hashed_evidence": hashed_evidence,
+            "durable_validation_artifact": durable_validation_artifact,
+            "remote_mutation_aligned": remote_mutation_aligned,
+            "remote_mutation_scope_valid": remote_mutation_scope_valid,
+        },
+    }
+
+
+def evaluate_materials_trace_performance(
+    result: dict[str, Any],
+    *,
+    max_model_calls_per_turn: int = 8,
+    max_input_tokens_per_turn: int = 250_000,
+    max_tool_calls_per_turn: int = 12,
+    max_input_amplification_vs_peak: float = 6.0,
+    max_terminal_ms_per_turn: float | None = None,
+) -> dict[str, Any]:
+    """Apply explicit live-run tripwires to bounded materials workflows.
+
+    These are orchestration-regression limits, not scientific tolerances or global
+    platform quotas. They intentionally use unique usage-event IDs so transport
+    redelivery cannot create a false regression.
+    """
+
+    if max_model_calls_per_turn < 1:
+        raise ValueError("max_model_calls_per_turn must be >= 1")
+    if max_input_tokens_per_turn < 1:
+        raise ValueError("max_input_tokens_per_turn must be >= 1")
+    if max_tool_calls_per_turn < 1:
+        raise ValueError("max_tool_calls_per_turn must be >= 1")
+    if not math.isfinite(max_input_amplification_vs_peak) or (
+        max_input_amplification_vs_peak < 1.0
+    ):
+        raise ValueError("max_input_amplification_vs_peak must be finite and >= 1")
+    if max_terminal_ms_per_turn is not None and (
+        not math.isfinite(max_terminal_ms_per_turn) or max_terminal_ms_per_turn <= 0
+    ):
+        raise ValueError("max_terminal_ms_per_turn must be finite and > 0 when set")
+
+    turns = _trace_turn_summaries(result)
+    if not turns:
+        return {
+            "passed": False,
+            "issues": ["no trace turns found"],
+            "turn_count": 0,
+            "limits": {
+                "max_model_calls_per_turn": max_model_calls_per_turn,
+                "max_input_tokens_per_turn": max_input_tokens_per_turn,
+                "max_tool_calls_per_turn": max_tool_calls_per_turn,
+                "max_input_amplification_vs_peak": max_input_amplification_vs_peak,
+                "max_terminal_ms_per_turn": max_terminal_ms_per_turn,
+            },
+            "turns": [],
+        }
+
+    issues: list[str] = []
+    observations: list[dict[str, Any]] = []
+    for index, turn in enumerate(turns, start=1):
+        usage = turn.get("token_usage")
+        lifecycle = turn.get("tool_lifecycle")
+        usage_record = usage if isinstance(usage, dict) else {}
+        lifecycle_record = lifecycle if isinstance(lifecycle, dict) else {}
+        model_calls = int(usage_record.get("model_call_count") or 0)
+        input_tokens = int(usage_record.get("input_tokens") or 0)
+        amplification = float(usage_record.get("input_amplification_vs_peak") or 0.0)
+        invalid_usage = int(usage_record.get("invalid_event_count") or 0)
+        conflicting_usage = int(usage_record.get("conflicting_duplicate_count") or 0)
+        tool_calls = int(lifecycle_record.get("started_call_count") or 0)
+        failed_tools = int(lifecycle_record.get("failed_terminal_count") or 0)
+        terminal_ms_value = turn.get("terminal_ms")
+        terminal_ms = (
+            float(terminal_ms_value)
+            if isinstance(terminal_ms_value, int | float)
+            and not isinstance(terminal_ms_value, bool)
+            else None
+        )
+        label = f"turn[{index}]"
+        if model_calls == 0:
+            issues.append(f"{label} has no valid token-usage evidence")
+        if invalid_usage:
+            issues.append(f"{label} has {invalid_usage} malformed token-usage event(s)")
+        if conflicting_usage:
+            issues.append(
+                f"{label} has {conflicting_usage} conflicting duplicate token-usage event(s)"
+            )
+        if model_calls > max_model_calls_per_turn:
+            issues.append(
+                f"{label} model_call_count={model_calls} exceeds {max_model_calls_per_turn}"
+            )
+        if input_tokens > max_input_tokens_per_turn:
+            issues.append(
+                f"{label} input_tokens={input_tokens} exceeds {max_input_tokens_per_turn}"
+            )
+        if tool_calls > max_tool_calls_per_turn:
+            issues.append(f"{label} tool_call_count={tool_calls} exceeds {max_tool_calls_per_turn}")
+        if amplification > max_input_amplification_vs_peak:
+            issues.append(
+                f"{label} input_amplification_vs_peak={amplification} exceeds "
+                f"{max_input_amplification_vs_peak}"
+            )
+        if failed_tools:
+            issues.append(f"{label} has {failed_tools} failed tool terminal(s)")
+        if (
+            max_terminal_ms_per_turn is not None
+            and terminal_ms is not None
+            and terminal_ms > max_terminal_ms_per_turn
+        ):
+            issues.append(f"{label} terminal_ms={terminal_ms} exceeds {max_terminal_ms_per_turn}")
+        observations.append(
+            {
+                "run_id": turn.get("run_id"),
+                "model_call_count": model_calls,
+                "input_tokens": input_tokens,
+                "output_tokens": int(usage_record.get("output_tokens") or 0),
+                "peak_input_tokens": int(usage_record.get("peak_input_tokens") or 0),
+                "input_amplification_vs_peak": amplification,
+                "tool_call_count": tool_calls,
+                "failed_tool_terminal_count": failed_tools,
+                "terminal_ms": terminal_ms,
+            }
+        )
+
+    return {
+        "passed": not issues,
+        "issues": issues,
+        "turn_count": len(turns),
+        "scope": "bounded_materials_orchestration_regression",
+        "limits": {
+            "max_model_calls_per_turn": max_model_calls_per_turn,
+            "max_input_tokens_per_turn": max_input_tokens_per_turn,
+            "max_tool_calls_per_turn": max_tool_calls_per_turn,
+            "max_input_amplification_vs_peak": max_input_amplification_vs_peak,
+            "max_terminal_ms_per_turn": max_terminal_ms_per_turn,
+        },
+        "turns": observations,
+    }
+
+
+def _remote_mutations_match_scope(turn: dict[str, Any]) -> bool:
+    tool_names = {str(name) for name in (turn.get("tool_names") or [])}
+    upload_called = bool(
+        tool_names.intersection({"bisque_upload_files", "bisque_upload_workspace_files"})
+    )
+    dataset_called = "bisque_create_dataset" in tool_names
+    if not upload_called and not dataset_called:
+        return True
+    allowed = {str(item) for item in (turn.get("remote_mutation_intents") or [])}
+    return (not upload_called or "bisque.upload" in allowed) and (
+        not dataset_called or "bisque.create_dataset" in allowed
+    )
+
+
+def _run_remote_mutation_intents(run: dict[str, Any]) -> tuple[list[str], bool]:
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return [], True
+    raw = metadata.get("remote_mutation_intents")
+    if raw is None:
+        return [], True
+    if not isinstance(raw, list):
+        return [], False
+    allowed_order = ("bisque.upload", "bisque.create_dataset")
+    if any(not isinstance(item, str) or item not in allowed_order for item in raw):
+        return [], False
+    requested = set(raw)
+    return [item for item in allowed_order if item in requested], len(requested) == len(raw)
 
 
 def _labeled_trace_turn_summaries(result: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
@@ -538,9 +1259,7 @@ def evaluate_paper_trace_quality(
     tools_ok = _turns_have_paper_tools(turns)
     figures_ok = _trace_has_figure_evidence(turns)
     technical_ok = _trace_has_technical_content(turns)
-    followup_context_ok = len(turns) <= 1 or all(
-        _has_any_paper_tool(turn) for turn in turns[1:]
-    )
+    followup_context_ok = len(turns) <= 1 or all(_has_any_paper_tool(turn) for turn in turns[1:])
     no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
 
     score = 0.0
@@ -832,9 +1551,7 @@ def evaluate_tool_capability_trace_quality(
         for tool_name in (turn.get("tool_names") or [])
         if str(tool_name).strip()
     }
-    missing_used_tools = sorted(
-        used_tool_names - declared_names - allowed_without_manifest
-    )
+    missing_used_tools = sorted(used_tool_names - declared_names - allowed_without_manifest)
 
     terminal_ok = all(turn.get("status") == "succeeded" for turn in turns)
     manifest_called = bool(manifests)
@@ -938,9 +1655,7 @@ def evaluate_delegation_trace_quality(
     response_ok = all(int(turn.get("response_len") or 0) >= 500 for turn in turns)
     task_declared = "task" in builtin_names
     subagents_declared = bool(available_subagents)
-    scoped_subagent_context_tools_declared = bool(
-        scoped_subagent_context_tools
-    ) and all(
+    scoped_subagent_context_tools_declared = bool(scoped_subagent_context_tools) and all(
         _context_staging_tool_names().issubset(set(tool_names))
         for tool_names in scoped_subagent_context_tools.values()
     )
@@ -1068,7 +1783,9 @@ def evaluate_async_delegation_trace_quality(
             if str(status).lower() in ASYNC_FAILURE_STATUSES
         }
     )
-    no_async_failures = int(async_delegation.get("failure_count") or 0) == 0 and not failure_statuses
+    no_async_failures = (
+        int(async_delegation.get("failure_count") or 0) == 0 and not failure_statuses
+    )
     no_recoveries = all(int(turn.get("idle_recovery_count") or 0) == 0 for turn in turns)
 
     score = 0.0
@@ -1258,9 +1975,7 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     available_subagents = _manifest_available_subagent_names(manifests)
     available_async_subagents = _manifest_available_async_subagent_names(manifests)
     scoped_subagent_context_tools = _manifest_scoped_subagent_context_tool_names(manifests)
-    scoped_subagent_context_tools_declared = bool(
-        scoped_subagent_context_tools
-    ) and all(
+    scoped_subagent_context_tools_declared = bool(scoped_subagent_context_tools) and all(
         _context_staging_tool_names().issubset(set(tool_names))
         for tool_names in scoped_subagent_context_tools.values()
     )
@@ -1284,13 +1999,11 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
         "task",
     } | ASYNC_TASK_TOOL_NAMES
     storage_routes = [
-        manifest.get("storage")
+        cast(dict[str, Any], storage)
         for manifest in manifests
-        if isinstance(manifest.get("storage"), dict)
+        if isinstance((storage := manifest.get("storage")), dict)
     ]
-    outputs_declared = any(
-        storage.get("outputs") == "/outputs" for storage in storage_routes
-    )
+    outputs_declared = any(storage.get("outputs") == "/outputs" for storage in storage_routes)
     skills_used = bool(skill_reads or skill_scripts)
     rarespot_skill_available = RARESPOT_SKILL_NAME in set(available_skills)
     rarespot_skill_used = _skill_records_have_skill(skill_scripts, RARESPOT_SKILL_NAME)
@@ -1301,8 +2014,12 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             "used": "execute" in all_used_tools,
         },
         "filesystem": {
-            "available": bool({"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & builtin_names),
-            "used": bool({"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & all_used_tools),
+            "available": bool(
+                {"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & builtin_names
+            ),
+            "used": bool(
+                {"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & all_used_tools
+            ),
         },
         "context_staging": {
             "available": bool(_context_staging_tool_names() & registered_names),
@@ -1317,8 +2034,7 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
             "used": skills_used,
         },
         "delegation": {
-            "available": "task" in builtin_names
-            and bool(available_subagents),
+            "available": "task" in builtin_names and bool(available_subagents),
             "used": bool(delegation["subagent_names"]),
             "available_subagents": sorted(available_subagents),
             "scoped_subagent_context_tools_declared": scoped_subagent_context_tools_declared,
@@ -1347,21 +2063,15 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
     turn_summaries: list[dict[str, Any]] = []
     for index, turn in enumerate(turns):
         turn_manifests = [
-            raw
-            for raw in (turn.get("tool_capability_manifests") or [])
-            if isinstance(raw, dict)
+            raw for raw in (turn.get("tool_capability_manifests") or []) if isinstance(raw, dict)
         ]
         turn_available_subagents = _manifest_available_subagent_names(turn_manifests)
-        turn_available_async_subagents = _manifest_available_async_subagent_names(
+        turn_available_async_subagents = _manifest_available_async_subagent_names(turn_manifests)
+        turn_scoped_subagent_context_tools = _manifest_scoped_subagent_context_tool_names(
             turn_manifests
         )
-        turn_scoped_subagent_context_tools = (
-            _manifest_scoped_subagent_context_tool_names(turn_manifests)
-        )
         turn_tools = {
-            str(tool_name)
-            for tool_name in (turn.get("tool_names") or [])
-            if str(tool_name).strip()
+            str(tool_name) for tool_name in (turn.get("tool_names") or []) if str(tool_name).strip()
         }
         turn_skills_used = bool(turn.get("skill_reads") or turn.get("skill_scripts"))
         turn_summaries.append(
@@ -1375,15 +2085,17 @@ def build_tool_capability_matrix(result: dict[str, Any]) -> dict[str, Any]:
                 "artifact_count": len(
                     [
                         raw
-                        for raw in [*(turn.get("artifacts") or []), *(turn.get("linked_artifacts") or [])]
+                        for raw in [
+                            *(turn.get("artifacts") or []),
+                            *(turn.get("linked_artifacts") or []),
+                        ]
                         if isinstance(raw, dict)
                     ]
                 ),
                 "capabilities": {
                     "sandbox_execution": "execute" in turn_tools,
                     "filesystem": bool(
-                        {"write_file", "read_file", "edit_file", "ls", "glob", "grep"}
-                        & turn_tools
+                        {"write_file", "read_file", "edit_file", "ls", "glob", "grep"} & turn_tools
                     ),
                     "context_staging": bool(_context_staging_tool_names() & turn_tools),
                     "skills": turn_skills_used,
@@ -1462,14 +2174,10 @@ def evaluate_thread_trace_quality(
             "turn_count": len(turns),
         }
 
-    expected_roles = [
-        role for _turn in turns for role in ("user", "assistant")
-    ]
+    expected_roles = [role for _turn in turns for role in ("user", "assistant")]
     roles = [str(role) for role in messages.get("roles") or []]
     run_ids = [str(run_id) for run_id in messages.get("run_ids") or []]
-    content_lengths = [
-        int(length or 0) for length in messages.get("content_lengths") or []
-    ]
+    content_lengths = [int(length or 0) for length in messages.get("content_lengths") or []]
     turn_run_ids = [str(turn.get("run_id") or "") for turn in turns]
 
     score = 0.0
@@ -1538,9 +2246,7 @@ def evaluate_thread_trace_quality(
         "turn_count": len(turns),
         "signals": {
             "roles_alternate": roles == expected_roles,
-            "no_tool_messages": not any(
-                role in {"tool", "system", "developer"} for role in roles
-            ),
+            "no_tool_messages": not any(role in {"tool", "system", "developer"} for role in roles),
             "run_ids_match": pair_run_ids_ok,
             "assistant_messages_non_empty": len(assistant_lengths) == len(turns)
             and all(length > 0 for length in assistant_lengths),
@@ -1566,6 +2272,17 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         help="Path to a local file to upload through /v2/uploads before creating the run.",
+    )
+    parser.add_argument(
+        "--upload-calphad-manifest",
+        action="append",
+        default=[],
+        help=(
+            "Reviewed CALPHAD registry manifest corresponding positionally to one "
+            "--upload-file. The trace verifies exact bytes and persists bounded owner "
+            "source/license/assessment/reference-state/temperature declarations before "
+            "creating the run."
+        ),
     )
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--poll-interval", type=float, default=1.0)
@@ -1594,6 +2311,14 @@ def main(argv: list[str] | None = None) -> int:
             "exercise Intelligence Pro rigor enforcement)."
         ),
     )
+    parser.add_argument(
+        "--suggested-domain",
+        default="",
+        help=(
+            "Optional selection_context.suggested_domain sent on every run "
+            "(for example materials to exercise domain routing explicitly)."
+        ),
+    )
     parser.add_argument("--verify-downloads", action="store_true")
     parser.add_argument("--require-downloads", action="store_true")
     parser.add_argument("--min-artifacts", type=int, default=0)
@@ -1604,6 +2329,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rarespot-quality", action="store_true")
     parser.add_argument("--require-rarespot-quality", action="store_true")
     parser.add_argument("--min-rarespot-quality-score", type=float, default=8.5)
+    parser.add_argument("--materials-quality", action="store_true")
+    parser.add_argument("--require-materials-quality", action="store_true")
+    parser.add_argument("--min-materials-quality-score", type=float, default=9.0)
+    parser.add_argument("--materials-performance", action="store_true")
+    parser.add_argument("--require-materials-performance", action="store_true")
+    parser.add_argument("--materials-max-model-calls", type=int, default=8)
+    parser.add_argument("--materials-max-input-tokens", type=int, default=250_000)
+    parser.add_argument("--materials-max-tool-calls", type=int, default=12)
+    parser.add_argument("--materials-max-input-amplification", type=float, default=6.0)
+    parser.add_argument(
+        "--materials-max-terminal-seconds",
+        type=float,
+        default=0.0,
+        help="Optional per-turn terminal latency tripwire; 0 disables the latency limit.",
+    )
+    parser.add_argument(
+        "--materials-evidence-dir",
+        type=Path,
+        help=(
+            "Retain the exact downloaded materials_validation.json bytes in this "
+            "content-addressed directory for independent promotion revalidation."
+        ),
+    )
     parser.add_argument("--tool-autonomy-quality", action="store_true")
     parser.add_argument("--require-tool-autonomy-quality", action="store_true")
     parser.add_argument("--min-tool-autonomy-quality-score", type=float, default=8.5)
@@ -1652,9 +2400,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             result["paper_quality"] = paper_quality
             if args.require_paper_quality and not paper_quality["passed"]:
-                issues.extend(
-                    f"paper quality: {issue}" for issue in paper_quality["issues"]
-                )
+                issues.extend(f"paper quality: {issue}" for issue in paper_quality["issues"])
         if args.rarespot_quality or args.require_rarespot_quality:
             rarespot_quality = evaluate_rarespot_trace_quality(
                 result,
@@ -1665,8 +2411,35 @@ def main(argv: list[str] | None = None) -> int:
             )
             result["rarespot_quality"] = rarespot_quality
             if args.require_rarespot_quality and not rarespot_quality["passed"]:
+                issues.extend(f"rarespot quality: {issue}" for issue in rarespot_quality["issues"])
+        if args.materials_quality or args.require_materials_quality:
+            materials_quality = evaluate_materials_trace_quality(
+                result,
+                min_score=args.min_materials_quality_score,
+            )
+            result["materials_quality"] = materials_quality
+            if args.require_materials_quality and not materials_quality["passed"]:
                 issues.extend(
-                    f"rarespot quality: {issue}" for issue in rarespot_quality["issues"]
+                    f"materials quality: {issue}" for issue in materials_quality["issues"]
+                )
+        if args.materials_performance or args.require_materials_performance:
+            max_terminal_ms = (
+                args.materials_max_terminal_seconds * 1000.0
+                if args.materials_max_terminal_seconds > 0
+                else None
+            )
+            materials_performance = evaluate_materials_trace_performance(
+                result,
+                max_model_calls_per_turn=args.materials_max_model_calls,
+                max_input_tokens_per_turn=args.materials_max_input_tokens,
+                max_tool_calls_per_turn=args.materials_max_tool_calls,
+                max_input_amplification_vs_peak=(args.materials_max_input_amplification),
+                max_terminal_ms_per_turn=max_terminal_ms,
+            )
+            result["materials_performance"] = materials_performance
+            if args.require_materials_performance and not materials_performance["passed"]:
+                issues.extend(
+                    f"materials performance: {issue}" for issue in materials_performance["issues"]
                 )
         if args.tool_autonomy_quality or args.require_tool_autonomy_quality:
             tool_autonomy_quality = evaluate_tool_autonomy_trace_quality(
@@ -1676,8 +2449,7 @@ def main(argv: list[str] | None = None) -> int:
             result["tool_autonomy_quality"] = tool_autonomy_quality
             if args.require_tool_autonomy_quality and not tool_autonomy_quality["passed"]:
                 issues.extend(
-                    f"tool autonomy quality: {issue}"
-                    for issue in tool_autonomy_quality["issues"]
+                    f"tool autonomy quality: {issue}" for issue in tool_autonomy_quality["issues"]
                 )
         if args.tool_capability_quality or args.require_tool_capability_quality:
             tool_capability_quality = evaluate_tool_capability_trace_quality(
@@ -1698,8 +2470,7 @@ def main(argv: list[str] | None = None) -> int:
             result["delegation_quality"] = delegation_quality
             if args.require_delegation_quality and not delegation_quality["passed"]:
                 issues.extend(
-                    f"delegation quality: {issue}"
-                    for issue in delegation_quality["issues"]
+                    f"delegation quality: {issue}" for issue in delegation_quality["issues"]
                 )
         if args.async_delegation_quality or args.require_async_delegation_quality:
             async_delegation_quality = evaluate_async_delegation_trace_quality(
@@ -1707,10 +2478,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_score=args.min_async_delegation_quality_score,
             )
             result["async_delegation_quality"] = async_delegation_quality
-            if (
-                args.require_async_delegation_quality
-                and not async_delegation_quality["passed"]
-            ):
+            if args.require_async_delegation_quality and not async_delegation_quality["passed"]:
                 issues.extend(
                     f"async delegation quality: {issue}"
                     for issue in async_delegation_quality["issues"]
@@ -1724,9 +2492,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             result["bisque_quality"] = bisque_quality
             if args.require_bisque_quality and not bisque_quality["passed"]:
-                issues.extend(
-                    f"bisque quality: {issue}" for issue in bisque_quality["issues"]
-                )
+                issues.extend(f"bisque quality: {issue}" for issue in bisque_quality["issues"])
         if args.thread_quality or args.require_thread_quality:
             thread_quality = evaluate_thread_trace_quality(
                 result,
@@ -1734,9 +2500,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             result["thread_quality"] = thread_quality
             if args.require_thread_quality and not thread_quality["passed"]:
-                issues.extend(
-                    f"thread quality: {issue}" for issue in thread_quality["issues"]
-                )
+                issues.extend(f"thread quality: {issue}" for issue in thread_quality["issues"])
         if issues:
             result["issues"] = issues
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -1769,6 +2533,13 @@ def _workflow_hint_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
     if not hint_id:
         return None
     return {"id": hint_id, "source": "live_trace"}
+
+
+def _selection_context_from_args(args: argparse.Namespace) -> dict[str, Any] | None:
+    suggested_domain = str(getattr(args, "suggested_domain", "") or "").strip().lower()
+    if not suggested_domain:
+        return None
+    return {"suggested_domain": suggested_domain, "source": "live_trace"}
 
 
 def _auth_headers_from_args(args: argparse.Namespace) -> dict[str, str]:
@@ -1807,9 +2578,7 @@ def _login_bisque_from_args(
     if not username_env and not password_env:
         return None
     if not username_env or not password_env:
-        raise ValueError(
-            "both --bisque-username-env and --bisque-password-env are required"
-        )
+        raise ValueError("both --bisque-username-env and --bisque-password-env are required")
     username = str(os.environ.get(username_env) or "").strip()
     password = str(os.environ.get(password_env) or "")
     if not username:
@@ -1821,10 +2590,7 @@ def _login_bisque_from_args(
     username_from_session = ""
     if isinstance(user, dict):
         username_from_session = str(
-            user.get("username")
-            or user.get("name")
-            or user.get("email")
-            or ""
+            user.get("username") or user.get("name") or user.get("email") or ""
         ).strip()
     return {
         "authenticated": bool(session.get("authenticated")),
@@ -1868,6 +2634,229 @@ def _tool_names(events: list[dict[str, Any]]) -> list[str]:
         if tool_name:
             names.append(tool_name)
     return names
+
+
+def _token_usage_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize unique per-model-call usage without trusting redeliveries.
+
+    Worker events carry a stable ``usage_event_id``. NATS/control-plane replay may
+    expose the same event more than once, so raw event count is not a model-call
+    count. Conflicting duplicate IDs and malformed/non-additive totals are surfaced
+    explicitly and excluded from the scientific performance totals.
+    """
+
+    records_by_id: dict[str, tuple[int, int, int]] = {}
+    duplicate_event_count = 0
+    conflicting_duplicate_count = 0
+    invalid_event_count = 0
+    anonymous_index = 0
+    ordered_records: list[tuple[int, int, int]] = []
+
+    for event in events:
+        if event.get("event_kind") != "run.token_usage":
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            invalid_event_count += 1
+            continue
+        input_tokens = _strict_nonnegative_usage_count(payload.get("input_tokens"))
+        output_tokens = _strict_nonnegative_usage_count(payload.get("output_tokens"))
+        total_tokens = _strict_nonnegative_usage_count(payload.get("total_tokens"))
+        if (
+            input_tokens is None
+            or output_tokens is None
+            or total_tokens is None
+            or total_tokens != input_tokens + output_tokens
+        ):
+            invalid_event_count += 1
+            continue
+        record = (input_tokens, output_tokens, total_tokens)
+        usage_event_id = str(payload.get("usage_event_id") or "").strip()
+        if not usage_event_id:
+            anonymous_index += 1
+            usage_event_id = f"<anonymous:{anonymous_index}>"
+        existing = records_by_id.get(usage_event_id)
+        if existing is not None:
+            duplicate_event_count += 1
+            if existing != record:
+                conflicting_duplicate_count += 1
+            continue
+        records_by_id[usage_event_id] = record
+        ordered_records.append(record)
+
+    input_counts = [record[0] for record in ordered_records]
+    output_counts = [record[1] for record in ordered_records]
+    total_counts = [record[2] for record in ordered_records]
+    cumulative_input = sum(input_counts)
+    peak_input = max(input_counts, default=0)
+    return {
+        "model_call_count": len(ordered_records),
+        "input_tokens": cumulative_input,
+        "output_tokens": sum(output_counts),
+        "total_tokens": sum(total_counts),
+        "first_input_tokens": input_counts[0] if input_counts else 0,
+        "last_input_tokens": input_counts[-1] if input_counts else 0,
+        "peak_input_tokens": peak_input,
+        "input_amplification_vs_peak": (
+            round(cumulative_input / peak_input, 6) if peak_input else 0.0
+        ),
+        "duplicate_event_count": duplicate_event_count,
+        "conflicting_duplicate_count": conflicting_duplicate_count,
+        "invalid_event_count": invalid_event_count,
+    }
+
+
+def _strict_nonnegative_usage_count(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        integer = int(value)
+        return integer if integer >= 0 else None
+    return None
+
+
+def _tool_lifecycle_evidence(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pair tool starts and terminals without trusting tool-name-only evidence."""
+
+    starts: dict[tuple[str, str], dict[str, Any]] = {}
+    terminal_keys: set[tuple[str, str]] = set()
+    matched_skill_reads: set[tuple[str, str]] = set()
+    execute_completions: list[dict[str, Any]] = []
+    typed_scientific_completions: list[dict[str, Any]] = []
+    failed_terminal_count = 0
+    orphan_terminal_count = 0
+    duplicate_start_count = 0
+
+    for event in events:
+        event_kind = str(event.get("event_kind") or "")
+        if event_kind not in {
+            "tool_call.started",
+            "tool_call.completed",
+            "tool_call.failed",
+        }:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            if event_kind in {"tool_call.completed", "tool_call.failed"}:
+                orphan_terminal_count += 1
+                if event_kind == "tool_call.failed":
+                    failed_terminal_count += 1
+            continue
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        ).strip()
+        tool_call_id = str(
+            payload.get("tool_call_id") or payload.get("call_id") or payload.get("id") or ""
+        ).strip()
+        if not tool_name or not tool_call_id:
+            if event_kind in {"tool_call.completed", "tool_call.failed"}:
+                orphan_terminal_count += 1
+                if event_kind == "tool_call.failed":
+                    failed_terminal_count += 1
+            continue
+        key = (tool_call_id, tool_name)
+        if event_kind == "tool_call.started":
+            if key in starts:
+                duplicate_start_count += 1
+            else:
+                starts[key] = payload
+            continue
+
+        if event_kind == "tool_call.failed":
+            failed_terminal_count += 1
+        started_payload = starts.get(key)
+        if started_payload is None:
+            orphan_terminal_count += 1
+            continue
+        terminal_keys.add(key)
+        if event_kind != "tool_call.completed":
+            continue
+
+        if tool_name == "read_file":
+            for text in _payload_strings(started_payload):
+                for match in SKILL_READ_PATTERN.finditer(text):
+                    skill = match.group(1).strip()
+                    if skill:
+                        matched_skill_reads.add((skill, tool_call_id))
+        elif tool_name == "execute":
+            start_digest = _immutable_runtime_image_digest(
+                started_payload.get("runtime_image_digest")
+            )
+            terminal_digest = _immutable_runtime_image_digest(payload.get("runtime_image_digest"))
+            exit_code_observed = "exit_code" in payload
+            exit_code = _strict_tool_exit_code(payload.get("exit_code"))
+            digest_matched = bool(start_digest and start_digest == terminal_digest)
+            exit_code_ok = not exit_code_observed or exit_code == 0
+            execute_completions.append(
+                {
+                    "tool_call_id": tool_call_id,
+                    "runtime_image_digest": terminal_digest,
+                    "runtime_image_digest_matched": digest_matched,
+                    "exit_code_observed": exit_code_observed,
+                    "exit_code": exit_code,
+                    "exit_code_ok": exit_code_ok,
+                    "successful": digest_matched and exit_code_ok,
+                }
+            )
+        elif tool_name in MATERIALS_TYPED_SCIENTIFIC_TOOL_NAMES:
+            record: dict[str, Any] = {
+                "tool_name": tool_name,
+                "tool_call_id": tool_call_id,
+            }
+            operation = str(payload.get("scientific_operation") or "").strip().lower()
+            result_sha256 = str(payload.get("result_artifact_sha256") or "").strip().lower()
+            allowed_operations = MATERIALS_TYPED_SCIENTIFIC_TOOL_OPERATIONS[tool_name]
+            if (
+                payload.get("scientific_result_ok") is True
+                and operation in allowed_operations
+                and re.fullmatch(r"[0-9a-f]{64}", result_sha256)
+            ):
+                record.update(
+                    {
+                        "scientific_operation": operation,
+                        "result_artifact_sha256": result_sha256,
+                        "scientific_result_ok": True,
+                    }
+                )
+                validation_sha256 = (
+                    str(payload.get("materials_validation_artifact_sha256") or "").strip().lower()
+                )
+                if re.fullmatch(r"[0-9a-f]{64}", validation_sha256):
+                    record["materials_validation_artifact_sha256"] = validation_sha256
+            typed_scientific_completions.append(record)
+
+    return {
+        "started_call_count": len(starts),
+        "matched_terminal_count": len(terminal_keys),
+        "started_only_count": len(set(starts).difference(terminal_keys)),
+        "orphan_terminal_count": orphan_terminal_count,
+        "duplicate_start_count": duplicate_start_count,
+        "failed_terminal_count": failed_terminal_count,
+        "matched_skill_read_completions": [
+            {"skill": skill, "tool_call_id": tool_call_id}
+            for skill, tool_call_id in sorted(matched_skill_reads)
+        ],
+        "matched_execute_completions": execute_completions,
+        "matched_typed_scientific_completions": typed_scientific_completions,
+    }
+
+
+def _immutable_runtime_image_digest(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if IMMUTABLE_RUNTIME_IMAGE_PATTERN.fullmatch(normalized) else ""
+
+
+def _strict_tool_exit_code(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    if re.fullmatch(r"-?\d+", text):
+        return int(text)
+    return None
 
 
 def _skill_reads(events: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -1972,7 +2961,9 @@ def _tool_capability_manifests(events: list[dict[str, Any]]) -> list[dict[str, A
         payload = event.get("payload")
         if not isinstance(payload, dict):
             continue
-        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        )
         if tool_name not in TOOL_CAPABILITY_TOOL_NAMES:
             continue
         output_text = str(payload.get("output_preview") or payload.get("output") or "")
@@ -1994,7 +2985,9 @@ def _context_tool_output_hygiene(events: list[dict[str, Any]]) -> dict[str, Any]
         payload = event.get("payload")
         if not isinstance(payload, dict):
             continue
-        tool_name = str(payload.get("tool_name") or payload.get("name") or payload.get("tool") or "")
+        tool_name = str(
+            payload.get("tool_name") or payload.get("name") or payload.get("tool") or ""
+        )
         if tool_name not in _context_staging_tool_names():
             continue
         checked_output_count += 1
@@ -2458,7 +3451,7 @@ def _summarize_artifact(
     download_checks: dict[str, bool],
 ) -> dict[str, Any]:
     artifact_id = str(artifact.get("artifact_id") or "")
-    return {
+    summary = {
         "artifact_id": artifact_id,
         "kind": artifact.get("kind"),
         "path": artifact.get("path"),
@@ -2466,6 +3459,327 @@ def _summarize_artifact(
         "size_bytes": artifact.get("size_bytes"),
         "download_ok": download_checks.get(artifact_id),
     }
+    if artifact.get("run_id"):
+        summary["run_id"] = artifact.get("run_id")
+    if artifact.get("tool_name"):
+        summary["tool_name"] = artifact.get("tool_name")
+    if artifact.get("sha256"):
+        summary["sha256"] = artifact.get("sha256")
+    return summary
+
+
+def _retain_materials_validation_bytes(
+    evidence_dir: Path,
+    payload: bytes,
+    digest: str,
+) -> Path:
+    """Write exact downloaded validation bytes to a content-addressed file."""
+
+    root_input = evidence_dir.expanduser()
+    if root_input.is_symlink():
+        raise ValueError("materials evidence directory cannot be a symlink")
+    root_input.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = root_input.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("materials evidence path is not a directory")
+    target = root / f"materials-validation-{digest}.json"
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != payload:
+            raise ValueError("retained materials validation path conflicts with existing bytes")
+        return target
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(target, flags, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("could not finish materials validation evidence write")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return target
+
+
+def _typed_evidence_binding(evidence: Any) -> tuple[str, str] | None:
+    evidence_sha256 = str(evidence.sha256 or "").strip().lower()
+    artifact_id = str(evidence.artifact_id or "").strip().lower()
+    id_match = TYPED_MATERIALS_EVIDENCE_ID_PATTERN.fullmatch(artifact_id)
+    if id_match is not None:
+        operation, identity_sha256 = id_match.groups()
+        if (
+            operation in MATERIALS_TYPED_SCIENTIFIC_OPERATIONS
+            and identity_sha256 == evidence_sha256
+        ):
+            return operation, identity_sha256
+        return None
+    if artifact_id.startswith("typed-"):
+        return None
+
+    durable_path = _normalized_durable_output_path(evidence.path)
+    if durable_path is None:
+        return None
+    for pattern in TYPED_MATERIALS_EVIDENCE_PATH_PATTERNS:
+        path_match = pattern.fullmatch(durable_path)
+        if path_match is None:
+            continue
+        operation, identity_sha256 = path_match.groups()
+        if identity_sha256 == evidence_sha256:
+            return operation, identity_sha256
+        return None
+    return None
+
+
+def _typed_result_bindings(assessment: Any) -> list[dict[str, Any]]:
+    """Recover exact operation/result identities from closed typed evidence."""
+
+    validators_by_binding: dict[tuple[str, str], set[str]] = {}
+    for check in assessment.checks:
+        for evidence in check.evidence:
+            binding = _typed_evidence_binding(evidence)
+            if binding is None:
+                continue
+            validators_by_binding.setdefault(binding, set()).add(check.validator_id)
+    return [
+        {
+            "operation": operation,
+            "result_artifact_sha256": result_sha256,
+            "validator_ids": sorted(validators_by_binding[(operation, result_sha256)]),
+        }
+        for operation, result_sha256 in sorted(validators_by_binding)
+    ]
+
+
+def _inspect_materials_validation_artifact(
+    client: ControlPlaneClient,
+    artifacts: list[dict[str, Any]],
+    *,
+    evidence_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Download, hash, parse, and recompute a materials validation record."""
+
+    candidates = [
+        artifact
+        for artifact in artifacts
+        if _durable_artifact_output_path(artifact) == f"outputs/{MATERIALS_VALIDATION_FILENAME}"
+    ]
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        return {
+            "valid": False,
+            "error": f"expected one {MATERIALS_VALIDATION_FILENAME}, found {len(candidates)}",
+            "candidate_count": len(candidates),
+            "independent": False,
+        }
+    artifact = candidates[0]
+    artifact_id = str(artifact.get("artifact_id") or "").strip()
+    base = {
+        "artifact_id": artifact_id,
+        "path": artifact.get("path"),
+        "durable_path": _durable_artifact_output_path(artifact),
+        "independent": False,
+    }
+    if not artifact_id:
+        return {**base, "valid": False, "error": "validation artifact has no artifact_id"}
+    declared_size = _optional_int(artifact.get("size_bytes"))
+    if declared_size is None:
+        return {
+            **base,
+            "valid": False,
+            "error": "validation artifact has no declared size_bytes",
+        }
+    if declared_size > MATERIALS_VALIDATION_MAX_BYTES:
+        return {
+            **base,
+            "valid": False,
+            "error": (f"validation artifact exceeds {MATERIALS_VALIDATION_MAX_BYTES} byte limit"),
+        }
+    try:
+        raw = client.download_artifact(artifact_id)
+        if len(raw) > MATERIALS_VALIDATION_MAX_BYTES:
+            raise ValueError(
+                f"validation artifact exceeds {MATERIALS_VALIDATION_MAX_BYTES} byte limit"
+            )
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("materials validation record must be a JSON object")
+        assessment = parse_assessment_record(payload)
+        raw_sha256 = hashlib.sha256(raw).hexdigest()
+        declared_sha256 = str(artifact.get("sha256") or "").strip().lower()
+        if declared_sha256 and declared_sha256 != raw_sha256:
+            raise ValueError("validation artifact SHA-256 differs from control-plane metadata")
+    except Exception as exc:
+        return {
+            **base,
+            "valid": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    try:
+        canonical_sha256 = hashlib.sha256(
+            canonical_record_json(assessment).encode("utf-8")
+        ).hexdigest()
+    except Exception as exc:
+        return {
+            **base,
+            "valid": False,
+            "error": f"canonical validation record failed: {type(exc).__name__}: {exc}",
+        }
+
+    retained: dict[str, Any] = {}
+    if evidence_dir is not None:
+        try:
+            retained_path = _retain_materials_validation_bytes(
+                evidence_dir,
+                raw,
+                raw_sha256,
+            )
+        except Exception as exc:
+            return {
+                **base,
+                "valid": False,
+                "error": f"validation evidence retention failed: {type(exc).__name__}: {exc}",
+            }
+        retained = {
+            "retained_path": str(retained_path),
+            "retained_sha256": raw_sha256,
+            "retained_size_bytes": len(raw),
+        }
+
+    outcome_counts = Counter(check.outcome.value for check in assessment.checks)
+    evidence_errors, verified_evidence = _verify_materials_evidence_artifacts(
+        assessment=assessment,
+        artifacts=artifacts,
+    )
+    return {
+        **base,
+        **retained,
+        "valid": True,
+        "schema_version": "1",
+        "scientific_status": assessment.scientific_status.value,
+        "run_status": assessment.run_status,
+        "verified": assessment.verified,
+        "silent_success": assessment.silent_success,
+        "capability_supported": assessment.capability_supported,
+        "contradiction_failures": list(assessment.contradiction_failures),
+        "required_validator_ids": list(assessment.required_validator_ids),
+        "record_sha256": raw_sha256,
+        "canonical_sha256": canonical_sha256,
+        "size_bytes": len(raw),
+        "check_count": len(assessment.checks),
+        "required_count": len(assessment.required_validator_ids),
+        "evidence_count": sum(len(check.evidence) for check in assessment.checks),
+        "evidence_verified_count": verified_evidence,
+        "evidence_verified": not evidence_errors,
+        "evidence_errors": evidence_errors,
+        "typed_result_bindings": _typed_result_bindings(assessment),
+        "outcomes": dict(sorted(outcome_counts.items())),
+        "critical_failures": list(assessment.critical_failures),
+        "missing_validator_ids": list(assessment.missing_validator_ids),
+        "reasons": list(assessment.reasons),
+    }
+
+
+def _normalized_durable_output_path(value: Any) -> str | None:
+    """Normalize only paths rooted in the durable ``/outputs`` namespace."""
+
+    raw = str(value or "").strip().replace("\\", "/")
+    if not raw:
+        return None
+    if raw.startswith("/outputs/"):
+        raw = raw[1:]
+    elif not raw.startswith("outputs/"):
+        return None
+    normalized = posixpath.normpath(raw)
+    if normalized == "outputs" or not normalized.startswith("outputs/"):
+        return None
+    return normalized
+
+
+def _durable_artifact_output_path(artifact: dict[str, Any]) -> str | None:
+    """Resolve the control plane's basename form only for collected outputs."""
+
+    normalized = _normalized_durable_output_path(artifact.get("path"))
+    if normalized:
+        return normalized
+    raw = str(artifact.get("path") or "").strip().replace("\\", "/")
+    if (
+        raw
+        and "/" not in raw
+        and raw not in {".", ".."}
+        and str(artifact.get("tool_name") or "").strip() == "outputs_collector"
+        and str(artifact.get("artifact_id") or "").strip()
+        and str(artifact.get("run_id") or "").strip()
+    ):
+        return f"outputs/{raw}"
+    return None
+
+
+def _verify_materials_evidence_artifacts(
+    *,
+    assessment: Any,
+    artifacts: list[dict[str, Any]],
+) -> tuple[list[str], int]:
+    """Match every evidence reference to a content-addressed run artifact."""
+
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    by_path: dict[str, list[dict[str, Any]]] = {}
+    for artifact in artifacts:
+        artifact_id = str(artifact.get("artifact_id") or "").strip()
+        durable_path = _durable_artifact_output_path(artifact)
+        if artifact_id:
+            by_id.setdefault(artifact_id, []).append(artifact)
+        if durable_path:
+            by_path.setdefault(durable_path, []).append(artifact)
+
+    errors: list[str] = []
+    verified = 0
+    for check in assessment.checks:
+        for evidence in check.evidence:
+            label = f"{check.validator_id}:{evidence.name}"
+            matches: list[dict[str, Any]] = []
+            if evidence.artifact_id:
+                matches = by_id.get(evidence.artifact_id, [])
+                if len(matches) != 1:
+                    errors.append(f"{label} artifact_id resolved to {len(matches)} run artifacts")
+                    continue
+            if evidence.path:
+                normalized_path = _normalized_durable_output_path(evidence.path)
+                if normalized_path is None:
+                    errors.append(f"{label} path is outside durable /outputs")
+                    continue
+                path_matches = by_path.get(normalized_path, [])
+                if len(path_matches) != 1:
+                    errors.append(f"{label} path resolved to {len(path_matches)} run artifacts")
+                    continue
+                if matches and matches[0] is not path_matches[0]:
+                    errors.append(f"{label} artifact_id and path refer to different artifacts")
+                    continue
+                matches = path_matches
+            if len(matches) != 1:
+                errors.append(f"{label} has no resolvable artifact_id or durable path")
+                continue
+
+            matched = matches[0]
+            matched_path = _durable_artifact_output_path(matched)
+            if matched_path is None:
+                errors.append(f"{label} matched artifact is outside durable /outputs")
+                continue
+            actual_sha256 = str(matched.get("sha256") or "").strip().lower()
+            if actual_sha256 != evidence.sha256:
+                errors.append(f"{label} SHA-256 does not match the control-plane artifact")
+                continue
+            actual_size = _optional_int(matched.get("size_bytes"))
+            if evidence.size_bytes is not None and actual_size != evidence.size_bytes:
+                errors.append(f"{label} size_bytes does not match the control-plane artifact")
+                continue
+            verified += 1
+    return errors, verified
 
 
 def _summary_artifacts(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2474,9 +3788,7 @@ def _summary_artifacts(summary: dict[str, Any]) -> list[dict[str, Any]]:
         raw_artifacts = summary.get(key) or []
         if not isinstance(raw_artifacts, list):
             continue
-        artifacts.extend(
-            artifact for artifact in raw_artifacts if isinstance(artifact, dict)
-        )
+        artifacts.extend(artifact for artifact in raw_artifacts if isinstance(artifact, dict))
     return artifacts
 
 
@@ -2556,7 +3868,9 @@ def _trace_has_code_and_analysis_artifacts(turns: list[dict[str, Any]]) -> bool:
             kind in {"figure", "image", "table", "report", "model", "dataset"}
             or mime_type.startswith("image/")
             or mime_type in {"text/csv", "application/json", "text/markdown"}
-            or path.endswith((".png", ".jpg", ".jpeg", ".gif", ".csv", ".json", ".md", ".pth", ".pt"))
+            or path.endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".csv", ".json", ".md", ".pth", ".pt")
+            )
         ):
             saw_analysis_artifact = True
     return saw_code and saw_analysis_artifact
@@ -2652,9 +3966,7 @@ def _trace_has_autonomy_analysis_content(turns: list[dict[str, Any]]) -> bool:
             combined,
         )
     )
-    visual_explanation = bool(
-        re.search(r"\bplot|figure|curve|visuali[sz]|chart|image", combined)
-    )
+    visual_explanation = bool(re.search(r"\bplot|figure|curve|visuali[sz]|chart|image", combined))
     durable_work = bool(
         re.search(r"\bartifact|saved|download|code|source|script|outputs?/", combined)
     )
@@ -2814,10 +4126,7 @@ def _manifest_scoped_subagent_context_tool_names(
                 if str(tool_name or "").strip()
             }
             tools_by_subagent.setdefault(name, set()).update(tools)
-    return {
-        name: sorted(tool_names)
-        for name, tool_names in sorted(tools_by_subagent.items())
-    }
+    return {name: sorted(tool_names) for name, tool_names in sorted(tools_by_subagent.items())}
 
 
 def _manifest_available_async_subagent_names(manifests: list[dict[str, Any]]) -> set[str]:
@@ -2969,6 +4278,8 @@ def _turns_have_page_citations(turns: list[dict[str, Any]]) -> bool:
 
 
 PAPER_TOOL_NAMES = {
+    "bind_paper_text_literal",
+    "extract_paper_table_evidence",
     "ingest_arxiv_paper",
     "ingest_pdf_resource",
     "paper_manifest",
@@ -3006,7 +4317,9 @@ def _trace_has_figure_evidence(turns: list[dict[str, Any]]) -> bool:
                 if (
                     kind in {"figure", "image"}
                     or mime_type.startswith("image/")
-                    or str(artifact.get("path") or "").lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+                    or str(artifact.get("path") or "")
+                    .lower()
+                    .endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
                 ):
                     if artifact.get("download_ok") is not False:
                         return True

@@ -46,6 +46,78 @@ type ControlBisqueCredential struct {
 	Metadata           []byte             `json:"metadata"`
 }
 
+type ControlCalphadEvidenceBlob struct {
+	EvidenceSha256    string             `json:"evidence_sha256"`
+	EvidenceSizeBytes int64              `json:"evidence_size_bytes"`
+	Encoding          string             `json:"encoding"`
+	Payload           []byte             `json:"payload"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlCalphadInputBlob struct {
+	InputSha256    string             `json:"input_sha256"`
+	InputSizeBytes int64              `json:"input_size_bytes"`
+	Encoding       string             `json:"encoding"`
+	Payload        []byte             `json:"payload"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlCalphadRevision struct {
+	RevisionID              string             `json:"revision_id"`
+	ResourceID              string             `json:"resource_id"`
+	OwnerUserID             string             `json:"owner_user_id"`
+	OwnerOrgID              pgtype.Text        `json:"owner_org_id"`
+	Sha256                  string             `json:"sha256"`
+	SizeBytes               int64              `json:"size_bytes"`
+	DatabaseFormat          string             `json:"database_format"`
+	AssessmentPressureMinPa pgtype.Float8      `json:"assessment_pressure_min_pa"`
+	AssessmentPressureMaxPa pgtype.Float8      `json:"assessment_pressure_max_pa"`
+	ParentRevisionID        pgtype.Text        `json:"parent_revision_id"`
+	CreatedByUserID         pgtype.Text        `json:"created_by_user_id"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	Metadata                []byte             `json:"metadata"`
+}
+
+type ControlCalphadTenantCapacity struct {
+	OwnerUserID           string             `json:"owner_user_id"`
+	OwnerOrgID            string             `json:"owner_org_id"`
+	MaxRetainedBytes      int64              `json:"max_retained_bytes"`
+	MaxValidationEvents   int64              `json:"max_validation_events"`
+	RetainedInputBytes    int64              `json:"retained_input_bytes"`
+	RetainedEvidenceBytes int64              `json:"retained_evidence_bytes"`
+	ValidationEvents      int64              `json:"validation_events"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlCalphadValidationEvent struct {
+	ValidationID             string             `json:"validation_id"`
+	RevisionID               string             `json:"revision_id"`
+	ResourceID               string             `json:"resource_id"`
+	DatabaseSha256           string             `json:"database_sha256"`
+	DatabaseSizeBytes        int64              `json:"database_size_bytes"`
+	DatabaseFormat           string             `json:"database_format"`
+	AssessmentPressureMinPa  pgtype.Float8      `json:"assessment_pressure_min_pa"`
+	AssessmentPressureMaxPa  pgtype.Float8      `json:"assessment_pressure_max_pa"`
+	DatabaseInventorySha256  pgtype.Text        `json:"database_inventory_sha256"`
+	RequestSha256            pgtype.Text        `json:"request_sha256"`
+	Status                   string             `json:"status"`
+	Operation                string             `json:"operation"`
+	FailureDomain            pgtype.Text        `json:"failure_domain"`
+	FailureStage             pgtype.Text        `json:"failure_stage"`
+	FailureCode              pgtype.Text        `json:"failure_code"`
+	EvidencePath             pgtype.Text        `json:"evidence_path"`
+	EvidenceSha256           pgtype.Text        `json:"evidence_sha256"`
+	EvidenceSizeBytes        pgtype.Int8        `json:"evidence_size_bytes"`
+	RuntimeImageID           pgtype.Text        `json:"runtime_image_id"`
+	PycalphadVersion         pgtype.Text        `json:"pycalphad_version"`
+	RunID                    pgtype.Text        `json:"run_id"`
+	InspectionEvidenceSha256 pgtype.Text        `json:"inspection_evidence_sha256"`
+	EvidenceContractVersion  pgtype.Text        `json:"evidence_contract_version"`
+	CreatedByAuthority       string             `json:"created_by_authority"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	Metadata                 []byte             `json:"metadata"`
+}
+
 type ControlDataAgentJob struct {
 	JobID             string             `json:"job_id"`
 	OwnerUserID       string             `json:"owner_user_id"`

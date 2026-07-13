@@ -1,0 +1,24 @@
+# Direct materials dependencies for the code-execution image.
+#
+# Keep exact pins: the release gate records these alongside the resolved `pip
+# freeze` manifest and immutable image digest. `pymatgen-analysis-defects`
+# 2026.3.20/2025.9.26 require NumPy 2 and conflict with Ultra's verified
+# NumPy-1.26 imaging/RareSpot stack; 2025.1.18 is the newest release verified
+# compatible with this production image. Official MatTools scoring uses its own
+# historical evaluator pins (pymatgen 2024.8.9 and defects 2024.7.19 at the
+# locked upstream source revision); changing the evaluator to these production
+# versions would create a non-comparable benchmark variant.
+pymatgen==2026.5.4
+pymatgen-analysis-defects==2025.1.18
+ase==3.29.0
+spglib==2.7.0
+pycalphad==0.11.2
+scheil==0.3.0
+damask==3.1.0
+zarr==3.1.5
+matminer==0.10.1
+orix==0.14.3
+kikuchipy==0.13.0
+diffsims==0.7.0
+defdap==1.2.1
+porespy==3.0.4

@@ -147,9 +147,26 @@ def dream3d_path(tmp_path):
     rng = np.random.default_rng(8)
     with h5py.File(path, "w") as f:
         f.attrs["DREAM3D Version"] = "6.5.0"
-        cell = f.create_group("DataContainers").create_group("Vol").create_group("CellData")
-        cell.create_dataset("FeatureIds", data=rng.integers(0, 20, (10, 20, 25, 1)).astype("i4"))
+        vol = f.create_group("DataContainers").create_group("Vol")
+        geom = vol.create_group("_SIMPL_GEOMETRY")
+        geom.create_dataset("DIMENSIONS", data=np.array([25, 20, 10], dtype="i8"))
+        geom.create_dataset("SPACING", data=np.array([0.5, 0.5, 0.5], dtype="f4"))
+        geom.create_dataset("ORIGIN", data=np.zeros(3, dtype="f4"))
+        cell = vol.create_group("CellData")
+        feature_ids = np.resize(np.array([0, 1, 2, 3], dtype="i4"), 10 * 20 * 25)
+        cell.create_dataset("FeatureIds", data=feature_ids.reshape(10, 20, 25, 1))
         cell.create_dataset("IPFColors", data=rng.integers(0, 255, (10, 20, 25, 3)).astype("u1"))
+        grain = vol.create_group("Grain Data")
+        grain.create_dataset("Volumes", data=np.array([[0.0], [0.0], [2.0], [3.0]], dtype="f4"))
+        grain.create_dataset(
+            "EulerAngles",
+            data=np.array(
+                [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.1, 0.2, 0.3], [0.2, 0.3, 0.4]],
+                dtype="f4",
+            ),
+        )
+        ensemble = vol.create_group("CellEnsembleData")
+        ensemble.create_dataset("PhaseName", data=np.array([b"Unknown Phase", b"Nickel"], dtype="S16"))
     return path
 
 
@@ -229,6 +246,14 @@ def test_hdf5_materials_dashboard_route(client, dream3d_path):
     body = r.json()
     assert body["schema"] == "dream3d"
     assert any(m["dataset_path"].endswith("/IPFColors") for m in body["maps"])
+    assert body["overview"]["grain_count"] == 3
+    assert body["overview"]["declared_feature_tuple_count"] == 3
+    assert body["overview"]["referenced_positive_feature_count"] == 3
+    assert body["overview"]["feature_id_scan_complete"] is True
+    assert body["overview"]["feature_id_consistency"] is True
+    assert body["overview"]["phase_names"] == ["Nickel"]
+    assert body["overview"]["phase_names_source"] == "stored_metadata"
+    assert body["grain_charts"] and body["orientation_charts"]
 
 
 def test_hdf5_materials_dashboard_non_dream3d_is_404(client, hdf5_path):

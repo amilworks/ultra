@@ -11,6 +11,15 @@ dependencies = [
     "langgraph-checkpoint>=4.1.0,<5",
     "httpx>=0.28.0,<1",
     "nats-py>=2.9.0,<3",
+    # First-class crystal-plasticity, degradation, characterization, and sensor
+    # reducers import NumPy in the production worker. Keep it in the core
+    # dependency closure; Dockerfile.worker separately pins the deployed ABI.
+    "numpy>=1.26.0,<3",
+    # Sensor inspection opens selected Zarr/OME-NGFF stores in the worker itself.
+    # Keep the qualified reader pair exact instead of relying on the optional
+    # NGFF service extra or a transitive dependency.
+    "numcodecs==0.16.5",
+    "zarr==3.1.5",
     "pillow>=10.0.0,<13",
     "psycopg[binary]>=3.2.0,<4",
     "pymupdf>=1.24.0,<2",
@@ -22,9 +31,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# dev pulls in the imaging deps (numpy/fastapi/lxml/uvicorn) so the imaging test
-# suite collects+runs under a clean `uv run --extra dev` (as CI does) — without
-# them, test_imaging_* fail to import numpy.
+# dev pulls in the remaining imaging deps (fastapi/lxml/uvicorn and readers) so
+# the imaging test suite collects+runs under a clean `uv run --extra dev`.
 dev = ["pytest>=8.0.0", "ultra-deepagents-runtime[imaging]"]
 imaging = [
     "numpy>=1.26.0,<3",

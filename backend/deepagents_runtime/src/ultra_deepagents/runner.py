@@ -19,6 +19,7 @@ from PIL import Image, UnidentifiedImageError
 from ultra_deepagents.agent import (
     attempt_ledger_path,
     build_research_agent,
+    is_materials_context,
     is_rigor_intelligence,
     looks_quantitative_rigor_goal,
     request_classification_text,
@@ -26,6 +27,7 @@ from ultra_deepagents.agent import (
 )
 from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
 from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
+from ultra_deepagents.code_execution.docker import resolve_docker_image_id
 from ultra_deepagents.code_execution.progress import (
     ExecuteProgressEvent,
     reset_execute_progress_sink,
@@ -34,6 +36,19 @@ from ultra_deepagents.code_execution.progress import (
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import stage_uploaded_files
+from ultra_deepagents.evaluation_profiles import (
+    EVALUATION_PROFILE_EVENT_KIND,
+    EVALUATION_SURFACE_EVENT_KIND,
+    EvaluationProfileError,
+    build_evaluation_profile_attestation,
+    build_evaluation_surface_attestation,
+    evaluation_artifact_dir,
+    evaluation_profile_policy,
+    evaluation_workspace_dir,
+    goal_only_messages,
+    materialize_evaluation_profile_attestation,
+    materialize_evaluation_surface_attestation,
+)
 from ultra_deepagents.events import (
     RunEvent,
     normalize_artifact_created,
@@ -45,6 +60,7 @@ from ultra_deepagents.events import (
     normalize_tool_call,
     normalize_tool_call_progress,
 )
+from ultra_deepagents.materials.trace_binding import typed_materials_result_binding
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
@@ -119,7 +135,9 @@ class ExecuteProgressEventStreamer:
     event loop that owns the run sequencer.
     """
 
-    def __init__(self, *, context: Any, sequencer: RunEventSequencer, publish_event: PublishEvent) -> None:
+    def __init__(
+        self, *, context: Any, sequencer: RunEventSequencer, publish_event: PublishEvent
+    ) -> None:
         self._context = context
         self._sequencer = sequencer
         self._publish_event = publish_event
@@ -328,8 +346,7 @@ def _preload_arxiv_papers_for_context(
         return context
     knowledge_context = dict(context.knowledge_context)
     existing = [
-        item for item in knowledge_context.get("ingested_papers", [])
-        if isinstance(item, dict)
+        item for item in knowledge_context.get("ingested_papers", []) if isinstance(item, dict)
     ]
     knowledge_context["ingested_papers"] = existing + ingested
     if warnings:
@@ -374,7 +391,9 @@ def _preload_uploaded_pdf_papers_for_context(
                 source_url=f"upload:{file_id}" if file_id else "",
             )
         except Exception as exc:
-            warnings.append({"source": f"upload:{file_id}" if file_id else str(staged_path), "error": str(exc)})
+            warnings.append(
+                {"source": f"upload:{file_id}" if file_id else str(staged_path), "error": str(exc)}
+            )
             continue
         ingested.append(
             {
@@ -390,13 +409,13 @@ def _preload_uploaded_pdf_papers_for_context(
         return context
     knowledge_context = dict(context.knowledge_context)
     existing = [
-        item for item in knowledge_context.get("ingested_papers", [])
-        if isinstance(item, dict)
+        item for item in knowledge_context.get("ingested_papers", []) if isinstance(item, dict)
     ]
     knowledge_context["ingested_papers"] = _dedupe_ingested_papers(existing + ingested)
     if warnings:
         existing_warnings = [
-            item for item in knowledge_context.get("paper_ingest_warnings", [])
+            item
+            for item in knowledge_context.get("paper_ingest_warnings", [])
             if isinstance(item, dict)
         ]
         knowledge_context["paper_ingest_warnings"] = existing_warnings + warnings
@@ -445,10 +464,31 @@ async def run_job(
     sequencer: RunEventSequencer | None = None,
     user_profile: dict[str, Any] | None = None,
     prior_usage: dict[str, Any] | None = None,
+    run_lease_worker_id: str = "",
+    run_lease_token: str = "",
 ) -> str:
     workspace_root = Path(settings.workspace_root).expanduser()
-    workspace_dir = workspace_root / job.run_id
-    artifact_dir = Path(settings.artifact_root).expanduser() / job.run_id
+    evaluation_policy = evaluation_profile_policy(job.evaluation_profile)
+    effective_messages = _effective_job_messages(job)
+    workspace_dir = (
+        evaluation_workspace_dir(
+            workspace_root,
+            evaluation_policy.name,
+            job.run_id,
+        )
+        if evaluation_policy is not None
+        else workspace_root / job.run_id
+    )
+    artifact_root = Path(settings.artifact_root).expanduser()
+    artifact_dir = (
+        evaluation_artifact_dir(
+            artifact_root,
+            evaluation_policy.name,
+            job.run_id,
+        )
+        if evaluation_policy is not None
+        else artifact_root / job.run_id
+    )
     # Opportunistically reclaim expired scratch workspaces before creating this
     # run's. Best-effort: never fail a run because retention GC could not run.
     if settings.workspace_retention_seconds > 0:
@@ -460,11 +500,30 @@ async def run_job(
             )
         except Exception:
             pass
+    evaluation_attestation: dict[str, Any] | None = None
+    if evaluation_policy is not None:
+        evaluation_attestation = build_evaluation_profile_attestation(
+            profile=evaluation_policy.name,
+            run_id=job.run_id,
+            thread_id=job.thread_id,
+            user_id=job.user_id,
+            goal=effective_messages[0]["content"],
+            provided_message_count=len(job.messages),
+        )
+        await asyncio.to_thread(
+            materialize_evaluation_profile_attestation,
+            memory_root=settings.memory_root,
+            workspace_dir=workspace_dir,
+            artifact_dir=artifact_dir,
+            attestation=evaluation_attestation,
+        )
     workspace_dir.mkdir(parents=True, exist_ok=True)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     context = job.to_context(
         artifact_root=str(artifact_dir),
         workspace_root=str(workspace_dir),
+        run_lease_worker_id=run_lease_worker_id,
+        run_lease_token=run_lease_token,
     )
     # Reuse the worker-owned sequencer when provided so worker lifecycle events
     # (heartbeats, terminal events) and streamed events share one counter; only
@@ -474,10 +533,28 @@ async def run_job(
     _write_workspace_lease(context, status="running")
     # Mirror the user's self-described profile into app-owned durable memory.
     # Best-effort: never fail a run because profile seeding could not write.
-    _seed_user_profile_memory(
-        resolve_user_memory_root(settings, context.user_id, thread_id=context.thread_id),
-        user_profile,
-    )
+    if evaluation_policy is None:
+        _seed_user_profile_memory(
+            resolve_user_memory_root(settings, context.user_id, thread_id=context.thread_id),
+            user_profile,
+        )
+
+    if evaluation_attestation is not None:
+        await publish_event(
+            sequencer.stamp(
+                RunEvent(
+                    run_id=context.run_id,
+                    thread_id=context.thread_id,
+                    event_kind=EVALUATION_PROFILE_EVENT_KIND,
+                    event_type="run",
+                    node_name="worker",
+                    agent_role="worker",
+                    level="info",
+                    message="Worker enforced the trusted evaluation profile.",
+                    payload=evaluation_attestation,
+                ).to_dict()
+            )
+        )
 
     await publish_event(
         sequencer.stamp(
@@ -504,25 +581,34 @@ async def run_job(
     title_task = start_conversation_title_task(
         settings=settings,
         goal=job.goal,
-        messages=list(job.messages or [{"role": "user", "content": job.goal}]),
+        messages=list(effective_messages),
         model_factory=title_model_factory or build_chat_model,
     )
 
     try:
-        messages = list(job.messages or [{"role": "user", "content": job.goal}])
-        context = await asyncio.to_thread(
-            _preload_arxiv_papers_for_context,
-            context,
-            goal=job.goal,
-            messages=messages,
-            cache_root=Path(settings.memory_root).expanduser() / "papers",
+        messages = list(effective_messages)
+        # Resolve once per worker/image reference (the helper is process-cached).
+        # Agent construction uses the same immutable ID for `docker run`; the
+        # event annotation below therefore attests the image actually launched.
+        sandbox_image_digest = await asyncio.to_thread(
+            resolve_docker_image_id,
+            settings.sandbox_image,
         )
-        context = await asyncio.to_thread(
-            _preload_uploaded_pdf_papers_for_context,
-            context,
-            upload_roots=settings.rarespot_upload_roots,
-            cache_root=Path(settings.memory_root).expanduser() / "papers",
-        )
+        if evaluation_policy is None:
+            context = await asyncio.to_thread(
+                _preload_arxiv_papers_for_context,
+                context,
+                goal=job.goal,
+                messages=messages,
+                cache_root=Path(settings.memory_root).expanduser() / "papers",
+            )
+            context = await asyncio.to_thread(
+                _preload_uploaded_pdf_papers_for_context,
+                context,
+                upload_roots=settings.rarespot_upload_roots,
+                cache_root=Path(settings.memory_root).expanduser() / "papers",
+            )
+        evaluation_surface: dict[str, str] = {}
         agent = _build_agent_with_optional_checkpointer(
             agent_factory,
             settings,
@@ -530,7 +616,42 @@ async def run_job(
             artifact_dir=artifact_dir,
             context=context,
             checkpointer=checkpointer,
+            surface_attestation_sink=evaluation_surface.update,
         )
+        if evaluation_policy is not None and not evaluation_surface:
+            if agent_factory is build_research_agent:
+                raise EvaluationProfileError(
+                    "production evaluation agent omitted its surface attestation"
+                )
+        elif evaluation_attestation is not None:
+            surface_attestation = build_evaluation_surface_attestation(
+                profile_attestation=evaluation_attestation,
+                runtime_image_digest=sandbox_image_digest,
+                surface=evaluation_surface,
+                model_id=settings.openai_model,
+                provider_id=settings.model_provider_id,
+            )
+            await asyncio.to_thread(
+                materialize_evaluation_surface_attestation,
+                memory_root=settings.memory_root,
+                profile_attestation=evaluation_attestation,
+                surface_attestation=surface_attestation,
+            )
+            await publish_event(
+                sequencer.stamp(
+                    RunEvent(
+                        run_id=context.run_id,
+                        thread_id=context.thread_id,
+                        event_kind=EVALUATION_SURFACE_EVENT_KIND,
+                        event_type="run",
+                        node_name="worker",
+                        agent_role="worker",
+                        level="info",
+                        message="Worker sealed the constructed evaluation surface.",
+                        payload=surface_attestation,
+                    ).to_dict()
+                )
+            )
         run_config = run_graph_config(
             context.run_id, recursion_limit=settings.langgraph_recursion_limit
         )
@@ -600,6 +721,9 @@ async def run_job(
                     resume_from_checkpoint=resume_from_checkpoint,
                     progress_detector=progress_detector,
                     attempt_ledger=attempt_ledger,
+                    execute_runtime_image_digest=sandbox_image_digest,
+                    primary_model_id=settings.openai_model,
+                    primary_provider_id=settings.model_provider_id,
                 )
                 # Only the first attempt of a redelivered run resumes from the
                 # checkpoint; continuation passes feed fresh messages.
@@ -664,9 +788,7 @@ async def run_job(
                     artifact_dir,
                     reference_text=_artifact_reference_text(attempt_result, workspace_dir),
                 )
-                exhausted = (
-                    progress_stall_recoveries_used >= settings.progress_stall_max_recoveries
-                )
+                exhausted = progress_stall_recoveries_used >= settings.progress_stall_max_recoveries
                 stall_notice = (
                     _progress_stall_exhausted_notice(exc.verdict)
                     if exhausted
@@ -710,9 +832,7 @@ async def run_job(
                     progress_stall_recoveries_used += 1
                     # This attempt never reaches the fold below - account for it here.
                     run_usage["input_tokens"] += int(attempt_result.usage.get("input_tokens", 0))
-                    run_usage["output_tokens"] += int(
-                        attempt_result.usage.get("output_tokens", 0)
-                    )
+                    run_usage["output_tokens"] += int(attempt_result.usage.get("output_tokens", 0))
                     run_usage["total_tokens"] += int(attempt_result.usage.get("total_tokens", 0))
                     if attempt_result.model and not run_usage_model:
                         run_usage_model = attempt_result.model
@@ -755,7 +875,10 @@ async def run_job(
                     artifact_events=artifact_events,
                 ),
             ]
-            if not missing_kinds or completion_continuations_used >= settings.completion_max_continuations:
+            if (
+                not missing_kinds
+                or completion_continuations_used >= settings.completion_max_continuations
+            ):
                 break
 
             # No-progress guard: if this continuation could not change the set of
@@ -831,7 +954,7 @@ async def run_job(
         title_task,
         settings=settings,
         goal=job.goal,
-        messages=list(job.messages or [{"role": "user", "content": job.goal}]),
+        messages=list(effective_messages),
         response_text=response_text,
         artifact_events=artifact_events,
         model_factory=title_model_factory or build_chat_model,
@@ -863,6 +986,7 @@ def _build_agent_with_optional_checkpointer(
     artifact_dir: Any,
     context: AgentRunContext,
     checkpointer: Any | None,
+    surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
 ) -> Any:
     """Build the agent, passing the checkpointer only when the factory accepts
     it so custom/test factories without that parameter still work."""
@@ -871,17 +995,20 @@ def _build_agent_with_optional_checkpointer(
         "artifact_dir": artifact_dir,
         "context": context,
     }
+    try:
+        parameters = inspect.signature(agent_factory).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
     if checkpointer is not None:
-        try:
-            parameters = inspect.signature(agent_factory).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-        accepts_var_kwargs = any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
         if "checkpointer" in parameters or accepts_var_kwargs:
             kwargs["checkpointer"] = checkpointer
+    if surface_attestation_sink is not None and (
+        "surface_attestation_sink" in parameters or accepts_var_kwargs
+    ):
+        kwargs["surface_attestation_sink"] = surface_attestation_sink
     return agent_factory(settings, **kwargs)
 
 
@@ -898,6 +1025,9 @@ async def _stream_agent_attempt(
     resume_from_checkpoint: bool = False,
     progress_detector: ProgressStallDetector | None = None,
     attempt_ledger: AttemptLedger | None = None,
+    execute_runtime_image_digest: str = "",
+    primary_model_id: str = "",
+    primary_provider_id: str = "",
 ) -> AgentAttemptResult:
     response_parts: list[str] = []
     post_tool_response_parts: list[str] = []
@@ -984,6 +1114,12 @@ async def _stream_agent_attempt(
             # Every model call (coordinator + subagents) reports usage on its
             # ``on_chat_model_end`` event; sum them for the attempt-level total.
             model_name = _model_name_from_event(event)
+            provider_name = _provider_name_from_event(event)
+            if primary_provider_id and (not model_name or model_name == primary_model_id):
+                # LangChain's ls_provider identifies its generic transport (or
+                # is absent for v3/vLLM). The worker-owned provider identity is
+                # the release evidence for the instantiated primary endpoint.
+                provider_name = primary_provider_id
             usage_index += 1
             usage_event = sequencer.stamp(
                 _annotate_usage_event_scope(
@@ -991,6 +1127,7 @@ async def _stream_agent_attempt(
                         context,
                         usage,
                         model=model_name,
+                        provider=provider_name,
                         usage_event_id=_usage_event_id_from_stream_event(
                             context,
                             event,
@@ -1011,6 +1148,10 @@ async def _stream_agent_attempt(
             continue
         tool_event = _tool_event_from_stream_event(context, event, tool_names_by_call_id)
         if tool_event is not None:
+            tool_event = _annotate_execute_runtime_image(
+                tool_event,
+                execute_runtime_image_digest,
+            )
             _track_task_subagent_start(tool_event, pending_task_subagent_names)
             tool_event = _annotate_tool_event_scope(
                 tool_event,
@@ -1032,11 +1173,7 @@ async def _stream_agent_attempt(
                         attempt_ledger.record(
                             scope=observation.scope,
                             command_preview=observation.command_preview,
-                            kind=(
-                                "stagnant_repeat"
-                                if observation.stagnant_repeat
-                                else "error"
-                            ),
+                            kind=("stagnant_repeat" if observation.stagnant_repeat else "error"),
                             detail=observation.error_preview,
                         )
                     if observation.verdict is not None:
@@ -1051,9 +1188,7 @@ async def _stream_agent_attempt(
                         raise AgentProgressStalledError(
                             observation.verdict,
                             AgentAttemptResult(
-                                final_response_text=_response_text_from_final_state(
-                                    final_state
-                                ),
+                                final_response_text=_response_text_from_final_state(final_state),
                                 streamed_response_text="".join(response_parts),
                                 post_tool_streamed_response_text="",
                                 usage=attempt_usage,
@@ -1741,6 +1876,14 @@ def _missing_rigor_contract_kinds(
     """
     if not is_rigor_intelligence(context):
         return []
+    # Materials runs carry a modality-specific Pro results contract.  Do not
+    # re-impose the dynamical-systems seeds/durations/3x-spread contract after
+    # a deterministic crystallography calculation or typed scientific input
+    # refusal has already completed.  Besides being scientifically irrelevant,
+    # that continuation can induce repeated first-party tool calls and a large
+    # token/latency regression.
+    if is_materials_context(context):
+        return []
     if not looks_quantitative_rigor_goal(_run_request_text(job)):
         return []
     response_text = "\n".join(
@@ -1886,9 +2029,7 @@ def _has_minimum_ic_or_seed_count(response_text: str) -> bool:
                 counts.append(int(match.group(1)))
             except (TypeError, ValueError):
                 continue
-    return any(count >= 3 for count in counts) or _has_markdown_table_count_column(
-        response_text
-    )
+    return any(count >= 3 for count in counts) or _has_markdown_table_count_column(response_text)
 
 
 def _has_markdown_table_count_column(response_text: str) -> bool:
@@ -2065,6 +2206,8 @@ def _response_references_artifacts(
 
 
 def _run_request_text(job: RunJobEnvelope) -> str:
+    if evaluation_profile_policy(job.evaluation_profile) is not None:
+        return job.goal
     parts = [job.goal]
     for message in reversed(job.messages or []):
         if not isinstance(message, dict):
@@ -2074,6 +2217,13 @@ def _run_request_text(job: RunJobEnvelope) -> str:
             parts.append(_chunk_text(message.get("content")))
             break
     return "\n".join(part for part in parts if part)
+
+
+def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
+    policy = evaluation_profile_policy(job.evaluation_profile)
+    if policy is not None:
+        return list(goal_only_messages(policy.name, job.goal))
+    return list(job.messages or [{"role": "user", "content": job.goal}])
 
 
 def _requested_artifact_kinds(text: str) -> list[str]:
@@ -2234,9 +2384,10 @@ def _progress_stall_recovery_prompt(
     current_outputs = _current_output_summary(artifact_events)
     current_outputs_text = "\n".join(current_outputs) if current_outputs else "- none yet"
     scope_clause = f" (in {verdict.scope})" if verdict.scope else ""
-    repeated_lines = "\n".join(
-        f"- {repeats}x: {command}" for command, repeats in verdict.repeated_commands
-    ) or "- (commands unavailable)"
+    repeated_lines = (
+        "\n".join(f"- {repeats}x: {command}" for command, repeats in verdict.repeated_commands)
+        or "- (commands unavailable)"
+    )
     return (
         f"Progress stall detected{scope_clause}: the last {verdict.stall_count} sandbox "
         "executions repeated earlier commands whose output did not change. Repeated most:\n"
@@ -2357,7 +2508,9 @@ def _tool_event_from_deepagents_tools_protocol(
         return None
     raw_status = _first_nonempty_string(data.get("event"), data.get("status"))
     status = _normalize_tool_status(raw_status)
-    tool_call_id = _first_nonempty_string(data.get("tool_call_id"), data.get("id"), data.get("run_id"))
+    tool_call_id = _first_nonempty_string(
+        data.get("tool_call_id"), data.get("id"), data.get("run_id")
+    )
     tool_name = _first_nonempty_string(
         data.get("tool_name"),
         data.get("name"),
@@ -2378,6 +2531,11 @@ def _tool_event_from_deepagents_tools_protocol(
     if output is not None:
         payload["output_preview"] = _payload_preview_text(output)
         payload["output_size_chars"] = len(str(output))
+        if tool_name == "execute":
+            exit_code = _execute_exit_code_from_output(output)
+            if exit_code is not None:
+                payload["exit_code"] = exit_code
+        payload.update(typed_materials_result_binding(tool_name, output))
     error = data.get("error")
     if error is not None:
         payload["error"] = _payload_preview_text(error)
@@ -2403,7 +2561,9 @@ def _tool_name_from_event(event: dict[str, Any]) -> str:
 def _tool_start_payload(event: dict[str, Any]) -> dict[str, Any]:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     payload: dict[str, Any] = {
-        "tool_call_id": _first_nonempty_string(event.get("run_id"), data.get("run_id"), data.get("id")),
+        "tool_call_id": _first_nonempty_string(
+            event.get("run_id"), data.get("run_id"), data.get("id")
+        ),
     }
     tool_input = data.get("input")
     if isinstance(tool_input, dict):
@@ -2418,12 +2578,20 @@ def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     output = data.get("output")
     payload: dict[str, Any] = {
-        "tool_call_id": _first_nonempty_string(event.get("run_id"), data.get("run_id"), data.get("id")),
+        "tool_call_id": _first_nonempty_string(
+            event.get("run_id"), data.get("run_id"), data.get("id")
+        ),
     }
     if output is not None:
         output_text = _payload_preview_text(output)
         payload["output_preview"] = output_text
         payload["output_size_chars"] = len(str(output))
+        tool_name = _tool_name_from_event(event)
+        if tool_name == "execute":
+            exit_code = _execute_exit_code_from_output(output)
+            if exit_code is not None:
+                payload["exit_code"] = exit_code
+        payload.update(typed_materials_result_binding(tool_name, output))
     return _drop_empty_payload_values(payload)
 
 
@@ -2431,7 +2599,9 @@ def _tool_error_payload(event: dict[str, Any]) -> dict[str, Any]:
     data = event.get("data") if isinstance(event.get("data"), dict) else {}
     error = data.get("error") or event.get("error")
     payload: dict[str, Any] = {
-        "tool_call_id": _first_nonempty_string(event.get("run_id"), data.get("run_id"), data.get("id")),
+        "tool_call_id": _first_nonempty_string(
+            event.get("run_id"), data.get("run_id"), data.get("id")
+        ),
     }
     if error is not None:
         payload["error"] = _payload_preview_text(error)
@@ -2451,6 +2621,23 @@ def _normalize_stream_tool_call(
         status=status,
         payload=_annotate_async_delegation_payload(tool_name, status, payload),
     )
+
+
+def _annotate_execute_runtime_image(
+    tool_event: dict[str, Any],
+    image_digest: str,
+) -> dict[str, Any]:
+    """Bind execute lifecycle evidence to the immutable launched image ID."""
+
+    payload = tool_event.get("payload")
+    if not isinstance(payload, dict) or payload.get("tool_name") != "execute":
+        return tool_event
+    normalized = str(image_digest or "").strip().lower()
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", normalized) is None:
+        return tool_event
+    annotated = dict(tool_event)
+    annotated["payload"] = {**payload, "runtime_image_digest": normalized}
+    return annotated
 
 
 def _annotate_async_delegation_payload(
@@ -2846,6 +3033,25 @@ def _payload_preview_text(value: Any, *, max_chars: int = 2000) -> str:
     return text if len(text) <= max_chars else f"{text[:max_chars]}... [truncated]"
 
 
+def _execute_exit_code_from_output(value: Any) -> int | None:
+    """Recover Deep Agents' terminal exit marker without parsing command stdout loosely."""
+
+    direct = (
+        value.get("exit_code") if isinstance(value, dict) else getattr(value, "exit_code", None)
+    )
+    if isinstance(direct, int) and not isinstance(direct, bool):
+        return direct
+    text = _chunk_text(value) or (value if isinstance(value, str) else "")
+    if not text:
+        return None
+    match = re.search(
+        r"\[Command (?:succeeded|failed) with exit code (-?\d+)\]"
+        r"(?:\n\[Output was truncated due to size limits\])?\s*\Z",
+        text,
+    )
+    return int(match.group(1)) if match else None
+
+
 def _event_namespace(event: dict[str, Any]) -> Any:
     if "namespace" in event:
         return event.get("namespace")
@@ -3042,6 +3248,29 @@ def _model_name_from_event(event: dict[str, Any]) -> str:
                 response_metadata.get("model_name"),
                 response_metadata.get("model"),
             )
+    return ""
+
+
+def _provider_name_from_event(event: dict[str, Any]) -> str:
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        _, finish_metadata = finish
+        provider = _first_nonempty_string(
+            finish_metadata.get("ls_provider"),
+            finish_metadata.get("provider"),
+            finish_metadata.get("provider_name"),
+        )
+        if provider:
+            return provider
+    metadata = event.get("metadata")
+    if isinstance(metadata, dict):
+        provider = _first_nonempty_string(
+            metadata.get("ls_provider"),
+            metadata.get("provider"),
+            metadata.get("provider_name"),
+        )
+        if provider:
+            return provider
     return ""
 
 

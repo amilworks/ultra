@@ -751,6 +751,21 @@ func TestV2ThreadRunArtifactHandlers(t *testing.T) {
 	if !ok || threadID == "" {
 		t.Fatalf("thread response missing thread_id: %+v", thread)
 	}
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "file-1",
+		OwnerUserID:  "local-user",
+		OwnerOrgID:   "local-org",
+		OwnerRole:    "researcher",
+		OriginalName: "selected.dat",
+		ContentType:  "application/octet-stream",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		Status:       "active",
+		CreatedAt:    domain.Now(),
+		UpdatedAt:    domain.Now(),
+	}); err != nil {
+		t.Fatalf("seed selected resource: %v", err)
+	}
 
 	createRunBody := strings.NewReader(`{"goal":"hello","messages":[{"role":"user","content":"hello"}],"file_ids":["file-1"],"resource_uris":["bisque://resource/1"],"dataset_uris":["bisque://dataset/2"],"selected_tool_names":["rarespot_ecology_inference"],"knowledge_context":{"active_paper":"arxiv:2509.26626"},"workflow_hint":{"id":"rarespot_ecology"},"selection_context":{"source":"sidebar"},"budgets":{"max_runtime_seconds":1800},"reasoning_mode":"deep","benchmark":{"suite":"http-context"}}`)
 	createRunReq := httptest.NewRequest(http.MethodPost, "/v2/threads/"+threadID+"/runs", createRunBody)
@@ -11596,8 +11611,14 @@ func TestV2BisqueSearchCanCountAllPagesWhenBisqueOmitsTotal(t *testing.T) {
 		if r.URL.Query().Get("wpublic") != "owner,shared" {
 			t.Fatalf("wpublic = %q, want owner,shared", r.URL.Query().Get("wpublic"))
 		}
-		requestedOffsets = append(requestedOffsets, r.URL.Query().Get("offset"))
 		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Get("view") == "count" {
+			// Simulate a BisQue that does not answer view=count (no count tag),
+			// which forces the paging fallback this test exercises.
+			_, _ = w.Write([]byte(`<resource/>`))
+			return
+		}
+		requestedOffsets = append(requestedOffsets, r.URL.Query().Get("offset"))
 		switch r.URL.Query().Get("offset") {
 		case "":
 			if r.URL.Query().Get("limit") != "1" {
@@ -12580,17 +12601,30 @@ func TestWorkerBisqueSearchUsesRunScopedSessionInWorkOSMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
-	credentialStore := NewBisqueCredentialStore()
-	sessionID := credentialStore.Put(BisqueCredentials{Username: "amil", Password: "bean123"})
+	cipher, err := NewBisqueCredentialCipher(bytes.Repeat([]byte{4}, 32), "worker-test-key")
+	if err != nil {
+		t.Fatalf("NewBisqueCredentialCipher: %v", err)
+	}
+	credentialStore := NewPersistentBisqueCredentialStore(memory, cipher, bisque.URL)
+	sessionID, err := credentialStore.PutLinked(context.Background(), BisqueCredentialLinkInput{
+		Credentials: BisqueCredentials{Username: "amil", Password: "bean123"},
+		UserID:      "workos:user_e2e",
+		OrgID:       "workos-org",
+		RootURL:     bisque.URL,
+	})
+	if err != nil {
+		t.Fatalf("PutLinked: %v", err)
+	}
 	run, err := memory.CreateRun(context.Background(), domain.CreateRunInput{
 		ThreadID: thread.ThreadID,
 		UserID:   "workos:user_e2e",
 		Goal:     "bisque worker test",
-		Metadata: domain.JSONMap{"bisque_session_id": sessionID},
+		Metadata: testRunAuthorityMetadata("workos:user_e2e", "workos-org", bisque.URL, sessionID),
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	lease := startTestWorkerRunLease(t, memory, run.RunID, "worker-a")
 
 	router := NewRouter(ServerDeps{
 		Version:           "test-version",
@@ -12619,6 +12653,10 @@ func TestWorkerBisqueSearchUsesRunScopedSessionInWorkOSMode(t *testing.T) {
 		if bisqueSession != "" {
 			req.Header.Set("X-Ultra-Bisque-Session-Id", bisqueSession)
 		}
+		if runID != "" {
+			req.Header.Set("X-Ultra-Worker-Id", "worker-a")
+			req.Header.Set("X-Ultra-Run-Lease-Token", lease.LeaseToken)
+		}
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
 		return rec
@@ -12643,15 +12681,9 @@ func TestWorkerBisqueSearchUsesRunScopedSessionInWorkOSMode(t *testing.T) {
 	if lastAuth != wantAuth {
 		t.Fatalf("Authorization = %q, want linked run-scoped credentials", lastAuth)
 	}
-	// A session id that does not match the run metadata is ignored.
-	if rec := makeSearch("worker-secret", run.RunID, "bisque_session_stolen"); rec.Code != http.StatusOK {
-		t.Fatalf("mismatched session search status = %d, want 200 with anonymous upstream", rec.Code)
-	}
-	mu.Lock()
-	lastAuth = gotAuths[len(gotAuths)-1]
-	mu.Unlock()
-	if lastAuth == wantAuth {
-		t.Fatalf("mismatched session id reused linked credentials")
+	// A session id that does not match the immutable run binding fails closed.
+	if rec := makeSearch("worker-secret", run.RunID, "bisque_session_stolen"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched session search status = %d, want 401", rec.Code)
 	}
 	// An invalid worker token is rejected outright.
 	if rec := makeSearch("wrong-secret", run.RunID, sessionID); rec.Code != http.StatusUnauthorized {
@@ -12697,6 +12729,7 @@ func TestWorkerBisqueSessionRejectedWhenRunOwnerDiffers(t *testing.T) {
 		ThreadID: thread.ThreadID,
 		UserID:   "workos:user_attacker",
 		Goal:     "cross-user session use",
+		Metadata: testRunAuthorityMetadata("workos:user_attacker", "workos-org", bisque.URL, ""),
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
@@ -12709,10 +12742,13 @@ func TestWorkerBisqueSessionRejectedWhenRunOwnerDiffers(t *testing.T) {
 		ThreadID: victimThread.ThreadID,
 		UserID:   "workos:user_victim",
 		Goal:     "legitimate run",
+		Metadata: testRunAuthorityMetadata("workos:user_victim", "workos-org", bisque.URL, victimSession),
 	})
 	if err != nil {
 		t.Fatalf("CreateRun victim: %v", err)
 	}
+	attackerLease := startTestWorkerRunLease(t, memory, attackerRun.RunID, "worker-attacker")
+	victimLease := startTestWorkerRunLease(t, memory, victimRun.RunID, "worker-victim")
 
 	router := NewRouter(ServerDeps{
 		Version:           "test-version",
@@ -12729,28 +12765,22 @@ func TestWorkerBisqueSessionRejectedWhenRunOwnerDiffers(t *testing.T) {
 		}),
 	})
 
-	search := func(runID string) {
+	search := func(runID string, workerID string, leaseToken string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v2/bisque/search", strings.NewReader(`{"resource_type":"image","limit":1}`))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Ultra-Worker-Token", "worker-secret")
-		req.Header.Set("X-Ultra-Run-Id", runID)
-		req.Header.Set("X-Ultra-Bisque-Session-Id", victimSession)
+		setTestWorkerRunHeaders(req, runID, workerID, leaseToken, victimSession)
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
-		}
+		return rec
 	}
 
 	victimAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("victim:victim-secret"))
-	search(attackerRun.RunID)
-	mu.Lock()
-	attackerAuth := gotAuths[len(gotAuths)-1]
-	mu.Unlock()
-	if attackerAuth == victimAuth {
-		t.Fatalf("another user's run reused the victim's linked BisQue credentials")
+	if rec := search(attackerRun.RunID, "worker-attacker", attackerLease.LeaseToken); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("attacker search status = %d body=%s, want 401", rec.Code, rec.Body.String())
 	}
-	search(victimRun.RunID)
+	if rec := search(victimRun.RunID, "worker-victim", victimLease.LeaseToken); rec.Code != http.StatusOK {
+		t.Fatalf("victim search status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
 	mu.Lock()
 	ownerAuth := gotAuths[len(gotAuths)-1]
 	mu.Unlock()
@@ -12767,11 +12797,13 @@ func TestWorkerBisqueEndpointAllowlistCoversAgentReachableRoutes(t *testing.T) {
 	// intentionally excluded.
 	for _, path := range []string{
 		"/v2/bisque/search",
+		"/v2/bisque/dataset-members",
+		"/v2/bisque/image-annotations",
+		"/v2/bisque/dataset-annotations",
 		"/v2/bisque/module-run",
 		"/v2/bisque/download",
 		"/v2/bisque/upload",
 		"/v2/bisque/datasets",
-		"/v2/bisque/push",
 		"/v2/uploads",
 	} {
 		if !isWorkerBisqueEndpointPath(path) {
@@ -12781,12 +12813,30 @@ func TestWorkerBisqueEndpointAllowlistCoversAgentReachableRoutes(t *testing.T) {
 	if isWorkerBisqueEndpointPath("/v2/bisque/unlink") {
 		t.Fatalf("unlink is user-only and must not be worker-reachable")
 	}
+	if isWorkerBisqueEndpointPath("/v2/bisque/push") {
+		t.Fatalf("browser push is user-only and must not be worker-reachable")
+	}
 }
 
 func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
 	t.Parallel()
 
 	memory := store.NewMemoryStore()
+	cipher, err := NewBisqueCredentialCipher(bytes.Repeat([]byte{6}, 32), "worker-upload-key")
+	if err != nil {
+		t.Fatalf("NewBisqueCredentialCipher: %v", err)
+	}
+	const bisqueRoot = "https://bisque.example.test"
+	credentialStore := NewPersistentBisqueCredentialStore(memory, cipher, bisqueRoot)
+	sessionID, err := credentialStore.PutLinked(context.Background(), BisqueCredentialLinkInput{
+		Credentials: BisqueCredentials{Username: "worker-user", Password: "worker-password"},
+		UserID:      "workos:user_e2e",
+		OrgID:       "workos-org",
+		RootURL:     bisqueRoot,
+	})
+	if err != nil {
+		t.Fatalf("PutLinked: %v", err)
+	}
 	thread, err := memory.CreateThread(context.Background(), domain.CreateThreadInput{Title: "worker uploads"})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
@@ -12795,17 +12845,26 @@ func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
 		ThreadID: thread.ThreadID,
 		UserID:   "workos:user_e2e",
 		Goal:     "stage outputs",
+		Metadata: testRunAuthorityMetadata(
+			"workos:user_e2e", "workos-org", bisqueRoot, sessionID,
+			domain.RemoteMutationIntentBisqueUpload,
+		),
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	lease := startTestWorkerRunLease(t, memory, run.RunID, "worker-upload")
 
 	router := NewRouter(ServerDeps{
-		Version:     "test-version",
-		Store:       memory,
-		UploadRoot:  t.TempDir(),
-		WorkerToken: "worker-secret",
-		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+		Version:           "test-version",
+		Store:             memory,
+		UploadRoot:        t.TempDir(),
+		WorkerToken:       "worker-secret",
+		WorkOS:            testWorkOSAuth(t, WorkOSAuthConfig{}),
+		BisqueCredentials: credentialStore,
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL: bisqueRoot, AllowedRoots: []string{bisqueRoot},
+		}),
 	})
 
 	var body bytes.Buffer
@@ -12822,8 +12881,7 @@ func TestWorkerUploadAttributesFilesToRunOwner(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("X-Ultra-Worker-Token", "worker-secret")
-	req.Header.Set("X-Ultra-Run-Id", run.RunID)
+	setTestWorkerRunHeaders(req, run.RunID, "worker-upload", lease.LeaseToken, sessionID)
 	req.Header.Set("X-Ultra-User-Id", "spoofed-user")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -13121,7 +13179,7 @@ func TestBisqueUnlinkDeletesPersistentCredentials(t *testing.T) {
 	}
 }
 
-func TestV2BisqueSearchUsesRunScopedLinkedSessionHeader(t *testing.T) {
+func TestV2BisqueSearchIgnoresWorkerSessionHeaderWithoutWorkerAuthority(t *testing.T) {
 	t.Parallel()
 
 	var gotAuth string
@@ -13170,12 +13228,12 @@ func TestV2BisqueSearchUsesRunScopedLinkedSessionHeader(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("search status = %d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("linked-user:linked-secret"))
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("fallback-user:fallback-secret"))
 	if gotAuth != wantAuth {
-		t.Fatalf("Authorization = %q, want run-scoped linked session credentials", gotAuth)
+		t.Fatalf("Authorization = %q, want direct-user fallback credentials", gotAuth)
 	}
-	if strings.Contains(gotAuth, "fallback") {
-		t.Fatalf("Authorization unexpectedly used fallback credentials: %q", gotAuth)
+	if strings.Contains(gotAuth, "linked-secret") {
+		t.Fatalf("worker-only session header leaked linked credentials into a direct request: %q", gotAuth)
 	}
 }
 
@@ -13184,19 +13242,27 @@ func TestCreateRunPassesBisqueSessionOnlyInTransientJobMetadata(t *testing.T) {
 
 	mem := store.NewMemoryStore()
 	bus := eventbus.NewMemoryBus()
-	credentialStore := NewBisqueCredentialStore()
+	cipher, err := NewBisqueCredentialCipher(bytes.Repeat([]byte{7}, 32), "create-run-key")
+	if err != nil {
+		t.Fatalf("NewBisqueCredentialCipher: %v", err)
+	}
+	const bisqueRoot = "https://bisque.example.org"
+	credentialStore := NewPersistentBisqueCredentialStore(mem, cipher, bisqueRoot)
 	router := NewRouter(ServerDeps{
 		Version:           "test-version",
 		Runs:              runcontrol.NewService(mem, bus),
 		Store:             mem,
 		BisqueCredentials: credentialStore,
+		Bisque: NewBisqueService(BisqueServiceConfig{
+			RootURL: bisqueRoot, AllowedRoots: []string{bisqueRoot},
+		}),
 	})
 
 	sessionID, err := credentialStore.PutLinked(context.Background(), BisqueCredentialLinkInput{
 		Credentials: BisqueCredentials{Username: "linked-user", Password: "linked-secret"},
 		UserID:      "bisque:linked-user",
 		OrgID:       "local-org",
-		RootURL:     "https://bisque.example.org",
+		RootURL:     bisqueRoot,
 		Metadata:    domain.JSONMap{"source": "test"},
 	})
 	if err != nil {
@@ -13231,6 +13297,9 @@ func TestCreateRunPassesBisqueSessionOnlyInTransientJobMetadata(t *testing.T) {
 	}
 	if _, exposed := run.Metadata["bisque_session_id"]; exposed {
 		t.Fatalf("run metadata exposed BisQue session reference: %#v", run.Metadata)
+	}
+	if _, bound := run.Metadata[domain.BisqueAccountBindingMetadataKey]; !bound {
+		t.Fatalf("run metadata is missing non-secret BisQue account binding: %#v", run.Metadata)
 	}
 	storedRun, err := mem.GetRun(context.Background(), run.RunID)
 	if err != nil {
@@ -14907,6 +14976,7 @@ func TestV2RunResourceSearchAndResolveAreRunAnchoredAndUserScoped(t *testing.T) 
 	thread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "now"})
 	run, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID, UserID: "user-a", Goal: "plot the norm CT middle slice",
+		Metadata: domain.JSONMap{"org_id": "org-a"},
 	})
 
 	post := func(token, path, body string) *httptest.ResponseRecorder {
@@ -15042,6 +15112,7 @@ func TestV2RunResourceSearchHonorsShareGrants(t *testing.T) {
 	thread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "now"})
 	run, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID, UserID: "user-a", Goal: "analyze the shared dataset",
+		Metadata: domain.JSONMap{"org_id": "org-a"},
 	})
 	post := func(path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))

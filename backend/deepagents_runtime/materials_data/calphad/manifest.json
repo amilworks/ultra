@@ -1,0 +1,67 @@
+{
+  "schema_version": "1",
+  "databases": [
+    {
+      "database_id": "nist-al-co-w-wang-2017",
+      "filename": "alcow_CALPHAD-2017-Wang.tdb",
+      "format": "tdb",
+      "sha256": "107c7330f0326a334742632f7494c7beadf53370edbc188df1a030853ceab5a8",
+      "size_bytes": 21274,
+      "source_sha256": "da3ede1592b8691abe85a1c15d8649364dc0553e4480bb29da4733ec9cef3d96",
+      "source_size_bytes": 21833,
+      "normalization": "Byte-for-byte source content with CRLF line endings normalized to LF; no TDB tokens changed.",
+      "title": "Thermodynamic re-assessment of the Al-Co-W system",
+      "authors": [
+        "Peisheng Wang",
+        "Wei Xiong",
+        "Ursula R. Kattner",
+        "Carelyn E. Campbell",
+        "Eric A. Lass",
+        "Oleg Y. Kontsevoi",
+        "Gregory B. Olson"
+      ],
+      "publication_doi": "10.1016/j.calphad.2017.09.007",
+      "source_uri": "https://materialsdata.nist.gov/handle/11256/948",
+      "source_download_uri": "https://materialsdata.nist.gov/bitstream/handle/11256/948/alcow_CALPHAD-2017-Wang.tdb",
+      "retrieval_uri": "https://web.archive.org/web/20250808143710id_/https://materialsdata.nist.gov/bitstream/handle/11256/948/alcow_CALPHAD-2017-Wang.tdb",
+      "retrieved_at": "2026-07-09",
+      "license_id": "CC0-1.0",
+      "license_uri": "https://creativecommons.org/publicdomain/zero/1.0/",
+      "assessment_scope": "Critically reviewed Al-Co-W and binary-subsystem thermodynamics described in the cited publication.",
+      "elements": ["AL", "CO", "W", "VA"],
+      "physical_elements": ["AL", "CO", "W"],
+      "components": ["AL", "CO", "W", "VA"],
+      "pseudo_elements": ["/-"],
+      "phases": [
+        "AL12W",
+        "AL2W",
+        "AL3CO",
+        "AL4W",
+        "AL5CO2",
+        "AL5W",
+        "AL9CO2",
+        "BCC_A2",
+        "BCC_B2",
+        "CO3W",
+        "FCC_A1",
+        "HCP_A3",
+        "L12_FCC",
+        "LIQUID",
+        "MAL13CO4",
+        "MU",
+        "OAL13CO4",
+        "YAL13CO4"
+      ],
+      "tdb_temperature_limits_K": [298.14, 6000.0],
+      "assessment_pressure_limits_Pa": [101325.0, 101325.0],
+      "reference_state": "Standard Element Reference (SER/GHSER)",
+      "embedded_role": "open assessed reference and release-qualification database",
+      "caveats": [
+        "The cited assessment, not Ultra or pycalphad, defines the scientific validity domain.",
+        "A successful numerical solve does not validate extrapolation outside the assessed systems and conditions.",
+        "The publication reports ordered gamma-prime (L12_FCC) as metastable in the assessed ternary description; callers must not reinterpret a metastable calculation as equilibrium evidence.",
+        "Commercial or user-supplied databases require their own source, license, citation, hash, and validity metadata."
+      ]
+    }
+  ]
+}

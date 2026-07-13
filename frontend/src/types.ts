@@ -82,6 +82,11 @@ export type SelectionContext = {
   suggested_tool_names?: string[];
 };
 
+export type RemoteMutationIntent = "bisque.upload" | "bisque.create_dataset";
+
+export type ProtectedEvaluationProfile =
+  "materials_cleanroom_v1";
+
 export type ChatRequest = {
   messages: ChatMessage[];
   uploaded_files: string[];
@@ -91,6 +96,8 @@ export type ChatRequest = {
   conversation_id?: string | null;
   goal?: string | null;
   selected_tool_names?: string[];
+  remote_mutation_intents?: RemoteMutationIntent[];
+  evaluation_profile?: ProtectedEvaluationProfile | null;
   knowledge_context?: KnowledgeContext | null;
   selection_context?: SelectionContext | null;
   workflow_hint?: ChatWorkflowHint | null;
@@ -1635,8 +1642,15 @@ export type Hdf5MaterialsPayload = {
   capabilities: string[];
   roles: Record<string, string>;
   phase_names: string[];
+  phase_names_source?: string | null;
+  phase_names_provenance?: string | null;
   feature_count?: number | null;
   grain_count?: number | null;
+  declared_feature_tuple_count?: number | null;
+  referenced_positive_feature_count?: number | null;
+  feature_id_scan_complete: boolean;
+  feature_id_consistency?: boolean | null;
+  feature_zero_reserved?: boolean | null;
   recommended_view: "materials" | "explorer";
 };
 
@@ -1694,6 +1708,9 @@ export type Hdf5DatasetSummary = {
     dimensions?: number[] | null;
     spacing?: number[] | null;
     origin?: number[] | null;
+    cell_data_path?: string | null;
+    cell_data_consistent?: boolean | null;
+    complete?: boolean | null;
   } | null;
   structured_fields: Hdf5DatasetField[];
   component_count: number;
@@ -1810,11 +1827,21 @@ export type Hdf5MaterialsDashboardResponse = {
       dimensions?: number[] | null;
       spacing?: number[] | null;
       origin?: number[] | null;
+      cell_data_path?: string | null;
+      cell_data_consistent?: boolean | null;
+      complete?: boolean | null;
     } | null;
     spacing_note?: string | null;
     phase_names: string[];
+    phase_names_source?: string | null;
+    phase_names_provenance?: string | null;
     feature_count?: number | null;
     grain_count?: number | null;
+    declared_feature_tuple_count?: number | null;
+    referenced_positive_feature_count?: number | null;
+    feature_id_scan_complete: boolean;
+    feature_id_consistency?: boolean | null;
+    feature_zero_reserved?: boolean | null;
     capabilities: string[];
     recommended_map_dataset_path?: string | null;
   };
@@ -2149,6 +2176,9 @@ export type UploadViewerInfo = {
         dimensions?: number[] | null;
         spacing?: number[] | null;
         origin?: number[] | null;
+        cell_data_path?: string | null;
+        cell_data_consistent?: boolean | null;
+        complete?: boolean | null;
       } | null;
     };
     tree: Hdf5ViewerTreeNode[];

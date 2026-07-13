@@ -1687,6 +1687,225 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/dataset-members:
+    post:
+      operationId: getBisqueDatasetMembers
+      description: >-
+        Return the authoritative accessible member count and one bounded member
+        page from a BisQue dataset's /value sub-collection. In production the
+        caller must use either an approved WorkOS session or a trusted worker
+        token. Worker calls additionally require X-Ultra-Run-Id,
+        X-Ultra-Worker-Id, and X-Ultra-Run-Lease-Token to match an active lease
+        and the run-bound BisQue account.
+      security:
+        - UltraWorkOSSession: []
+        - UltraWorkerToken: []
+      parameters:
+        - $ref: "#/components/parameters/ConditionalUltraWorkerRunID"
+        - $ref: "#/components/parameters/ConditionalUltraWorkerID"
+        - $ref: "#/components/parameters/ConditionalUltraRunLeaseToken"
+        - $ref: "#/components/parameters/OptionalUltraBisqueSessionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2BisqueDatasetMembersRequest"
+      responses:
+        "200":
+          description: Accessible dataset membership count and requested member page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueDatasetMembersResponse"
+        "400":
+          description: Invalid JSON or missing/invalid dataset identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "401":
+          description: User authentication or trusted-worker run/lease/account authority is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "403":
+          description: The authenticated WorkOS account is not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+        "413":
+          description: JSON request body exceeds 16 MiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "500":
+          description: Internal count processing failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "502":
+          description: BisQue rejected or failed the upstream request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueNotConfiguredResponse"
+  /v2/bisque/image-annotations:
+    post:
+      operationId: getBisqueImageAnnotations
+      description: >-
+        Count primitive graphical annotation shapes in one image's complete
+        /gobject?view=deep tree and group them by their nearest named gobject
+        class. In production the caller must use either an approved WorkOS
+        session or a trusted worker token. Worker calls additionally require
+        X-Ultra-Run-Id, X-Ultra-Worker-Id, and X-Ultra-Run-Lease-Token to match
+        an active lease and the run-bound BisQue account.
+      security:
+        - UltraWorkOSSession: []
+        - UltraWorkerToken: []
+      parameters:
+        - $ref: "#/components/parameters/ConditionalUltraWorkerRunID"
+        - $ref: "#/components/parameters/ConditionalUltraWorkerID"
+        - $ref: "#/components/parameters/ConditionalUltraRunLeaseToken"
+        - $ref: "#/components/parameters/OptionalUltraBisqueSessionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2BisqueImageAnnotationsRequest"
+      responses:
+        "200":
+          description: Shape and group counts for the requested image
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueImageAnnotationsResponse"
+        "400":
+          description: Invalid JSON or missing/invalid image identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "401":
+          description: User authentication or trusted-worker run/lease/account authority is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "403":
+          description: The authenticated WorkOS account is not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+        "413":
+          description: JSON request body exceeds 16 MiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "500":
+          description: Internal annotation processing failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "502":
+          description: BisQue rejected or failed the upstream request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueNotConfiguredResponse"
+  /v2/bisque/dataset-annotations:
+    post:
+      operationId: getBisqueDatasetAnnotations
+      description: >-
+        Scan at most 8,000 accessible dataset members with concurrency bounded
+        to 16 and report how many images contain primitive annotation shapes.
+        In production the caller must use either an approved WorkOS session or
+        a trusted worker token. Worker calls additionally require
+        X-Ultra-Run-Id, X-Ultra-Worker-Id, and X-Ultra-Run-Lease-Token to match
+        an active lease and the run-bound BisQue account.
+      security:
+        - UltraWorkOSSession: []
+        - UltraWorkerToken: []
+      parameters:
+        - $ref: "#/components/parameters/ConditionalUltraWorkerRunID"
+        - $ref: "#/components/parameters/ConditionalUltraWorkerID"
+        - $ref: "#/components/parameters/ConditionalUltraRunLeaseToken"
+        - $ref: "#/components/parameters/OptionalUltraBisqueSessionID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2BisqueDatasetAnnotationsRequest"
+      responses:
+        "200":
+          description: Bounded dataset-wide annotation inventory
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueDatasetAnnotationsResponse"
+        "400":
+          description: Invalid JSON or missing/invalid dataset identity
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "401":
+          description: User authentication or trusted-worker run/lease/account authority is invalid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "403":
+          description: The authenticated WorkOS account is not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionResponse"
+        "413":
+          description: JSON request body exceeds 16 MiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "500":
+          description: Internal annotation processing failure
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "502":
+          description: BisQue rejected or failed the upstream request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2BisqueNotConfiguredResponse"
   /v2/bisque/module-run:
     post:
       operationId: getBisqueModuleRun
@@ -3391,6 +3610,200 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/resources/{file_id}/calphad/revision:
+    post:
+      operationId: createCalphadRevision
+      description: >-
+        Create or idempotently return the immutable, owner-scoped CALPHAD
+        revision after retaining the exact bounded TDB or DAT bytes and binding
+        them to the server-catalog SHA-256, size, server-derived database format,
+        and finite owner-declared provenance snapshot.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2CalphadRevisionCreateRequest"
+      responses:
+        "201":
+          description: Server-managed CALPHAD revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2CalphadRevisionResponse"
+        "404":
+          description: Resource or parent revision is absent or outside the owner tenant
+        "409":
+          description: Resource binding, pressure declaration, or requested lineage conflicts with the immutable revision
+        "503":
+          description: CALPHAD governance ledger is not configured
+  /v2/resources/{file_id}/calphad/revision/input:
+    get:
+      operationId: getCalphadRevisionInput
+      description: >-
+        Retrieve the owner-only exact immutable CALPHAD database bytes retained
+        for replay. The payload may be Thermo-Calc TDB or ChemSage DAT and is
+        therefore served as format-neutral binary data. Retrieval remains
+        available after source-catalog garbage collection.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: Exact content-addressed TDB or DAT revision bytes
+          headers:
+            X-Ultra-Calphad-Revision-Id:
+              schema: { type: string }
+            X-Ultra-Content-Sha256:
+              schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+            X-Ultra-Calphad-Database-Format:
+              schema: { type: string, enum: [tdb, dat] }
+              description: Immutable server-derived format bound to the revision and replay filename.
+            Content-Disposition:
+              schema: { type: string }
+              description: Content-addressed attachment filename `<sha256>.<database_format>`.
+            Content-Length:
+              schema: { type: integer, format: int64, minimum: 1 }
+            ETag:
+              schema: { type: string }
+              description: Strong immutable `"sha256:<digest>"` replay identity.
+            Cache-Control:
+              schema: { type: string, enum: ["private, immutable"] }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Revision is absent or outside the owner tenant
+        "409":
+          description: Exact retained input bytes are absent or fail their SHA-256/size binding
+        "503":
+          description: CALPHAD governance ledger is not configured
+  /v2/resources/{file_id}/calphad/ledger:
+    get:
+      operationId: getCalphadLedger
+      description: >-
+        Read a bounded owner-only page of the append-only validation ledger in
+        descending (created_at, validation_id) order. Generic resource metadata
+        is not a validation authority; pressure limits come from the immutable
+        normalized revision binding. The latest_validation field always reports
+        the global latest event, including on continuation pages.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: limit
+          in: query
+          description: Maximum validation events in this page.
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+        - name: cursor
+          in: query
+          description: >-
+            Opaque next_cursor from the prior page. The cursor is strictly
+            validated against the exact owner, organization, resource,
+            immutable revision, and existing validation anchor; malformed or
+            mismatched cursors return 404 without disclosing ledger existence.
+          schema: { type: string }
+      responses:
+        "200":
+          description: CALPHAD revision and validation evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2CalphadLedgerResponse"
+        "404":
+          description: Ledger or cursor is absent, invalid, or outside the owner tenant
+        "400":
+          description: Limit is absent, duplicated, or outside the supported range
+        "409":
+          description: Immutable pressure or retained-input binding is absent or inconsistent
+        "503":
+          description: CALPHAD governance ledger is not configured
+  /v2/resources/{file_id}/calphad/validations/{validation_id}/evidence:
+    get:
+      operationId: getCalphadValidationEvidence
+      description: >-
+        Replay the exact retained JSON evidence bytes for an owner-visible
+        validation. The payload is rehashed and size-checked on every read and
+        is served from immutable ledger retention only; source or run-artifact
+        filesystem paths are never used as a fallback.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: validation_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Exact content-addressed validation evidence bytes
+          headers:
+            Content-Length:
+              schema: { type: integer, format: int64, minimum: 1 }
+            ETag:
+              schema: { type: string, pattern: '^"sha256:[0-9a-f]{64}"$' }
+            Cache-Control:
+              schema: { type: string, enum: ["private, immutable"] }
+            X-Ultra-Calphad-Validation-Id:
+              schema: { type: string }
+            X-Ultra-Content-Sha256:
+              schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+          content:
+            application/json:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Validation is absent, resource-mismatched, or outside the owner tenant
+        "409":
+          description: Authorized evidence retention is absent or fails its SHA-256/size binding
+        "503":
+          description: CALPHAD governance ledger is not configured
+  /v2/runs/{run_id}/resources/{file_id}/calphad/validations:
+    post:
+      operationId: appendCalphadValidation
+      description: >-
+        Atomically retain exact bounded evidence bytes and append content-addressed pycalphad
+        validation for an owner-selected resource. The worker token, exact run header, active
+        unexpired lease worker/token, run-selected SHA-256/size, and current owner catalog
+        binding must all agree. The exact finite assessment_pressure_limits_Pa pair must match
+        the selected descriptor, evidence database binding and manifest, requested pressure
+        axis, current owner metadata, and immutable revision. An exact retry for the same revision/run/operation/evidence
+        artifact returns the existing event; another valid observation of the same typed request
+        may append when its evidence artifact differs. Read/share grantees may
+        calculate with selected bytes but cannot promote the owner's catalog ledger.
+      security:
+        - UltraWorkerToken: []
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - $ref: "#/components/parameters/FileID"
+        - $ref: "#/components/parameters/UltraWorkerRunID"
+        - $ref: "#/components/parameters/UltraWorkerID"
+        - $ref: "#/components/parameters/UltraRunLeaseToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2CalphadValidationAppendRequest"
+      responses:
+        "201":
+          description: Appended trusted-worker validation event, or the exact prior event on retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2CalphadValidationAppendResponse"
+        "401":
+          description: Worker authentication, exact run identity, or active lease identity is absent, expired, or invalid
+        "400":
+          description: Evidence encoding, exact bytes, schema, operation, runtime, database/pressure binding, requested pressure axis, or pycalphad identity is invalid
+        "413":
+          description: The bounded JSON callback body exceeds 16 MiB
+        "404":
+          description: Run or resource is absent or belongs to another tenant
+        "409":
+          description: Immutable resource or pressure binding changed, or the same evidence artifact identity was replayed with inconsistent semantic binding
+        "503":
+          description: Resource catalog, run-lease verification, or CALPHAD governance ledger is not configured
 components:
   parameters:
     ThreadID:
@@ -3418,6 +3831,59 @@ components:
       in: path
       required: true
       schema: { type: string }
+    UltraWorkerRunID:
+      name: X-Ultra-Run-Id
+      in: header
+      required: true
+      description: Must exactly equal the run_id path parameter.
+      schema: { type: string, minLength: 1 }
+    UltraWorkerID:
+      name: X-Ultra-Worker-Id
+      in: header
+      required: true
+      description: Must exactly equal the worker id on the active run lease.
+      schema: { type: string, minLength: 1 }
+    UltraRunLeaseToken:
+      name: X-Ultra-Run-Lease-Token
+      in: header
+      required: true
+      description: Opaque active run-lease secret compared in constant time by the server.
+      schema: { type: string, minLength: 1 }
+    ConditionalUltraWorkerRunID:
+      name: X-Ultra-Run-Id
+      in: header
+      required: false
+      description: Required when the UltraWorkerToken security alternative is used.
+      schema: { type: string, minLength: 1 }
+    ConditionalUltraWorkerID:
+      name: X-Ultra-Worker-Id
+      in: header
+      required: false
+      description: Required when the UltraWorkerToken security alternative is used; must equal the active lease worker.
+      schema: { type: string, minLength: 1 }
+    ConditionalUltraRunLeaseToken:
+      name: X-Ultra-Run-Lease-Token
+      in: header
+      required: false
+      description: Required when the UltraWorkerToken security alternative is used; compared with the active lease in constant time.
+      schema: { type: string, minLength: 1 }
+    OptionalUltraBisqueSessionID:
+      name: X-Ultra-Bisque-Session-Id
+      in: header
+      required: false
+      description: Optional opaque linked-session selector; worker use is accepted only when it matches the run's server-stamped account binding.
+      schema: { type: string, minLength: 1 }
+  securitySchemes:
+    UltraWorkerToken:
+      type: apiKey
+      in: header
+      name: X-Ultra-Worker-Token
+      description: Configured control-plane credential for trusted Deep Agents workers.
+    UltraWorkOSSession:
+      type: apiKey
+      in: cookie
+      name: ultra_workos_session
+      description: Sealed approved WorkOS session cookie used by interactive production callers.
   schemas:
     JsonObject:
       type: object
@@ -4173,6 +4639,14 @@ components:
       required: [messages]
       properties:
         goal: { type: string, nullable: true }
+        evaluation_profile:
+          type: string
+          enum: [materials_cleanroom_v1]
+          nullable: true
+          description: >-
+            Protected clean-room evaluator contract. Only an administrator
+            principal may create a run with this profile; the control plane
+            persists and propagates it as server-owned run metadata.
         messages:
           type: array
           items:
@@ -4189,6 +4663,17 @@ components:
         selected_tool_names:
           type: array
           items: { type: string }
+        remote_mutation_intents:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [bisque.upload, bisque.create_dataset]
+          description: >-
+            Explicit authenticated current-turn authorization for bounded
+            worker-side external mutations. The control plane validates and
+            persists this field as immutable run capability metadata; copies
+            in metadata are ignored. Protected evaluation profiles forbid it.
         knowledge_context:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
@@ -4448,6 +4933,148 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2BisqueResource"
+    V2BisqueDatasetMembersRequest:
+      type: object
+      anyOf:
+        - required: [dataset_uniq]
+        - required: [resource_uri]
+      properties:
+        dataset_uniq:
+          type: string
+          description: Bare BisQue dataset resource_uniq; preferred when both identities are present.
+        resource_uri:
+          type: string
+          description: BisQue dataset data_service URI or bare resource_uniq.
+        limit:
+          type: integer
+          default: 200
+          description: Values less than or equal to zero use 200; values above 100,000 are clamped to 100,000.
+        offset:
+          type: integer
+          default: 0
+          description: Negative values are normalized to zero.
+    V2BisqueDatasetMembersResponse:
+      type: object
+      additionalProperties: false
+      required: [dataset_uniq, member_count, offset, members]
+      properties:
+        dataset_uniq: { type: string }
+        member_count: { type: integer, minimum: 0 }
+        offset: { type: integer, minimum: 0 }
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueResource"
+    V2BisqueImageAnnotationsRequest:
+      type: object
+      anyOf:
+        - required: [image_uniq]
+        - required: [resource_uri]
+      properties:
+        image_uniq:
+          type: string
+          description: Bare BisQue image resource_uniq; preferred when both identities are present.
+        resource_uri:
+          type: string
+          description: BisQue image data_service URI or bare resource_uniq.
+    V2BisqueImageAnnotationsResponse:
+      type: object
+      additionalProperties: false
+      required: [image_uniq, annotation_count]
+      properties:
+        image_uniq: { type: string }
+        name: { type: string, nullable: true }
+        annotation_count:
+          type: integer
+          minimum: 0
+          description: Number of primitive graphical shape elements, excluding gobject containers.
+        group_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        label_counts:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: integer
+            minimum: 0
+        client_view_url: { type: string, nullable: true }
+    V2BisqueDatasetAnnotationsRequest:
+      type: object
+      anyOf:
+        - required: [dataset_uniq]
+        - required: [resource_uri]
+      properties:
+        dataset_uniq:
+          type: string
+          description: Bare BisQue dataset resource_uniq; preferred when both identities are present.
+        resource_uri:
+          type: string
+          description: BisQue dataset data_service URI or bare resource_uniq.
+        max_images:
+          type: integer
+          default: 8000
+          description: Values less than or equal to zero or above 8,000 use the fixed 8,000-image safety bound.
+    V2BisqueAnnotatedImage:
+      type: object
+      additionalProperties: false
+      required: [resource_uniq, annotation_count]
+      properties:
+        resource_uniq: { type: string }
+        name: { type: string, nullable: true }
+        annotation_count: { type: integer, minimum: 0 }
+        label_counts:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: integer
+            minimum: 0
+        client_view_url: { type: string, nullable: true }
+    V2BisqueDatasetAnnotationsResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - dataset_uniq
+        - member_count
+        - images_checked
+        - images_with_annotations
+        - total_annotations
+        - inaccessible
+        - truncated
+        - annotated_images
+      properties:
+        dataset_uniq: { type: string }
+        member_count: { type: integer, minimum: 0 }
+        images_checked: { type: integer, minimum: 0 }
+        images_with_annotations: { type: integer, minimum: 0 }
+        total_annotations: { type: integer, minimum: 0 }
+        label_totals:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: integer
+            minimum: 0
+        inaccessible: { type: integer, minimum: 0 }
+        truncated: { type: boolean }
+        annotated_images:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2BisqueAnnotatedImage"
+    V2APIErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
+        upstream_status: { type: integer, nullable: true }
+    V2BisqueNotConfiguredResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service, detail]
+      properties:
+        status: { type: string, enum: [not_configured] }
+        service: { type: string, enum: [bisque] }
+        detail: { type: string }
     V2BisqueImportRecord:
       type: object
       required: [input_url, status, resource_uri, uploaded]
@@ -5471,3 +6098,242 @@ components:
       properties:
         artifact:
           $ref: "#/components/schemas/V2ArtifactRecord"
+    V2CalphadRevisionCreateRequest:
+      type: object
+      properties:
+        parent_revision_id:
+          type: string
+          description: Optional prior revision owned by the same tenant. The server verifies lineage and rejects self/cross-tenant parents.
+    V2CalphadRevisionRecord:
+      type: object
+      required: [revision_id, resource_id, owner_user_id, sha256, size_bytes, database_format, assessment_pressure_limits_Pa, created_at, metadata]
+      properties:
+        revision_id: { type: string }
+        resource_id: { type: string }
+        owner_user_id: { type: string }
+        owner_org_id: { type: string, nullable: true }
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        size_bytes: { type: integer, format: int64, minimum: 1 }
+        database_format:
+          type: string
+          enum: [tdb, dat]
+          description: Server-derived immutable format from the catalog filename suffix; never inferred from MIME alone.
+        assessment_pressure_limits_Pa:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number, format: double, minimum: 1.0e-9, maximum: 1.0e12 }
+          description: Immutable normalized owner-authoritative [minimum, maximum] pressure range in Pa; equal fixed bounds are valid.
+        parent_revision_id: { type: string, nullable: true }
+        created_by_user_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+          description: >-
+            Immutable revision metadata containing exact
+            owner_declaration (ultra.calphad.owner-declaration.v1), stamped with
+            resource_owner authority, the server resource/database identity,
+            safe source/license/scope/reference strings, finite temperature and
+            pressure limits, and the same database_format as this revision.
+    V2CalphadValidationRecord:
+      type: object
+      required: [validation_id, revision_id, resource_id, database_sha256, database_size_bytes, database_format, assessment_pressure_limits_Pa, status, operation, evidence_retention, promotable, created_by_authority, created_at, metadata]
+      properties:
+        validation_id: { type: string }
+        revision_id: { type: string }
+        resource_id: { type: string }
+        database_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Exact database digest duplicated on every event and DB-bound to the revision.
+        database_size_bytes:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Exact database byte size duplicated on every event and DB-bound to the revision.
+        database_format:
+          type: string
+          enum: [tdb, dat]
+          description: Exact database format duplicated on every event and DB-bound to the revision.
+        assessment_pressure_limits_Pa:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number, format: double, minimum: 1.0e-9, maximum: 1.0e12 }
+          description: Normalized pressure declaration duplicated on every event and DB-bound to the immutable revision; equal fixed bounds are valid.
+        database_inventory_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+          description: Canonical semantic fingerprint of phases, components, and model inventory; required for successful inspection and every equilibrium or Scheil attempt, but an inspect terminal failure may omit it.
+        request_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+          description: Canonical typed inspect/equilibrium/Scheil request fingerprint used to group scientific observations; exact evidence identity controls retry idempotence.
+        status:
+          type: string
+          enum: [pending, input_validated, equilibrium_completed, scheil_completed, failed, timeout, unsupported]
+        operation:
+          type: string
+          enum: [registration, inspect, equilibrium, scheil]
+        failure_domain:
+          type: string
+          nullable: true
+          enum: [input, scientific, platform]
+          description: Required exactly for failed, timeout, or unsupported terminal events; null on registration and successful events.
+        failure_stage:
+          type: string
+          nullable: true
+          enum: [parse, solver, result_validation, sandbox_runtime]
+          description: Required exactly for failed, timeout, or unsupported terminal events; cross-checked against operation and failure_code.
+        failure_code:
+          type: string
+          nullable: true
+          enum:
+            - calphad_parse_failed
+            - calphad_parse_timeout
+            - calphad_parse_unsupported
+            - calphad_solver_failed
+            - calphad_solver_timeout
+            - calphad_solver_unsupported
+            - calphad_result_invalid
+            - calphad_runtime_internal_failure
+            - calphad_sandbox_failed
+            - calphad_sandbox_timeout
+          description: Stable bounded terminal code, required exactly on failed, timeout, and unsupported events.
+        evidence_path: { type: string, nullable: true }
+        evidence_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+        evidence_size_bytes: { type: integer, format: int64, minimum: 1, nullable: true }
+        runtime_image_id:
+          type: string
+          nullable: true
+          pattern: '^sha256:[0-9a-f]{64}$'
+        pycalphad_version: { type: string, nullable: true }
+        run_id: { type: string, nullable: true }
+        inspection_evidence_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+          description: For equilibrium or Scheil, the exact retained inspection artifact SHA from the same revision, run, and runtime image.
+        evidence_contract_version:
+          type: string
+          nullable: true
+          enum: [ultra.calphad.retained-evidence.v2]
+          description: Server-authored retained-evidence contract marker; absent historical worker rows are explicitly legacy and non-promotable.
+        evidence_retention:
+          type: string
+          enum: [not_applicable, retained, unretained, legacy_unretained]
+          description: Server-derived blob retention state. Historical rows without retained bytes are explicitly legacy_unretained.
+        promotable:
+          type: boolean
+          description: False for every terminal failure; otherwise false unless successful evidence bytes are retained and equilibrium/Scheil inspection lineage is complete.
+        created_by_authority:
+          type: string
+          enum: [control_plane, trusted_worker]
+        created_at: { type: string, format: date-time }
+        metadata:
+          $ref: "#/components/schemas/JsonObject"
+    V2CalphadLedgerRecord:
+      type: object
+      required: [revision, validations, has_more]
+      properties:
+        revision:
+          $ref: "#/components/schemas/V2CalphadRevisionRecord"
+        latest_validation:
+          nullable: true
+          $ref: "#/components/schemas/V2CalphadValidationRecord"
+        validations:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2CalphadValidationRecord"
+        has_more:
+          type: boolean
+          description: True when an older page exists.
+        next_cursor:
+          type: string
+          description: Opaque continuation cursor, present exactly when has_more is true.
+    V2CalphadRevisionResponse:
+      type: object
+      required: [revision]
+      properties:
+        revision:
+          $ref: "#/components/schemas/V2CalphadRevisionRecord"
+    V2CalphadLedgerResponse:
+      type: object
+      required: [ledger]
+      properties:
+        ledger:
+          $ref: "#/components/schemas/V2CalphadLedgerRecord"
+    V2CalphadValidationAppendRequest:
+      type: object
+      additionalProperties: false
+      required: [status, operation, evidence_path, evidence_sha256, evidence_size_bytes, runtime_image_id, pycalphad_version, evidence_gzip_base64]
+      oneOf:
+        - properties:
+            status:
+              enum: [input_validated, equilibrium_completed, scheil_completed]
+          not:
+            anyOf:
+              - required: [failure_domain]
+              - required: [failure_stage]
+              - required: [failure_code]
+        - required: [failure_domain, failure_stage, failure_code]
+          properties:
+            status:
+              enum: [failed, timeout, unsupported]
+      properties:
+        status:
+          type: string
+          enum: [input_validated, equilibrium_completed, scheil_completed, failed, timeout, unsupported]
+        operation:
+          type: string
+          enum: [inspect, equilibrium, scheil]
+        failure_domain:
+          type: string
+          enum: [input, scientific, platform]
+        failure_stage:
+          type: string
+          enum: [parse, solver, result_validation, sandbox_runtime]
+        failure_code:
+          type: string
+          enum:
+            - calphad_parse_failed
+            - calphad_parse_timeout
+            - calphad_parse_unsupported
+            - calphad_solver_failed
+            - calphad_solver_timeout
+            - calphad_solver_unsupported
+            - calphad_result_invalid
+            - calphad_runtime_internal_failure
+            - calphad_sandbox_failed
+            - calphad_sandbox_timeout
+        evidence_path:
+          type: string
+          description: Content-addressed run artifact under /outputs/calphad/inspection, /outputs/calphad/equilibrium, or /outputs/calphad/scheil.
+        evidence_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        evidence_size_bytes: { type: integer, format: int64, minimum: 1, maximum: 33554432 }
+        runtime_image_id:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        pycalphad_version: { type: string, minLength: 1, maxLength: 128 }
+        evidence_gzip_base64:
+          type: string
+          minLength: 1
+          maxLength: 15379116
+          description: Strict base64 of one gzip member containing the exact content-addressed evidence bytes; decompressed bytes are capped at 32 MiB.
+    V2CalphadValidationAppendResponse:
+      type: object
+      required: [revision, validation]
+      properties:
+        revision:
+          $ref: "#/components/schemas/V2CalphadRevisionRecord"
+        validation:
+          $ref: "#/components/schemas/V2CalphadValidationRecord"

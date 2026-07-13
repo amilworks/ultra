@@ -956,6 +956,8 @@ WHERE r.resource_id = $1
       WHERE g.resource_id = r.resource_id
         AND g.status = 'active'
         AND (
+          COALESCE(g.grantee_user_id, '') = '__public__'
+          OR
           (
             COALESCE(g.grantee_user_id, '') <> ''
             AND g.grantee_user_id = $2

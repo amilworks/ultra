@@ -7,6 +7,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,7 @@ import (
 
 var bisqueResourceTypePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 var bisqueScopePattern = regexp.MustCompile(`^[A-Za-z0-9_, -]+$`)
+var bisqueSHA256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type BisqueServiceConfig struct {
 	RootURL       string
@@ -303,25 +305,30 @@ func (store *BisqueCredentialStore) GetWithContext(ctx context.Context, sessionI
 	return credentials, true, nil
 }
 
-// OwnerUserID reports which user a linked session belongs to. Sessions held
-// only in the in-memory cache (dev logins without persistence) have no owner
-// record, so known is false and callers fall back to legacy trust.
-func (store *BisqueCredentialStore) OwnerUserID(ctx context.Context, sessionID string) (string, bool, error) {
+// OwnerPrincipal reports the exact tenant a durable linked session belongs to.
+// Sessions held only in the in-memory cache have no trustworthy owner binding
+// and therefore cannot authorize worker-side external mutations.
+func (store *BisqueCredentialStore) OwnerPrincipal(ctx context.Context, sessionID string) (string, string, bool, error) {
 	if store == nil || store.persistent == nil {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	record, found, err := store.persistent.GetBisqueCredentialBySessionID(contextOrBackground(ctx), sessionID)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	if !found {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return strings.TrimSpace(record.UserID), true, nil
+	return strings.TrimSpace(record.UserID), strings.TrimSpace(record.OrgID), true, nil
+}
+
+func (store *BisqueCredentialStore) OwnerUserID(ctx context.Context, sessionID string) (string, bool, error) {
+	userID, _, known, err := store.OwnerPrincipal(ctx, sessionID)
+	return userID, known, err
 }
 
 // ResolveLinkedSessionForUser returns the session id and credentials of a user's
@@ -496,6 +503,18 @@ type bisqueUploadResponse struct {
 	Uploads []BisqueUploadRecord `json:"uploads"`
 }
 
+type preparedBisqueFileUpload struct {
+	record  resourceRecord
+	path    string
+	content []byte
+}
+
+type preparedBisqueArtifactUpload struct {
+	artifact domain.ArtifactRecord
+	path     string
+	content  []byte
+}
+
 type bisqueCreateDatasetRequest struct {
 	Name         string   `json:"name"`
 	ResourceURIs []string `json:"resource_uris"`
@@ -582,11 +601,15 @@ func (deps ServerDeps) handleBisqueSearch(w http.ResponseWriter, r *http.Request
 		writeBisqueNotConfigured(w)
 		return
 	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r)
+	if !authorized {
+		return
+	}
 	var req bisqueSearchRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	response, err := deps.Bisque.Search(r.Context(), req, deps.bisqueCredentialsFromRequest(r.Context(), r))
+	response, err := deps.Bisque.Search(r.Context(), req, authority.Credentials)
 	if err != nil {
 		writeBisqueError(w, err)
 		return
@@ -599,6 +622,10 @@ func (deps ServerDeps) handleBisqueModuleRun(w http.ResponseWriter, r *http.Requ
 		writeBisqueNotConfigured(w)
 		return
 	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r)
+	if !authorized {
+		return
+	}
 	var req bisqueModuleRunRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -608,7 +635,7 @@ func (deps ServerDeps) handleBisqueModuleRun(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, errors.New("mex_uri or mex_uniq is required"))
 		return
 	}
-	run, err := deps.Bisque.GetModuleRun(r.Context(), mexRef, deps.bisqueCredentialsFromRequest(r.Context(), r))
+	run, err := deps.Bisque.GetModuleRun(r.Context(), mexRef, authority.Credentials)
 	if err != nil {
 		writeBisqueError(w, err)
 		return
@@ -619,6 +646,10 @@ func (deps ServerDeps) handleBisqueModuleRun(w http.ResponseWriter, r *http.Requ
 func (deps ServerDeps) handleImportBisqueResources(w http.ResponseWriter, r *http.Request) {
 	if deps.Bisque == nil {
 		writeBisqueNotConfigured(w)
+		return
+	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r)
+	if !authorized {
 		return
 	}
 	root, err := deps.resolvedUploadRoot()
@@ -636,11 +667,11 @@ func (deps ServerDeps) handleImportBisqueResources(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, errors.New("at least one BisQue resource URI is required"))
 		return
 	}
-	principal := deps.principalFromRequest(r, "")
+	principal := authority.Principal
 	uploaded := make([]uploadedFileRecord, 0, len(resources))
 	imports := make([]BisqueImportRecord, 0, len(resources))
 	for _, resourceURI := range resources {
-		record, imported, err := deps.Bisque.ImportResource(r.Context(), root, resourceURI, principal, deps.bisqueCredentialsFromRequest(r.Context(), r))
+		record, imported, err := deps.Bisque.ImportResource(r.Context(), root, resourceURI, principal, authority.Credentials)
 		if err != nil {
 			writeBisqueError(w, err)
 			return
@@ -667,6 +698,10 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 		writeBisqueNotConfigured(w)
 		return
 	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r, domain.RemoteMutationIntentBisqueUpload)
+	if !authorized {
+		return
+	}
 	root, err := deps.resolvedUploadRoot()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -680,30 +715,32 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, errors.New("at least one file_id or artifact_id is required"))
 		return
 	}
-	principal := deps.principalFromRequest(r, "")
-	uploads := make([]BisqueUploadRecord, 0, len(req.FileIDs)+len(req.ArtifactIDs))
+	req.FileIDs = uniqueTrimmedStringValues(req.FileIDs)
+	req.ArtifactIDs = uniqueTrimmedStringValues(req.ArtifactIDs)
+	principal := authority.Principal
+	preparedFiles := make([]preparedBisqueFileUpload, 0, len(req.FileIDs))
 	for _, fileID := range req.FileIDs {
 		record, path, err := deps.findUploadResourceForRequest(r.Context(), root, principal, fileID)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		uploaded, err := deps.Bisque.UploadFile(r.Context(), record, path, deps.bisqueCredentialsFromRequest(r.Context(), r))
-		if err != nil {
-			writeBisqueError(w, err)
+		if authority.Worker && !workerRunAllowsBisqueResourceRecord(authority.Run, record) {
+			writeStoreError(w, store.ErrNotFound)
 			return
 		}
-		uploads = append(uploads, uploaded)
+		preparedFiles = append(preparedFiles, preparedBisqueFileUpload{record: record, path: path})
+	}
+	preparedArtifacts := make([]preparedBisqueArtifactUpload, 0, len(req.ArtifactIDs))
+	if len(req.ArtifactIDs) > 0 && deps.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact store is not configured"})
+		return
+	}
+	if len(req.ArtifactIDs) > 0 && strings.TrimSpace(deps.ArtifactRoot) == "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact root is not configured"})
+		return
 	}
 	for _, artifactID := range req.ArtifactIDs {
-		if deps.Store == nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact store is not configured"})
-			return
-		}
-		if strings.TrimSpace(deps.ArtifactRoot) == "" {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "artifact root is not configured"})
-			return
-		}
 		artifact, err := deps.Store.GetArtifactForUser(r.Context(), artifactID, principal.UserID)
 		if err != nil {
 			writeStoreError(w, err)
@@ -714,15 +751,80 @@ func (deps ServerDeps) handleBisqueUpload(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
-		uploaded, err := deps.Bisque.UploadNamedFile(r.Context(), artifactName(artifact, path), path, deps.bisqueCredentialsFromRequest(r.Context(), r))
+		if authority.Worker && !workerRunAllowsBisqueArtifact(authority.Run, artifact) {
+			writeStoreError(w, store.ErrNotFound)
+			return
+		}
+		preparedArtifacts = append(preparedArtifacts, preparedBisqueArtifactUpload{artifact: artifact, path: path})
+	}
+	mutationTargets := make([]bisqueMutationUploadTarget, 0, len(preparedFiles)+len(preparedArtifacts))
+	for index, prepared := range preparedFiles {
+		target, content, err := verifiedBisqueMutationTarget(
+			"resource", prepared.record.OriginalName, prepared.path, prepared.record.SHA256, prepared.record.SizeBytes,
+		)
 		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		preparedFiles[index].content = content
+		mutationTargets = append(mutationTargets, target)
+	}
+	for index, prepared := range preparedArtifacts {
+		target, content, err := verifiedBisqueMutationTarget(
+			"artifact", artifactName(prepared.artifact, prepared.path), prepared.path,
+			prepared.artifact.SHA256, prepared.artifact.SizeBytes,
+		)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		preparedArtifacts[index].content = content
+		mutationTargets = append(mutationTargets, target)
+	}
+	receipt, cached, replayed, err := deps.beginWorkerBisqueMutation(
+		r.Context(), authority, "bisque.upload",
+		bisqueUploadMutationRequest{Targets: canonicalBisqueUploadTargets(mutationTargets)},
+	)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if replayed {
+		writeJSON(w, http.StatusOK, cached)
+		return
+	}
+
+	// All local targets are authorized and resolved before the first external
+	// write, so one invalid item cannot leave a partially uploaded batch.
+	uploads := make([]BisqueUploadRecord, 0, len(preparedFiles)+len(preparedArtifacts))
+	for _, prepared := range preparedFiles {
+		uploaded, err := deps.Bisque.UploadFileBytes(r.Context(), prepared.record, prepared.content, authority.Credentials)
+		if err != nil {
+			deps.markWorkerBisqueMutationAmbiguous(r.Context(), receipt, err)
 			writeBisqueError(w, err)
 			return
 		}
-		uploaded.ArtifactID = artifact.ArtifactID
 		uploads = append(uploads, uploaded)
 	}
-	writeJSON(w, http.StatusOK, bisqueUploadResponse{Count: len(uploads), Uploads: uploads})
+	for _, prepared := range preparedArtifacts {
+		uploaded, err := deps.Bisque.UploadNamedBytes(
+			r.Context(), artifactName(prepared.artifact, prepared.path), prepared.content, authority.Credentials,
+		)
+		if err != nil {
+			deps.markWorkerBisqueMutationAmbiguous(r.Context(), receipt, err)
+			writeBisqueError(w, err)
+			return
+		}
+		uploaded.ArtifactID = prepared.artifact.ArtifactID
+		uploads = append(uploads, uploaded)
+	}
+	response := bisqueUploadResponse{Count: len(uploads), Uploads: uploads}
+	if err := deps.completeWorkerBisqueMutation(r.Context(), receipt, response); err != nil {
+		deps.markWorkerBisqueMutationAmbiguous(r.Context(), receipt, err)
+		writeError(w, http.StatusServiceUnavailable, errors.New("BisQue mutation completed upstream but its durable receipt could not be sealed"))
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (deps ServerDeps) handleBisqueCreateDataset(w http.ResponseWriter, r *http.Request) {
@@ -730,14 +832,63 @@ func (deps ServerDeps) handleBisqueCreateDataset(w http.ResponseWriter, r *http.
 		writeBisqueNotConfigured(w)
 		return
 	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r, domain.RemoteMutationIntentBisqueCreateDataset)
+	if !authorized {
+		return
+	}
 	var req bisqueCreateDatasetRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	credentials := deps.bisqueCredentialsFromRequest(r.Context(), r)
-	dataset, err := deps.Bisque.CreateDataset(r.Context(), req.Name, req.ResourceURIs, credentials)
+	req.Name = strings.TrimSpace(req.Name)
+	req.ResourceURIs = canonicalBisqueDatasetMembers(req.ResourceURIs)
+	if req.Name == "" || len(req.ResourceURIs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("dataset name and at least one resource_uri are required"))
+		return
+	}
+	for index, rawURI := range req.ResourceURIs {
+		normalized, err := deps.Bisque.normalizeAllowedURL(rawURI)
+		if err != nil {
+			writeBisqueError(w, err)
+			return
+		}
+		req.ResourceURIs[index] = normalized
+	}
+	req.ResourceURIs = canonicalBisqueDatasetMembers(req.ResourceURIs)
+	if authority.Worker {
+		uploadedURIs, err := deps.workerBisqueUploadedResourceURIs(r.Context(), authority.Run.RunID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, resourceURI := range req.ResourceURIs {
+			if !workerRunAllowsBisqueDatasetURI(authority.Run, resourceURI, uploadedURIs) {
+				writeStoreError(w, store.ErrNotFound)
+				return
+			}
+		}
+	}
+	receipt, cached, replayed, err := deps.beginWorkerBisqueMutation(
+		r.Context(), authority, "bisque.create_dataset",
+		bisqueDatasetMutationRequest{Name: req.Name, ResourceURIs: req.ResourceURIs},
+	)
 	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if replayed {
+		writeJSON(w, http.StatusOK, cached)
+		return
+	}
+	dataset, err := deps.Bisque.CreateDataset(r.Context(), req.Name, req.ResourceURIs, authority.Credentials)
+	if err != nil {
+		deps.markWorkerBisqueMutationAmbiguous(r.Context(), receipt, err)
 		writeBisqueError(w, err)
+		return
+	}
+	if err := deps.completeWorkerBisqueMutation(r.Context(), receipt, dataset); err != nil {
+		deps.markWorkerBisqueMutationAmbiguous(r.Context(), receipt, err)
+		writeError(w, http.StatusServiceUnavailable, errors.New("BisQue mutation completed upstream but its durable receipt could not be sealed"))
 		return
 	}
 	writeJSON(w, http.StatusOK, dataset)
@@ -746,6 +897,10 @@ func (deps ServerDeps) handleBisqueCreateDataset(w http.ResponseWriter, r *http.
 func (deps ServerDeps) handleBisquePush(w http.ResponseWriter, r *http.Request) {
 	if deps.Bisque == nil {
 		writeBisqueNotConfigured(w)
+		return
+	}
+	authority, authorized := deps.authorizeBisqueRequest(w, r)
+	if !authorized {
 		return
 	}
 	root, err := deps.resolvedUploadRoot()
@@ -763,12 +918,12 @@ func (deps ServerDeps) handleBisquePush(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, errors.New("at least one file_id or collection_id is required"))
 		return
 	}
-	credentials := deps.bisqueCredentialsFromRequest(r.Context(), r)
+	credentials := authority.Credentials
 	if strings.TrimSpace(credentials.Username) == "" && strings.TrimSpace(deps.Bisque.username) == "" {
 		writeError(w, http.StatusBadRequest, errors.New("link your BisQue account in Settings before pushing resources"))
 		return
 	}
-	principal := deps.principalFromRequest(r, "")
+	principal := authority.Principal
 	uploads := []BisqueUploadRecord{}
 	datasets := []BisqueDatasetRecord{}
 	datasetName := strings.TrimSpace(req.DatasetName)
@@ -915,6 +1070,76 @@ func (deps ServerDeps) bisqueJobMetadataFromRequest(r *http.Request) domain.JSON
 	return metadata
 }
 
+// bisqueRunBindingFromRequest snapshots a non-secret digest of the exact
+// durable linked account selected when the authenticated user creates a run.
+// The opaque session id remains transient job metadata; its digest prevents an
+// old run from inheriting a newly linked account after unlink/relink.
+func (deps ServerDeps) bisqueRunBindingFromRequest(r *http.Request, principal requestPrincipal) (string, domain.JSONMap, bool) {
+	if deps.BisqueCredentials == nil {
+		return "", nil, false
+	}
+	sessionID := deps.resolveBisqueSessionForRequest(r)
+	if sessionID == "" {
+		return "", nil, false
+	}
+	ownerUserID, ownerOrgID, known, err := deps.BisqueCredentials.OwnerPrincipal(r.Context(), sessionID)
+	if err != nil || !known || ownerUserID == "" || ownerOrgID == "" ||
+		ownerUserID != strings.TrimSpace(principal.UserID) || ownerOrgID != strings.TrimSpace(principal.OrgID) {
+		return "", nil, false
+	}
+	return sessionID, domain.JSONMap{
+		"schema_version": "ultra.bisque_account_binding.v1",
+		"authority":      "control_plane",
+		"session_sha256": bisqueSessionDigest(sessionID),
+		"root_url":       deps.bisqueRootURL(),
+		"owner_user_id":  ownerUserID,
+		"owner_org_id":   ownerOrgID,
+	}, true
+}
+
+func bisqueSessionDigest(sessionID string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(sessionID)))
+	return hex.EncodeToString(digest[:])
+}
+
+func bisqueAccountBindingForRun(run domain.RunRecord) (domain.JSONMap, bool) {
+	binding, ok := jsonMapValue(run.Metadata[domain.BisqueAccountBindingMetadataKey])
+	if !ok {
+		return nil, false
+	}
+	schema, _ := safeMetadataString(binding["schema_version"], 128)
+	authority, _ := safeMetadataString(binding["authority"], 128)
+	sessionSHA, _ := safeMetadataString(binding["session_sha256"], 128)
+	ownerUserID, _ := safeMetadataString(binding["owner_user_id"], 512)
+	ownerOrgID, _ := safeMetadataString(binding["owner_org_id"], 512)
+	rootURL, _ := safeMetadataString(binding["root_url"], 4096)
+	if schema != "ultra.bisque_account_binding.v1" || authority != "control_plane" ||
+		!bisqueSHA256Pattern.MatchString(sessionSHA) || ownerUserID == "" ||
+		ownerOrgID == "" || rootURL == "" || ownerUserID != strings.TrimSpace(run.UserID) ||
+		ownerOrgID != trustedRunOrgID(run) {
+		return nil, false
+	}
+	return domain.JSONMap{
+		"schema_version": schema,
+		"authority":      authority,
+		"session_sha256": sessionSHA,
+		"root_url":       rootURL,
+		"owner_user_id":  ownerUserID,
+		"owner_org_id":   ownerOrgID,
+	}, true
+}
+
+func bisqueSessionMatchesRunBinding(run domain.RunRecord, sessionID string, expectedRoot string) bool {
+	binding, ok := bisqueAccountBindingForRun(run)
+	if !ok || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	sessionSHA, _ := safeMetadataString(binding["session_sha256"], 128)
+	rootURL, _ := safeMetadataString(binding["root_url"], 4096)
+	return subtle.ConstantTimeCompare([]byte(sessionSHA), []byte(bisqueSessionDigest(sessionID))) == 1 &&
+		strings.TrimRight(rootURL, "/") == strings.TrimRight(strings.TrimSpace(expectedRoot), "/")
+}
+
 // resolveBisqueSessionForRequest returns the BisQue session id to attach to a
 // run for this user: the cookie session when present, otherwise the user's
 // durably-linked account session looked up by identity. The durable fallback is
@@ -940,37 +1165,31 @@ func (deps ServerDeps) resolveBisqueSessionForRequest(r *http.Request) string {
 }
 
 func (deps ServerDeps) bisqueCredentialsFromRequest(ctx context.Context, r *http.Request) BisqueCredentials {
+	// A presented worker credential never consumes browser cookies or global
+	// service credentials. Worker handlers obtain credentials only from
+	// authorizeBisqueRequest after run/binding/lease validation.
+	if workerTokenFromRequest(r) != "" {
+		return BisqueCredentials{}
+	}
+	return deps.directBisqueCredentialsFromRequest(ctx, r, deps.principalFromRequest(r, ""))
+}
+
+func (deps ServerDeps) directBisqueCredentialsFromRequest(ctx context.Context, r *http.Request, principal requestPrincipal) BisqueCredentials {
 	if deps.BisqueCredentials == nil {
 		return BisqueCredentials{}
 	}
 	if credentials, ok, _ := deps.BisqueCredentials.GetWithContext(ctx, bisqueSessionIDFromRequest(r)); ok {
 		return credentials
 	}
-	if workerSessionID := deps.bisqueSessionIDFromWorkerHeader(r); workerSessionID != "" {
-		if credentials, ok, _ := deps.BisqueCredentials.GetWithContext(ctx, workerSessionID); ok {
-			return credentials
-		}
-	}
-	// Durable fallback: resolve the linked account by the request/run owner so a
-	// BisQue call still authenticates after the session cookie has lapsed or when
-	// a resumed run no longer carries the transient session header.
-	if userID, orgID := deps.bisqueOwnerForRequest(r); userID != "" {
-		if _, credentials, ok := deps.BisqueCredentials.ResolveLinkedSessionForUser(ctx, userID, orgID); ok {
+	// Durable direct-user fallback survives an expired browser cookie. Worker
+	// fallback is intentionally implemented only in authorizeBisqueRequest,
+	// where it must match the immutable run binding digest.
+	if strings.TrimSpace(principal.UserID) != "" {
+		if _, credentials, ok := deps.BisqueCredentials.ResolveLinkedSessionForUser(ctx, principal.UserID, principal.OrgID); ok {
 			return credentials
 		}
 	}
 	return BisqueCredentials{}
-}
-
-// bisqueOwnerForRequest returns the account identity whose linked BisQue
-// credentials should serve this request: the run owner for trusted worker
-// requests, otherwise the request principal.
-func (deps ServerDeps) bisqueOwnerForRequest(r *http.Request) (string, string) {
-	if principal, ok := deps.workerRunPrincipal(r); ok {
-		return strings.TrimSpace(principal.UserID), strings.TrimSpace(principal.OrgID)
-	}
-	principal := deps.principalFromRequest(r, "")
-	return strings.TrimSpace(principal.UserID), strings.TrimSpace(principal.OrgID)
 }
 
 func (deps ServerDeps) bisqueRootURL() string {
@@ -978,43 +1197,6 @@ func (deps ServerDeps) bisqueRootURL() string {
 		return ""
 	}
 	return deps.Bisque.rootURL
-}
-
-// bisqueSessionIDFromWorkerHeader resolves the run-scoped BisQue session that
-// agent workers forward. The session id rides only the transient job payload
-// (never the stored run record), so the header is validated by ownership
-// instead: when the credential store knows which user the session belongs to,
-// it must be the same user that owns the run named in X-Ultra-Run-Id.
-func (deps ServerDeps) bisqueSessionIDFromWorkerHeader(r *http.Request) string {
-	runID := strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id"))
-	if runID == "" {
-		return ""
-	}
-	sessionID := strings.TrimSpace(r.Header.Get("X-Ultra-Bisque-Session-Id"))
-	if sessionID == "" {
-		return ""
-	}
-	if deps.workerRequestAuth(r) == workerAuthInvalid {
-		return ""
-	}
-	if deps.Store == nil {
-		return sessionID
-	}
-	ownerID, known, err := deps.BisqueCredentials.OwnerUserID(r.Context(), sessionID)
-	if err != nil {
-		return ""
-	}
-	if !known {
-		return sessionID
-	}
-	run, err := deps.Store.GetRun(r.Context(), runID)
-	if err != nil {
-		return ""
-	}
-	if !strings.EqualFold(strings.TrimSpace(ownerID), strings.TrimSpace(run.UserID)) {
-		return ""
-	}
-	return sessionID
 }
 
 func (service *BisqueService) VerifyCredentials(ctx context.Context, credentials BisqueCredentials) error {
@@ -1082,9 +1264,17 @@ func (service *BisqueService) Search(ctx context.Context, req bisqueSearchReques
 	}
 	results, total := parseBisqueSearchResponse(data)
 	if req.CountAll {
-		total, err = service.countAllSearchResults(ctx, resourceType, req, credentials)
-		if err != nil {
-			return bisqueSearchResponse{}, err
+		// Prefer BisQue's authoritative view=count total (one request); fall back
+		// to paging only if the server doesn't answer with a count tag. The old
+		// paging-and-sum path is O(N) requests and over-counted by one at exact
+		// page-size multiples.
+		if counted, ok, cerr := service.countViaViewCount(ctx, resourceType, req, credentials); cerr == nil && ok {
+			total = counted
+		} else {
+			total, err = service.countAllSearchResults(ctx, resourceType, req, credentials)
+			if err != nil {
+				return bisqueSearchResponse{}, err
+			}
 		}
 	}
 	results = service.withLinks(results)
@@ -1475,6 +1665,15 @@ func (service *BisqueService) UploadFile(ctx context.Context, record resourceRec
 	return uploaded, nil
 }
 
+func (service *BisqueService) UploadFileBytes(ctx context.Context, record resourceRecord, content []byte, credentials BisqueCredentials) (BisqueUploadRecord, error) {
+	uploaded, err := service.UploadNamedBytes(ctx, record.OriginalName, content, credentials)
+	if err != nil {
+		return BisqueUploadRecord{}, err
+	}
+	uploaded.FileID = record.FileID
+	return uploaded, nil
+}
+
 func (service *BisqueService) UploadNamedFile(ctx context.Context, originalName string, path string, credentials BisqueCredentials) (BisqueUploadRecord, error) {
 	// A directory bundle (e.g. an OME-Zarr: a .ome.zarr tree of chunk files) is not a single
 	// uploadable file. Without this guard os.Open succeeds on the directory and io.Copy below
@@ -1486,20 +1685,21 @@ func (service *BisqueService) UploadNamedFile(ctx context.Context, originalName 
 			originalName,
 		))
 	}
-	file, err := os.Open(path)
+	content, err := os.ReadFile(path)
 	if err != nil {
 		return BisqueUploadRecord{}, err
 	}
-	defer func() {
-		_ = file.Close()
-	}()
+	return service.UploadNamedBytes(ctx, originalName, content, credentials)
+}
+
+func (service *BisqueService) UploadNamedBytes(ctx context.Context, originalName string, content []byte, credentials BisqueCredentials) (BisqueUploadRecord, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("file", safeOriginalFilename(originalName))
 	if err != nil {
 		return BisqueUploadRecord{}, err
 	}
-	if _, err := io.Copy(part, file); err != nil {
+	if _, err := part.Write(content); err != nil {
 		return BisqueUploadRecord{}, err
 	}
 	if err := writer.Close(); err != nil {
@@ -1955,9 +2155,16 @@ func isBisqueWrapperResource(parsed bisqueXMLResource) bool {
 		strings.TrimSpace(parsed.URI) == "" {
 		return true
 	}
+	// A bare <resource> envelope with no uniq/type/name is the data_service
+	// list wrapper, whether or not it carries children. The previous guard
+	// required len(Children) > 0, so an EMPTY result body (`<resource uri=…/>`,
+	// zero children) fell through and the wrapper itself was counted as one
+	// resource — making every zero-result search report count=1 (and emit a
+	// phantom empty resource). Dropping the children requirement makes an empty
+	// search correctly report 0 while still skipping a populated wrapper (whose
+	// real children are collected by the recursion).
 	return strings.TrimSpace(parsed.Type) == "" &&
-		strings.TrimSpace(parsed.Name) == "" &&
-		len(parsed.Children) > 0
+		strings.TrimSpace(parsed.Name) == ""
 }
 
 func isBisqueResourceElement(name string) bool {

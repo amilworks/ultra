@@ -834,6 +834,66 @@ func TestPostgresStoreResourceReadGrantMakesResourceVisibleToGrantee(t *testing.
 	}
 }
 
+func TestPostgresStoreGetResourceForUserHonorsActivePublicGrant(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+
+	store := NewPostgresStore(pool)
+	suffix := domain.NewID("public-share")
+	resourceID := "file_public_calpha_" + suffix
+	ownerID := "calphad-owner-" + suffix
+	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   resourceID,
+		OwnerUserID:  ownerID,
+		OwnerOrgID:   "org-owner",
+		OwnerRole:    "researcher",
+		OriginalName: "public-al-co-w.tdb",
+		ContentType:  "application/x-thermocalc-tdb",
+		SizeBytes:    21274,
+		SHA256:       "sha-public-calphad-" + suffix,
+		SourceType:   "upload",
+		ResourceKind: "document",
+		Status:       "active",
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	grant, err := store.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		GrantID:         "resource_grant_public_calpha_" + suffix,
+		ResourceID:      resourceID,
+		OwnerUserID:     ownerID,
+		OwnerOrgID:      "org-owner",
+		Public:          true,
+		Role:            "read",
+		CreatedByUserID: ownerID,
+		CreatedAt:       now.Add(time.Second),
+	})
+	if err != nil {
+		t.Fatalf("CreateResourceShareGrant: %v", err)
+	}
+	if grant.GranteeUserID != domain.PublicResourceGranteeUserID || grant.Status != "active" {
+		t.Fatalf("public grant = %+v", grant)
+	}
+
+	loaded, err := store.GetResourceForUser(ctx, resourceID, "unrelated-reader-"+suffix, "org-unrelated")
+	if err != nil {
+		t.Fatalf("GetResourceForUser(public): %v", err)
+	}
+	if loaded.ResourceID != resourceID || loaded.OwnerUserID != ownerID {
+		t.Fatalf("publicly resolved resource = %+v", loaded)
+	}
+}
+
 func TestPostgresStoreResourceShareGrantRevocationRemovesCollaboratorAccess(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {

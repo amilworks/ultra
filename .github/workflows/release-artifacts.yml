@@ -17,7 +17,21 @@ jobs:
   build-release-artifact:
     name: Build Immutable Release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 75
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: ultra_calphad_qualification
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ultra_calphad_qualification"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v4
 
@@ -51,8 +65,100 @@ jobs:
       - name: Run control-plane tests
         run: make control-test
 
+      - name: Test fail-closed CALPHAD ledger evidence runner
+        run: >-
+          uv run --isolated --no-project --python 3.11 --with pytest==8.4.2
+          pytest -q -p no:cacheprovider tests/test_calphad_ledger_gate.py
+
+      - name: Provision non-owner CALPHAD serving role
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql -h 127.0.0.1 -p 55432 -U postgres -d ultra_calphad_qualification
+          -v ON_ERROR_STOP=1
+          -c "CREATE ROLE ultra_calphad_serving LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD 'ultra_calphad_serving'"
+
+      - name: Qualify CALPHAD ledger against dedicated PostgreSQL
+        env:
+          ULTRA_CONTROL_TEST_DATABASE_URL: postgresql://ultra_calphad_serving:ultra_calphad_serving@127.0.0.1:55432/ultra_calphad_qualification
+          ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:55432/ultra_calphad_qualification
+          MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED: dedicated-test-database
+          MATERIALS_EXPECTED_GIT_SHA: ${{ github.sha }}
+          MATERIALS_CALPHAD_LEDGER_OUTPUT_DIR: ${{ github.workspace }}/.tmp/calphad-ledger-qualification
+        run: make calphad-ledger-qualification
+
+      - name: Upload release-gated CALPHAD ledger evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: calphad-ledger-qualification-${{ github.sha }}
+          path: .tmp/calphad-ledger-qualification
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Run Deep Agents autonomy tests
         run: make deepagents-autonomy-test
+
+      - name: Test run-bound remote mutation authority and trace scoring
+        working-directory: backend/deepagents_runtime
+        run: >-
+          uv run --extra dev pytest -q
+          tests/test_bisque_tools.py
+          tests/test_worker_transport.py
+          tests/test_materials_live_trace.py
+
+      - name: Test materials evidence and promotion-aggregation contracts
+        run: |
+          uv run --project backend/deepagents_runtime --python 3.11 --extra dev \
+            pytest -q \
+            tests/test_calphad_cross_language_gate.py \
+            tests/test_materials_domain_gate_runner.py \
+            tests/test_production_materials_sandbox.py \
+            tests/test_materials_readiness_gate.py
+
+      - name: Test first-class mechanics and characterization tool surfaces
+        working-directory: backend/deepagents_runtime
+        run: >-
+          uv run --extra dev pytest -q
+          tests/test_crystal_plasticity_tools.py
+          tests/test_crystal_plasticity_agent_registration.py
+          tests/test_degradation_characterization_tools.py
+          tests/test_degradation_characterization_agent_registration.py
+          tests/test_sensor_worker_core_smoke.py
+
+      - name: Test protected materials promotion envelope and workflow contracts
+        run: make materials-promotion-envelope-test
+
+      - name: Test MatTools evaluator and promotion harness contracts
+        run: make mattools-promotion-test
+
+      - name: Run deterministic materials evidence gate
+        env:
+          MATERIALS_DOMAIN_GATE_REQUIRE_CLEAN_PROVENANCE: "1"
+        run: make materials-domain-gate
+
+      - name: Run pinned-image DockerSandboxBackend source contract
+        env:
+          MATERIALS_EXPECTED_GIT_SHA: ${{ github.sha }}
+          MATERIALS_PRODUCTION_PARITY_REPORT_DIR: ${{ github.workspace }}/.tmp/materials-production-source-contract
+        run: make materials-production-source-contract
+
+      - name: Upload deterministic materials evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: materials-domain-gate-${{ github.sha }}
+          path: .tmp/materials-domain-gate
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload materials backend source-contract evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: materials-production-source-contract-${{ github.sha }}
+          path: .tmp/materials-production-source-contract
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Run frontend quality checks
         run: make frontend-quality
@@ -68,6 +174,36 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_OUT_DIR: .tmp/releases
         run: scripts/build_ultra_release_artifact.sh
+
+      - name: Assert source artifact makes no materials production-readiness claim
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          release_sha = os.environ["GITHUB_SHA"]
+          manifest = json.loads(
+              Path(f".tmp/releases/release-manifest-{release_sha}.json").read_text()
+          )
+          materials = manifest["materials"]
+          assert materials["full_materials_production_ready"] is False
+          assert materials["required_post_image_gate"] == "materials-production-readiness"
+          assert materials["readiness_result_is_candidate_only"] is True
+          assert materials["required_release_envelope_schema"] == "ultra.materials.release-envelope.v1"
+          assert materials["required_final_verification_schema"] == "ultra.materials.production-attestation-verification.v1"
+          assert materials["requires_github_sigstore_attestation"] is True
+          assert materials["raw_mattools_evidence_may_be_public_artifact"] is False
+          assert materials["required_evidence"]["production_parity_scope"] == "production-full"
+          assert materials["required_evidence"]["production_parity_evidence_bundle_schema_version"] == 1
+          assert materials["required_evidence"]["sandbox_output_capture_mode"] == "docker_sandbox_backend_combined_stdout_stderr"
+          assert materials["required_evidence"]["calphad_runtime_test_count"] == 39
+          assert materials["required_evidence"]["calphad_tool_test_count"] == 56
+          assert materials["required_evidence"]["calphad_cross_language_schema"] == "ultra.calphad.cross-language-gate.v1"
+          assert materials["required_evidence"]["calphad_cross_language_requires_production_runtime_image"] is True
+          assert materials["required_evidence"]["mattools_runnable_minimum"] == 118
+          assert materials["required_evidence"]["mattools_scientific_minimum"] == 249
+          PY
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4

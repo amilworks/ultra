@@ -5,6 +5,7 @@ import binascii
 import os
 import queue
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -30,6 +31,60 @@ savefig.dpi: 300
 # EX_TEMPFAIL: the sandbox is saturated but the request itself is fine — the caller
 # (the model, or a retry) may try again shortly. Distinct from a real failure exit.
 _SANDBOX_BUSY_EXIT_CODE = 75
+_DOCKER_IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
+_docker_image_id_cache: dict[str, str] = {}
+_docker_image_id_cache_lock = threading.Lock()
+
+
+def resolve_docker_image_id(image_ref: str) -> str:
+    """Resolve a local Docker reference to the immutable image configuration ID.
+
+    The returned ID can both pin ``docker run`` and be attached to execution
+    trace events. Resolution is cached per worker process so a mutable tag is
+    fixed for the lifetime of the worker instead of drifting between runs.
+    Empty output means the image is not locally inspectable; callers may retain
+    the original reference, but must not claim an immutable attestation.
+    """
+
+    reference = str(image_ref or "").strip()
+    if not reference:
+        return ""
+    if _DOCKER_IMAGE_ID_PATTERN.fullmatch(reference):
+        return reference.lower()
+    # functools.lru_cache does not single-flight concurrent cold misses: two run
+    # threads can resolve the same mutable tag to different IDs while an image is
+    # being replaced. Keep lookup + inspection under one process lock so the ID
+    # used by agent construction and the ID stamped on trace events are identical.
+    with _docker_image_id_cache_lock:
+        if reference in _docker_image_id_cache:
+            return _docker_image_id_cache[reference]
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", "--format={{.Id}}", reference],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            resolved = ""
+        else:
+            candidate = result.stdout.strip()
+            resolved = (
+                candidate.lower()
+                if result.returncode == 0 and _DOCKER_IMAGE_ID_PATTERN.fullmatch(candidate)
+                else ""
+            )
+        if len(_docker_image_id_cache) >= 64:
+            _docker_image_id_cache.pop(next(iter(_docker_image_id_cache)))
+        _docker_image_id_cache[reference] = resolved
+        return resolved
+
+
+def _reset_docker_image_id_cache_for_tests() -> None:
+    with _docker_image_id_cache_lock:
+        _docker_image_id_cache.clear()
+
 
 # Process-wide admission control for sandbox containers. A single worker runs up to
 # worker_max_concurrency (default 64) runs at once, and each run can launch a code-exec
@@ -91,6 +146,10 @@ class DockerSandboxConfig:
     cpus: float = 0.0
     memory: str = ""
     pids_limit: int = 0
+    # None preserves the generic sandbox's environment-controlled compatibility
+    # behavior. Security-sensitive typed primitives clone the backend with True,
+    # so a process-level opt-out cannot weaken their container after registration.
+    no_new_privileges: bool | None = None
     # Size of /dev/shm inside the container. Docker's default is a tiny 64MB, which
     # makes torch DataLoader(num_workers>0), OpenCV, joblib/loky, and any
     # multiprocessing shared-memory array crash with an opaque "Bus error (core
@@ -129,10 +188,11 @@ class DockerSandboxBackend(BaseSandbox):
         self.outputs_dir = Path(outputs_dir) if outputs_dir is not None else None
         self.config = config
         self._progress_callback = progress_callback
-        self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_root_directory(self.workspace_dir, label="workspace")
         if self.outputs_dir is not None:
-            self.outputs_dir.mkdir(parents=True, exist_ok=True)
+            self._ensure_root_directory(self.outputs_dir, label="outputs")
         self._ensure_matplotlib_config()
+        self._ensure_numba_cache()
         self._ensure_writable_tmp()
         try:
             os.chmod(self.workspace_dir, 0o777)
@@ -145,16 +205,79 @@ class DockerSandboxBackend(BaseSandbox):
     def id(self) -> str:
         return f"docker:{self.workspace_dir.resolve()}"
 
-    def _ensure_matplotlib_config(self) -> None:
-        config_dir = self.workspace_dir / ".cache" / "matplotlib"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        for path in (self.workspace_dir / "matplotlibrc", config_dir / "matplotlibrc"):
-            path.write_text(MATPLOTLIBRC)
-        for path in (self.workspace_dir / ".cache", config_dir):
+    @staticmethod
+    def _ensure_root_directory(path: Path, *, label: str) -> None:
+        if path.is_symlink():
+            raise ValueError(f"unsafe {label} directory symlink: {path}")
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            info = os.lstat(path)
+        except OSError as exc:
+            raise ValueError(f"could not inspect {label} directory: {path}") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise ValueError(f"unsafe {label} directory type: {path}")
+
+    def _ensure_workspace_subdirectory(self, *parts: str) -> Path:
+        current = self.workspace_dir
+        for part in parts:
+            if not part or part in {".", ".."} or "/" in part or "\\" in part:
+                raise ValueError(f"unsafe workspace directory component: {part!r}")
+            candidate = current / part
             try:
-                os.chmod(path, 0o777)
-            except OSError:
-                pass
+                info = os.lstat(candidate)
+            except FileNotFoundError:
+                candidate.mkdir(mode=0o777)
+                info = os.lstat(candidate)
+            except OSError as exc:
+                raise ValueError(
+                    f"could not inspect workspace cache directory: {candidate}"
+                ) from exc
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise ValueError(f"unsafe workspace cache directory: {candidate}")
+            flags = os.O_RDONLY
+            flags |= getattr(os, "O_DIRECTORY", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(candidate, flags)
+                try:
+                    os.fchmod(descriptor, 0o777)
+                finally:
+                    os.close(descriptor)
+            except OSError as exc:
+                raise ValueError(
+                    f"could not secure workspace cache directory: {candidate}"
+                ) from exc
+            current = candidate
+        return current
+
+    @staticmethod
+    def _write_no_follow(path: Path, content: str) -> None:
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            info = None
+        if info is not None and (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)):
+            raise ValueError(f"unsafe workspace configuration file: {path}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags, 0o666)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(content)
+        except OSError as exc:
+            raise ValueError(f"could not write workspace configuration file: {path}") from exc
+
+    def _ensure_matplotlib_config(self) -> None:
+        config_dir = self._ensure_workspace_subdirectory(".cache", "matplotlib")
+        for path in (self.workspace_dir / "matplotlibrc", config_dir / "matplotlibrc"):
+            self._write_no_follow(path, MATPLOTLIBRC)
+
+    def _ensure_numba_cache(self) -> None:
+        # The image rootfs is read-only, while Numba-decorated scientific packages
+        # such as orix and PoreSpy request on-disk caches during import.  Give Numba
+        # an explicit directory on the writable workspace bind mount instead of
+        # letting it attempt to cache beside files under /usr/local/site-packages.
+        self._ensure_workspace_subdirectory(".cache", "numba")
 
     def _ensure_writable_tmp(self) -> None:
         # The container rootfs is read-only and the in-container /tmp is a small,
@@ -163,12 +286,7 @@ class DockerSandboxBackend(BaseSandbox):
         # JVM scratch, dcm2niix, tifffile memmaps, intermediate arrays) land on real
         # disk and are not capped at the tmpfs size. Created here, on the host, so the
         # bind-mounted container sees it.
-        tmp_dir = self.workspace_dir / ".tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(tmp_dir, 0o777)
-        except OSError:
-            pass
+        self._ensure_workspace_subdirectory(".tmp")
 
     def build_docker_command(self, command: str) -> list[str]:
         workspace_mount = f"{self.workspace_dir.resolve()}:/workspace:rw"
@@ -203,6 +321,8 @@ class DockerSandboxBackend(BaseSandbox):
             "--env",
             "MPLCONFIGDIR=/workspace/.cache/matplotlib",
             "--env",
+            "NUMBA_CACHE_DIR=/workspace/.cache/numba",
+            "--env",
             "XDG_CACHE_HOME=/workspace/.cache",
             # HOME defaults to read-only /root on this rootfs, which breaks libraries
             # that write to ~ directly (astropy, numba, fontconfig, torch hub). Point it
@@ -215,7 +335,12 @@ class DockerSandboxBackend(BaseSandbox):
         # no-new-privileges blocks setuid escalation, but snap-packaged docker (e.g. stitch)
         # denies exec under it ("operation not permitted"). Allow a per-node opt-out via env
         # while keeping --cap-drop ALL / --network none / --read-only / tmpfs intact.
-        if os.getenv("ULTRA_DEEPAGENTS_SANDBOX_NO_NEW_PRIVILEGES", "true").strip().lower() not in ("0", "false", "no"):
+        no_new_privileges = self.config.no_new_privileges
+        if no_new_privileges is None:
+            no_new_privileges = os.getenv(
+                "ULTRA_DEEPAGENTS_SANDBOX_NO_NEW_PRIVILEGES", "true"
+            ).strip().lower() not in ("0", "false", "no")
+        if no_new_privileges:
             docker_command.extend(["--security-opt", "no-new-privileges"])
         if self.outputs_dir is not None:
             docker_command.extend(
@@ -237,7 +362,9 @@ class DockerSandboxBackend(BaseSandbox):
         # Diagnostic-only labels (NOT used by the reaper's kill filter) so an operator can
         # trace a leaked container back to the worker/run that created it.
         if self.config.worker_id.strip():
-            docker_command.extend(["--label", f"ultra.sandbox.worker={self.config.worker_id.strip()}"])
+            docker_command.extend(
+                ["--label", f"ultra.sandbox.worker={self.config.worker_id.strip()}"]
+            )
         if self.config.run_id.strip():
             docker_command.extend(["--label", f"ultra.sandbox.run={self.config.run_id.strip()}"])
         docker_command.extend([self.config.image, "bash", "-lc", command])
@@ -612,8 +739,7 @@ def _path_is_within_allowed_roots(path: str) -> bool:
     if normalized == "/":
         return False
     return any(
-        normalized == root or normalized.startswith(root + "/")
-        for root in _ALLOWED_SEARCH_ROOTS
+        normalized == root or normalized.startswith(root + "/") for root in _ALLOWED_SEARCH_ROOTS
     )
 
 

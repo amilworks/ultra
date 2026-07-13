@@ -1,0 +1,3 @@
+interface:
+  display_name: "Materials Processing & Kinetics"
+  short_description: "Qualified Scheil paths and fail-closed kinetics routing"

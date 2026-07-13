@@ -1,7 +1,9 @@
 import base64
+import concurrent.futures
 import io
 import os
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,6 +59,62 @@ def test_resolve_workspace_file_rejects_paths_outside_workspace(tmp_path: Path):
         resolve_workspace_file(workspace, "../secret.txt")
 
 
+def test_resolve_docker_image_id_returns_and_caches_immutable_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    image_id = "sha256:" + "c" * 64
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "timeout": 15,
+            "check": False,
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=image_id + "\n", stderr="")
+
+    docker._reset_docker_image_id_cache_for_tests()
+    monkeypatch.setattr(docker.subprocess, "run", fake_run)
+    try:
+        assert docker.resolve_docker_image_id("sandbox:release") == image_id
+        assert docker.resolve_docker_image_id("sandbox:release") == image_id
+    finally:
+        docker._reset_docker_image_id_cache_for_tests()
+
+    assert calls == [
+        ["docker", "image", "inspect", "--format={{.Id}}", "sandbox:release"]
+    ]
+
+
+def test_resolve_docker_image_id_single_flights_concurrent_cold_tag_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    first_id = "sha256:" + "1" * 64
+    second_id = "sha256:" + "2" * 64
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        _ = kwargs
+        calls += 1
+        call_id = first_id if calls == 1 else second_id
+        time.sleep(0.05)
+        return subprocess.CompletedProcess(command, 0, stdout=call_id + "\n", stderr="")
+
+    docker._reset_docker_image_id_cache_for_tests()
+    monkeypatch.setattr(docker.subprocess, "run", fake_run)
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(docker.resolve_docker_image_id, ["mutable:tag"] * 2))
+    finally:
+        docker._reset_docker_image_id_cache_for_tests()
+
+    assert results == [first_id, first_id]
+    assert calls == 1
+
+
 def test_docker_sandbox_command_enforces_isolation_and_limits(tmp_path: Path):
     backend = DockerSandboxBackend(
         workspace_dir=tmp_path / "workspace",
@@ -96,14 +154,53 @@ def test_docker_sandbox_command_enforces_isolation_and_limits(tmp_path: Path):
     assert command[command.index("--tmpfs") + 1] == "/tmp:rw,nosuid,nodev,size=512m"
     assert "--workdir" in command
     assert command[command.index("--workdir") + 1] == "/workspace"
-    # HOME/TMPDIR redirect ~ and temp files onto the writable, disk-backed /workspace
-    # mount (rootfs is read-only; /tmp is a small RAM-backed tmpfs).
+    # HOME/TMPDIR and library caches redirect writes onto the writable, disk-backed
+    # /workspace mount (rootfs is read-only; /tmp is a small RAM-backed tmpfs).
     assert "--env" in command
     assert "HOME=/workspace" in command
     assert "TMPDIR=/workspace/.tmp" in command
+    assert "NUMBA_CACHE_DIR=/workspace/.cache/numba" in command
     assert (tmp_path / "workspace" / ".tmp").is_dir()
+    assert (tmp_path / "workspace" / ".cache" / "numba").is_dir()
     assert "ultra-agent-sandbox:test" in command
     assert command[-3:] == ["bash", "-lc", "python analysis.py"]
+
+
+def test_docker_sandbox_rejects_numba_cache_symlink_without_chmodding_target(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    cache = workspace / ".cache"
+    cache.mkdir(parents=True)
+    outside = tmp_path / "outside-numba-cache"
+    outside.mkdir(mode=0o700)
+    (cache / "numba").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="unsafe workspace cache directory"):
+        DockerSandboxBackend(
+            workspace_dir=workspace,
+            config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+        )
+
+    assert (os.stat(outside).st_mode & 0o777) == 0o700
+
+
+def test_docker_sandbox_rejects_matplotlibrc_symlink_without_overwriting_target(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside-config"
+    outside.write_text("keep me", encoding="utf-8")
+    (workspace / "matplotlibrc").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="unsafe workspace configuration file"):
+        DockerSandboxBackend(
+            workspace_dir=workspace,
+            config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+        )
+
+    assert outside.read_text(encoding="utf-8") == "keep me"
 
 
 def test_docker_sandbox_can_disable_no_new_privileges_for_snap_docker(
@@ -147,9 +244,11 @@ def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
     # must never appear unless explicitly configured.
     assert "--shm-size" not in command
     assert "--gpus" not in command
-    # HOME/TMPDIR are always set (rootfs robustness), independent of resource caps.
+    # HOME/TMPDIR and the Numba cache are always set (rootfs robustness), independent
+    # of resource caps.
     assert "HOME=/workspace" in command
     assert "TMPDIR=/workspace/.tmp" in command
+    assert "NUMBA_CACHE_DIR=/workspace/.cache/numba" in command
     assert command[-3:] == ["bash", "-lc", "python train.py"]
 
 

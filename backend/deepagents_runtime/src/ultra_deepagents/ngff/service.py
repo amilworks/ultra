@@ -19,7 +19,12 @@ from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from ultra_deepagents.ngff.reader import NgffError, NgffImage, open_ngff
+from ultra_deepagents.ngff.reader import (
+    NgffError,
+    NgffImage,
+    open_ngff,
+    process_plane_cache_info,
+)
 from ultra_deepagents.ngff.render import render_slice_png, render_thumbnail_png, render_tile_png
 from ultra_deepagents.ngff.viewerinfo import build_ngff_viewer_info
 
@@ -28,7 +33,7 @@ SCRUB_MAX_DIMENSION = 1024
 # How many opened images (parsed metadata + window cache + zarr handles) to keep warm.
 _OPEN_CACHE_MAX = int(os.environ.get("ULTRA_NGFF_OPEN_CACHE", "64"))
 
-_open_cache: "OrderedDict[tuple[str, float], NgffImage]" = OrderedDict()
+_open_cache: OrderedDict[tuple[str, float], NgffImage] = OrderedDict()
 _open_lock = threading.Lock()
 
 
@@ -68,9 +73,10 @@ def _parse_channels(channels: str | None) -> list[int] | None:
     out: list[int] = []
     for tok in channels.split(","):
         tok = tok.strip()
-        if tok.isdigit():
-            out.append(int(tok))
-    return out or None
+        if not tok or not tok.isdigit():
+            raise ValueError("channels must be a comma-separated list of non-negative integers")
+        out.append(int(tok))
+    return out
 
 
 def create_app() -> FastAPI:
@@ -78,7 +84,12 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:  # noqa: D401
-        return {"status": "ok", "service": "ngff", "open_cached": len(_open_cache)}
+        return {
+            "status": "ok",
+            "service": "ngff",
+            "open_cached": len(_open_cache),
+            "decoded_plane_cache": process_plane_cache_info(),
+        }
 
     @app.get("/viewerinfo")
     async def viewerinfo(path: str) -> Any:
@@ -86,7 +97,9 @@ def create_app() -> FastAPI:
             img = await run_in_threadpool(_get_image, path)
             return await run_in_threadpool(build_ngff_viewer_info, img)
         except (NgffError, ValueError) as exc:
-            return JSONResponse(status_code=422, content={"error": "not a readable OME-Zarr", "detail": str(exc)})
+            return JSONResponse(
+                status_code=422, content={"error": "not a readable OME-Zarr", "detail": str(exc)}
+            )
 
     @app.get("/slice")
     async def slice_plane(
@@ -102,12 +115,20 @@ def create_app() -> FastAPI:
             lvl = 0 if level is None else int(level)
             max_dim = None if full_resolution else SCRUB_MAX_DIMENSION
             png = await run_in_threadpool(
-                render_slice_png, img, t=t, z=z, level=lvl,
-                channels=_parse_channels(channels), max_dim=max_dim,
+                render_slice_png,
+                img,
+                t=t,
+                z=z,
+                level=lvl,
+                channels=_parse_channels(channels),
+                max_dim=max_dim,
             )
             return Response(content=png, media_type="image/png")
         except (NgffError, ValueError) as exc:
-            return JSONResponse(status_code=422, content={"error": "cannot render OME-Zarr slice", "detail": str(exc)})
+            return JSONResponse(
+                status_code=422,
+                content={"error": "cannot render OME-Zarr slice", "detail": str(exc)},
+            )
 
     @app.get("/tile")
     async def tile(
@@ -124,12 +145,22 @@ def create_app() -> FastAPI:
         try:
             img = await run_in_threadpool(_get_image, path)
             png = await run_in_threadpool(
-                render_tile_png, img, level=int(level), col=int(col), row=int(row),
-                tile_size=int(size), t=int(t), z=int(z), channels=_parse_channels(channels),
+                render_tile_png,
+                img,
+                level=int(level),
+                col=int(col),
+                row=int(row),
+                tile_size=int(size),
+                t=int(t),
+                z=int(z),
+                channels=_parse_channels(channels),
             )
             return Response(content=png, media_type="image/png")
         except (NgffError, ValueError) as exc:
-            return JSONResponse(status_code=422, content={"error": "cannot render OME-Zarr tile", "detail": str(exc)})
+            return JSONResponse(
+                status_code=422,
+                content={"error": "cannot render OME-Zarr tile", "detail": str(exc)},
+            )
 
     @app.get("/thumbnail")
     async def thumbnail(path: str, max_size: int = 256, t: int = 0, z: int = 0) -> Response:
@@ -138,6 +169,9 @@ def create_app() -> FastAPI:
             png = await run_in_threadpool(render_thumbnail_png, img, max_size=max_size, t=t, z=z)
             return Response(content=png, media_type="image/png")
         except (NgffError, ValueError) as exc:
-            return JSONResponse(status_code=422, content={"error": "cannot render OME-Zarr thumbnail", "detail": str(exc)})
+            return JSONResponse(
+                status_code=422,
+                content={"error": "cannot render OME-Zarr thumbnail", "detail": str(exc)},
+            )
 
     return app

@@ -39,10 +39,8 @@ def _visible_channels(img: NgffImage) -> list[int]:
 
 def build_ngff_tile_scheme(img: NgffImage) -> dict[str, Any] | None:
     """Build the viewer tile_scheme from the OME-Zarr multiscale levels — one entry per
-    level (level index maps 1:1 to the /tile ``level`` param). Returns None for small or
-    single-level images (the viewer then uses the direct /slice path)."""
-    if len(img.levels) <= 1:
-        return None
+    level (level index maps 1:1 to the /tile ``level`` param). Large single-level images
+    still use bounded tiles; only small images use the direct full-slice path."""
     base_h, base_w = img.level_yx(0)
     if max(base_h, base_w) <= _TILE_THRESHOLD:
         return None
@@ -51,15 +49,17 @@ def build_ngff_tile_scheme(img: NgffImage) -> dict[str, Any] | None:
         h, w = img.level_yx(i)
         if w <= 0 or h <= 0:
             continue
-        levels.append({
-            "level": i,
-            "width": w,
-            "height": h,
-            "columns": (w + _TILE_SIZE - 1) // _TILE_SIZE,
-            "rows": (h + _TILE_SIZE - 1) // _TILE_SIZE,
-            "downsample": max(1, round(base_w / w)),
-        })
-    if len(levels) <= 1:
+        levels.append(
+            {
+                "level": i,
+                "width": w,
+                "height": h,
+                "columns": (w + _TILE_SIZE - 1) // _TILE_SIZE,
+                "rows": (h + _TILE_SIZE - 1) // _TILE_SIZE,
+                "downsample": max(1, round(base_w / w)),
+            }
+        )
+    if not levels:
         return None
     return {"tile_size": _TILE_SIZE, "format": "png", "levels": levels}
 
@@ -89,18 +89,35 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
     volume_mode = "slice_stack" if is_volume else "none"
 
     phys = {
-        "x": x, "y": y, "z": z, "t": t, "ch": c,
+        "x": x,
+        "y": y,
+        "z": z,
+        "t": t,
+        "ch": c,
         "pixel_depth": img.dtype.itemsize * 8,
         "pixel_format": "f" if img.dtype.kind == "f" else ("s" if img.dtype.kind == "i" else "u"),
         "pixel_size": [spacing["x"], spacing["y"], spacing["z"], 1.0],
-        "pixel_units": ["um", "um", "um", "frame"],
-        "channel_names": names, "display_channels": visible,
-        "channel_colors": colors, "units": "physical",
+        "pixel_units": [
+            img.units.get("x") or "pixel",
+            img.units.get("y") or "pixel",
+            img.units.get("z") or "pixel",
+            img.units.get("t") or "frame",
+        ],
+        "channel_names": names,
+        "display_channels": visible,
+        "channel_colors": colors,
+        "units": "physical",
     }
     display_defaults = {
-        "enhancement": "d", "negative": False, "rotate": 0, "fusion_method": "m",
-        "channel_mode": channel_mode, "channels": visible,
-        "time_index": 0, "z_index": z // 2, "volume_channel": visible[0],
+        "enhancement": "d",
+        "negative": False,
+        "rotate": 0,
+        "fusion_method": "m",
+        "channel_mode": channel_mode,
+        "channels": visible,
+        "time_index": 0,
+        "z_index": z // 2,
+        "volume_channel": visible[0],
     }
     backend_mode = "pyramid" if has_tiles else "direct"
     delivery_mode = "deferred_multiscale" if has_tiles else "direct"
@@ -116,12 +133,58 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
         "physical_spacing": spacing,
         "scene_count": 1,
         "multiscale_levels": len(img.levels),
+        # Effective diagonal array-to-physical transforms. Dataset transforms are
+        # composed first, followed by multiscale-level transforms, exactly as NGFF
+        # v0.4/v0.5 define. Units align positionally with every scale/translation.
+        "ngff_coordinate_transforms": {
+            "semantics": "effective-array-to-physical",
+            "selected_multiscale_index": img.multiscale_index,
+            "selected_multiscale_name": img.multiscale_name,
+            "axes": [
+                {"name": axis, "unit": unit}
+                for axis, unit in zip(img.axes, img.levels[0].axis_units, strict=True)
+            ],
+            "levels": [
+                {
+                    "path": level.path,
+                    "scale": list(level.scale),
+                    "translation": list(level.translation),
+                }
+                for level in img.levels
+            ],
+        },
         "warnings": [],
     }
-    # True data intensity range (Metadata tab "Value range") — cheap, smallest level.
+    # Exact over the complete smallest level or explicitly unknown.  Never label a sampled
+    # plane as the store's true range; array_min/array_max are omitted when the scan budget
+    # prevents an exact result.
     intensity = img.intensity_range()
+    intensity_scope = (
+        "complete_array"
+        if len(img.levels) == 1
+        else "complete_smallest_multiscale_level"
+    )
+    intensity_record: dict[str, Any] = {
+        "status": img.intensity_range_status,
+        "scope": intensity_scope,
+        "level": len(img.levels) - 1,
+    }
+    metadata["intensity_range"] = intensity_record
     if intensity is not None:
-        metadata["array_min"], metadata["array_max"] = intensity
+        intensity_record["minimum"], intensity_record["maximum"] = intensity
+        if len(img.levels) == 1:
+            # Only the single-level case is also an exact range over the complete image
+            # array, so the generic viewer's unqualified "Value range" label is truthful.
+            metadata["array_min"], metadata["array_max"] = intensity
+        else:
+            metadata["warnings"].append(
+                "unqualified value range omitted: exact statistics cover only the "
+                "complete smallest multiscale level"
+            )
+    else:
+        metadata["warnings"].append(
+            f"intensity range omitted: {img.intensity_range_status}"
+        )
     # Acquisition / provenance the NGFF store carries: the multiscale pyramid depth and the
     # source image name (multiscales.name / omero.name, e.g. a well/sample id).
     acquisition: dict[str, Any] = {"pyramid_levels": len(img.levels)}
@@ -139,15 +202,25 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
             microscopy["total_time_duration"] = _format_quantity(increment * (t - 1), time_unit)
         metadata["microscopy"] = microscopy
 
-    viewer = {
-        "status": "ready", "warmup_mode": "lazy", "backend_mode": backend_mode,
-        "default_surface": "2d", "available_surfaces": ["2d", "metadata"],
-        "default_axis": "z", "slice_axes": ["z"], "channel_mode": channel_mode,
-        "volume_mode": volume_mode, "render_policy": "scalar", "delivery_mode": delivery_mode,
-        "first_paint_mode": "webgl", "texture_policy": "linear",
+    viewer: dict[str, Any] = {
+        "status": "ready",
+        "warmup_mode": "lazy",
+        "backend_mode": backend_mode,
+        "default_surface": "2d",
+        "available_surfaces": ["2d", "metadata"],
+        "default_axis": "z",
+        "slice_axes": ["z"],
+        "channel_mode": channel_mode,
+        "volume_mode": volume_mode,
+        "render_policy": "scalar",
+        "delivery_mode": delivery_mode,
+        "first_paint_mode": "webgl",
+        "texture_policy": "linear",
         "asset_preparation": {
-            "status": "ready", "native_supported": True,
-            "tile_pyramid": "ready" if has_tiles else "none", "volume_representation": volume_mode,
+            "status": "ready",
+            "native_supported": True,
+            "tile_pyramid": "ready" if has_tiles else "none",
+            "volume_representation": volume_mode,
         },
     }
     if has_tiles:

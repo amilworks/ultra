@@ -1,5 +1,10 @@
 from ultra_deepagents.agent import build_research_agent, build_run_context_brief
 from ultra_deepagents.bisque.tools import (
+    _bisque_mutation_authorized,
+    bisque_dataset_annotation_summary,
+    bisque_dataset_member_count,
+    bisque_image_annotation_count,
+    bisque_mutation_goal_authorized,
     control_post_json,
     create_bisque_dataset,
     download_bisque_resources,
@@ -11,6 +16,88 @@ from ultra_deepagents.bisque.tools import (
 )
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
+
+
+def _mutation_context(goal: str, *intents: str) -> AgentRunContext:
+    return AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-bisque-intent",
+        goal=goal,
+        remote_mutation_intents=tuple(intents),
+    )
+
+
+def test_bisque_mutations_require_exact_server_authored_scope():
+    denied_upload_goals = (
+        "Compute the XRD pattern and save durable outputs.",
+        "Send me the report.",
+        "Copy the CIF into /outputs.",
+        "Create a local dataset from the results.",
+        "Upload the resulting plot for me.",
+        "Search BisQue, then send me the report.",
+        "Copy the CIF into /outputs, then inspect BisQue.",
+        "Do not upload or publish these results to BisQue.",
+        "Never copy the CIF to my linked BisQue account.",
+        "Analyze it without sending anything to BisQue.",
+    )
+    for goal in denied_upload_goals:
+        assert _bisque_mutation_authorized(_mutation_context(goal), "upload") is False
+
+    allowed_upload_goals = (
+        "Upload the resulting plot to BisQue.",
+        "Push the outputs to my linked BisQue account.",
+        "Send this report to the BisQue server.",
+        "Copy the CIF into my BisQue account.",
+    )
+    for goal in allowed_upload_goals:
+        assert (
+            _bisque_mutation_authorized(_mutation_context(goal, "bisque.upload"), "upload") is True
+        )
+
+    denied_dataset_goals = (
+        "Create a local dataset from the results.",
+        "Create a local BisQue dataset for offline use.",
+        "Create a dataset from these files.",
+        "Do not create a BisQue dataset.",
+        "Never make a dataset in my linked BisQue account.",
+    )
+    for goal in denied_dataset_goals:
+        assert _bisque_mutation_authorized(_mutation_context(goal), "create_dataset") is False
+
+    allowed_dataset_goals = (
+        "Create a BisQue dataset grouping the uploaded results.",
+        "Make a dataset in my linked BisQue account.",
+    )
+    for goal in allowed_dataset_goals:
+        assert (
+            _bisque_mutation_authorized(
+                _mutation_context(goal, "bisque.create_dataset"), "create_dataset"
+            )
+            is True
+        )
+
+    assert (
+        _bisque_mutation_authorized(
+            _mutation_context("Upload it", "bisque.create_dataset"), "upload"
+        )
+        is False
+    )
+
+
+def test_goal_heuristic_rejects_explanatory_and_hypothetical_non_consent():
+    for goal in (
+        "Explain how users upload files to BisQue.",
+        "Can Ultra upload files to BisQue?",
+        "If I asked you to upload a plot to BisQue, what would happen?",
+        "I didn't ask you to upload the plot to BisQue.",
+        "Explain how to create a dataset in BisQue.",
+    ):
+        assert bisque_mutation_goal_authorized(goal, "upload") is False
+        assert bisque_mutation_goal_authorized(goal, "create_dataset") is False
 
 
 def test_research_agent_registers_bisque_tools_for_selected_resource_context(monkeypatch):
@@ -34,6 +121,7 @@ def test_research_agent_registers_bisque_tools_for_selected_resource_context(mon
         thread_id="thread-1",
         run_id="run-bisque",
         goal="Analyze this BisQue image and save any derived outputs back to BisQue.",
+        remote_mutation_intents=("bisque.upload", "bisque.create_dataset"),
         selected_resource_uris=("https://bisque.example.org/data_service/image/abc",),
     )
 
@@ -46,12 +134,49 @@ def test_research_agent_registers_bisque_tools_for_selected_resource_context(mon
     assert "bisque_create_dataset" in tool_names
     assert "bisque_module_runs" in tool_names
     manifest_tool = next(
-        tool for tool in captured["tools"] if getattr(tool, "name", "") == "tool_capability_manifest"
+        tool
+        for tool in captured["tools"]
+        if getattr(tool, "name", "") == "tool_capability_manifest"
     )
     manifest = manifest_tool.invoke({})
     assert "bisque_search_resources" in manifest
     assert "bisque_download_resource" in manifest
     assert "bisque_upload_files" in manifest
+
+
+def test_research_agent_omits_bisque_mutation_tools_without_exact_run_scope(monkeypatch):
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="user-1",
+        project_id="local-project",
+        thread_id="thread-1",
+        run_id="run-bisque-read-only",
+        goal="Inspect my linked BisQue account.",
+        run_metadata={"bisque_session_id": "bisque_session_opaque"},
+    )
+
+    build_research_agent(settings, model=object(), backend=object(), context=context)
+
+    tool_names = {getattr(tool, "name", "") for tool in captured["tools"]}
+    assert "bisque_search_resources" in tool_names
+    assert "bisque_download_resource" in tool_names
+    assert "bisque_module_runs" in tool_names
+    assert "bisque_upload_files" not in tool_names
+    assert "bisque_upload_workspace_files" not in tool_names
+    assert "bisque_create_dataset" not in tool_names
 
 
 def test_research_agent_registers_bisque_tools_for_linked_account_followup(monkeypatch):
@@ -75,6 +200,7 @@ def test_research_agent_registers_bisque_tools_for_linked_account_followup(monke
         thread_id="thread-1",
         run_id="run-linked-followup",
         goal="Upload the updated overlay and report back to the account.",
+        remote_mutation_intents=("bisque.upload",),
         run_metadata={"bisque_session_id": "bisque_session_opaque"},
     )
 
@@ -95,6 +221,7 @@ def test_run_context_brief_mentions_linked_bisque_account_without_session_id():
         thread_id="thread-1",
         run_id="run-linked-followup",
         goal="Upload the updated overlay and report back to the account.",
+        remote_mutation_intents=("bisque.upload",),
         run_metadata={"bisque_session_id": "bisque_session_secret"},
     )
 
@@ -279,9 +406,7 @@ def test_bisque_search_forwards_numeric_metadata_filters(monkeypatch):
     )
 
     assert captured["json"]["tag_query"] == "modality:CT"
-    assert captured["json"]["metadata_filters"] == [
-        {"tag": "age", "op": "gt", "value": "50"}
-    ]
+    assert captured["json"]["metadata_filters"] == [{"tag": "age", "op": "gt", "value": "50"}]
     # The relational comparison must NOT be smuggled into tag_query, where BisQue
     # would compare it lexically.
     assert ">" not in captured["json"]["tag_query"]
@@ -316,6 +441,8 @@ def test_bisque_control_call_sends_run_scoped_session_and_principal_reference(mo
         run_id="run-bisque",
         goal="Use bqapi",
         run_metadata={"bisque_session_id": "bisque_session_opaque"},
+        run_lease_worker_id="worker-a",
+        run_lease_token="lease-secret",
     )
     captured: dict = {}
 
@@ -344,12 +471,16 @@ def test_bisque_control_call_sends_run_scoped_session_and_principal_reference(mo
 
     monkeypatch.setattr("httpx.Client", FakeClient)
 
-    result = control_post_json(settings, "/v2/bisque/search", {"resource_type": "image"}, context=context)
+    result = control_post_json(
+        settings, "/v2/bisque/search", {"resource_type": "image"}, context=context
+    )
 
     assert result == {"ok": True}
     assert captured["headers"] == {
         "X-Ultra-Run-Id": "run-bisque",
         "X-Ultra-Bisque-Session-Id": "bisque_session_opaque",
+        "X-Ultra-Worker-Id": "worker-a",
+        "X-Ultra-Run-Lease-Token": "lease-secret",
         "X-Ultra-User-Id": "user-1",
         "X-Ultra-Org-Id": "local-org",
     }
@@ -403,6 +534,7 @@ def test_bisque_upload_accepts_artifact_ids_without_credentials(monkeypatch):
         settings,
         artifact_ids=["artifact-report"],
         file_ids=[],
+        context=_mutation_context("Upload the report to BisQue", "bisque.upload"),
     )
 
     assert captured["url"] == "http://control.test/v2/bisque/upload"
@@ -428,6 +560,8 @@ def test_bisque_control_call_sends_worker_token_when_configured(monkeypatch):
         run_id="run-bisque",
         goal="Use bqapi",
         run_metadata={"bisque_session_id": "bisque_session_opaque"},
+        run_lease_worker_id="worker-a",
+        run_lease_token="lease-secret",
     )
     captured: dict = {}
 
@@ -459,6 +593,8 @@ def test_bisque_control_call_sends_worker_token_when_configured(monkeypatch):
     assert captured["headers"]["X-Ultra-Worker-Token"] == "worker-secret"
     assert captured["headers"]["X-Ultra-Run-Id"] == "run-bisque"
     assert captured["headers"]["X-Ultra-Bisque-Session-Id"] == "bisque_session_opaque"
+    assert captured["headers"]["X-Ultra-Worker-Id"] == "worker-a"
+    assert captured["headers"]["X-Ultra-Run-Lease-Token"] == "lease-secret"
 
 
 def test_bisque_create_dataset_posts_members_to_control_plane(monkeypatch):
@@ -476,6 +612,7 @@ def test_bisque_create_dataset_posts_members_to_control_plane(monkeypatch):
         thread_id="thread-1",
         run_id="run-bisque",
         goal="Group uploads into a dataset",
+        remote_mutation_intents=("bisque.create_dataset",),
         run_metadata={"bisque_session_id": "bisque_session_opaque"},
     )
     captured: dict = {}
@@ -657,7 +794,10 @@ def test_bisque_get_module_run_requires_mex_uri():
         openai_model="deepseek_v4",
         control_base_url="http://control.test",
     )
-    assert get_bisque_module_run(settings, mex_uri="  ") == {"ok": False, "error": "mex_uri_required"}
+    assert get_bisque_module_run(settings, mex_uri="  ") == {
+        "ok": False,
+        "error": "mex_uri_required",
+    }
 
 
 def test_bisque_create_dataset_requires_name_and_members():
@@ -776,6 +916,7 @@ def test_bisque_upload_returns_structured_failure_without_tool_exception(monkeyp
         thread_id="thread-1",
         run_id="run-bisque",
         goal="Upload an OME-Zarr to BisQue",
+        remote_mutation_intents=("bisque.upload",),
     )
     captured: dict = {}
 
@@ -915,6 +1056,7 @@ def test_bisque_workspace_upload_stages_local_file_then_uploads_to_bisque(monkey
         thread_id="thread-1",
         run_id="run-bisque",
         goal="Upload generated image",
+        remote_mutation_intents=("bisque.upload",),
         workspace_root=str(workspace),
         artifact_root=str(tmp_path / "artifacts"),
         run_metadata={"bisque_session_id": "bisque_session_opaque"},
@@ -1048,6 +1190,7 @@ def test_bisque_push_prior_artifact_resolves_across_turns(monkeypatch, tmp_path)
         thread_id="thread-1",
         run_id="run-now",
         goal="Push these resulting images to bisque",
+        remote_mutation_intents=("bisque.upload",),
         workspace_root=str(current_workspace),
         artifact_root=str(current_artifacts),
         resource_descriptors=(artifact_descriptor,),
@@ -1131,6 +1274,7 @@ def test_bisque_push_prior_artifact_resolves_by_basename(monkeypatch, tmp_path):
         thread_id="thread-1",
         run_id="run-now",
         goal="push it",
+        remote_mutation_intents=("bisque.upload",),
         workspace_root=str(workspace),
         artifact_root=str(current_artifacts),
         resource_descriptors=(
@@ -1150,7 +1294,12 @@ def test_bisque_push_prior_artifact_resolves_by_basename(monkeypatch, tmp_path):
             return None
 
         def json(self):
-            return {"count": 1, "uploads": [{"artifact_id": "artifact_run_prior_def456", "resource_uri": "https://b/00-X"}]}
+            return {
+                "count": 1,
+                "uploads": [
+                    {"artifact_id": "artifact_run_prior_def456", "resource_uri": "https://b/00-X"}
+                ],
+            }
 
     class FakeClient:
         def __init__(self, timeout):
@@ -1168,7 +1317,9 @@ def test_bisque_push_prior_artifact_resolves_by_basename(monkeypatch, tmp_path):
 
     monkeypatch.setattr("httpx.Client", FakeClient)
 
-    result = upload_bisque_workspace_files(settings, paths=["ct_scan_visualization.png"], context=context)
+    result = upload_bisque_workspace_files(
+        settings, paths=["ct_scan_visualization.png"], context=context
+    )
     assert calls[0]["json"]["artifact_ids"] == ["artifact_run_prior_def456"]
     assert result["ok"] is True
 
@@ -1191,6 +1342,7 @@ def test_bisque_push_reports_unresolved_path_without_uploading(monkeypatch, tmp_
         thread_id="thread-1",
         run_id="run-now",
         goal="push missing",
+        remote_mutation_intents=("bisque.upload",),
         workspace_root=str(workspace),
         artifact_root=str(artifacts),
     )
@@ -1204,3 +1356,104 @@ def test_bisque_push_reports_unresolved_path_without_uploading(monkeypatch, tmp_
     assert result["ok"] is False
     assert result["error"] == "no_resolvable_paths"
     assert result["missing_paths"] == ["/outputs/nope.png"]
+
+
+class _CaptureClient:
+    """Minimal httpx.Client stand-in that records the request + response payload."""
+
+    _captured: dict = {}
+    _response: dict = {}
+
+    def __init__(self, timeout):
+        _CaptureClient._captured["timeout"] = timeout
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def post(self, url, json, headers=None):
+        _CaptureClient._captured["url"] = url
+        _CaptureClient._captured["json"] = json
+        _CaptureClient._captured["headers"] = headers or {}
+        payload = _CaptureClient._response
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return payload
+
+        return _Resp()
+
+
+def _settings():
+    return RuntimeSettings(
+        openai_base_url="http://localhost:8001/v1",
+        openai_model="deepseek_v4",
+        control_base_url="http://control.test",
+        openai_api_key="should-not-leak",
+    )
+
+
+def test_bisque_dataset_member_count_calls_control_plane(monkeypatch):
+    _CaptureClient._captured = {}
+    _CaptureClient._response = {"dataset_uniq": "00-ds", "member_count": 2752, "members": []}
+    monkeypatch.setattr("httpx.Client", _CaptureClient)
+
+    result = bisque_dataset_member_count(_settings(), dataset_uniq="00-ds", limit=50, offset=100)
+
+    assert _CaptureClient._captured["url"] == "http://control.test/v2/bisque/dataset-members"
+    assert _CaptureClient._captured["json"] == {
+        "dataset_uniq": "00-ds",
+        "limit": 50,
+        "offset": 100,
+    }
+    assert result["ok"] is True
+    assert result["member_count"] == 2752
+
+
+def test_bisque_image_annotation_count_calls_control_plane(monkeypatch):
+    _CaptureClient._captured = {}
+    _CaptureClient._response = {
+        "image_uniq": "00-ax",
+        "annotation_count": 3,
+        "gobject_types": ["Impala", "Springbok", "For Review"],
+    }
+    monkeypatch.setattr("httpx.Client", _CaptureClient)
+
+    result = bisque_image_annotation_count(_settings(), image_uniq="00-ax")
+
+    assert _CaptureClient._captured["url"] == "http://control.test/v2/bisque/image-annotations"
+    assert _CaptureClient._captured["json"] == {"image_uniq": "00-ax"}
+    assert result["ok"] is True
+    assert result["annotation_count"] == 3
+
+
+def test_bisque_dataset_annotation_summary_uses_long_timeout(monkeypatch):
+    _CaptureClient._captured = {}
+    _CaptureClient._response = {
+        "dataset_uniq": "00-ds",
+        "member_count": 2752,
+        "images_with_annotations": 7,
+        "total_annotations": 15,
+        "annotated_images": [],
+    }
+    monkeypatch.setattr("httpx.Client", _CaptureClient)
+
+    result = bisque_dataset_annotation_summary(_settings(), dataset_uniq="00-ds")
+
+    assert _CaptureClient._captured["url"] == "http://control.test/v2/bisque/dataset-annotations"
+    assert _CaptureClient._captured["json"] == {"dataset_uniq": "00-ds"}
+    # A dataset-wide scan must allow more than the default 60s client timeout.
+    assert _CaptureClient._captured["timeout"] >= 300.0
+    assert result["ok"] is True
+    assert result["images_with_annotations"] == 7
+
+
+def test_bisque_count_tools_require_a_reference():
+    assert bisque_dataset_member_count(_settings())["error"] == "dataset_uniq_required"
+    assert bisque_image_annotation_count(_settings())["error"] == "image_uniq_required"
+    assert bisque_dataset_annotation_summary(_settings())["error"] == "dataset_uniq_required"

@@ -7,25 +7,27 @@ import (
 )
 
 type Job struct {
-	RunID               string                 `json:"run_id"`
-	DispatchID          string                 `json:"dispatch_id,omitempty"`
-	ThreadID            string                 `json:"thread_id"`
-	UserID              string                 `json:"user_id"`
-	Goal                string                 `json:"goal"`
-	WorkflowKind        string                 `json:"workflow_kind,omitempty"`
-	Messages            []domain.ThreadMessage `json:"messages,omitempty"`
-	FileIDs             []string               `json:"file_ids,omitempty"`
-	ResourceURIs        []string               `json:"resource_uris,omitempty"`
-	DatasetURIs         []string               `json:"dataset_uris,omitempty"`
-	SelectedToolNames   []string               `json:"selected_tool_names,omitempty"`
-	KnowledgeContext    domain.JSONMap         `json:"knowledge_context,omitempty"`
-	WorkflowHint        domain.JSONMap         `json:"workflow_hint,omitempty"`
-	SelectionContext    domain.JSONMap         `json:"selection_context,omitempty"`
-	ReasoningMode       string                 `json:"reasoning_mode,omitempty"`
-	Budgets             domain.JSONMap         `json:"budgets,omitempty"`
-	Benchmark           domain.JSONMap         `json:"benchmark,omitempty"`
-	ResourceDescriptors []domain.JSONMap       `json:"resource_descriptors,omitempty"`
-	Metadata            domain.JSONMap         `json:"metadata,omitempty"`
+	RunID                 string                        `json:"run_id"`
+	DispatchID            string                        `json:"dispatch_id,omitempty"`
+	ThreadID              string                        `json:"thread_id"`
+	UserID                string                        `json:"user_id"`
+	Goal                  string                        `json:"goal"`
+	WorkflowKind          string                        `json:"workflow_kind,omitempty"`
+	EvaluationProfile     domain.EvaluationProfile      `json:"evaluation_profile,omitempty"`
+	RemoteMutationIntents []domain.RemoteMutationIntent `json:"remote_mutation_intents,omitempty"`
+	Messages              []domain.ThreadMessage        `json:"messages,omitempty"`
+	FileIDs               []string                      `json:"file_ids,omitempty"`
+	ResourceURIs          []string                      `json:"resource_uris,omitempty"`
+	DatasetURIs           []string                      `json:"dataset_uris,omitempty"`
+	SelectedToolNames     []string                      `json:"selected_tool_names,omitempty"`
+	KnowledgeContext      domain.JSONMap                `json:"knowledge_context,omitempty"`
+	WorkflowHint          domain.JSONMap                `json:"workflow_hint,omitempty"`
+	SelectionContext      domain.JSONMap                `json:"selection_context,omitempty"`
+	ReasoningMode         string                        `json:"reasoning_mode,omitempty"`
+	Budgets               domain.JSONMap                `json:"budgets,omitempty"`
+	Benchmark             domain.JSONMap                `json:"benchmark,omitempty"`
+	ResourceDescriptors   []domain.JSONMap              `json:"resource_descriptors,omitempty"`
+	Metadata              domain.JSONMap                `json:"metadata,omitempty"`
 }
 
 type DataAgentJob struct {

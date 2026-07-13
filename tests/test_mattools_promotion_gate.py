@@ -10,11 +10,19 @@ from pathlib import Path
 import pytest
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "mattools_promotion_gate.py"
+REPO_ROOT = SCRIPT_PATH.parents[1]
 SPEC = importlib.util.spec_from_file_location("mattools_promotion_gate", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 gate = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = gate
 SPEC.loader.exec_module(gate)
+
+
+def test_make_target_provisions_pytest_in_a_clean_environment() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("mattools-promotion-test:", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
+
+    assert "uv run --extra dev pytest" in target
 
 
 def _write_synthetic_snapshot(root: Path) -> gate.BenchmarkSnapshot:

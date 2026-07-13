@@ -567,7 +567,7 @@ mattools-evaluator-verify: ## Verify evaluator image, complete lock, source mani
 
 mattools-promotion-test: ## Run lean MatTools parsing, scoring, isolation, and resume tests
 	PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile scripts/build_mattools_evaluator.py scripts/mattools_promotion_gate.py scripts/mattools_safe_parser.py scripts/mattools_runner_wrapper.py scripts/mattools_strict_shadow.py scripts/mattools_semantic_repairs.py
-	PYTHONDONTWRITEBYTECODE=1 uv run pytest -p no:cacheprovider tests/test_mattools_evaluator_image.py tests/test_mattools_promotion_gate.py tests/test_mattools_safe_parser.py tests/test_mattools_semantic_repairs.py -q
+	PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -p no:cacheprovider tests/test_mattools_evaluator_image.py tests/test_mattools_promotion_gate.py tests/test_mattools_safe_parser.py tests/test_mattools_semantic_repairs.py -q
 
 mattools-promotion-inspect: ## Verify an explicit pinned official MatTools snapshot
 	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT to the official pinned checkout." >&2; exit 1; }

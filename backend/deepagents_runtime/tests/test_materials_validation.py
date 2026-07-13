@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from ultra_deepagents.materials.validation import (
     EvidenceArtifact,
     ScientificStatus,
@@ -14,7 +13,6 @@ from ultra_deepagents.materials.validation import (
     parse_assessment_record,
     record_sha256,
 )
-
 
 _DIGEST = "a" * 64
 
@@ -253,9 +251,7 @@ def test_duplicate_validator_ids_are_rejected():
 
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("field_name", ["observed", "expected"])
-def test_validation_check_rejects_nested_nonfinite_numbers(
-    field_name: str, nonfinite: float
-):
+def test_validation_check_rejects_nested_nonfinite_numbers(field_name: str, nonfinite: float):
     kwargs = {
         "validator_id": "xrd.fcc_first_peak",
         "outcome": ValidationOutcome.PASS,

@@ -100,7 +100,7 @@ REQUIRED_CALPHAD_RELEASE_INPUT_SHA256S = {
         "18439683fcef25a6cecfb727fe0d26a3f6a7625764d11b5e48fa729d809e8528"
     ),
     "scripts/calphad_experimental_benchmark.py": (
-        "248ac0f741afa4ff76224dda8e8dc77d29f3472afaee518efa0b43cdcdf34f78"
+        "c5ebfe7c635e2ccae9192f66c622e99ac3a4a8b2ac25d9c8cb7337ec90fa3140"
     ),
     "tests/fixtures/materials/calphad_experimental_benchmark_expected.json": (
         "b39a5d50df6ff89201f5421381a6754446ea17366cfa6a9aaba974e27e46d58b"
@@ -109,7 +109,7 @@ REQUIRED_CALPHAD_RELEASE_INPUT_SHA256S = {
         "dc143d199b0959256d39de1512a6dadf4c417c027eab95c45f1d2ddfcf66d276"
     ),
     "tests/test_calphad_experimental_benchmark.py": (
-        "b934ab54c49f1a0c8483d8436c60d1abcdf464cea2a27fb2c134b597a4fac405"
+        "bb9a509c3e1dbaa3c33c33fd6d75c851e4495fbd2079cc1a1513b20b445242f9"
     ),
 }
 REQUIRED_CALPHAD_TOOL_TEST_NAMES = (

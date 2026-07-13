@@ -2,7 +2,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -80,9 +79,7 @@ def test_deepagents_worker_units_override_mutable_tag_with_verified_image_id() -
     ):
         text = read_repo_file(unit)
         ordinary_environment = text.index("EnvironmentFile=/etc/ultra/ultra-")
-        immutable_environment = text.index(
-            "EnvironmentFile=/etc/ultra/ultra-sandbox-image.env"
-        )
+        immutable_environment = text.index("EnvironmentFile=/etc/ultra/ultra-sandbox-image.env")
         assert immutable_environment > ordinary_environment
 
 
@@ -278,7 +275,10 @@ def test_systemd_units_run_go_control_and_deepagents_workers() -> None:
     assert "Environment=ULTRA_CONTROL_HTTP_ADDR=127.0.0.1:8000" in control
 
     assert "After=ultra-control.service" in deepagents
-    assert "ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.nats_worker" in deepagents
+    assert (
+        "ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.nats_worker"
+        in deepagents
+    )
     assert "EnvironmentFile=/etc/ultra/ultra-backend.env" in deepagents
 
 

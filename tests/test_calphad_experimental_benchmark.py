@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _ROOT / "scripts" / "calphad_experimental_benchmark.py"
 _SPEC = importlib.util.spec_from_file_location("calphad_experimental_benchmark", _SCRIPT)
@@ -93,9 +92,7 @@ def test_retained_pycalphad_predictions_pass_the_locked_two_lane_metrics() -> No
     assert calibration_metrics["max_abs_z"] == pytest.approx(
         expected["calibration_max_abs_z"], abs=1e-12
     )
-    assert held_out_metrics["mae_K"] == pytest.approx(
-        expected["held_out_mae_K"], abs=1e-12
-    )
+    assert held_out_metrics["mae_K"] == pytest.approx(expected["held_out_mae_K"], abs=1e-12)
     assert held_out_metrics["max_abs_error_K"] == pytest.approx(
         expected["held_out_max_abs_error_K"], abs=1e-12
     )
@@ -128,7 +125,9 @@ def test_independent_holdout_failure_blocks_promotion_without_hiding_residuals()
     )
     assert failed_observation["predicted_temperature_K"] == 1800.0
     assert failed_observation["residual_K_predicted_minus_observed"] == pytest.approx(58.85)
-    assert any("independent thermometric holdout" in reason for reason in report["blocking_reasons"])
+    assert any(
+        "independent thermometric holdout" in reason for reason in report["blocking_reasons"]
+    )
 
 
 def test_manifest_rejects_post_hoc_tolerance_relaxation() -> None:

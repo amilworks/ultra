@@ -19,13 +19,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-
 BENCHMARK_SCHEMA_VERSION = "1"
 BENCHMARK_ID = "materials.calphad.al_co_w_experimental_two_lane.v1"
 BENCHMARK_REPORT_SCHEMA_VERSION = "ultra.calphad.experimental_benchmark.v1"
 DEFAULT_MANIFEST_RELATIVE_PATH = (
-    "backend/deepagents_runtime/materials_data/calphad/"
-    "experimental_benchmark_manifest.json"
+    "backend/deepagents_runtime/materials_data/calphad/experimental_benchmark_manifest.json"
 )
 DATABASE_ID = "nist-al-co-w-wang-2017"
 CALIBRATION_LANE_ID = "nist_2014_phase_vertex_calibration"
@@ -277,10 +275,15 @@ def validate_manifest(
 
     lanes = _indexed_objects(manifest.get("lanes"), key="lane_id", label="lanes")
     if set(lanes) != {CALIBRATION_LANE_ID, HELD_OUT_LANE_ID}:
-        raise BenchmarkConfigurationError("benchmark must contain exactly calibration and held-out lanes")
+        raise BenchmarkConfigurationError(
+            "benchmark must contain exactly calibration and held-out lanes"
+        )
     calibration = lanes[CALIBRATION_LANE_ID]
     held_out = lanes[HELD_OUT_LANE_ID]
-    if calibration.get("classification") != "calibration" or calibration.get("required") is not True:
+    if (
+        calibration.get("classification") != "calibration"
+        or calibration.get("required") is not True
+    ):
         raise BenchmarkConfigurationError("calibration lane classification/requirement drifted")
     if (
         held_out.get("classification") != "held_out"
@@ -300,7 +303,9 @@ def validate_manifest(
         calibration_calculation.get("temperature_K"), label="calibration temperature K"
     )
     if not math.isclose(temperature_k, temperature_c + 273.15, abs_tol=1e-12, rel_tol=0.0):
-        raise BenchmarkConfigurationError("calibration Celsius-to-kelvin conversion is inconsistent")
+        raise BenchmarkConfigurationError(
+            "calibration Celsius-to-kelvin conversion is inconsistent"
+        )
     _require_exact_number(
         calibration_calculation.get("pressure_Pa"),
         101325.0,
@@ -329,9 +334,7 @@ def validate_manifest(
             raise BenchmarkConfigurationError(f"unknown calibration phase: {observation_id}")
         if observation.get("component") not in {"AL", "W"}:
             raise BenchmarkConfigurationError(f"unknown calibration component: {observation_id}")
-        mean = _finite(
-            observation.get("mean_atomic_fraction"), label=f"{observation_id} mean"
-        )
+        mean = _finite(observation.get("mean_atomic_fraction"), label=f"{observation_id} mean")
         ci95 = _finite(
             observation.get("ci95_half_width_atomic_fraction"),
             label=f"{observation_id} confidence interval",
@@ -361,9 +364,7 @@ def validate_manifest(
     }:
         raise BenchmarkConfigurationError("held-out calculation identities drifted")
     for condition_id, calculation in calculations.items():
-        source_id = _text(
-            calculation.get("source_id"), label=f"{condition_id} source identity"
-        )
+        source_id = _text(calculation.get("source_id"), label=f"{condition_id} source identity")
         if source_id not in sources or sources[source_id].get("source_role") != "held_out_source":
             raise BenchmarkConfigurationError(f"invalid held-out source binding: {condition_id}")
         _composition(
@@ -389,34 +390,32 @@ def validate_manifest(
         raise BenchmarkConfigurationError("held-out lane must contain four observations")
     transition_pairs: set[tuple[str, str]] = set()
     for observation_id, observation in held_out_observations.items():
-        condition_id = _text(
-            observation.get("condition_id"), label=f"{observation_id} condition"
-        )
+        condition_id = _text(observation.get("condition_id"), label=f"{observation_id} condition")
         source_id = _text(observation.get("source_id"), label=f"{observation_id} source")
-        transition = _text(
-            observation.get("transition"), label=f"{observation_id} transition"
-        )
-        if condition_id not in calculations or calculations[condition_id].get("source_id") != source_id:
-            raise BenchmarkConfigurationError(f"held-out observation binding drift: {observation_id}")
+        transition = _text(observation.get("transition"), label=f"{observation_id} transition")
+        if (
+            condition_id not in calculations
+            or calculations[condition_id].get("source_id") != source_id
+        ):
+            raise BenchmarkConfigurationError(
+                f"held-out observation binding drift: {observation_id}"
+            )
         if transition not in {"solidus", "liquidus"}:
             raise BenchmarkConfigurationError(f"invalid held-out transition: {observation_id}")
         pair = (condition_id, transition)
         if pair in transition_pairs:
             raise BenchmarkConfigurationError(f"duplicate condition/transition observation: {pair}")
         transition_pairs.add(pair)
-        temperature_c = _finite(
-            observation.get("temperature_degC"), label=f"{observation_id} degC"
-        )
-        temperature_k = _finite(
-            observation.get("temperature_K"), label=f"{observation_id} K"
-        )
+        temperature_c = _finite(observation.get("temperature_degC"), label=f"{observation_id} degC")
+        temperature_k = _finite(observation.get("temperature_K"), label=f"{observation_id} K")
         if not math.isclose(temperature_k, temperature_c + 273.15, abs_tol=1e-12, rel_tol=0.0):
             raise BenchmarkConfigurationError(
                 f"held-out Celsius-to-kelvin conversion is inconsistent: {observation_id}"
             )
-        if observation.get("uncertainty_K") is not None or observation.get(
-            "uncertainty_status"
-        ) != "not_reported_numerically":
+        if (
+            observation.get("uncertainty_K") is not None
+            or observation.get("uncertainty_status") != "not_reported_numerically"
+        ):
             raise BenchmarkConfigurationError(
                 f"held-out numerical uncertainty must remain explicitly unreported: {observation_id}"
             )
@@ -433,9 +432,10 @@ def validate_manifest(
         PHASE_FRACTION_EPSILON,
         label="phase fraction epsilon",
     )
-    if _strict_int(
-        boundary_policy.get("bisection_iterations"), label="bisection iterations"
-    ) != BISECTION_ITERATIONS:
+    if (
+        _strict_int(boundary_policy.get("bisection_iterations"), label="bisection iterations")
+        != BISECTION_ITERATIONS
+    ):
         raise BenchmarkConfigurationError("bisection iteration count must remain fixed")
     _require_exact_number(
         boundary_policy.get("maximum_reported_boundary_resolution_K"),
@@ -443,9 +443,10 @@ def validate_manifest(
         label="maximum boundary resolution",
     )
     held_out_metrics = _mapping(held_out.get("metrics"), label="held-out metrics")
-    if _strict_int(
-        held_out_metrics.get("observation_count"), label="held-out observation count"
-    ) != HELD_OUT_OBSERVATION_COUNT:
+    if (
+        _strict_int(held_out_metrics.get("observation_count"), label="held-out observation count")
+        != HELD_OUT_OBSERVATION_COUNT
+    ):
         raise BenchmarkConfigurationError("held-out metric count drifted")
     _require_exact_number(
         held_out_metrics.get("mae_K_max"),
@@ -544,9 +545,7 @@ def score_predictions(
         predicted_k = _finite(
             condition_predictions.get(prediction_key), label=f"{condition_id} {prediction_key}"
         )
-        observed_k = _finite(
-            observation.get("temperature_K"), label=f"{observation_id} observed K"
-        )
+        observed_k = _finite(observation.get("temperature_K"), label=f"{observation_id} observed K")
         residual_k = predicted_k - observed_k
         absolute_error_k = abs(residual_k)
         absolute_errors.append(absolute_error_k)
@@ -635,7 +634,9 @@ class PyCalphadPredictor:
             from pycalphad import Database, equilibrium
             from pycalphad import variables as v
         except ImportError as exc:
-            raise BenchmarkConfigurationError(f"pinned pycalphad runtime is unavailable: {exc}") from exc
+            raise BenchmarkConfigurationError(
+                f"pinned pycalphad runtime is unavailable: {exc}"
+            ) from exc
         if pycalphad.__version__ != binding.get("pycalphad_version"):
             raise BenchmarkConfigurationError(
                 "installed pycalphad version differs from the benchmark binding"
@@ -736,9 +737,7 @@ class PyCalphadPredictor:
         result = self._solve(float(temperature_k), composition)
         phase_values = self._np.asarray(result.Phase.values).reshape(-1)
         amount_values = self._np.asarray(result.NP.values, dtype=float).reshape(-1)
-        liquid_fraction = float(
-            self._np.nansum(amount_values[phase_values == "LIQUID"])
-        )
+        liquid_fraction = float(self._np.nansum(amount_values[phase_values == "LIQUID"]))
         if (
             not math.isfinite(liquid_fraction)
             or liquid_fraction < -1e-8
@@ -855,9 +854,7 @@ def run_benchmark(
     manifest_path: Path | None = None,
     predictor: Any | None = None,
 ) -> dict[str, Any]:
-    manifest, selected_manifest, validated = load_validated_manifest(
-        repository_root, manifest_path
-    )
+    manifest, selected_manifest, validated = load_validated_manifest(repository_root, manifest_path)
     lanes = validated["lanes"]
     calibration = lanes[CALIBRATION_LANE_ID]
     held_out = lanes[HELD_OUT_LANE_ID]

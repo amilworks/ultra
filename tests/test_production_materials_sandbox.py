@@ -188,6 +188,9 @@ def test_release_critical_sources_include_protected_promotion_boundary() -> None
 
     assert ".github/workflows/materials-production-qualification.yml" in required
     assert "scripts/materials_promotion_envelope.py" in required
+    # AGENTS.md is local development guidance and may be intentionally untracked.
+    # Release identity must depend only on repository-owned runtime and gate sources.
+    assert "AGENTS.md" not in required
 
 
 def _calphad_experimental_benchmark_wrapper() -> dict[str, object]:

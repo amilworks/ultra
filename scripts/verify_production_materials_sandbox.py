@@ -239,7 +239,6 @@ RELEASE_CRITICAL_FIXED_FILES = (
     Path(".github/workflows/materials-domain-gate.yml"),
     Path(".github/workflows/materials-production-qualification.yml"),
     Path(".github/workflows/release-artifacts.yml"),
-    Path("AGENTS.md"),
     Path("Makefile"),
     Path("backend/controlplane/.dockerignore"),
     Path("backend/controlplane/Dockerfile"),

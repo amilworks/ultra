@@ -821,6 +821,19 @@ def test_backend_contract_requires_every_resource_and_security_bound() -> None:
     assert any("shell payload differs" in item for item in failures)
 
 
+def test_parity_execution_keeps_pytest_temps_off_the_staged_source_tree() -> None:
+    command = _VERIFY._execution_command(
+        expected_git_sha=GIT_SHA,
+        image=_image_inspection("production:test", "Ultra Deep Agents scientific sandbox"),
+        requirements_sha256="a" * 64,
+        scope="production-full",
+    )
+
+    assert f"export TMPDIR={_VERIFY.PARITY_TMPDIR}" in command
+    assert 'mkdir -p "$TMPDIR" /outputs/domain' in command
+    assert "/workspace/.tmp" not in command
+
+
 @pytest.mark.parametrize(
     "bypass",
     [
@@ -1013,7 +1026,9 @@ def test_calphad_tools_junit_requires_exact_56_tests_without_skips(tmp_path: Pat
     assert any("exact required test identities" in failure for failure in failures)
 
 
-def test_release_calphad_test_contract_includes_format_pressure_scheil_and_mqmqa_adversaries() -> None:
+def test_release_calphad_test_contract_includes_format_pressure_scheil_and_mqmqa_adversaries() -> (
+    None
+):
     assert len(_VERIFY.REQUIRED_CALPHAD_CORE_TEST_NAMES) == 36
     assert len(_VERIFY.REQUIRED_TYPED_CALPHAD_CLI_TEST_NAMES) == 3
     assert len(_VERIFY.REQUIRED_CALPHAD_TOOL_TEST_NAMES) == 56
@@ -1054,7 +1069,7 @@ def test_materials_images_and_domain_gate_bind_the_reviewed_pressure_format_cont
     runner = (_REPO_ROOT / "scripts/run_materials_domain_gate.sh").read_text(encoding="utf-8")
     assert "ULTRA_MATERIALS_GATE_REQUIRE_CALPHAD_RUNTIME_JUNIT=1" in runner
     assert "--calphad-runtime-junit /reports/calphad-runtime-junit.xml" in runner
-    assert "testcase.find(\"skipped\") is not None" in runner
+    assert 'testcase.find("skipped") is not None' in runner
     assert "expected_damask_cases" in runner
     assert "observed_damask_cases != expected_damask_cases" in runner
     assert "exact 10 DAMASK 3.1.0" in runner
@@ -1212,15 +1227,15 @@ def test_materials_domain_workflow_runs_degradation_characterization_zero_skip_l
 
 
 def test_worker_core_dependency_and_image_pin_close_materials_import_surface() -> None:
-    pyproject = (
-        _REPO_ROOT / "backend/deepagents_runtime/pyproject.toml"
-    ).read_text(encoding="utf-8")
-    dockerfile = (
-        _REPO_ROOT / "backend/deepagents_runtime/Dockerfile.worker"
-    ).read_text(encoding="utf-8")
-    dockerignore = (
-        _REPO_ROOT / "backend/deepagents_runtime/.dockerignore"
-    ).read_text(encoding="utf-8")
+    pyproject = (_REPO_ROOT / "backend/deepagents_runtime/pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    dockerfile = (_REPO_ROOT / "backend/deepagents_runtime/Dockerfile.worker").read_text(
+        encoding="utf-8"
+    )
+    dockerignore = (_REPO_ROOT / "backend/deepagents_runtime/.dockerignore").read_text(
+        encoding="utf-8"
+    )
 
     assert '"numpy>=1.26.0,<3"' in pyproject
     assert '"numcodecs==0.16.5"' in pyproject
@@ -1234,10 +1249,7 @@ def test_worker_core_dependency_and_image_pin_close_materials_import_surface() -
     assert "import numpy, numcodecs, zarr" in dockerfile
     assert "assert numcodecs.__version__ == '${ULTRA_WORKER_NUMCODECS_VERSION}'" in dockerfile
     assert "assert zarr.__version__ == '${ULTRA_WORKER_ZARR_VERSION}'" in dockerfile
-    assert (
-        "RUN python /app/deepagents_runtime/tests/test_sensor_worker_core_smoke.py"
-        in dockerfile
-    )
+    assert "RUN python /app/deepagents_runtime/tests/test_sensor_worker_core_smoke.py" in dockerfile
     assert "!tests/test_sensor_worker_core_smoke.py" in dockerignore
     for module in (
         "ultra_deepagents.agent",
@@ -1249,9 +1261,7 @@ def test_worker_core_dependency_and_image_pin_close_materials_import_surface() -
 
 
 def test_release_workflow_requalifies_first_class_mechanics_and_characterization() -> None:
-    source = (_REPO_ROOT / ".github/workflows/release-artifacts.yml").read_text(
-        encoding="utf-8"
-    )
+    source = (_REPO_ROOT / ".github/workflows/release-artifacts.yml").read_text(encoding="utf-8")
 
     assert "Test first-class mechanics and characterization tool surfaces" in source
     for relative in (
@@ -1482,6 +1492,7 @@ def test_full_orchestration_uses_mocked_backend_and_writes_content_addressed_rep
     assert report["full_production_image_parity"] is True
     assert report["sandbox"]["backend"] == "DockerSandboxBackend"
     assert report["sandbox"]["policy_source"] == "exported_worker_environment"
+    assert report["sandbox"]["pytest_isolation"]["tmpdir"] == _VERIFY.PARITY_TMPDIR
     assert report["domain_gate"]["report"]["junit"]["tests"] == 13
     assert report["calphad_runtime"]["junit"]["tests"] == 39
     assert report["calphad_tool_orchestration"]["junit"]["tests"] == 56

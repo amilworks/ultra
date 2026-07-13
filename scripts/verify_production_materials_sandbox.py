@@ -379,6 +379,7 @@ RELEASE_CRITICAL_GLOBS = (
 )
 
 RUNTIME_SCRATCH_ROOTS = (Path(".cache"), Path(".tmp"))
+PARITY_TMPDIR = "/tmp/ultra-materials-parity"
 
 
 class VerificationError(RuntimeError):
@@ -2043,6 +2044,11 @@ def _gate_environment(
             if scope == "production-full"
             else "/opt/ultra/src/ultra_deepagents/materials"
         ),
+        # Keep pytest's housekeeping symlinks on the container's ephemeral tmpfs.
+        # The generic scientific sandbox deliberately uses /workspace/.tmp for large
+        # intermediates, but this small parity suite must leave staged source as an
+        # independently hashable tree of regular files.
+        "TMPDIR": PARITY_TMPDIR,
         "PYTEST_ADDOPTS": "",
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
         "PYTEST_PLUGINS": "",
@@ -2069,7 +2075,7 @@ def _execution_command(
     )
     return f"""set -euo pipefail
 {exports}
-mkdir -p /outputs/domain
+mkdir -p "$TMPDIR" /outputs/domain
 python /workspace/.ultra-parity/calphad_probe.py /outputs/{CALPHAD_REPORT.as_posix()}
 python -m pytest \
   /workspace/backend/deepagents_runtime/tests/test_calphad_runtime.py \
@@ -3387,6 +3393,7 @@ def validate_retained_evidence_bundle(
                 "pytest_addopts": "",
                 "pytest_plugins": "",
                 "rootdir": "/workspace/backend/deepagents_runtime",
+                "tmpdir": PARITY_TMPDIR,
             }
         ):
             failures.append("production sandbox/image/isolation policy evidence is inconsistent")
@@ -3901,6 +3908,7 @@ def run_verification(
                     "pytest_addopts": "",
                     "pytest_plugins": "",
                     "rootdir": "/workspace/backend/deepagents_runtime",
+                    "tmpdir": PARITY_TMPDIR,
                 },
             }
             report["execution"] = {

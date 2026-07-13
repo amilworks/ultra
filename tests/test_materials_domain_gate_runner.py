@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "materials_domain_gate.py"
+_SHELL_RUNNER_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "run_materials_domain_gate.sh"
+)
 _SPEC = importlib.util.spec_from_file_location("materials_domain_gate", _SCRIPT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _GATE = importlib.util.module_from_spec(_SPEC)
@@ -31,6 +34,12 @@ validate_calphad_experimental_benchmark_report = (
 _VALID_GIT_SHA = "a" * 40
 _VALID_IMAGE_ID = "sha256:" + "b" * 64
 _VALID_IMAGE_DIGEST = "sha256:" + "c" * 64
+
+
+def test_shell_runner_maps_all_gate_containers_to_host_report_owner() -> None:
+    source = _SHELL_RUNNER_PATH.read_text(encoding="utf-8")
+
+    assert source.count('--user "$(id -u):$(id -g)"') == 3
 
 
 def _valid_evidence(index: int, *, outcome: str = "pass") -> dict[str, object]:

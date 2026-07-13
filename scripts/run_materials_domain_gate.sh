@@ -88,6 +88,7 @@ docker run --rm \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 512 \
+  --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=${REPO_ROOT},dst=/workspace,readonly" \
   --mount "type=bind,src=${REPORT_DIR},dst=/reports" \
   --entrypoint python \
@@ -109,6 +110,7 @@ docker run --rm \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 512 \
+  --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=${REPO_ROOT},dst=/workspace,readonly" \
   --mount "type=bind,src=${REPORT_DIR},dst=/reports" \
   --entrypoint python \
@@ -168,6 +170,7 @@ docker run --rm \
   --cap-drop ALL \
   --security-opt no-new-privileges \
   --pids-limit 512 \
+  --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=${REPO_ROOT},dst=/workspace,readonly" \
   --mount "type=bind,src=${REPORT_DIR},dst=/reports" \
   --env "ULTRA_MATERIALS_GATE_DOCKERFILE_SHA256=${dockerfile_sha256}" \

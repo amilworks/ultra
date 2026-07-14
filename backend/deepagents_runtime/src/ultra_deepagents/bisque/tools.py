@@ -731,14 +731,22 @@ def build_bisque_tools(
         dataset_uniq: str = "",
         max_images: int = 0,
     ) -> str:
-        """Answer "how many images in this dataset have associated annotations".
+        """Summarize a BisQue dataset's graphical (gobject) annotations, INCLUDING per-class totals.
 
-        Scans every member image of the dataset for graphical (gobject)
-        annotations and returns member_count, images_with_annotations,
-        total_annotations, and the list of annotated images (with names and
-        counts). This is the correct way to answer annotation-coverage questions
-        about a dataset; it may take up to a minute for a large dataset. Pass the
-        dataset's resource_uniq.
+        This is the ONE correct tool for dataset-scoped annotation questions —
+        "how many annotations do I have for each class", "annotation counts by
+        class/label", "how many burrows vs prairie_dogs", AND "how many images
+        have annotations". In a SINGLE call it scans every member image and
+        returns member_count, images_with_annotations, total_annotations,
+        label_totals (annotation shapes PER CLASS across the whole dataset, e.g.
+        {"burrow": 118, "prairie_dog": 30, "prairie_dog_in_burrow": 15}), and the
+        per-image annotated list (each with its own label_counts). Report the
+        label_totals when the user asks per-class. PREFER this single scoped call
+        over iterating bisque_image_annotations image-by-image — one call is
+        correct and scales to thousand-member datasets. Pass the dataset's
+        resource_uniq (resolve the dataset name first with
+        bisque_search_resources(resource_type="dataset")). May take up to a minute
+        on a large dataset.
         """
         return _json_text(
             bisque_dataset_annotation_summary(

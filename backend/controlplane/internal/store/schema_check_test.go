@@ -31,7 +31,8 @@ func TestVerifyPostgresSchemaAcceptsCurrentControlSchema(t *testing.T) {
 	t.Parallel()
 
 	err := VerifyPostgresSchema(context.Background(), fakeSchemaQuerier{
-		presentTables: requiredPostgresControlTables,
+		presentTables:  requiredPostgresControlTables,
+		calphadCatalog: validCalphadSchemaCatalogFixture(),
 	})
 
 	if err != nil {
@@ -55,22 +56,57 @@ func TestVerifyPostgresSchemaWrapsDatabaseErrors(t *testing.T) {
 }
 
 type fakeSchemaQuerier struct {
-	presentTables []string
-	err           error
+	presentTables  []string
+	calphadCatalog calphadSchemaCatalog
+	err            error
 }
 
-func (q fakeSchemaQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
-	return fakeSchemaRow{presentTables: q.presentTables, err: q.err}
+func (q fakeSchemaQuerier) QueryRow(_ context.Context, sql string, _ ...any) pgx.Row {
+	return fakeSchemaRow{
+		presentTables:  q.presentTables,
+		calphadCatalog: q.calphadCatalog,
+		catalogQuery:   strings.Contains(sql, "calphad_schema_catalog_v1"),
+		err:            q.err,
+	}
 }
 
 type fakeSchemaRow struct {
-	presentTables []string
-	err           error
+	presentTables  []string
+	calphadCatalog calphadSchemaCatalog
+	catalogQuery   bool
+	err            error
 }
 
 func (r fakeSchemaRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
+	}
+	if r.catalogQuery {
+		if len(dest) != 7 {
+			return errors.New("expected seven CALPHAD catalog destinations")
+		}
+		values := [][]string{
+			r.calphadCatalog.Columns,
+			r.calphadCatalog.Constraints,
+			r.calphadCatalog.Indexes,
+			r.calphadCatalog.Functions,
+			r.calphadCatalog.Triggers,
+		}
+		for index, value := range values {
+			target, ok := dest[index].(*[]string)
+			if !ok {
+				return errors.New("expected *[]string CALPHAD catalog destination")
+			}
+			*target = append([]string(nil), value...)
+		}
+		writerFunctionsExact, writerOK := dest[5].(*bool)
+		capacityAccounting, capacityOK := dest[6].(*bool)
+		if !writerOK || !capacityOK {
+			return errors.New("expected *bool CALPHAD catalog destination")
+		}
+		*writerFunctionsExact = r.calphadCatalog.WriterFunctionsExact
+		*capacityAccounting = r.calphadCatalog.CapacityAccountingValid
+		return nil
 	}
 	target, ok := dest[0].(*[]string)
 	if !ok {
@@ -78,4 +114,23 @@ func (r fakeSchemaRow) Scan(dest ...any) error {
 	}
 	*target = append([]string(nil), r.presentTables...)
 	return nil
+}
+
+func validCalphadSchemaCatalogFixture() calphadSchemaCatalog {
+	records := func(fingerprints map[string][]string) []string {
+		out := make([]string, 0, len(fingerprints))
+		for name, fragments := range fingerprints {
+			out = append(out, name+"\n"+strings.Join(fragments, " "))
+		}
+		return out
+	}
+	return calphadSchemaCatalog{
+		Columns:                 append([]string(nil), requiredCalphadColumns...),
+		Constraints:             records(requiredCalphadConstraintFingerprints),
+		Indexes:                 records(requiredCalphadIndexFingerprints),
+		Functions:               records(requiredCalphadFunctionFingerprints),
+		Triggers:                records(requiredCalphadTriggerFingerprints),
+		WriterFunctionsExact:    true,
+		CapacityAccountingValid: true,
+	}
 }

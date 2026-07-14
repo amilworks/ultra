@@ -14,6 +14,9 @@ Group=ultra
 SupplementaryGroups=docker
 WorkingDirectory=/srv/ultra/current/backend/deepagents_runtime
 EnvironmentFile=/etc/ultra/ultra-backend.env
+# Installed by the deploy wrapper only after tag-to-ID binding and the full
+# materials parity check. Later EnvironmentFile entries override earlier ones.
+EnvironmentFile=/etc/ultra/ultra-sandbox-image.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/srv/ultra/current/backend/deepagents_runtime/.venv/bin/python -m ultra_deepagents.nats_worker
 Restart=always

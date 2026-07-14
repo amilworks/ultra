@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image materials-kinetics-image materials-domain-gate materials-domain-test materials-production-parity materials-production-source-contract materials-production-parity-test calphad-ledger-qualification calphad-cross-language-qualification calphad-cross-language-test materials-production-readiness materials-production-readiness-test materials-promotion-envelope-test materials-promotion-envelope-create materials-promotion-envelope-verify-root materials-promotion-attestation-verify mattools-evaluator-build mattools-evaluator-verify mattools-promotion-test mattools-promotion-inspect mattools-promotion-diagnostic mattools-promotion-gate frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 COMPOSE_ENV_FILE := $(if $(wildcard .env.docker),.env.docker,.env.docker.example)
@@ -6,6 +6,7 @@ PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtim
 PYTHON_TYPECHECK_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_RULES := --select B,RUF,SIM,RET
+MATTOOLS_EVALUATOR_ENV_LOCK ?= deploy/docker/mattools-evaluator-linux-arm64-lock.json
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -18,11 +19,17 @@ help: ## Show this help message
 # over the native *-control-stack / dev-stack targets, which run Go/Python/Vite on
 # the host. Uses .env.docker if present, else .env.docker.example.
 
-up: ## Start the full stack in Docker, building if needed (canonical local stack)
-	docker compose --env-file $(COMPOSE_ENV_FILE) up --build
+up: materials-kinetics-image ## Start the full stack in Docker, building if needed (canonical local stack)
+	@image="$$(docker compose --env-file $(COMPOSE_ENV_FILE) config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["materials-kinetics-runtime"]["image"])')"; \
+	image_id="$$(docker image inspect --format '{{.Id}}' "$$image")"; \
+	ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$$image" ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$$image_id" \
+		docker compose --env-file $(COMPOSE_ENV_FILE) up --build
 
-up-detached: ## Start the full Docker stack in the background
-	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d
+up-detached: materials-kinetics-image ## Start the full Docker stack in the background
+	@image="$$(docker compose --env-file $(COMPOSE_ENV_FILE) config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["materials-kinetics-runtime"]["image"])')"; \
+	image_id="$$(docker image inspect --format '{{.Id}}' "$$image")"; \
+	ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$$image" ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$$image_id" \
+		docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d
 
 down: ## Stop the Docker stack (keeps data volumes: Postgres, uploads, JetStream)
 	docker compose down
@@ -36,8 +43,11 @@ logs: ## Tail logs from the Docker stack (CTRL-C to stop tailing)
 ps: ## Show status of the Docker stack
 	docker compose ps
 
-scale-workers: ## Run N agent workers as a NATS queue group, e.g. make scale-workers N=3
-	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d --scale worker=$(or $(N),2)
+scale-workers: materials-kinetics-image ## Run N agent workers as a NATS queue group, e.g. make scale-workers N=3
+	@image="$$(docker compose --env-file $(COMPOSE_ENV_FILE) config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["materials-kinetics-runtime"]["image"])')"; \
+	image_id="$$(docker image inspect --format '{{.Id}}' "$$image")"; \
+	ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$$image" ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$$image_id" \
+		docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d --scale worker=$(or $(N),2)
 
 install: ## Install production dependencies
 	uv sync
@@ -198,7 +208,232 @@ codeexec-image: ## Build Python sandbox image for execute_python_job (bakes Rare
 		echo "Skill bakes it into the sandbox image. Stage it from the model store first, e.g.:"; \
 		echo "  mkdir -p data/models/yolo && cp /path/to/RareSpotWeights.pt data/models/yolo/"; \
 		exit 1; }
-	docker build -f deploy/docker/deepagents-sandbox.Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
+	@vcs_ref="$${GITHUB_SHA:-$$(git rev-parse HEAD)}"; \
+	docker build --build-arg "VCS_REF=$$vcs_ref" -f deploy/docker/deepagents-sandbox.Dockerfile -t $${CODE_EXECUTION_DOCKER_IMAGE:-bisque-ultra-codeexec:py311} .
+
+materials-kinetics-image: ## Build and qualify the separate Kawin/NumPy-2 typed runtime image
+	docker compose --env-file $(COMPOSE_ENV_FILE) build materials-kinetics-runtime
+	@image="$$(docker compose --env-file $(COMPOSE_ENV_FILE) config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["materials-kinetics-runtime"]["image"])')"; \
+	image_id="$$(docker image inspect --format '{{.Id}}' "$$image")"; \
+	title="$$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "$$image")"; \
+	test "$$title" = "Ultra isolated materials kinetics runtime"; \
+	echo "Qualified isolated materials kinetics image $$image_id"
+
+materials-domain-gate: ## Run pinned, non-skipping deterministic materials invariants in Docker
+	./scripts/run_materials_domain_gate.sh
+
+materials-domain-test: materials-domain-gate ## Alias for deterministic materials evidence (not full readiness)
+
+materials-production-parity: ## Run exact full production image parity through DockerSandboxBackend
+	@test -n "$${MATERIALS_RELEASE_ROOT:-}" || { echo "Set MATERIALS_RELEASE_ROOT to the extracted immutable release tree (not a Git checkout)." >&2; exit 1; }
+	@test -f "$${MATERIALS_RELEASE_ROOT}/release-manifest.json" || { echo "MATERIALS_RELEASE_ROOT lacks release-manifest.json." >&2; exit 1; }
+	@test ! -e "$${MATERIALS_RELEASE_ROOT}/.git" || { echo "MATERIALS_RELEASE_ROOT must be an extracted release tree without .git." >&2; exit 1; }
+	@release_root="$$(cd "$${MATERIALS_RELEASE_ROOT}" && pwd -P)"; \
+	image="$${MATERIALS_PRODUCTION_PARITY_IMAGE:-$${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}}"; \
+	sha="$${MATERIALS_EXPECTED_GIT_SHA:-$${GITHUB_SHA:-$$(git rev-parse HEAD)}}"; \
+	uv run --frozen --project "$$release_root/backend/deepagents_runtime" --python 3.11 python \
+		"$$release_root/scripts/verify_production_materials_sandbox.py" \
+		--repo-root "$$release_root" --image "$$image" --expected-git-sha "$$sha" \
+		--scope production-full \
+		--output-dir "$${MATERIALS_PRODUCTION_PARITY_REPORT_DIR:-.tmp/materials-production-parity}"
+
+materials-production-source-contract: ## Run pinned lean-image backend contract (not full-image parity)
+	@image="$${MATERIALS_DOMAIN_GATE_IMAGE:-bisque-ultra-materials-domain-gate:py311}"; \
+	sha="$${MATERIALS_EXPECTED_GIT_SHA:-$${GITHUB_SHA:-$$(git rev-parse HEAD)}}"; \
+	uv run --project backend/deepagents_runtime --python 3.11 python \
+		scripts/verify_production_materials_sandbox.py \
+		--repo-root . --image "$$image" --expected-git-sha "$$sha" \
+		--scope ci-pinned-materials --prepare-entrypoint-adapter \
+		--output-dir "$${MATERIALS_PRODUCTION_PARITY_REPORT_DIR:-.tmp/materials-production-source-contract}"
+
+materials-production-parity-test: ## Test production materials parity runner contracts
+	uv run --project backend/deepagents_runtime --python 3.11 --extra dev \
+		pytest -q tests/test_production_materials_sandbox.py \
+			tests/test_materials_domain_gate_runner.py
+
+calphad-ledger-qualification: ## Qualify append-only CALPHAD governance against a dedicated test Postgres
+	@test -n "$${ULTRA_CONTROL_TEST_DATABASE_URL:-}" || { echo "Set ULTRA_CONTROL_TEST_DATABASE_URL to a dedicated test/CI/qualification database." >&2; exit 1; }
+	@test -n "$${ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL:-}" || { echo "Set ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL to the distinct schema-owner URL for the same disposable database." >&2; exit 1; }
+	@test "$${MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED:-}" = "dedicated-test-database" || { echo "Set MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED=dedicated-test-database after independently confirming the target is disposable." >&2; exit 1; }
+	@sha="$${MATERIALS_EXPECTED_GIT_SHA:-$${GITHUB_SHA:-$$(git rev-parse HEAD)}}"; \
+		uv run --isolated --no-project --python 3.11 python \
+			scripts/calphad_ledger_gate.py \
+			--repository-root . \
+			--expected-git-sha "$$sha" \
+			--qualification-database-confirmed \
+			--output-dir "$${MATERIALS_CALPHAD_LEDGER_OUTPUT_DIR:-.tmp/calphad-ledger-qualification}"
+
+calphad-cross-language-test: ## Test fail-closed typed-CLI -> Go HTTP -> PostgreSQL qualification contracts
+	uv run --isolated --no-project --python 3.11 --with pytest==8.4.2 \
+		pytest -q -p no:cacheprovider tests/test_calphad_cross_language_gate.py
+	go -C backend/controlplane test ./integration -run '^$$' -count=1
+
+calphad-cross-language-qualification: ## Qualify real pycalphad evidence through live Go HTTP and dedicated Postgres
+	@test -n "$${ULTRA_CONTROL_TEST_DATABASE_URL:-}" || { echo "Set ULTRA_CONTROL_TEST_DATABASE_URL to the non-owner role on a dedicated qualification database." >&2; exit 1; }
+	@test -n "$${ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL:-}" || { echo "Set ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL to the distinct schema-owner role on that database." >&2; exit 1; }
+	@test "$${MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED:-}" = "dedicated-test-database" || { echo "Set MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED=dedicated-test-database after confirming the target is disposable." >&2; exit 1; }
+	@test -n "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_IMAGE:-}" || { echo "Set MATERIALS_CALPHAD_CROSS_LANGUAGE_IMAGE to the exact production scientific sandbox image reference." >&2; exit 1; }
+	@test -n "$${MATERIALS_EXPECTED_CROSS_LANGUAGE_IMAGE:-}" || { echo "Set MATERIALS_EXPECTED_CROSS_LANGUAGE_IMAGE=sha256:... from the trusted image build output." >&2; exit 1; }
+	@image="$${MATERIALS_CALPHAD_CROSS_LANGUAGE_IMAGE}"; \
+		image_id="$${MATERIALS_EXPECTED_CROSS_LANGUAGE_IMAGE}"; \
+		sha="$${MATERIALS_EXPECTED_GIT_SHA:-$${GITHUB_SHA:-$$(git rev-parse HEAD)}}"; \
+		uv run --isolated --no-project --python 3.11 python \
+			scripts/calphad_cross_language_gate.py \
+			--repository-root . \
+			--output-dir "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_OUTPUT_DIR:-.tmp/calphad-cross-language-qualification}" \
+			--expected-git-sha "$$sha" \
+			--qualification-database-confirmed \
+			--mode pinned-image \
+			--image "$$image" \
+			--expected-image-id "$$image_id" \
+			--expected-image-title "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_IMAGE_TITLE:-Ultra Deep Agents scientific sandbox}"
+
+materials-production-readiness: ## Aggregate full-image parity, MatTools >=80%/60%, and live evidence
+	@test -n "$${MATERIALS_DETERMINISTIC_REPORT:-}" || { echo "Set MATERIALS_DETERMINISTIC_REPORT." >&2; exit 1; }
+	@test -n "$${MATERIALS_PRODUCTION_PARITY_REPORT:-}" || { echo "Set MATERIALS_PRODUCTION_PARITY_REPORT to a production-full content-addressed report." >&2; exit 1; }
+	@test -n "$${MATERIALS_CALPHAD_LEDGER_REPORT:-}" || { echo "Set MATERIALS_CALPHAD_LEDGER_REPORT to a dedicated-Postgres CALPHAD ledger qualification report." >&2; exit 1; }
+	@test -n "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT:-}" || { echo "Set MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT to a production-runtime typed-CLI/HTTP/Postgres qualification report." >&2; exit 1; }
+	@test -n "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_MANIFEST:-}" || { echo "Set MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_MANIFEST to that qualification's report_manifest.json." >&2; exit 1; }
+	@test -n "$${MATTOOLS_REPORT:-}" || { echo "Set MATTOOLS_REPORT to the complete three-trial promotion report." >&2; exit 1; }
+	@test -n "$${MATTOOLS_REPORT_MANIFEST:-}" || { echo "Set MATTOOLS_REPORT_MANIFEST to the campaign report_manifest.json." >&2; exit 1; }
+	@test -n "$${MATERIALS_LIVE_TRACE_REPORT:-}" || { echo "Set MATERIALS_LIVE_TRACE_REPORT to a designated live-trace report." >&2; exit 1; }
+	@test -n "$${MATTOOLS_BENCHMARK_ROOT:-}" || { echo "Set MATTOOLS_BENCHMARK_ROOT to the pinned official checkout." >&2; exit 1; }
+	@test -n "$${MATERIALS_EXPECTED_GIT_SHA:-}" || { echo "Set MATERIALS_EXPECTED_GIT_SHA." >&2; exit 1; }
+	@test -n "$${MATERIALS_EXPECTED_DOMAIN_IMAGE:-}" || { echo "Set MATERIALS_EXPECTED_DOMAIN_IMAGE=sha256:..." >&2; exit 1; }
+	@test -n "$${MATERIALS_EXPECTED_RUNTIME_IMAGE:-}" || { echo "Set MATERIALS_EXPECTED_RUNTIME_IMAGE=sha256:..." >&2; exit 1; }
+	@test -n "$${MATERIALS_EXPECTED_EVALUATOR_IMAGE:-}" || { echo "Set MATERIALS_EXPECTED_EVALUATOR_IMAGE=sha256:..." >&2; exit 1; }
+	@output="$${MATERIALS_READINESS_OUTPUT_DIR:-.tmp/materials-production-readiness}"; \
+		mkdir -p "$$output"; \
+		uv run --project backend/deepagents_runtime --python 3.11 python \
+			scripts/materials_readiness_gate.py \
+			--deterministic-report "$$MATERIALS_DETERMINISTIC_REPORT" \
+			--production-parity-report "$$MATERIALS_PRODUCTION_PARITY_REPORT" \
+			--calphad-ledger-report "$$MATERIALS_CALPHAD_LEDGER_REPORT" \
+			--calphad-cross-language-report "$$MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT" \
+			--calphad-cross-language-report-manifest "$$MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_MANIFEST" \
+			--mattools-report "$$MATTOOLS_REPORT" \
+			--mattools-report-manifest "$$MATTOOLS_REPORT_MANIFEST" \
+			--live-trace "$$MATERIALS_LIVE_TRACE_REPORT" \
+			--repository-root . \
+			--benchmark-root "$$MATTOOLS_BENCHMARK_ROOT" \
+			--expected-git-sha "$$MATERIALS_EXPECTED_GIT_SHA" \
+			--expected-domain-image "$$MATERIALS_EXPECTED_DOMAIN_IMAGE" \
+			--expected-runtime-image "$$MATERIALS_EXPECTED_RUNTIME_IMAGE" \
+			--expected-evaluator-image "$$MATERIALS_EXPECTED_EVALUATOR_IMAGE" \
+			--output-json "$$output/materials-production-readiness.json" \
+			--output-markdown "$$output/materials-production-readiness.md" \
+			--output-manifest "$$output/materials-production-readiness-manifest.json"
+
+materials-production-readiness-test: ## Test fail-closed full materials promotion aggregation
+	uv run --project backend/deepagents_runtime --python 3.11 --extra dev \
+		pytest -q tests/test_materials_readiness_gate.py
+
+materials-promotion-envelope-test: ## Test restricted evidence closure, workflow, and GitHub attestation policy
+	uv run --project backend/deepagents_runtime --python 3.11 --extra dev \
+		pytest -q -p no:cacheprovider \
+		tests/test_materials_promotion_envelope.py \
+		tests/test_materials_production_workflow.py
+
+materials-promotion-envelope-create: ## Create a restricted closure and sanitized candidate envelope from explicit role paths
+	@: "$${MATERIALS_EVIDENCE_ROOT:?Set MATERIALS_EVIDENCE_ROOT.}"
+	@: "$${MATERIALS_EVIDENCE_ROOT_MANIFEST:?Set MATERIALS_EVIDENCE_ROOT_MANIFEST outside the evidence root.}"
+	@: "$${MATERIALS_RELEASE_ENVELOPE:?Set MATERIALS_RELEASE_ENVELOPE outside the evidence root.}"
+	@: "$${MATERIALS_EXPECTED_GIT_SHA:?Set MATERIALS_EXPECTED_GIT_SHA.}"
+	@: "$${MATERIALS_GITHUB_RUN_ID:?Set MATERIALS_GITHUB_RUN_ID.}"
+	@: "$${MATERIALS_GITHUB_RUN_ATTEMPT:?Set MATERIALS_GITHUB_RUN_ATTEMPT.}"
+	@: "$${MATERIALS_WORKFLOW_SIGNER_DIGEST:?Set MATERIALS_WORKFLOW_SIGNER_DIGEST.}"
+	@: "$${MATERIALS_EXPECTED_WORKFLOW_FILE:?Set MATERIALS_EXPECTED_WORKFLOW_FILE.}"
+	@: "$${MATERIALS_RUNTIME_OCI_DIGEST:?Set MATERIALS_RUNTIME_OCI_DIGEST.}"
+	@: "$${MATERIALS_EXPECTED_RUNTIME_IMAGE:?Set MATERIALS_EXPECTED_RUNTIME_IMAGE.}"
+	@: "$${MATERIALS_EXPECTED_DOMAIN_IMAGE:?Set MATERIALS_EXPECTED_DOMAIN_IMAGE.}"
+	@: "$${MATERIALS_EXPECTED_EVALUATOR_IMAGE:?Set MATERIALS_EXPECTED_EVALUATOR_IMAGE.}"
+	@: "$${MATTOOLS_LICENSE_BASIS:?Set MATTOOLS_LICENSE_BASIS.}"
+	@: "$${MATERIALS_RESTRICTED_STORE_LOCATOR_SHA256:?Set the already-hashed restricted store locator.}"
+	@: "$${MATERIALS_READINESS_REPORT_ROLE:?Set the readiness-report path relative to the evidence root.}"
+	@: "$${MATERIALS_READINESS_MANIFEST_ROLE:?Set the readiness-manifest path relative to the evidence root.}"
+	@: "$${MATERIALS_DETERMINISTIC_REPORT_ROLE:?Set the deterministic-report path relative to the evidence root.}"
+	@: "$${MATERIALS_PRODUCTION_PARITY_REPORT_ROLE:?Set the production-parity path relative to the evidence root.}"
+	@: "$${MATERIALS_CALPHAD_LEDGER_REPORT_ROLE:?Set the CALPHAD-ledger path relative to the evidence root.}"
+	@: "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_ROLE:?Set the CALPHAD cross-language report path.}"
+	@: "$${MATERIALS_CALPHAD_CROSS_LANGUAGE_MANIFEST_ROLE:?Set the CALPHAD cross-language manifest path.}"
+	@: "$${MATTOOLS_REPORT_ROLE:?Set the MatTools report path relative to the evidence root.}"
+	@: "$${MATTOOLS_MANIFEST_ROLE:?Set the MatTools manifest path relative to the evidence root.}"
+	@: "$${MATERIALS_LIVE_TRACE_ROLE:?Set the designated live-trace path relative to the evidence root.}"
+	@: "$${MATERIALS_RELEASE_TARBALL_ROLE:?Set the release-tarball path relative to the evidence root.}"
+	@: "$${MATERIALS_RELEASE_MANIFEST_ROLE:?Set the release-manifest path relative to the evidence root.}"
+	@set --; \
+	if [ "$${MATTOOLS_LICENSE_BASIS}" = "separately_licensed" ]; then \
+		: "$${MATTOOLS_LICENSE_EVIDENCE_SHA256:?Set MATTOOLS_LICENSE_EVIDENCE_SHA256.}"; \
+		: "$${MATTOOLS_LICENSE_EVIDENCE_ROLE:?Set MATTOOLS_LICENSE_EVIDENCE_ROLE relative to the evidence root.}"; \
+		set -- --role "license_evidence=$${MATTOOLS_LICENSE_EVIDENCE_ROLE}" --license-evidence-sha256 "$${MATTOOLS_LICENSE_EVIDENCE_SHA256}"; \
+	else \
+		test -z "$${MATTOOLS_LICENSE_EVIDENCE_SHA256:-}"; \
+		test -z "$${MATTOOLS_LICENSE_EVIDENCE_ROLE:-}"; \
+	fi; \
+	uv run --isolated --no-project --python 3.11 python scripts/materials_promotion_envelope.py create \
+		--evidence-root "$${MATERIALS_EVIDENCE_ROOT}" \
+		--evidence-root-manifest "$${MATERIALS_EVIDENCE_ROOT_MANIFEST}" \
+		--envelope "$${MATERIALS_RELEASE_ENVELOPE}" \
+		--role "readiness_report=$${MATERIALS_READINESS_REPORT_ROLE}" \
+		--role "readiness_manifest=$${MATERIALS_READINESS_MANIFEST_ROLE}" \
+		--role "deterministic_report=$${MATERIALS_DETERMINISTIC_REPORT_ROLE}" \
+		--role "production_parity_report=$${MATERIALS_PRODUCTION_PARITY_REPORT_ROLE}" \
+		--role "calphad_ledger_report=$${MATERIALS_CALPHAD_LEDGER_REPORT_ROLE}" \
+		--role "calphad_cross_language_report=$${MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_ROLE}" \
+		--role "calphad_cross_language_manifest=$${MATERIALS_CALPHAD_CROSS_LANGUAGE_MANIFEST_ROLE}" \
+		--role "mattools_report=$${MATTOOLS_REPORT_ROLE}" \
+		--role "mattools_manifest=$${MATTOOLS_MANIFEST_ROLE}" \
+		--role "live_trace:1=$${MATERIALS_LIVE_TRACE_ROLE}" \
+		--role "release_tarball=$${MATERIALS_RELEASE_TARBALL_ROLE}" \
+		--role "release_manifest=$${MATERIALS_RELEASE_MANIFEST_ROLE}" \
+		"$$@" \
+		--repository amilworks/ultra --repository-id 1204778765 --owner-id 22850980 \
+		--source-git-sha "$${MATERIALS_EXPECTED_GIT_SHA}" --source-ref refs/heads/main \
+		--workflow-path .github/workflows/materials-production-qualification.yml \
+		--workflow-file "$${MATERIALS_EXPECTED_WORKFLOW_FILE}" \
+		--workflow-signer-digest "$${MATERIALS_WORKFLOW_SIGNER_DIGEST}" \
+		--run-id "$${MATERIALS_GITHUB_RUN_ID}" --run-attempt "$${MATERIALS_GITHUB_RUN_ATTEMPT}" \
+		--environment materials-production-qualification --event-name workflow_dispatch \
+		--runtime-oci-digest "$${MATERIALS_RUNTIME_OCI_DIGEST}" \
+		--runtime-config-id "$${MATERIALS_EXPECTED_RUNTIME_IMAGE}" \
+		--domain-image-id "$${MATERIALS_EXPECTED_DOMAIN_IMAGE}" \
+		--evaluator-image-id "$${MATERIALS_EXPECTED_EVALUATOR_IMAGE}" \
+		--license-basis "$${MATTOOLS_LICENSE_BASIS}" \
+		--restricted-store-locator-sha256 "$${MATERIALS_RESTRICTED_STORE_LOCATOR_SHA256}"
+
+materials-promotion-envelope-verify-root: ## Rehash the exact restricted materials evidence closure
+	@: "$${MATERIALS_EVIDENCE_ROOT:?Set MATERIALS_EVIDENCE_ROOT.}"
+	@: "$${MATERIALS_EVIDENCE_ROOT_MANIFEST:?Set MATERIALS_EVIDENCE_ROOT_MANIFEST.}"
+	uv run --isolated --no-project --python 3.11 python scripts/materials_promotion_envelope.py verify-root \
+		--evidence-root "$${MATERIALS_EVIDENCE_ROOT}" \
+		--evidence-root-manifest "$${MATERIALS_EVIDENCE_ROOT_MANIFEST}"
+
+materials-promotion-attestation-verify: ## Emit full readiness only after closure and exact GitHub/Sigstore verification
+	@: "$${MATERIALS_EVIDENCE_ROOT:?Set MATERIALS_EVIDENCE_ROOT.}"
+	@: "$${MATERIALS_EVIDENCE_ROOT_MANIFEST:?Set MATERIALS_EVIDENCE_ROOT_MANIFEST.}"
+	@: "$${MATERIALS_RELEASE_ENVELOPE:?Set MATERIALS_RELEASE_ENVELOPE.}"
+	@: "$${MATERIALS_ATTESTATION_BUNDLE:?Set MATERIALS_ATTESTATION_BUNDLE.}"
+	@: "$${MATERIALS_FINAL_VERIFICATION_REPORT:?Set MATERIALS_FINAL_VERIFICATION_REPORT.}"
+	@: "$${MATERIALS_EXPECTED_GIT_SHA:?Set MATERIALS_EXPECTED_GIT_SHA.}"
+	@: "$${MATERIALS_GITHUB_RUN_ID:?Set MATERIALS_GITHUB_RUN_ID.}"
+	@: "$${MATERIALS_GITHUB_RUN_ATTEMPT:?Set MATERIALS_GITHUB_RUN_ATTEMPT.}"
+	@: "$${MATERIALS_EXPECTED_WORKFLOW_SHA256:?Set MATERIALS_EXPECTED_WORKFLOW_SHA256.}"
+	uv run --isolated --no-project --python 3.11 python scripts/materials_promotion_envelope.py verify-attestation \
+		--evidence-root "$${MATERIALS_EVIDENCE_ROOT}" \
+		--evidence-root-manifest "$${MATERIALS_EVIDENCE_ROOT_MANIFEST}" \
+		--envelope "$${MATERIALS_RELEASE_ENVELOPE}" \
+		--bundle "$${MATERIALS_ATTESTATION_BUNDLE}" \
+		--output "$${MATERIALS_FINAL_VERIFICATION_REPORT}" \
+		--repository amilworks/ultra --repository-id 1204778765 --owner-id 22850980 \
+		--signer-repo amilworks/ultra \
+		--signer-workflow amilworks/ultra/.github/workflows/materials-production-qualification.yml \
+		--signer-digest "$${MATERIALS_EXPECTED_GIT_SHA}" \
+		--source-digest "$${MATERIALS_EXPECTED_GIT_SHA}" --source-ref refs/heads/main \
+		--expected-run-id "$${MATERIALS_GITHUB_RUN_ID}" \
+		--expected-run-attempt "$${MATERIALS_GITHUB_RUN_ATTEMPT}" \
+		--expected-environment materials-production-qualification \
+		--expected-event-name workflow_dispatch \
+		--expected-workflow-sha256 "$${MATERIALS_EXPECTED_WORKFLOW_SHA256}"
 
 control-test: ## Run Go control plane tests
 	$(MAKE) -C backend/controlplane test
@@ -318,3 +553,97 @@ async-delegation-live-smoke: ## Run opt-in live async/background subagent trace 
 		--require-thread-quality
 
 autonomy-gate: control-soak control-integration deepagents-worker-test deepagents-autonomy-test frontend-autonomy-test ## Run production autonomy durability gates
+
+mattools-evaluator-build: ## Build and metadata-verify the reviewed MatTools evaluator reconstruction
+	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT to the pinned checkout." >&2; exit 1; }
+	PYTHONDONTWRITEBYTECODE=1 uv run python scripts/build_mattools_evaluator.py build \
+		--benchmark-root "$(MATTOOLS_BENCHMARK_ROOT)"
+
+mattools-evaluator-verify: ## Verify evaluator image, complete lock, source manifest, and no-task evidence
+	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT to the pinned checkout." >&2; exit 1; }
+	PYTHONDONTWRITEBYTECODE=1 uv run python scripts/build_mattools_evaluator.py verify \
+		--benchmark-root "$(MATTOOLS_BENCHMARK_ROOT)" \
+		--lock "$(MATTOOLS_EVALUATOR_ENV_LOCK)"
+
+mattools-promotion-test: ## Run lean MatTools parsing, scoring, isolation, and resume tests
+	PYTHONDONTWRITEBYTECODE=1 uv run python -m py_compile scripts/build_mattools_evaluator.py scripts/mattools_promotion_gate.py scripts/mattools_safe_parser.py scripts/mattools_runner_wrapper.py scripts/mattools_strict_shadow.py scripts/mattools_semantic_repairs.py
+	PYTHONDONTWRITEBYTECODE=1 uv run --extra dev pytest -p no:cacheprovider tests/test_mattools_evaluator_image.py tests/test_mattools_promotion_gate.py tests/test_mattools_safe_parser.py tests/test_mattools_semantic_repairs.py -q
+
+mattools-promotion-inspect: ## Verify an explicit pinned official MatTools snapshot
+	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT to the official pinned checkout." >&2; exit 1; }
+	@uv run python scripts/mattools_promotion_gate.py inspect \
+		--benchmark-root "$(MATTOOLS_BENCHMARK_ROOT)"
+
+mattools-promotion-diagnostic: ## Evaluate one complete non-promotable MatTools diagnostic trial
+	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT." >&2; exit 1; }
+	@test -n "$(MATTOOLS_OUTPUT_DIR)" || { echo "Set MATTOOLS_OUTPUT_DIR." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_IMAGE_DIGEST)" || { echo "Set ULTRA_RUNTIME_IMAGE_DIGEST=sha256:..." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_PYMATGEN_VERSION)" || { echo "Set ULTRA_RUNTIME_PYMATGEN_VERSION." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_DEFECTS_VERSION)" || { echo "Set ULTRA_RUNTIME_DEFECTS_VERSION." >&2; exit 1; }
+	@test -n "$(ULTRA_MODEL_ID)" || { echo "Set ULTRA_MODEL_ID." >&2; exit 1; }
+	@test -n "$(ULTRA_PROVIDER_ID)" || { echo "Set ULTRA_PROVIDER_ID." >&2; exit 1; }
+	@test -n "$(MATTOOLS_USE_PURPOSE)" || { echo "Set MATTOOLS_USE_PURPOSE after reviewing benchmark licenses." >&2; exit 1; }
+	@test -n "$(MATTOOLS_LICENSE_BASIS)" || { echo "Set MATTOOLS_LICENSE_BASIS=noncommercial or separately_licensed." >&2; exit 1; }
+	@if [ "$(MATTOOLS_LICENSE_BASIS)" = "separately_licensed" ] && [ -z "$(MATTOOLS_LICENSE_EVIDENCE_SHA256)" ]; then echo "Set MATTOOLS_LICENSE_EVIDENCE_SHA256 for separately licensed use." >&2; exit 1; fi
+	@test -n "$(MATTOOLS_SANDBOX_ATTESTATION)" || { echo "Set MATTOOLS_SANDBOX_ATTESTATION to the evaluator policy JSON." >&2; exit 1; }
+	@test -n "$(MATTOOLS_SANDBOX_SIGNATURE)" || { echo "Set MATTOOLS_SANDBOX_SIGNATURE to its detached signature." >&2; exit 1; }
+	@test -n "$(MATTOOLS_SANDBOX_PUBLIC_KEY)" || { echo "Set MATTOOLS_SANDBOX_PUBLIC_KEY to the operator public key." >&2; exit 1; }
+	@test -n "$(MATTOOLS_EVALUATOR_IMAGE_ID)" || { echo "Set MATTOOLS_EVALUATOR_IMAGE_ID=sha256:..." >&2; exit 1; }
+	@test -n "$(MATTOOLS_EVALUATOR_ENV_LOCK)" || { echo "Set MATTOOLS_EVALUATOR_ENV_LOCK to the reviewed tracked JSON lock." >&2; exit 1; }
+	uv run python scripts/mattools_promotion_gate.py run \
+		--benchmark-root "$(MATTOOLS_BENCHMARK_ROOT)" \
+		--output-dir "$(MATTOOLS_OUTPUT_DIR)" \
+		--base-url "$${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000}" \
+		--model-id "$(ULTRA_MODEL_ID)" \
+		--provider-id "$(ULTRA_PROVIDER_ID)" \
+		--runtime-image-digest "$(ULTRA_RUNTIME_IMAGE_DIGEST)" \
+		--runtime-pymatgen-version "$(ULTRA_RUNTIME_PYMATGEN_VERSION)" \
+		--runtime-defects-version "$(ULTRA_RUNTIME_DEFECTS_VERSION)" \
+		--trials 1 \
+		--concurrency "$(or $(MATTOOLS_CONCURRENCY),1)" \
+		--benchmark-license-basis "$(MATTOOLS_LICENSE_BASIS)" \
+		--benchmark-license-evidence-sha256 "$(MATTOOLS_LICENSE_EVIDENCE_SHA256)" \
+		--benchmark-use-purpose "$(MATTOOLS_USE_PURPOSE)" \
+		--accept-benchmark-license \
+		--sandbox-policy-attestation "$(MATTOOLS_SANDBOX_ATTESTATION)" \
+		--sandbox-attestation-signature "$(MATTOOLS_SANDBOX_SIGNATURE)" \
+		--sandbox-attestation-public-key "$(MATTOOLS_SANDBOX_PUBLIC_KEY)" \
+		--expected-evaluator-image-id "$(MATTOOLS_EVALUATOR_IMAGE_ID)" \
+		--evaluator-environment-lock "$(MATTOOLS_EVALUATOR_ENV_LOCK)" \
+		--diagnostic-evaluate
+
+mattools-promotion-gate: ## Run three complete MatTools trials and the pinned independent evaluator
+	@test -n "$(MATTOOLS_BENCHMARK_ROOT)" || { echo "Set MATTOOLS_BENCHMARK_ROOT." >&2; exit 1; }
+	@test -n "$(MATTOOLS_OUTPUT_DIR)" || { echo "Set MATTOOLS_OUTPUT_DIR." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_IMAGE_DIGEST)" || { echo "Set ULTRA_RUNTIME_IMAGE_DIGEST=sha256:..." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_PYMATGEN_VERSION)" || { echo "Set ULTRA_RUNTIME_PYMATGEN_VERSION." >&2; exit 1; }
+	@test -n "$(ULTRA_RUNTIME_DEFECTS_VERSION)" || { echo "Set ULTRA_RUNTIME_DEFECTS_VERSION." >&2; exit 1; }
+	@test -n "$(ULTRA_MODEL_ID)" || { echo "Set ULTRA_MODEL_ID." >&2; exit 1; }
+	@test -n "$(ULTRA_PROVIDER_ID)" || { echo "Set ULTRA_PROVIDER_ID." >&2; exit 1; }
+	@test -n "$(MATTOOLS_USE_PURPOSE)" || { echo "Set MATTOOLS_USE_PURPOSE after reviewing benchmark licenses." >&2; exit 1; }
+	@test -n "$(MATTOOLS_LICENSE_BASIS)" || { echo "Set MATTOOLS_LICENSE_BASIS=noncommercial or separately_licensed." >&2; exit 1; }
+	@if [ "$(MATTOOLS_LICENSE_BASIS)" = "separately_licensed" ] && [ -z "$(MATTOOLS_LICENSE_EVIDENCE_SHA256)" ]; then echo "Set MATTOOLS_LICENSE_EVIDENCE_SHA256 for separately licensed use." >&2; exit 1; fi
+	@test -n "$(MATTOOLS_SANDBOX_ATTESTATION)" || { echo "Set MATTOOLS_SANDBOX_ATTESTATION to the evaluator policy JSON." >&2; exit 1; }
+	@test -n "$(MATTOOLS_SANDBOX_SIGNATURE)" || { echo "Set MATTOOLS_SANDBOX_SIGNATURE to its detached signature." >&2; exit 1; }
+	@test -n "$(MATTOOLS_SANDBOX_PUBLIC_KEY)" || { echo "Set MATTOOLS_SANDBOX_PUBLIC_KEY to the operator public key." >&2; exit 1; }
+	@test -n "$(MATTOOLS_EVALUATOR_IMAGE_ID)" || { echo "Set MATTOOLS_EVALUATOR_IMAGE_ID=sha256:..." >&2; exit 1; }
+	@test -n "$(MATTOOLS_EVALUATOR_ENV_LOCK)" || { echo "Set MATTOOLS_EVALUATOR_ENV_LOCK to the reviewed tracked JSON lock." >&2; exit 1; }
+	uv run python scripts/mattools_promotion_gate.py run \
+		--benchmark-root "$(MATTOOLS_BENCHMARK_ROOT)" \
+		--output-dir "$(MATTOOLS_OUTPUT_DIR)" \
+		--base-url "$${ULTRA_LIVE_TRACE_BASE_URL:-http://127.0.0.1:8000}" \
+		--model-id "$(ULTRA_MODEL_ID)" \
+		--provider-id "$(ULTRA_PROVIDER_ID)" \
+		--runtime-image-digest "$(ULTRA_RUNTIME_IMAGE_DIGEST)" \
+		--runtime-pymatgen-version "$(ULTRA_RUNTIME_PYMATGEN_VERSION)" \
+		--runtime-defects-version "$(ULTRA_RUNTIME_DEFECTS_VERSION)" \
+		--concurrency "$(or $(MATTOOLS_CONCURRENCY),1)" \
+		--benchmark-license-basis "$(MATTOOLS_LICENSE_BASIS)" \
+		--benchmark-license-evidence-sha256 "$(MATTOOLS_LICENSE_EVIDENCE_SHA256)" \
+		--benchmark-use-purpose "$(MATTOOLS_USE_PURPOSE)" \
+		--accept-benchmark-license \
+		--sandbox-policy-attestation "$(MATTOOLS_SANDBOX_ATTESTATION)" \
+		--sandbox-attestation-signature "$(MATTOOLS_SANDBOX_SIGNATURE)" \
+		--sandbox-attestation-public-key "$(MATTOOLS_SANDBOX_PUBLIC_KEY)" \
+		--expected-evaluator-image-id "$(MATTOOLS_EVALUATOR_IMAGE_ID)" \
+		--evaluator-environment-lock "$(MATTOOLS_EVALUATOR_ENV_LOCK)"

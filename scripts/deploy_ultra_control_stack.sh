@@ -11,10 +11,13 @@ ULTRA_RELEASE_ROOT="${ULTRA_RELEASE_ROOT:-/srv/ultra}"
 RELEASE_DIR="$ULTRA_RELEASE_ROOT/releases/$RELEASE_SHA"
 CURRENT_LINK="$ULTRA_RELEASE_ROOT/current"
 ULTRA_BACKEND_ENV_FILE="${ULTRA_BACKEND_ENV_FILE:-/etc/ultra/ultra-backend.env}"
+ULTRA_MIGRATION_ENV_FILE="${ULTRA_MIGRATION_ENV_FILE:-/etc/ultra/ultra-migration.env}"
+ULTRA_SANDBOX_IDENTITY_ENV_FILE="${ULTRA_SANDBOX_IDENTITY_ENV_FILE:-/etc/ultra/ultra-sandbox-image.env}"
 ULTRA_PYTHON_ROOT="${ULTRA_PYTHON_ROOT:-$ULTRA_RELEASE_ROOT/python}"
 ULTRA_DEEPAGENTS_VENV_ROOT="${ULTRA_DEEPAGENTS_VENV_ROOT:-$ULTRA_RELEASE_ROOT/deepagents-venvs}"
 UV_PYTHON_VERSION="${UV_PYTHON_VERSION:-3.11}"
 SYSTEMD_UNIT_DIR="${SYSTEMD_UNIT_DIR:-/etc/systemd/system}"
+MATERIALS_PARITY_ROOT="${ULTRA_MATERIALS_PARITY_ROOT:-$ULTRA_RELEASE_ROOT/materials-parity}"
 
 # Node role selects which units + build steps run. Default "all" preserves the
 # legacy single-node behavior (control + workers together). "edge" = control +
@@ -31,6 +34,7 @@ esac
 CONTROL_DIR="$RELEASE_DIR/backend/controlplane"
 DEEPAGENTS_DIR="$RELEASE_DIR/backend/deepagents_runtime"
 SANDBOX_DOCKERFILE="$RELEASE_DIR/deploy/docker/deepagents-sandbox.Dockerfile"
+KINETICS_DOCKERFILE="$RELEASE_DIR/deploy/docker/materials-kinetics.Dockerfile"
 BIN_DIR="$RELEASE_DIR/bin"
 DEEPAGENTS_VENV_DIR="$ULTRA_DEEPAGENTS_VENV_ROOT/$RELEASE_SHA"
 CONTROL_HEALTH_URL="${ULTRA_CONTROL_HEALTH_URL:-http://127.0.0.1:8000/v1/health}"
@@ -77,12 +81,116 @@ load_backend_env() {
   set +a
 }
 
+load_migration_env() {
+  if [ -n "${ULTRA_CONTROL_MIGRATION_DATABASE_URL:-}" ]; then
+    return 0
+  fi
+  if [ ! -f "$ULTRA_MIGRATION_ENV_FILE" ]; then
+    echo "Migration env file not found: $ULTRA_MIGRATION_ENV_FILE" >&2
+    exit 1
+  fi
+
+  set -a
+  # shellcheck disable=SC1090
+  . "$ULTRA_MIGRATION_ENV_FILE"
+  set +a
+}
+
 require_env() {
   local name="$1"
   if [ -z "${!name:-}" ]; then
     echo "Missing required environment value in $ULTRA_BACKEND_ENV_FILE: $name" >&2
     exit 1
   fi
+}
+
+validate_calphad_runtime_policy() {
+  local configured
+
+  configured="${ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID:-}"
+  if [[ ! "$configured" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID in $ULTRA_BACKEND_ENV_FILE must be an immutable sha256:<64hex> image ID." >&2
+    exit 1
+  fi
+}
+
+validate_kinetics_runtime_policy() {
+  local configured image
+
+  image="${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-}"
+  configured="${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID:-}"
+  if [ -z "$image" ]; then
+    echo "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE in $ULTRA_BACKEND_ENV_FILE must name the separately built Kawin image." >&2
+    exit 1
+  fi
+  if [[ ! "$configured" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID in $ULTRA_BACKEND_ENV_FILE must be an immutable sha256:<64hex> image ID." >&2
+    exit 1
+  fi
+}
+
+verify_calphad_runtime_image_binding() {
+  local actual configured image
+
+  image="${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}"
+  configured="${ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID:-}"
+  if ! actual="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"; then
+    actual=""
+  fi
+  if [ "$actual" != "$configured" ]; then
+    echo "CALPHAD runtime policy mismatch: $image resolves to ${actual:-missing}, but ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID authorizes $configured." >&2
+    exit 1
+  fi
+  RESOLVED_CALPHAD_RUNTIME_IMAGE_ID="$actual"
+  echo "Verified CALPHAD runtime image policy: $configured"
+}
+
+verify_kinetics_runtime_image_binding() {
+  local actual configured image revision title
+
+  image="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE"
+  configured="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID"
+  if ! actual="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"; then
+    actual=""
+  fi
+  revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image" 2>/dev/null || true)"
+  title="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "$image" 2>/dev/null || true)"
+  if [ "$actual" != "$configured" ]; then
+    echo "Kinetics runtime policy mismatch: $image resolves to ${actual:-missing}, but ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID authorizes $configured." >&2
+    exit 1
+  fi
+  if [ "$revision" != "$RELEASE_SHA" ] || [ "$title" != "Ultra isolated materials kinetics runtime" ]; then
+    echo "Kinetics runtime is not qualified for release $RELEASE_SHA (revision=${revision:-missing}, title=${title:-missing})." >&2
+    exit 1
+  fi
+  RESOLVED_KINETICS_RUNTIME_IMAGE_ID="$actual"
+  echo "Verified isolated kinetics runtime image policy: $configured"
+}
+
+install_sandbox_identity_env() {
+  local identity_dir temporary
+
+  if [[ ! "${RESOLVED_CALPHAD_RUNTIME_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Refusing to install a non-immutable sandbox identity override." >&2
+    exit 1
+  fi
+  if [[ ! "${RESOLVED_KINETICS_RUNTIME_IMAGE_ID:-}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Refusing to install a non-immutable kinetics runtime identity override." >&2
+    exit 1
+  fi
+  identity_dir="$(dirname "$ULTRA_SANDBOX_IDENTITY_ENV_FILE")"
+  temporary="$ULTRA_SANDBOX_IDENTITY_ENV_FILE.tmp.$$"
+  mkdir -p "$identity_dir"
+  (
+    umask 077
+    printf 'ULTRA_DEEPAGENTS_SANDBOX_IMAGE=%s\nULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE=%s\nULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID=%s\n' \
+      "$RESOLVED_CALPHAD_RUNTIME_IMAGE_ID" \
+      "$RESOLVED_KINETICS_RUNTIME_IMAGE_ID" \
+      "$RESOLVED_KINETICS_RUNTIME_IMAGE_ID" >"$temporary"
+  )
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$ULTRA_SANDBOX_IDENTITY_ENV_FILE"
+  echo "Installed immutable worker sandbox identity: $ULTRA_SANDBOX_IDENTITY_ENV_FILE"
 }
 
 wait_for_health() {
@@ -108,7 +216,7 @@ check_systemctl() {
 }
 
 build_sandbox_image() {
-  local image
+  local current_revision image
 
   if [ "${ULTRA_DEEPAGENTS_SKIP_SANDBOX_IMAGE_BUILD:-0}" = "1" ]; then
     echo "Skipping Deep Agents sandbox image build by request."
@@ -128,12 +236,85 @@ build_sandbox_image() {
   image="${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}"
   if [ "${ULTRA_DEEPAGENTS_FORCE_SANDBOX_IMAGE_BUILD:-0}" != "1" ] \
     && docker image inspect "$image" >/dev/null 2>&1; then
-    echo "Deep Agents sandbox image already present: $image"
-    return 0
+    current_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image" 2>/dev/null || true)"
+    if [ "$current_revision" = "$RELEASE_SHA" ]; then
+      echo "Deep Agents sandbox image already matches release $RELEASE_SHA: $image"
+      return 0
+    fi
+    echo "Deep Agents sandbox image revision ${current_revision:-unlabeled} does not match $RELEASE_SHA; rebuilding."
   fi
 
   echo "Building Deep Agents sandbox image: $image"
-  docker build -f "$SANDBOX_DOCKERFILE" -t "$image" "$RELEASE_DIR"
+  docker build --build-arg "VCS_REF=$RELEASE_SHA" -f "$SANDBOX_DOCKERFILE" -t "$image" "$RELEASE_DIR"
+}
+
+build_kinetics_runtime_image() {
+  local current_revision image
+
+  if [ "${ULTRA_MATERIALS_KINETICS_SKIP_IMAGE_BUILD:-0}" = "1" ]; then
+    echo "Skipping isolated materials kinetics image build by request."
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "docker is required to build the isolated materials kinetics image." >&2
+    exit 1
+  fi
+  if [ ! -f "$KINETICS_DOCKERFILE" ]; then
+    echo "Materials kinetics Dockerfile not found: $KINETICS_DOCKERFILE" >&2
+    exit 1
+  fi
+
+  image="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE"
+  if [ "${ULTRA_MATERIALS_KINETICS_FORCE_IMAGE_BUILD:-0}" != "1" ] \
+    && docker image inspect "$image" >/dev/null 2>&1; then
+    current_revision="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$image" 2>/dev/null || true)"
+    if [ "$current_revision" = "$RELEASE_SHA" ]; then
+      echo "Materials kinetics image already matches release $RELEASE_SHA: $image"
+      return 0
+    fi
+    echo "Materials kinetics image revision ${current_revision:-unlabeled} does not match $RELEASE_SHA; rebuilding."
+  fi
+
+  echo "Building isolated materials kinetics image: $image"
+  docker build --build-arg "VCS_REF=$RELEASE_SHA" -f "$KINETICS_DOCKERFILE" -t "$image" "$RELEASE_DIR"
+}
+
+verify_materials_sandbox_image() {
+  local image parity_dir report_count report_path verifier
+
+  image="${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}"
+  verifier="$RELEASE_DIR/scripts/verify_production_materials_sandbox.py"
+  parity_dir="$MATERIALS_PARITY_ROOT/$RELEASE_SHA"
+
+  if [ ! -f "$verifier" ]; then
+    echo "Production materials sandbox verifier not found: $verifier" >&2
+    exit 1
+  fi
+  if [ ! -x "$DEEPAGENTS_VENV_DIR/bin/python" ]; then
+    echo "Deep Agents Python is unavailable for production materials parity." >&2
+    exit 1
+  fi
+
+  mkdir -p "$parity_dir"
+  echo "Verifying full production materials sandbox parity: $image"
+  "$DEEPAGENTS_VENV_DIR/bin/python" "$verifier" \
+    --repo-root "$RELEASE_DIR" \
+    --image "$image" \
+    --expected-git-sha "$RELEASE_SHA" \
+    --scope production-full \
+    --output-dir "$parity_dir"
+
+  report_count="$(find "$parity_dir" -maxdepth 1 -type f -name 'production-materials-sandbox-parity-*.json' | wc -l | tr -d ' ')"
+  if [ "$report_count" != "1" ]; then
+    echo "Production materials parity did not retain exactly one content-addressed report." >&2
+    exit 1
+  fi
+  report_path="$(find "$parity_dir" -maxdepth 1 -type f -name 'production-materials-sandbox-parity-*.json' -print)"
+  if [ ! -d "$parity_dir/bundle/release" ] || [ ! -d "$parity_dir/bundle/staged" ]; then
+    echo "Production materials parity did not retain its rehashable release/staging bundle." >&2
+    exit 1
+  fi
+  echo "Retained production materials parity evidence: $report_path"
 }
 
 install_systemd_units() {
@@ -174,9 +355,24 @@ if [ "$ROLE_WORKERS" = 1 ]; then
   UV_BIN="$(resolve_uv_bin)"
 fi
 load_backend_env
+if [ "$ROLE_CONTROL" = 1 ]; then
+  if grep -Eq '^[[:space:]]*ULTRA_CONTROL_MIGRATION_DATABASE_URL=' "$ULTRA_BACKEND_ENV_FILE"; then
+    echo "Move ULTRA_CONTROL_MIGRATION_DATABASE_URL out of $ULTRA_BACKEND_ENV_FILE and into $ULTRA_MIGRATION_ENV_FILE so the serving service never receives schema-owner credentials." >&2
+    exit 1
+  fi
+  load_migration_env
+fi
 require_env ULTRA_CONTROL_DATABASE_URL
 require_env ULTRA_CONTROL_NATS_URL
 require_env ULTRA_CONTROL_ARTIFACT_ROOT
+require_env ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID
+require_env ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE
+require_env ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID
+validate_calphad_runtime_policy
+validate_kinetics_runtime_policy
+if [ "$ROLE_CONTROL" = 1 ]; then
+  require_env ULTRA_CONTROL_MIGRATION_DATABASE_URL
+fi
 
 if [ "${ULTRA_CONTROL_AUTH_PROVIDER:-}" = "workos" ]; then
   require_env ULTRA_CONTROL_WORKOS_CLIENT_ID
@@ -193,14 +389,20 @@ if [ -n "${ULTRA_CONTROL_UPLOAD_ROOT:-}" ]; then
 fi
 
 if [ "$ROLE_CONTROL" = 1 ]; then
-echo "Building ultra-control"
-if [ "${ULTRA_CONTROL_SKIP_BUILD:-0}" = "1" ]; then
+if [ -f "$RELEASE_DIR/release-manifest.json" ]; then
+  if [ ! -x "$BIN_DIR/ultra-control" ]; then
+    echo "Immutable release manifest exists but its prebuilt control binary is unavailable." >&2
+    exit 1
+  fi
+  echo "Using manifest-bound immutable control binary at $BIN_DIR/ultra-control"
+elif [ "${ULTRA_CONTROL_SKIP_BUILD:-0}" = "1" ]; then
   if [ ! -x "$BIN_DIR/ultra-control" ]; then
     echo "ULTRA_CONTROL_SKIP_BUILD=1 but $BIN_DIR/ultra-control is missing or not executable." >&2
     exit 1
   fi
-  echo "Using prebuilt ultra-control binary at $BIN_DIR/ultra-control"
+  echo "Using prebuilt legacy control binary at $BIN_DIR/ultra-control"
 else
+  echo "Building ultra-control for a legacy source-only release"
   (
     cd "$CONTROL_DIR"
     go build -trimpath -o "$BIN_DIR/ultra-control" ./cmd/ultra-control
@@ -221,6 +423,11 @@ env UV_PYTHON="$UV_PYTHON_VERSION" \
 ln -sfn "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 
 build_sandbox_image
+build_kinetics_runtime_image
+verify_calphad_runtime_image_binding
+verify_kinetics_runtime_image_binding
+verify_materials_sandbox_image
+install_sandbox_identity_env
 fi
 
 if [ "$ROLE_CONTROL" = 1 ]; then
@@ -258,6 +465,7 @@ if [ "$ROLE_WORKERS" = 1 ]; then
       systemctl is-active --quiet "$unit" && echo "$unit active" || echo "WARNING: $unit not active" >&2
     done
   else
+    systemctl enable ultra-deepagents-worker >/dev/null 2>&1 || true
     systemctl restart ultra-deepagents-worker
     sleep 2
     systemctl is-active --quiet ultra-deepagents-worker && echo "ultra-deepagents-worker active"

@@ -152,3 +152,85 @@ describe("normalizeUploadViewerInfo unsupported formats", () => {
     expect(viewer.decodable).toBeUndefined();
   });
 });
+
+describe("normalizeUploadViewerInfo DREAM.3D phase metadata", () => {
+  it("preserves the backend source and provenance instead of implying phase detection", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "hdf5",
+      file_id: "file-dream3d",
+      original_name: "synthetic-volume.dream3d",
+      hdf5: {
+        enabled: true,
+        supported: true,
+        materials: {
+          detected: true,
+          schema: "dream3d",
+          capabilities: ["grain_metrics"],
+          roles: {},
+          phase_names: ["Primary"],
+          phase_names_source: "stored_metadata",
+          phase_names_provenance:
+            "Read from stored DREAM.3D PhaseName metadata; no phase-identification algorithm was run.",
+          recommended_view: "materials",
+        },
+      },
+    });
+
+    expect(viewer.hdf5?.materials).toMatchObject({
+      phase_names: ["Primary"],
+      phase_names_source: "stored_metadata",
+      phase_names_provenance:
+        "Read from stored DREAM.3D PhaseName metadata; no phase-identification algorithm was run.",
+    });
+  });
+
+  it("preserves geometry-consistency and reserved-feature-zero evidence", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "hdf5",
+      file_id: "file-dream3d-evidence",
+      original_name: "qualified.dream3d",
+      hdf5: {
+        enabled: true,
+        supported: true,
+        summary: {
+          geometry: {
+            path: "/DataContainers/Image/_SIMPL_GEOMETRY",
+            dimensions: [4, 3, 2],
+            spacing: [0.5, 0.5, 1],
+            origin: [0, 0, 0],
+            cell_data_path: "/DataContainers/Image/CellData",
+            cell_data_consistent: true,
+            complete: true,
+          },
+        },
+        materials: {
+          detected: true,
+          schema: "dream3d",
+          capabilities: ["grain_metrics"],
+          roles: {},
+          phase_names: [],
+          declared_feature_tuple_count: 42,
+          referenced_positive_feature_count: 0,
+          feature_id_scan_complete: true,
+          feature_id_consistency: false,
+          feature_zero_reserved: true,
+          recommended_view: "materials",
+        },
+      },
+    });
+
+    expect(viewer.hdf5?.summary.geometry).toMatchObject({
+      cell_data_path: "/DataContainers/Image/CellData",
+      cell_data_consistent: true,
+      complete: true,
+    });
+    expect(viewer.hdf5?.materials?.feature_zero_reserved).toBe(true);
+    expect(viewer.hdf5?.materials).toMatchObject({
+      declared_feature_tuple_count: 42,
+      referenced_positive_feature_count: 0,
+      feature_id_scan_complete: true,
+      feature_id_consistency: false,
+      grain_count: null,
+    });
+  });
+});

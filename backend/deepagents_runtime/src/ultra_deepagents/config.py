@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from socket import gethostname
@@ -32,6 +33,7 @@ def allow_private_async_subagent_url() -> bool:
     """Local-dev opt-out for the async-subagent private-host URL guard."""
     return _env_bool("ULTRA_DEEPAGENTS_ALLOW_PRIVATE_ASYNC_SUBAGENT_URL", False)
 
+
 DEFAULT_WORKER_MAX_CONCURRENCY = 64
 
 
@@ -39,6 +41,10 @@ DEFAULT_WORKER_MAX_CONCURRENCY = 64
 class RuntimeSettings:
     openai_base_url: str
     openai_model: str
+    # Runtime-owned provider identity stamped onto token-usage evidence. This is
+    # distinct from MatTools' CLI declaration and is bound to the worker that
+    # instantiated the model transport.
+    model_provider_id: str = "openai-compatible"
     openai_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
     model_supports_multimodal: bool = False
     # Served model's input context window. When >0 it is published on the chat
@@ -88,10 +94,26 @@ class RuntimeSettings:
     # window (prompt+images+thinking+answer must all fit). client_max_edge bounds
     # image longest-side before send so large scientific images do not overload the
     # configured server.
+    # Materials-science (CALPHAD/kinetics/crystal-plasticity/…) platform switch.
+    # Default false: the materials tool families are never registered and the
+    # materials skills are hidden from the skill listing, so non-materials runs
+    # carry no materials prompt/tool cost. Enable only on a materials deployment.
+    materials_enabled: bool = False
     qwen_vlm_enabled: bool = False
     qwen_vlm_base_url: str = ""
     qwen_vlm_model: str = "Qwen3.6-27B"
-    qwen_vlm_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
+    # Advisory compatibility checks only; operator-provided strings are never
+    # accepted as durable paper-table attestation authority.
+    qwen_vlm_model_revision: str = ""
+    qwen_vlm_runtime_identity: str = ""
+    # Durable table extraction additionally requires a canonical deployment
+    # attestation file whose exact SHA-256 is pinned independently in deployment
+    # configuration. Without both values the paper-table path fails closed.
+    qwen_vlm_deployment_attestation_path: str = ""
+    qwen_vlm_deployment_attestation_sha256: str = ""
+    qwen_vlm_api_key: str = field(
+        default="EMPTY", repr=False
+    )  # keep secrets out of repr/tracebacks
     qwen_vlm_max_input_tokens: int = 131072
     qwen_vlm_max_tokens: int = 32768
     qwen_vlm_client_max_edge: int = 1280
@@ -254,6 +276,7 @@ class RuntimeSettings:
         return cls(
             openai_base_url=os.getenv("OPENAI_BASE_URL", "http://localhost:8001/v1"),
             openai_model=os.getenv("OPENAI_MODEL", "deepseek_v4"),
+            model_provider_id=_model_provider_id_from_env(),
             openai_api_key=os.getenv("OPENAI_API_KEY") or "EMPTY",
             model_supports_multimodal=_env_bool(
                 "ULTRA_DEEPAGENTS_MODEL_SUPPORTS_MULTIMODAL",
@@ -285,25 +308,28 @@ class RuntimeSettings:
                 int(os.getenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_MAX_RECOVERIES", "2")),
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
+            materials_enabled=_env_bool("ULTRA_DEEPAGENTS_MATERIALS_ENABLED", False),
             qwen_vlm_enabled=_env_bool("QWEN_VLM_ENABLED", False),
             qwen_vlm_base_url=os.getenv("QWEN_VLM_BASE_URL", ""),
             qwen_vlm_model=os.getenv("QWEN_VLM_MODEL", "Qwen3.6-27B"),
+            qwen_vlm_model_revision=os.getenv("QWEN_VLM_MODEL_REVISION", ""),
+            qwen_vlm_runtime_identity=os.getenv("QWEN_VLM_RUNTIME_IDENTITY", ""),
+            qwen_vlm_deployment_attestation_path=os.getenv(
+                "QWEN_VLM_DEPLOYMENT_ATTESTATION_PATH", ""
+            ),
+            qwen_vlm_deployment_attestation_sha256=os.getenv(
+                "QWEN_VLM_DEPLOYMENT_ATTESTATION_SHA256", ""
+            ),
             qwen_vlm_api_key=_resolve_secret(
                 "QWEN_VLM_API_KEY", "QWEN_VLM_API_KEY_FILE", default="EMPTY"
             ),
-            qwen_vlm_max_input_tokens=max(
-                0, int(os.getenv("QWEN_VLM_MAX_INPUT_TOKENS", "131072"))
-            ),
+            qwen_vlm_max_input_tokens=max(0, int(os.getenv("QWEN_VLM_MAX_INPUT_TOKENS", "131072"))),
             qwen_vlm_max_tokens=max(256, int(os.getenv("QWEN_VLM_MAX_TOKENS", "32768"))),
-            qwen_vlm_client_max_edge=max(
-                256, int(os.getenv("QWEN_VLM_CLIENT_MAX_EDGE", "1280"))
-            ),
+            qwen_vlm_client_max_edge=max(256, int(os.getenv("QWEN_VLM_CLIENT_MAX_EDGE", "1280"))),
             qwen_vlm_request_timeout_seconds=max(
                 1.0, float(os.getenv("QWEN_VLM_REQUEST_TIMEOUT_SECONDS", "180"))
             ),
-            qwen_vlm_max_concurrency=max(
-                1, int(os.getenv("QWEN_VLM_MAX_CONCURRENCY", "4"))
-            ),
+            qwen_vlm_max_concurrency=max(1, int(os.getenv("QWEN_VLM_MAX_CONCURRENCY", "4"))),
             qwen_vlm_max_images_per_call=max(
                 1, int(os.getenv("QWEN_VLM_MAX_IMAGES_PER_CALL", "4"))
             ),
@@ -442,7 +468,9 @@ class RuntimeSettings:
             ),
             data_agent_nats_worker_durable=os.getenv(
                 "ULTRA_DATA_AGENT_NATS_WORKER_DURABLE",
-                os.getenv("ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"),
+                os.getenv(
+                    "ULTRA_CONTROL_NATS_DATA_AGENT_WORKER_DURABLE", "ultra-data-agent-worker"
+                ),
             ),
             data_agent_nats_ack_wait_seconds=float(
                 os.getenv("ULTRA_DATA_AGENT_NATS_ACK_WAIT_SECONDS", "300")
@@ -531,13 +559,17 @@ class RuntimeSettings:
             ),
             artifact_root=os.getenv(
                 "ULTRA_ARTIFACT_ROOT",
-                os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),
+                os.getenv(
+                    "ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")
+                ),
             ),
             skills_root=os.getenv("ULTRA_DEEPAGENTS_SKILLS_ROOT", "").strip(),
             policies_root=os.getenv("ULTRA_DEEPAGENTS_POLICIES_ROOT", "").strip(),
             rarespot_artifact_root=os.getenv(
                 "ULTRA_RARESPOT_ARTIFACT_ROOT",
-                os.getenv("ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")),
+                os.getenv(
+                    "ULTRA_CONTROL_ARTIFACT_ROOT", os.getenv("ARTIFACT_ROOT", "data/artifacts")
+                ),
             ),
             rarespot_weights_path=os.getenv(
                 "YOLOV5_RARESPOT_WEIGHTS",
@@ -576,6 +608,15 @@ class RuntimeSettings:
                 int(os.getenv("ULTRA_DEEPAGENTS_WORKSPACE_RETENTION_SECONDS", str(7 * 24 * 3600))),
             ),
         )
+
+
+def _model_provider_id_from_env() -> str:
+    value = os.getenv("ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID", "openai-compatible").strip()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None:
+        raise ValueError(
+            "ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID must be a non-secret stable provider identifier"
+        )
+    return value
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -620,11 +661,7 @@ def _env_host_tuple(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
     raw = os.getenv(name)
     if raw is None:
         return default
-    hosts = tuple(
-        host.strip().lower()
-        for host in raw.replace(",", " ").split()
-        if host.strip()
-    )
+    hosts = tuple(host.strip().lower() for host in raw.replace(",", " ").split() if host.strip())
     return hosts or default
 
 
@@ -641,9 +678,7 @@ def _async_subagents_from_env() -> tuple[dict[str, Any], ...]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON must be valid JSON"
-        ) from exc
+        raise ValueError("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON must be valid JSON") from exc
     if not isinstance(parsed, list):
         raise ValueError("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON must be a JSON array")
 
@@ -651,9 +686,7 @@ def _async_subagents_from_env() -> tuple[dict[str, Any], ...]:
     seen_names: set[str] = set()
     for index, item in enumerate(parsed):
         if not isinstance(item, dict):
-            raise ValueError(
-                "ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON entries must be objects"
-            )
+            raise ValueError("ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON entries must be objects")
         prefix = f"ULTRA_DEEPAGENTS_ASYNC_SUBAGENTS_JSON[{index}]"
         name = _required_async_subagent_string(item, "name", prefix=prefix)
         description = _required_async_subagent_string(item, "description", prefix=prefix)
@@ -714,9 +747,7 @@ def _optional_async_subagent_url(
         return ""
     parsed = urlparse(value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        raise ValueError(
-            f"{prefix}.{field} must be an http:// or https:// endpoint when provided"
-        )
+        raise ValueError(f"{prefix}.{field} must be an http:// or https:// endpoint when provided")
     if parsed.username or parsed.password:
         raise ValueError(f"{prefix}.{field} must not include credentials")
     if is_local_http_host(parsed.hostname) and not allow_private_async_subagent_url():

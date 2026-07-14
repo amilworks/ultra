@@ -29,6 +29,7 @@ from langgraph_sdk.client import LangGraphClient, SyncLangGraphClient
 
 from ultra_deepagents.config import allow_private_async_subagent_url, is_local_http_host
 from ultra_deepagents.context import AgentRunContext
+from ultra_deepagents.context_tools import public_selected_resource_descriptor
 
 logger = logging.getLogger(__name__)
 
@@ -538,7 +539,9 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         return Command(
             update={
                 "messages": [
-                    _tool_message(f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request)
+                    _tool_message(
+                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request
+                    )
                 ],
                 "async_tasks": updates,
             }
@@ -584,7 +587,9 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         return Command(
             update={
                 "messages": [
-                    _tool_message(f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request)
+                    _tool_message(
+                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request
+                    )
                 ],
                 "async_tasks": updates,
             }
@@ -596,7 +601,9 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         if not self._agent_map:
             return "No async subagents are configured."
         available = ", ".join(sorted(self._agent_map))
-        return f"Unknown async subagent type '{subagent_type}'. Available async subagents: {available}"
+        return (
+            f"Unknown async subagent type '{subagent_type}'. Available async subagents: {available}"
+        )
 
     def _resolve_configured_tracked_task(
         self,
@@ -733,18 +740,14 @@ def _validate_async_subagent_headers(value: Any, *, name: str) -> dict[str, str]
             raise ValueError(f"Duplicate async subagent header name: {key}")
         seen_header_names.add(normalized_key)
         if not isinstance(raw_value, str) or not raw_value.strip():
-            raise ValueError(
-                f"Async subagent '{name}' headers.{key} must be a non-empty string"
-            )
+            raise ValueError(f"Async subagent '{name}' headers.{key} must be a non-empty string")
         headers[key] = raw_value.strip()
     return headers
 
 
 def _validate_async_subagent_url(value: Any, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise ValueError(
-            f"Async subagent '{name}' url must be a non-empty string when provided"
-        )
+        raise ValueError(f"Async subagent '{name}' url must be a non-empty string when provided")
     url = value.strip()
     parsed = urlparse(url)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
@@ -791,9 +794,7 @@ def _run_id_from_response(run: Any) -> str:
 
 def _thread_id_from_response(thread: Any) -> str:
     value = (
-        thread.get("thread_id")
-        if isinstance(thread, dict)
-        else getattr(thread, "thread_id", None)
+        thread.get("thread_id") if isinstance(thread, dict) else getattr(thread, "thread_id", None)
     )
     thread_id = str(value or "").strip()
     if not thread_id:
@@ -904,7 +905,9 @@ def _selected_tracked_tasks(request: ToolCallRequest) -> list[dict[str, str]]:
         status = str(task.get("status") or "").strip()
         if status_filter and status_filter != "all" and status != status_filter:
             continue
-        tracked = {field: str(task.get(field) or "").strip() for field in _ASYNC_TASK_REQUIRED_FIELDS}
+        tracked = {
+            field: str(task.get(field) or "").strip() for field in _ASYNC_TASK_REQUIRED_FIELDS
+        }
         if not all(tracked.values()):
             continue
         last_error = str(task.get("last_error") or "").strip()
@@ -933,7 +936,9 @@ def _async_task_list_entry(
         "last_checked_at": checked_at or tracked["last_checked_at"],
         "last_updated_at": (
             updated_at
-            or (checked_at if normalized_status != tracked["status"] else tracked["last_updated_at"])
+            or (
+                checked_at if normalized_status != tracked["status"] else tracked["last_updated_at"]
+            )
             or tracked["last_updated_at"]
         ),
     }
@@ -948,10 +953,7 @@ def _async_task_list_entry(
 
 
 def _format_async_task_list_entry(task: dict[str, str]) -> str:
-    entry = (
-        f"- task_id: {task['task_id']}  agent: {task['agent_name']}  "
-        f"status: {task['status']}"
-    )
+    entry = f"- task_id: {task['task_id']}  agent: {task['agent_name']}  status: {task['status']}"
     error = str(task.get("last_error") or "").strip()
     if error:
         entry += f"  error: {error}"
@@ -988,7 +990,9 @@ def _check_failure_command_from_result(
     return _async_task_check_error_command(request, tracked=tracked, error=error)
 
 
-def _check_error_detail_command_from_result(result: ToolMessage | Command[Any]) -> Command[Any] | None:
+def _check_error_detail_command_from_result(
+    result: ToolMessage | Command[Any],
+) -> Command[Any] | None:
     if not isinstance(result, Command):
         return None
     update = result.update
@@ -1104,6 +1108,11 @@ def _sanitize_async_resource_descriptors(
     for descriptor in descriptors:
         if not isinstance(descriptor, dict):
             continue
+        if str(descriptor.get("type") or "").strip() == "selected_resource":
+            selected = public_selected_resource_descriptor(descriptor)
+            if selected:
+                sanitized.append(selected)
+            continue
         public: dict[str, Any] = {}
         for key in _ASYNC_CONTEXT_RESOURCE_DESCRIPTOR_FIELDS:
             if key not in descriptor:
@@ -1161,8 +1170,10 @@ def _is_async_context_secret_key(key: str) -> bool:
     normalized = key.strip().lower().replace("-", "_")
     if normalized in _ASYNC_CONTEXT_PUBLIC_TOKEN_COUNT_KEYS:
         return False
-    return normalized in _ASYNC_CONTEXT_SECRET_KEY_NAMES or normalized.endswith("_token") or any(
-        marker in normalized for marker in _ASYNC_CONTEXT_SECRET_KEY_MARKERS
+    return (
+        normalized in _ASYNC_CONTEXT_SECRET_KEY_NAMES
+        or normalized.endswith("_token")
+        or any(marker in normalized for marker in _ASYNC_CONTEXT_SECRET_KEY_MARKERS)
     )
 
 
@@ -1227,8 +1238,6 @@ def _is_async_context_safe_remote_storage_uri(value: Any) -> bool:
     if scheme in {"http", "https"} and _is_local_http_host(parsed.hostname):
         return False
     return True
-
-
 
 
 def async_subagent_run_metadata(

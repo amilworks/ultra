@@ -1,115 +1,107 @@
-# Materials — vetted recipes (use the library; don't hand-roll)
+# Microstructure and EBSD vetted recipes
 
-Copy these instead of reinventing the analysis. Each has the **trap** (the
-plausible-but-wrong shortcut), the **correct** library call, and a **self-check**
-you should actually run in-sandbox. EBSD/IPF colouring is in
-[ebsd-ipf-recipe.md](ebsd-ipf-recipe.md). Recipes were adversarially reviewed;
-where noted, confirm a version-fragile API against the installed package first.
+Copy these named-library recipes rather than reimplementing them. Each includes the
+plausible-but-wrong shortcut and a self-check. IPF coloring has its own
+[recipe](ebsd-ipf-recipe.md).
 
-## Misorientation vs the Mackenzie baseline (orix) — VALIDATED
-**Trap:** a hand-rolled quaternion/Euler misorientation without symmetry reduction
-— angles run to 180° and every boundary looks "high-angle".
+The legacy structure, CALPHAD, and Magpie recipes moved to
+`/skills/materials-structure-thermo/references/structure-thermo-recipes.md`. XRD moved to
+`/skills/materials-characterization/references/xrd-recipes.md`.
+
+## Symmetry-reduced misorientation and random baseline (`orix`)
+
+**Trap:** subtracting Euler angles or taking a raw quaternion angle without crystal symmetry.
+Those values can run to 180 degrees and make ordinary boundaries appear special.
+
 ```python
 import numpy as np
-from orix.quaternion import Orientation, Misorientation, symmetry
+from orix.quaternion import Misorientation, Orientation, symmetry
+
 pg = symmetry.Oh
-mis = Misorientation(~o1 * o2); mis.symmetry = (pg, pg)     # o1,o2: Orientations
-ang = np.rad2deg(mis.map_into_symmetry_reduced_zone().angle)  # disorientation angles
-# random null (Mackenzie): set .symmetry as an ATTRIBUTE — do NOT pass symmetry= to random()
-r = Orientation.random(200000); r.symmetry = pg
-s = Orientation.random(200000); s.symmetry = pg
-null = Misorientation(~r * s); null.symmetry = (pg, pg)
-null_ang = np.rad2deg(null.map_into_symmetry_reduced_zone().angle)
-```
-**Self-check:** cubic disorientation caps at **62.8°** and the Mackenzie median is
-**~43°**: `assert null_ang.max() < 62.9 and 40 < np.median(null_ang) < 50`. Compare
-your measured boundary distribution to `null_ang`; deviation = real texture/special boundaries.
+mis = Misorientation(~o1 * o2)  # o1 and o2 are Orientation instances
+mis.symmetry = (pg, pg)
+angles_deg = np.rad2deg(mis.reduce().angle)
 
-## Pole figure / ODF texture strength in MRD (orix) — CONFIRM API LIVE
-**Trap:** raw pole-point density with no random baseline → "strong texture" that's
-just sampling. Report **multiples of random distribution (MRD)** vs uniform.
+r = Orientation.random(200_000)
+r.symmetry = pg
+s = Orientation.random(200_000)
+s.symmetry = pg
+random_mis = Misorientation(~r * s)
+random_mis.symmetry = (pg, pg)
+null_angles_deg = np.rad2deg(random_mis.reduce().angle)
+```
+
+**Self-check:** cubic disorientation is capped near 62.8 degrees and the large-sample Mackenzie
+median is near 43 degrees:
+
 ```python
-from orix.quaternion import Orientation, symmetry
-# expand crystal-symmetry equivalents in the CRYSTAL frame FIRST, then rotate to sample:
-poles = ~ori * m.symmetrise(unique=True)     # ori: Orientation; m: Miller/Vector3d (crystal dir)
-# then orix's pole density (MRD-normalised). Confirm signature/kwargs in the installed orix:
-#   e.g. Vector3d(poles).pole_density_function(...)  -> returns MRD histogram
+assert null_angles_deg.max() < 62.9
+assert 40 < np.median(null_angles_deg) < 50
 ```
-**Self-check:** a set of `Orientation.random(N)` (build then `.symmetry = pg`) must give
-**MRD ≈ 1 everywhere** — but weight by solid angle, not a raw `.mean()` over a lon/lat grid
-(pole over-weighting gives false failures). Verify `pole_density_function`'s return + kwargs
-against the installed version before trusting.
 
-## Grain segmentation + stereology (scikit-image) — needs skimage ≥ 0.24 for `spacing=`
-**Trap:** a bare intensity threshold for "grains", and grain sizes in **pixels**
-(ignoring anisotropic TriBeam z-spacing).
+Record the random sample count and random-state control if the installed API provides one. Compare
+the measured distribution with the null; do not call the null itself a measured grain-boundary
+distribution.
+
+## Texture strength relative to random (`orix`)
+
+**Trap:** interpreting raw pole-point density or a latitude/longitude histogram as MRD. A spherical
+grid is not equal-area, and raw density has no random reference.
+
+Use the installed `orix` pole-density/ODF API and confirm its live signature before adapting it.
+Expand crystal-symmetry-equivalent poles in the crystal frame, rotate them to the sample frame,
+and report multiples of random distribution (MRD) or a named texture index. Validate the complete
+pipeline on `Orientation.random(N)`; an equal-area-weighted random reference should be consistent
+with MRD 1 within its sampling uncertainty.
+
+## Anisotropy-aware grain segmentation and stereology (`scikit-image`)
+
+**Trap:** treating a thresholded foreground mask as individual grains, or reporting voxel counts
+as cubic micrometers while ignoring slice spacing.
+
 ```python
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 from skimage.feature import peak_local_max
-from skimage.segmentation import watershed, clear_border
-from skimage.measure import label, regionprops_table
-vox = (dz, dy, dx)                                   # physical voxel size (µm)
-dist = distance_transform_edt(fg, sampling=vox)      # anisotropy-aware
-coords = peak_local_max(dist, labels=fg, min_distance=5)
-mk = np.zeros(fg.shape, int); mk[tuple(coords.T)] = np.arange(1, len(coords) + 1)
-grains = watershed(-dist, markers=mk, mask=fg)
-# grains = clear_border(grains)   # drop edge-touching grains; report how many
-props = regionprops_table(grains, spacing=vox,       # spacing= requires scikit-image >= 0.24
-    properties=("label", "area", "equivalent_diameter_area", "axis_major_length"))
-```
-If skimage < 0.24: drop `spacing=` and multiply voxel counts by `np.prod(vox)` yourself.
-**Self-check:** on a synthetic rasterised ellipsoid, `props["area"]` (with `spacing=`) must equal
-`(4/3)π·a·b·c` within ~5%; without spacing it's off by exactly `dz·dy·dx` — catching the
-pixels-not-µm bug. Compute any watershed-vs-connected-components count check *before* `clear_border`.
+from skimage.measure import regionprops_table
+from skimage.segmentation import clear_border, watershed
 
-## CALPHAD equilibrium phase fractions (pycalphad) — needs a NAMED .tdb
-**Trap:** an ad-hoc "stability score". No TDB is bundled — the user must supply one; never fabricate.
-```python
-from pycalphad import Database, equilibrium, variables as v
-dbf = Database("Ni-Al.tdb")                          # a NAMED database the user provides
-comps = ["NI", "AL", "VA"]                           # include VA
-phases = list(dbf.phases.keys())
-eq = equilibrium(dbf, comps, phases, {v.X("AL"): 0.15, v.T: 1073, v.P: 101325, v.N: 1})
+voxel_size = (dz, dy, dx)  # physical units, in array-axis order
+distance = distance_transform_edt(foreground, sampling=voxel_size)
+coordinates = peak_local_max(distance, labels=foreground, min_distance=marker_distance)
+markers = np.zeros(foreground.shape, dtype=np.int32)
+markers[tuple(coordinates.T)] = np.arange(1, len(coordinates) + 1)
+labels_all = watershed(-distance, markers=markers, mask=foreground)
+labels_interior = clear_border(labels_all)
+props = regionprops_table(
+    labels_interior,
+    spacing=voxel_size,
+    properties=("label", "area", "equivalent_diameter_area", "axis_major_length"),
+)
 ```
-**Self-check:** phase fractions are a partition — over **converged** points (`eq.NP` not all-NaN),
-`np.nansum(eq.NP, axis=...) ≈ 1` and each in [0,1]. Corroborate γ′ fraction against EBSD/EDS.
 
-## Space-group / phase ID (pymatgen + spglib) — VALIDATED invariant
-**Trap:** identifying a phase "by eye" from lattice parameter; collapsing ordered L1₂ γ′ to FCC.
-```python
-from pymatgen.core import Structure
-from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-sga = SpacegroupAnalyzer(struct, symprec=0.01, angle_tolerance=5)
-sg_num = sga.get_space_group_number()   # sweep symprec (0.001..0.1) and report stability
-```
-**Self-check:** ordered **Ni₃Al L1₂ → 221 (Pm-3m)**; disordered FCC Cu/Ni → **225 (Fm-3m)**.
-Getting 225 for ordered Ni₃Al means the ordering (Al at corners, Ni at faces) was lost.
+`spacing=` requires a compatible scikit-image release. If unavailable, measure voxel counts and
+apply the physical voxel volume explicitly, documenting the fallback. Before specimen analysis,
+rasterize an ellipsoid with known physical semi-axes and require recovered volume within a stated
+rasterization tolerance (typically a few percent at adequate resolution). Compare counts and
+distributions across a marker-distance/threshold sweep and report how many labels `clear_border`
+removed.
 
-## Magpie composition featurization (matminer)
-**Trap:** a hand-averaged atomic-property vector (loses min/max/range/mode/avg-dev spread).
-```python
-from matminer.featurizers.composition import ElementProperty
-from pymatgen.core import Composition
-feat = ElementProperty.from_preset("magpie")
-x = feat.featurize(Composition("Ni3Al")); labels = feat.feature_labels()   # 132 = 22 props × 6 stats
-```
-(Needs `NUMBA_CPU_NAME=generic` on arm64 to avoid SIGILL — already set in the sandbox.)
-**Self-check:** `len(labels) == 132` and the labels include `avg_dev`, `mode`, `range` (a hand-averaged
-vector has none). Do **not** cross-check Magpie's mean AtomicWeight against pymatgen masses at 1e-6 —
-Magpie ships its own Ward-2016 table; use a loose (~1 amu) tolerance if you compare at all.
+## Porosity and pore scale (`porespy`)
 
-## Porosity / pore metrics (porespy) — CONFIRM metric names LIVE
-**Trap #1 (the footgun):** porespy's convention is **True = void**. Invert it and every metric flips.
-**Trap #2:** a bare threshold "porosity".
+**Trap:** PoreSpy expects **True = void**. Inverting the mask reverses the material meaning while
+still returning plausible numbers.
+
 ```python
 import porespy as ps
-void = im_bool                       # MUST be True where pore/void
-phi = ps.metrics.porosity(void)      # void fraction
-lt = ps.filters.local_thickness(void)
-# pore_size_distribution / two_point_correlation were renamed across porespy v1->v2 —
-# confirm the exact names + return objects in the installed version before use.
+
+void = void_mask.astype(bool)  # True only where pore/void
+porosity = ps.metrics.porosity(void)
+local_thickness = ps.filters.local_thickness(void)
 ```
-**Self-check (NOT the tautological `porosity == void.mean()`):** for a nominally dense alloy
-`assert phi < 0.5` (mislabeling solid as void trips it), and on a synthetic sphere of radius r,
-`local_thickness(sphere).max() ≈ r` (not the diameter).
+
+Confirm any distribution/correlation API name against the installed PoreSpy version because its
+result objects changed between major versions. Validate convention and scale on a labeled synthetic
+void sphere: the measured void fraction must match the known construction within rasterization
+tolerance and the local-thickness maximum must use the installed function's documented radius/
+diameter convention. A simple equality with `void.mean()` does not detect mask inversion.

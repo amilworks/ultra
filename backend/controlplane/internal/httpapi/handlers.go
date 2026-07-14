@@ -95,18 +95,19 @@ const (
 const maxJSONBodyBytes int64 = 16 << 20
 
 var (
-	workerRunPathPattern         = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
-	workerRunEventsPathPattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
-	workerLeasePathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
-	workerRunUserProfilePattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
-	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
-	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
-	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
-	workerDataAgentJobPattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
-	workerDataAgentLeasePattern  = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
-	workerDataAgentStatusPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
-	workerDataAgentEventsPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
-	workerDataAgentOutputPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
+	workerRunPathPattern           = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
+	workerRunEventsPathPattern     = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
+	workerLeasePathPattern         = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+	workerRunUserProfilePattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
+	workerEpisodicSearchPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
+	workerResourceSearchPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
+	workerResourceResolvePattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
+	workerCalphadValidationPattern = regexp.MustCompile(`^/v2/runs/[^/]+/resources/[^/]+/calphad/validations$`)
+	workerDataAgentJobPattern      = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
+	workerDataAgentLeasePattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
+	workerDataAgentStatusPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
+	workerDataAgentEventsPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
+	workerDataAgentOutputPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -155,6 +156,8 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodPost && workerResourceResolvePattern.MatchString(path):
 		return true
+	case r.Method == http.MethodPost && workerCalphadValidationPattern.MatchString(path):
+		return true
 	case workerLeasePathPattern.MatchString(path):
 		return true
 	case isWorkerDataAgentEndpoint(r):
@@ -189,8 +192,9 @@ func isWorkerDataAgentEndpoint(r *http.Request) bool {
 
 func isWorkerBisqueEndpointPath(path string) bool {
 	switch path {
-	case "/v2/bisque/search", "/v2/bisque/module-run", "/v2/bisque/download",
-		"/v2/bisque/upload", "/v2/bisque/datasets", "/v2/bisque/push", "/v2/uploads":
+	case "/v2/bisque/search", "/v2/bisque/dataset-members", "/v2/bisque/image-annotations",
+		"/v2/bisque/dataset-annotations", "/v2/bisque/module-run", "/v2/bisque/download",
+		"/v2/bisque/upload", "/v2/bisque/datasets", "/v2/uploads":
 		return true
 	default:
 		return false
@@ -267,6 +271,8 @@ type runResourceHit struct {
 	Status       string         `json:"status,omitempty"`
 	Tags         []string       `json:"tags,omitempty"`
 	Metadata     domain.JSONMap `json:"metadata,omitempty"`
+	TreeIdentity domain.JSONMap `json:"tree_identity,omitempty"`
+	SensorFormat domain.JSONMap `json:"sensor_format,omitempty"`
 	CreatedAt    *time.Time     `json:"created_at,omitempty"`
 }
 
@@ -282,7 +288,9 @@ func runResourceHitFromRecord(resource domain.ResourceRecord) runResourceHit {
 		ProjectID:    resource.ProjectID,
 		Status:       resource.Status,
 		Tags:         resource.Tags,
-		Metadata:     resource.Metadata,
+		Metadata:     projectRunResourceMetadata(resource.Metadata),
+		TreeIdentity: projectCatalogTreeIdentity(resource),
+		SensorFormat: projectCatalogSensorFormat(resource),
 	}
 	if !resource.CreatedAt.IsZero() {
 		created := resource.CreatedAt
@@ -613,6 +621,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/hdf5/preview/table", deps.handleGetUploadHdf5Table)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
+			r.Post("/bisque/dataset-members", deps.handleBisqueDatasetMembers)
+			r.Post("/bisque/image-annotations", deps.handleBisqueImageAnnotations)
+			r.Post("/bisque/dataset-annotations", deps.handleBisqueDatasetAnnotations)
 			r.Post("/bisque/module-run", deps.handleBisqueModuleRun)
 			r.Post("/bisque/download", deps.handleImportBisqueResources)
 			r.Post("/bisque/upload", deps.handleBisqueUpload)
@@ -630,6 +641,10 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/resources/{file_id}/csv/rows", deps.handleResourceCsvRows)
 			r.Get("/resources/{file_id}", deps.handleGetResource)
 			r.Patch("/resources/{file_id}", deps.handlePatchResource)
+			r.Post("/resources/{file_id}/calphad/revision", deps.handleCreateCalphadRevision)
+			r.Get("/resources/{file_id}/calphad/revision/input", deps.handleGetCalphadRevisionInput)
+			r.Get("/resources/{file_id}/calphad/ledger", deps.handleGetCalphadLedger)
+			r.Get("/resources/{file_id}/calphad/validations/{validation_id}/evidence", deps.handleGetCalphadValidationEvidence)
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
 			r.Post("/resources/{file_id}/restore", deps.handleRestoreResource)
 			r.Get("/resources/{file_id}/events", deps.handleListResourceEvents)
@@ -675,6 +690,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/runs/{run_id}/episodic-search", deps.handleEpisodicSearch)
 			r.Post("/runs/{run_id}/resource-search", deps.handleRunResourceSearch)
 			r.Post("/runs/{run_id}/resource-resolve", deps.handleRunResourceResolve)
+			r.Post("/runs/{run_id}/resources/{file_id}/calphad/validations", deps.handleAppendCalphadValidation)
 			r.Post("/runs/{run_id}/lease", deps.handleAcquireRunLease)
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
@@ -1735,7 +1751,7 @@ func (deps ServerDeps) principalFromRequest(r *http.Request, fallbackUserID stri
 // run named in X-Ultra-Run-Id, so files staged or pushed by agent tools land in
 // that user's catalog instead of an "unauthenticated" principal.
 func (deps ServerDeps) workerRunPrincipal(r *http.Request) (requestPrincipal, bool) {
-	if deps.Store == nil || deps.workerRequestAuth(r) != workerAuthValid {
+	if deps.Store == nil || deps.workerRequestAuth(r) != workerAuthValid || !isWorkerScopedEndpoint(r) {
 		return requestPrincipal{}, false
 	}
 	runID := strings.TrimSpace(r.Header.Get("X-Ultra-Run-Id"))
@@ -1746,8 +1762,15 @@ func (deps ServerDeps) workerRunPrincipal(r *http.Request) (requestPrincipal, bo
 	if err != nil || strings.TrimSpace(run.UserID) == "" {
 		return requestPrincipal{}, false
 	}
-	orgID := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")), "local-org")
-	role := firstNonEmpty(strings.TrimSpace(r.Header.Get("X-Ultra-Role")), "researcher")
+	orgID := trustedRunOrgID(run)
+	principalMetadata, _ := jsonMapValue(run.Metadata["principal"])
+	role, _ := safeMetadataString(principalMetadata["role"], 128)
+	if role == "" {
+		role, _ = safeMetadataString(run.Metadata["principal_role"], 128)
+	}
+	if orgID == "" || role == "" {
+		return requestPrincipal{}, false
+	}
 	return requestPrincipal{UserID: strings.TrimSpace(run.UserID), OrgID: orgID, Role: role}, true
 }
 
@@ -1913,22 +1936,24 @@ type upsertThreadRequest struct {
 }
 
 type createRunRequest struct {
-	UserID              string                 `json:"user_id"`
-	Goal                string                 `json:"goal"`
-	Messages            []domain.ThreadMessage `json:"messages"`
-	FileIDs             []string               `json:"file_ids"`
-	ResourceURIs        []string               `json:"resource_uris"`
-	DatasetURIs         []string               `json:"dataset_uris"`
-	SelectedToolNames   []string               `json:"selected_tool_names"`
-	KnowledgeContext    map[string]any         `json:"knowledge_context"`
-	WorkflowHint        map[string]any         `json:"workflow_hint"`
-	SelectionContext    map[string]any         `json:"selection_context"`
-	ReasoningMode       string                 `json:"reasoning_mode"`
-	Budgets             map[string]any         `json:"budgets"`
-	Benchmark           map[string]any         `json:"benchmark"`
-	ResourceDescriptors []domain.JSONMap       `json:"resource_descriptors"`
-	IdempotencyKey      string                 `json:"idempotency_key"`
-	Metadata            map[string]any         `json:"metadata"`
+	UserID                string                 `json:"user_id"`
+	Goal                  string                 `json:"goal"`
+	EvaluationProfile     string                 `json:"evaluation_profile"`
+	RemoteMutationIntents []string               `json:"remote_mutation_intents"`
+	Messages              []domain.ThreadMessage `json:"messages"`
+	FileIDs               []string               `json:"file_ids"`
+	ResourceURIs          []string               `json:"resource_uris"`
+	DatasetURIs           []string               `json:"dataset_uris"`
+	SelectedToolNames     []string               `json:"selected_tool_names"`
+	KnowledgeContext      map[string]any         `json:"knowledge_context"`
+	WorkflowHint          map[string]any         `json:"workflow_hint"`
+	SelectionContext      map[string]any         `json:"selection_context"`
+	ReasoningMode         string                 `json:"reasoning_mode"`
+	Budgets               map[string]any         `json:"budgets"`
+	Benchmark             map[string]any         `json:"benchmark"`
+	ResourceDescriptors   []domain.JSONMap       `json:"resource_descriptors"`
+	IdempotencyKey        string                 `json:"idempotency_key"`
+	Metadata              map[string]any         `json:"metadata"`
 }
 
 type cancelRunRequest struct {
@@ -1990,16 +2015,17 @@ type artifactResponse struct {
 }
 
 type uploadedFileRecord struct {
-	FileID       string          `json:"file_id"`
-	OriginalName string          `json:"original_name"`
-	ContentType  string          `json:"content_type,omitempty"`
-	SizeBytes    int64           `json:"size_bytes"`
-	SHA256       string          `json:"sha256"`
-	CreatedAt    string          `json:"created_at"`
-	SourceURI    string          `json:"source_uri,omitempty"`
-	ProjectID    string          `json:"project_id,omitempty"`
-	PreviewURL   string          `json:"preview_url,omitempty"`
-	Principal    principalRecord `json:"principal,omitempty"`
+	FileID             string          `json:"file_id"`
+	OriginalName       string          `json:"original_name"`
+	ContentType        string          `json:"content_type,omitempty"`
+	SizeBytes          int64           `json:"size_bytes"`
+	SHA256             string          `json:"sha256"`
+	CreatedAt          string          `json:"created_at"`
+	SourceURI          string          `json:"source_uri,omitempty"`
+	ProjectID          string          `json:"project_id,omitempty"`
+	PreviewURL         string          `json:"preview_url,omitempty"`
+	Principal          principalRecord `json:"principal,omitempty"`
+	TrustedSourceRunID string          `json:"-"`
 }
 
 type uploadFilesResponse struct {
@@ -2070,26 +2096,27 @@ type uploadHistogramPayload struct {
 }
 
 type resourceRecord struct {
-	FileID        string                      `json:"file_id"`
-	OriginalName  string                      `json:"original_name"`
-	ContentType   string                      `json:"content_type,omitempty"`
-	SizeBytes     int64                       `json:"size_bytes"`
-	SHA256        string                      `json:"sha256"`
-	CreatedAt     string                      `json:"created_at"`
-	Status        string                      `json:"status"`
-	SourceType    string                      `json:"source_type"`
-	ResourceKind  string                      `json:"resource_kind"`
-	SourceURI     string                      `json:"source_uri,omitempty"`
-	ProjectID     string                      `json:"project_id,omitempty"`
-	HasThumbnail  bool                        `json:"has_thumbnail"`
-	ThumbnailURL  string                      `json:"thumbnail_url,omitempty"`
-	PreviewURL    string                      `json:"preview_url,omitempty"`
-	CacheReady    bool                        `json:"cache_ready"`
-	StagedLocally bool                        `json:"staged_locally"`
-	Principal     principalRecord             `json:"principal,omitempty"`
-	Tags          []string                    `json:"tags,omitempty"`
-	Metadata      domain.JSONMap              `json:"metadata,omitempty"`
-	ShareSummary  domain.ResourceShareSummary `json:"share_summary,omitempty"`
+	FileID             string                      `json:"file_id"`
+	OriginalName       string                      `json:"original_name"`
+	ContentType        string                      `json:"content_type,omitempty"`
+	SizeBytes          int64                       `json:"size_bytes"`
+	SHA256             string                      `json:"sha256"`
+	CreatedAt          string                      `json:"created_at"`
+	Status             string                      `json:"status"`
+	SourceType         string                      `json:"source_type"`
+	ResourceKind       string                      `json:"resource_kind"`
+	SourceURI          string                      `json:"source_uri,omitempty"`
+	ProjectID          string                      `json:"project_id,omitempty"`
+	HasThumbnail       bool                        `json:"has_thumbnail"`
+	ThumbnailURL       string                      `json:"thumbnail_url,omitempty"`
+	PreviewURL         string                      `json:"preview_url,omitempty"`
+	CacheReady         bool                        `json:"cache_ready"`
+	StagedLocally      bool                        `json:"staged_locally"`
+	Principal          principalRecord             `json:"principal,omitempty"`
+	Tags               []string                    `json:"tags,omitempty"`
+	Metadata           domain.JSONMap              `json:"metadata,omitempty"`
+	ShareSummary       domain.ResourceShareSummary `json:"share_summary,omitempty"`
+	TrustedSourceRunID string                      `json:"-"`
 }
 
 type principalRecord struct {
@@ -2953,7 +2980,7 @@ func (deps ServerDeps) handleRunResourceSearch(w http.ResponseWriter, r *http.Re
 	}
 	page, err := catalog.ListResourcesForUser(r.Context(), domain.ResourceListInput{
 		UserID: run.UserID,
-		OrgID:  strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id")),
+		OrgID:  trustedRunOrgID(run),
 		Query:  strings.TrimSpace(req.Query),
 		Kind:   strings.ToLower(strings.TrimSpace(req.Kind)),
 		Source: strings.ToLower(strings.TrimSpace(req.Source)),
@@ -3009,7 +3036,7 @@ func (deps ServerDeps) handleRunResourceResolve(w http.ResponseWriter, r *http.R
 			return
 		}
 	}
-	orgID := strings.TrimSpace(r.Header.Get("X-Ultra-Org-Id"))
+	orgID := trustedRunOrgID(run)
 	resources := []runResourceHit{}
 	missing := []string{}
 	seen := map[string]bool{}
@@ -3325,30 +3352,88 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := deps.principalFromRequest(r, req.UserID)
+	evaluationProfile, valid := domain.ParseEvaluationProfile(req.EvaluationProfile)
+	if !valid {
+		writeError(w, http.StatusBadRequest, errors.New("evaluation_profile is not a supported protected profile"))
+		return
+	}
+	remoteMutationIntents, valid := domain.ParseRemoteMutationIntents(req.RemoteMutationIntents)
+	if !valid {
+		writeError(w, http.StatusBadRequest, errors.New("remote_mutation_intents contains an unsupported operation"))
+		return
+	}
+	if evaluationProfile != "" && len(remoteMutationIntents) > 0 {
+		writeError(w, http.StatusBadRequest, errors.New("protected evaluation profiles forbid remote mutations"))
+		return
+	}
+	if evaluationProfile != "" && !strings.EqualFold(strings.TrimSpace(principal.Role), "admin") {
+		writeError(w, http.StatusForbidden, errors.New("admin role required for protected evaluation profile"))
+		return
+	}
 	threadID := chi.URLParam(r, "thread_id")
 	if _, err := deps.Store.GetThreadForUser(r.Context(), threadID, principal.UserID); err != nil {
 		writeStoreError(w, err)
 		return
 	}
+	req.FileIDs = uniqueTrimmedStringValues(req.FileIDs)
+	var selectedResources []domain.ResourceRecord
+	if len(req.FileIDs) > 0 {
+		catalog, ok := deps.resourceCatalogStore()
+		if !ok {
+			writeError(w, http.StatusNotImplemented, errors.New("resource catalog is not supported by this store"))
+			return
+		}
+		authorized, resources, err := authorizeRunFileIDs(r.Context(), catalog, principal, req.FileIDs)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		req.FileIDs = authorized
+		selectedResources = resources
+	}
+	req.ResourceDescriptors = withAuthorizedSelectedResourceDescriptors(
+		req.ResourceDescriptors, selectedResources, principal,
+	)
+	runMetadata := domain.JSONMap(req.Metadata)
+	if runMetadata == nil {
+		runMetadata = domain.JSONMap{}
+	}
+	// Selected-resource capabilities are derived from the catalog above.
+	// Free-form request metadata cannot mint alternate file bindings.
+	delete(runMetadata, "file_ids")
+	delete(runMetadata, "resource_descriptors")
+	delete(runMetadata, domain.EvaluationProfileMetadataKey)
+	delete(runMetadata, domain.RemoteMutationIntentsMetadataKey)
+	delete(runMetadata, domain.BisqueAccountBindingMetadataKey)
+	jobMetadata := domain.JSONMap{}
+	if sessionID, binding, bound := deps.bisqueRunBindingFromRequest(r, principal); bound {
+		runMetadata[domain.BisqueAccountBindingMetadataKey] = binding
+		jobMetadata["bisque_session_id"] = sessionID
+	} else if len(remoteMutationIntents) > 0 {
+		writeError(w, http.StatusConflict, errors.New("link a durable BisQue account before authorizing remote mutations"))
+		return
+	}
 	run, err := deps.Runs.CreateRun(r.Context(), runcontrol.CreateRunRequest{
-		ThreadID:            threadID,
-		UserID:              principal.UserID,
-		Goal:                req.Goal,
-		Messages:            req.Messages,
-		FileIDs:             req.FileIDs,
-		ResourceURIs:        req.ResourceURIs,
-		DatasetURIs:         req.DatasetURIs,
-		SelectedToolNames:   req.SelectedToolNames,
-		KnowledgeContext:    domain.JSONMap(req.KnowledgeContext),
-		WorkflowHint:        domain.JSONMap(req.WorkflowHint),
-		SelectionContext:    domain.JSONMap(req.SelectionContext),
-		ReasoningMode:       req.ReasoningMode,
-		Budgets:             domain.JSONMap(req.Budgets),
-		Benchmark:           domain.JSONMap(req.Benchmark),
-		ResourceDescriptors: req.ResourceDescriptors,
-		IdempotencyKey:      idempotencyKeyFromRequest(r, req.IdempotencyKey),
-		Metadata:            metadataWithPrincipal(domain.JSONMap(req.Metadata), principal),
-		JobMetadata:         deps.bisqueJobMetadataFromRequest(r),
+		ThreadID:              threadID,
+		UserID:                principal.UserID,
+		Goal:                  req.Goal,
+		EvaluationProfile:     evaluationProfile,
+		RemoteMutationIntents: remoteMutationIntents,
+		Messages:              req.Messages,
+		FileIDs:               req.FileIDs,
+		ResourceURIs:          req.ResourceURIs,
+		DatasetURIs:           req.DatasetURIs,
+		SelectedToolNames:     req.SelectedToolNames,
+		KnowledgeContext:      domain.JSONMap(req.KnowledgeContext),
+		WorkflowHint:          domain.JSONMap(req.WorkflowHint),
+		SelectionContext:      domain.JSONMap(req.SelectionContext),
+		ReasoningMode:         req.ReasoningMode,
+		Budgets:               domain.JSONMap(req.Budgets),
+		Benchmark:             domain.JSONMap(req.Benchmark),
+		ResourceDescriptors:   req.ResourceDescriptors,
+		IdempotencyKey:        idempotencyKeyFromRequest(r, req.IdempotencyKey),
+		Metadata:              metadataWithPrincipal(runMetadata, principal),
+		JobMetadata:           jobMetadata,
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -3365,6 +3450,10 @@ func idempotencyKeyFromRequest(r *http.Request, bodyValue string) string {
 }
 
 func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request) {
+	authority, authorized := deps.authorizeBisqueRequest(w, r, domain.RemoteMutationIntentBisqueUpload)
+	if !authorized {
+		return
+	}
 	if r.ContentLength > directUploadMaxBodyBytes {
 		writeDirectUploadTooLarge(w)
 		return
@@ -3393,7 +3482,7 @@ func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	principal := deps.principalFromRequest(r, "")
+	principal := authority.Principal
 	projectID := strings.TrimSpace(r.FormValue("project_id"))
 	uploaded := make([]uploadedFileRecord, 0, len(r.MultipartForm.File["files"]))
 	for _, header := range r.MultipartForm.File["files"] {
@@ -3401,6 +3490,9 @@ func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+		if authority.Worker {
+			record.TrustedSourceRunID = authority.Run.RunID
 		}
 		if err := deps.enforceResourceQuota(r.Context(), principal, record.ProjectID, record.SizeBytes); err != nil {
 			_ = removeUploadedFile(root, record.FileID)
@@ -3935,6 +4027,11 @@ func (deps ServerDeps) handleCompleteUploadSessionFile(w http.ResponseWriter, r 
 	// bundle is committed as one resource by finalize-bundle. The session file is marked
 	// completed against the shared bundle id so finalize knows its members are in.
 	if dest, bundle, isBundle := bundleMemberTarget(root, session, file); isBundle {
+		// Finalization snapshots the complete member set and authors one tree
+		// identity. Serialize the move + durable completed state with that
+		// snapshot so a late member can never mutate an already-cataloged tree.
+		bundleUnlock := uploadBundleLocks.Lock(session.SessionID + "\x00" + bundle.ID)
+		defer bundleUnlock()
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			_ = os.Remove(tmp)
 			writeError(w, http.StatusInternalServerError, err)
@@ -4072,37 +4169,112 @@ func (deps ServerDeps) handleFinalizeUploadBundle(w http.ResponseWriter, r *http
 		writeError(w, http.StatusBadRequest, errors.New("upload session has no directory-format bundles"))
 		return
 	}
+	// Acquire every bundle lock in deterministic order. Member completion holds
+	// exactly one of these locks, so this cannot deadlock and makes the following
+	// all-bundle preflight atomic with respect to final member installation.
+	bundleTops := make([]string, 0, len(bundles))
+	for top := range bundles {
+		bundleTops = append(bundleTops, top)
+	}
+	sort.Strings(bundleTops)
+	unlockBundles := make([]func(), 0, len(bundleTops))
+	for _, top := range bundleTops {
+		unlockBundles = append(unlockBundles, uploadBundleLocks.Lock(session.SessionID+"\x00"+bundles[top].ID))
+	}
+	defer func() {
+		for index := len(unlockBundles) - 1; index >= 0; index-- {
+			unlockBundles[index]()
+		}
+	}()
+	files, err := sessions.ListUploadSessionFiles(r.Context(), session.SessionID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	type preparedBundle struct {
+		info     bundleInfo
+		dir      string
+		identity bundleTreeIdentity
+	}
+	prepared := make([]preparedBundle, 0, len(bundleTops))
+	for _, top := range bundleTops {
+		bundle := bundles[top]
+		dir := bundleDirPath(root, bundle)
+		identity, identityErr := finalizedBundleTreeIdentity(dir, top, bundle, files)
+		if identityErr != nil {
+			writeError(w, http.StatusConflict, fmt.Errorf("directory-format bundle %q is not finalizable: %w", bundle.Name, identityErr))
+			return
+		}
+		prepared = append(prepared, preparedBundle{info: bundle, dir: dir, identity: identity})
+	}
+
 	now := domain.Now().Format(time.RFC3339Nano)
-	results := make([]uploadedFileRecord, 0, len(bundles))
-	for _, b := range bundles {
-		dir := bundleDirPath(root, b)
-		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
-			continue // no members landed for this bundle (nothing uploaded) — skip
+	results := make([]uploadedFileRecord, 0, len(prepared))
+	newlyCataloged := 0
+	catalog, hasCatalog := deps.resourceCatalogStore()
+	for _, bundle := range prepared {
+		b := bundle.info
+		if hasCatalog {
+			existing, lookupErr := catalog.GetResourceForUser(
+				r.Context(), b.ID, principal.UserID, principal.OrgID,
+			)
+			if lookupErr == nil {
+				existingPath, pathErr := resolveCatalogResourcePath(root, existing)
+				if pathErr != nil || filepath.Clean(existingPath) != filepath.Clean(bundle.dir) ||
+					existing.Status != "active" || existing.OriginalName != b.Name ||
+					existing.SizeBytes != bundle.identity.SizeBytes ||
+					!strings.EqualFold(existing.SHA256, bundle.identity.ManifestSHA256) {
+					writeError(w, http.StatusConflict, fmt.Errorf(
+						"directory-format bundle %q is already cataloged with a different immutable identity", b.Name,
+					))
+					return
+				}
+				results = append(results, deps.uploadedFileRecordFromCatalog(root, existing))
+				continue
+			}
+			if !errors.Is(lookupErr, store.ErrNotFound) {
+				writeStoreError(w, lookupErr)
+				return
+			}
+		}
+		// Bundle members are retained before they become one catalog resource.
+		// Enforce quota again on the final physical tree size so the generated
+		// manifest overhead and the aggregate member bytes are both charged.
+		if err := deps.enforceResourceQuota(
+			r.Context(), principal, session.ProjectID, bundle.identity.SizeBytes,
+		); err != nil {
+			writeResourceQuotaError(w, err)
+			return
 		}
 		record := uploadedFileRecord{
 			FileID:       b.ID,
 			OriginalName: b.Name,
 			ContentType:  "application/octet-stream",
-			SizeBytes:    dirSizeBytes(dir),
+			SizeBytes:    bundle.identity.SizeBytes,
+			SHA256:       bundle.identity.ManifestSHA256,
 			CreatedAt:    now,
 			SourceURI:    uploadSessionSourceURI(session.SessionID, b.ID),
 			ProjectID:    session.ProjectID,
 			PreviewURL:   "/v2/uploads/" + url.PathEscape(b.ID) + "/preview",
 			Principal:    principal.record(),
 		}
-		if err := deps.catalogUploadedFileAtPath(r.Context(), root, dir, record, "resource.uploaded"); err != nil {
+		if err := deps.catalogUploadedFileAtPath(r.Context(), root, bundle.dir, record, "resource.uploaded"); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		results = append(results, record)
+		newlyCataloged++
 	}
 	if len(results) == 0 {
 		writeError(w, http.StatusBadRequest, errors.New("no bundle contents found to finalize"))
 		return
 	}
-	deps.recordUploadSessionEvent(r.Context(), session, principal, "upload_session.bundle_finalized", domain.JSONMap{
-		"bundle_count": len(results),
-	})
+	if newlyCataloged > 0 {
+		deps.recordUploadSessionEvent(r.Context(), session, principal, "upload_session.bundle_finalized", domain.JSONMap{
+			"bundle_count":         newlyCataloged,
+			"tree_identity_schema": resourceTreeIdentitySchema,
+		})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"bundles": results})
 }
 
@@ -4150,6 +4322,10 @@ func (k *keyedMutex) Lock(key string) func() {
 // uploadCompletionLocks serializes /complete calls per (session, file) so a client
 // retry or double-submit can't mint two resources for one uploaded file.
 var uploadCompletionLocks keyedMutex
+
+// uploadBundleLocks serialize member installation with the final closure/identity
+// snapshot for one directory-format resource.
+var uploadBundleLocks keyedMutex
 
 // uploadContentLocks serializes the dedup-check-then-commit for identical content
 // (owner+sha+size) across different upload sessions, so two concurrent re-uploads of the
@@ -10993,23 +11169,31 @@ func (deps ServerDeps) catalogUploadedFileWithEventMetadata(ctx context.Context,
 	if record.Principal.UserID != "" {
 		resource.Principal = record.Principal
 	}
+	// Preserve the content type resolved at upload time; re-deriving from the
+	// on-disk name alone can downgrade declared types to octet-stream.
+	if contentType := strings.TrimSpace(record.ContentType); contentType != "" &&
+		contentType != "application/octet-stream" {
+		resource.ContentType = contentType
+	}
+	resource.TrustedSourceRunID = record.TrustedSourceRunID
 	return deps.catalogResourceRecordWithEventMetadata(ctx, root, resource, eventType, eventMetadata)
 }
 
 func (deps ServerDeps) catalogUploadedFileAtPath(ctx context.Context, root string, path string, record uploadedFileRecord, eventType string) error {
 	resource := resourceRecord{
-		FileID:       record.FileID,
-		OriginalName: record.OriginalName,
-		ContentType:  contentTypeForUpload(record.OriginalName, record.ContentType),
-		SizeBytes:    record.SizeBytes,
-		SHA256:       record.SHA256,
-		CreatedAt:    record.CreatedAt,
-		SourceType:   "upload",
-		ResourceKind: resourceKindForContent(record.OriginalName, record.ContentType),
-		SourceURI:    record.SourceURI,
-		ProjectID:    record.ProjectID,
-		PreviewURL:   record.PreviewURL,
-		Principal:    record.Principal,
+		FileID:             record.FileID,
+		OriginalName:       record.OriginalName,
+		ContentType:        contentTypeForUpload(record.OriginalName, record.ContentType),
+		SizeBytes:          record.SizeBytes,
+		SHA256:             record.SHA256,
+		CreatedAt:          record.CreatedAt,
+		SourceType:         "upload",
+		ResourceKind:       resourceKindForContent(record.OriginalName, record.ContentType),
+		SourceURI:          record.SourceURI,
+		ProjectID:          record.ProjectID,
+		PreviewURL:         record.PreviewURL,
+		Principal:          record.Principal,
+		TrustedSourceRunID: record.TrustedSourceRunID,
 	}
 	return deps.catalogResourceRecordAtPathWithEventMetadata(ctx, root, path, resource, eventType, nil)
 }
@@ -11083,6 +11267,31 @@ func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.
 func uploadCatalogMetadataForPath(path string, record resourceRecord) domain.JSONMap {
 	metadata := domain.JSONMap{
 		"source": "upload_store",
+	}
+	if sourceRunID := strings.TrimSpace(record.TrustedSourceRunID); sourceRunID != "" {
+		metadata["source_run_id"] = sourceRunID
+		metadata["source_authority"] = "trusted_worker_run"
+	}
+	if isCalphadTDBUpload(record.OriginalName, record.ContentType) {
+		metadata["calphad"] = domain.JSONMap{
+			"format":            "thermo-calc-tdb",
+			"validation_status": "pending_pycalphad_validation",
+			"content_sha256":    record.SHA256,
+			"size_bytes":        float64(record.SizeBytes),
+			"scientific_status": "unverified",
+			"required_provenance_fields": []string{
+				"source",
+				"license_id",
+				"assessment_scope",
+				"reference_state",
+				"tdb_temperature_limits_K",
+				domain.CalphadAssessmentPressureLimitsMetadataKey,
+			},
+		}
+		metadata["scientific_descriptors"] = []string{
+			"CALPHAD thermodynamic database",
+			"Thermo-Calc TDB",
+		}
 	}
 	if header := uploadImageHeaderMetadataForPath(path, record); len(header) > 0 {
 		metadata["image_header"] = header
@@ -14623,6 +14832,9 @@ func contentTypeForUpload(originalName string, hint string) string {
 	if isNiftiUpload(originalName, hint) {
 		return "application/x-nifti"
 	}
+	if isCalphadTDBUpload(originalName, hint) {
+		return "application/x-thermocalc-tdb"
+	}
 	extensionType := mime.TypeByExtension(strings.ToLower(filepath.Ext(originalName)))
 	hint = strings.TrimSpace(hint)
 	if hint == "" || hint == "application/octet-stream" {
@@ -14652,6 +14864,8 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "video"
 	case isTabularUpload(originalName, contentType):
 		return "table"
+	case isCalphadTDBUpload(originalName, contentType):
+		return "document"
 	case isTextDocumentUpload(originalName, contentType):
 		return "document"
 	default:
@@ -14679,6 +14893,8 @@ func isTabularUpload(originalName string, contentType string) bool {
 func isTextDocumentUpload(originalName string, contentType string) bool {
 	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
 	switch {
+	case isCalphadTDBUpload(originalName, contentType):
+		return true
 	case strings.HasPrefix(normalizedType, "text/"):
 		return true
 	case normalizedType == "application/json" || strings.HasSuffix(normalizedType, "+json"):
@@ -14698,6 +14914,16 @@ func isTextDocumentUpload(originalName string, contentType string) bool {
 		return true
 	}
 	return false
+}
+
+// isCalphadTDBUpload recognizes the plain-text Thermo-Calc TDB exchange format.
+// Scientific usability remains pending until the pinned pycalphad runtime
+// validates the immutable bytes and their explicit provenance.
+func isCalphadTDBUpload(originalName string, contentType string) bool {
+	if strings.EqualFold(strings.TrimSpace(contentType), "application/x-thermocalc-tdb") {
+		return true
+	}
+	return strings.EqualFold(filepath.Ext(strings.TrimSpace(originalName)), ".tdb")
 }
 
 func isOmeTIFFName(originalName string) bool {

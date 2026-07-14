@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from ultra_deepagents.live_trace import (
+    PAPER_TOOL_NAMES,
     ControlPlaneClient,
     _artifact_ids_from_text,
     append_followup_messages,
@@ -29,12 +30,16 @@ def _rarespot_skill_turn(
     goal: str = "Run RareSpot prairie dog detection on the uploaded image.",
     response_text: str | None = None,
 ) -> dict:
-    response = response_text or (
-        "RareSpot inference completed with 4 prairie dog detections and 2 burrow "
-        "detections. Configuration: confidence threshold 0.25, tile overlap 0.25. "
-        "Count by class: prairie dog=4, burrow=2. Detection confidence summaries and "
-        "the overlay plus detection CSV are saved for download. "
-    ) * 4
+    response = (
+        response_text
+        or (
+            "RareSpot inference completed with 4 prairie dog detections and 2 burrow "
+            "detections. Configuration: confidence threshold 0.25, tile overlap 0.25. "
+            "Count by class: prairie dog=4, burrow=2. Detection confidence summaries and "
+            "the overlay plus detection CSV are saved for download. "
+        )
+        * 4
+    )
     return summarize_run_trace(
         run={
             "run_id": "run-1",
@@ -643,7 +648,9 @@ def test_evaluate_thread_trace_quality_reports_tool_pollution_and_missing_assist
     quality = evaluate_thread_trace_quality(result)
 
     assert quality["passed"] is False
-    assert "thread transcript does not contain one user/assistant pair per turn" in quality["issues"]
+    assert (
+        "thread transcript does not contain one user/assistant pair per turn" in quality["issues"]
+    )
     assert "thread transcript contains tool/internal messages" in quality["issues"]
     assert "assistant message missing for run run-1" in quality["issues"]
     assert "thread latest_run_id does not match final user-facing run" in quality["issues"]
@@ -725,8 +732,7 @@ def test_evaluate_tool_autonomy_trace_quality_scores_multiturn_coding_work():
 def test_evaluate_tool_autonomy_trace_quality_uses_tail_for_conclusions():
     long_intro = (
         "Created a Python script and generated the requested plot artifact. "
-        "The figure is saved and downloadable. "
-        * 80
+        "The figure is saved and downloadable. " * 80
     )
     response_tail = (
         "Quantitative check: y=x^2 grows from 0 to 25 with successive "
@@ -1080,7 +1086,10 @@ def test_summarize_run_trace_extracts_tool_capability_manifest():
             "response_text": "I inspected available tools and ran the analysis.",
         },
         events=[
-            {"event_kind": "tool_call.started", "payload": {"tool_name": "tool_capability_manifest"}},
+            {
+                "event_kind": "tool_call.started",
+                "payload": {"tool_name": "tool_capability_manifest"},
+            },
             {
                 "event_kind": "tool_call.completed",
                 "payload": {
@@ -1615,8 +1624,7 @@ def test_summarize_run_trace_flags_async_required_instruction_failures():
                 "payload": {
                     "tool_name": "start_async_task",
                     "output_preview": (
-                        "start_async_task description is required for async "
-                        "subagent delegation."
+                        "start_async_task description is required for async subagent delegation."
                     ),
                 },
             },
@@ -1632,8 +1640,7 @@ def test_summarize_run_trace_flags_async_required_instruction_failures():
                 "payload": {
                     "tool_name": "update_async_task",
                     "output_preview": (
-                        "update_async_task message is required for async "
-                        "subagent delegation."
+                        "update_async_task message is required for async subagent delegation."
                     ),
                 },
             },
@@ -1982,10 +1989,7 @@ def test_evaluate_async_delegation_trace_quality_rejects_failed_async_task():
     assert quality["signals"]["no_async_failures"] is False
     assert "async subagent tool failure observed" in quality["issues"]
     assert "async task reported terminal failure status: error" in quality["issues"]
-    assert (
-        "async subagent error: training worker exhausted its retry budget"
-        in quality["issues"]
-    )
+    assert "async subagent error: training worker exhausted its retry budget" in quality["issues"]
 
 
 def test_evaluate_async_delegation_trace_quality_reports_missing_core_signals():
@@ -2028,7 +2032,9 @@ def test_evaluate_async_delegation_trace_quality_reports_missing_core_signals():
     assert quality["score"] < 8.5
     assert "one or more responses are too short for async delegation trace" in quality["issues"]
     assert "async subagent tools were not declared by any captured manifest" in quality["issues"]
-    assert "no available async subagents were declared by any captured manifest" in quality["issues"]
+    assert (
+        "no available async subagents were declared by any captured manifest" in quality["issues"]
+    )
     assert "start_async_task was not used" in quality["issues"]
     assert "no async task_id was captured" in quality["issues"]
     assert "no async task monitor tool was used" in quality["issues"]
@@ -2152,7 +2158,9 @@ def test_evaluate_tool_capability_trace_quality_reports_missing_manifest_and_unk
     assert quality["passed"] is False
     assert quality["score"] < 8.5
     assert "tool capability manifest was not called or captured" in quality["issues"]
-    assert "used tools were not declared in any captured manifest: mystery_tool" in quality["issues"]
+    assert (
+        "used tools were not declared in any captured manifest: mystery_tool" in quality["issues"]
+    )
 
 
 def test_evaluate_tool_capability_trace_quality_rejects_context_tool_host_path_leaks():
@@ -2265,9 +2273,7 @@ def test_build_tool_capability_matrix_summarizes_available_and_used_categories()
                     "execute",
                 ],
                 "tool_capability_manifests": [],
-                "artifacts": [
-                    {"kind": "report", "path": "outputs/report.md", "download_ok": True}
-                ],
+                "artifacts": [{"kind": "report", "path": "outputs/report.md", "download_ok": True}],
             }
         ],
     }
@@ -2404,9 +2410,7 @@ def test_build_tool_capability_matrix_summarizes_async_delegation():
         "statuses": ["running"],
         "errors": [],
     }
-    assert matrix["turns"][0]["available_async_subagents"] == [
-        "remote-training-runner"
-    ]
+    assert matrix["turns"][0]["available_async_subagents"] == ["remote-training-runner"]
     assert matrix["turns"][0]["capabilities"]["background_delegation"] is True
 
 
@@ -2459,12 +2463,7 @@ def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
     assert matrix["capabilities"]["delegation"]["available_subagents"] == [
         "code-runner",
     ]
-    assert (
-        matrix["capabilities"]["delegation"][
-            "scoped_subagent_context_tools_declared"
-        ]
-        is True
-    )
+    assert matrix["capabilities"]["delegation"]["scoped_subagent_context_tools_declared"] is True
     assert matrix["capabilities"]["delegation"]["scoped_subagent_context_tools"] == {
         "code-runner": [
             "artifact_manifest",
@@ -2484,6 +2483,10 @@ def test_build_tool_capability_matrix_exposes_scoped_subagent_context_tools():
     }
 
 
+def test_paper_tool_inventory_includes_exact_text_and_vlm_table_evidence() -> None:
+    assert {"bind_paper_text_literal", "extract_paper_table_evidence"}.issubset(PAPER_TOOL_NAMES)
+
+
 def test_evaluate_paper_trace_quality_scores_page_grounded_multiturn_response():
     result = {
         "prompt": {
@@ -2497,7 +2500,12 @@ def test_evaluate_paper_trace_quality_scores_page_grounded_multiturn_response():
             ),
             "artifact_count": 1,
             "artifacts": [{"kind": "figure", "download_ok": True}],
-            "tool_names": ["ingest_arxiv_paper", "search_paper", "read_paper_pages", "render_paper_page"],
+            "tool_names": [
+                "ingest_arxiv_paper",
+                "search_paper",
+                "read_paper_pages",
+                "render_paper_page",
+            ],
             "idle_recovery_count": 0,
         },
         "followups": [
@@ -2600,7 +2608,10 @@ def test_evaluate_rarespot_trace_quality_scores_multirun_analysis():
                     "the stricter pass removed lower-confidence detections."
                 ),
                 "artifact_count": 3,
-                "artifacts": [{"kind": "image", "download_ok": True}, {"kind": "csv", "download_ok": True}],
+                "artifacts": [
+                    {"kind": "image", "download_ok": True},
+                    {"kind": "csv", "download_ok": True},
+                ],
                 "tool_names": ["execute"],
                 "skill_scripts": [
                     {"skill": "prairie-dog-detection", "path": "/opt/rarespot/rarespot_detect.py"}
@@ -2895,7 +2906,10 @@ def test_evaluate_rarespot_trace_quality_rejects_report_only_skill_script_rerun(
     quality = evaluate_rarespot_trace_quality(result)
 
     assert quality["passed"] is False
-    assert "report-only RareSpot turn reran inference instead of using prior artifacts" in quality["issues"]
+    assert (
+        "report-only RareSpot turn reran inference instead of using prior artifacts"
+        in quality["issues"]
+    )
     assert quality["signals"]["report_turns_avoid_inference"] is False
 
 
@@ -3076,7 +3090,7 @@ def test_control_plane_client_uploads_files_and_returns_file_ids(tmp_path):
     assert client.upload_files([upload]) == ["file-paper"]
 
 
-def test_control_plane_client_create_run_sends_uploaded_file_ids():
+def test_control_plane_client_create_run_sends_files_and_selection_context():
     client = ControlPlaneClient("http://control.test")
     captured = {}
 
@@ -3099,11 +3113,16 @@ def test_control_plane_client_create_run_sends_uploaded_file_ids():
         messages=[{"role": "user", "content": "Read the uploaded paper."}],
         idempotency_key="key-1",
         file_ids=["file-paper"],
+        selection_context={"suggested_domain": "materials", "source": "live_trace"},
     )
 
     assert run["run_id"] == "run-1"
     assert captured["path"] == "/v2/threads/thread-1/runs"
     assert captured["payload"]["file_ids"] == ["file-paper"]
+    assert captured["payload"]["selection_context"] == {
+        "suggested_domain": "materials",
+        "source": "live_trace",
+    }
     assert captured["headers"] == {"Idempotency-Key": "key-1"}
 
 

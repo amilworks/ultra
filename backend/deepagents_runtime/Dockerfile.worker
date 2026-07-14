@@ -9,6 +9,9 @@ ENV PYTHONUNBUFFERED=1
 # ca-certificates for HTTPS; the static docker CLI lets the worker drive the host
 # Docker daemon (mounted socket) to run code in the sandbox image (execute_python).
 ARG DOCKER_CLI_VERSION=27.4.0
+ARG ULTRA_WORKER_NUMPY_VERSION=1.26.4
+ARG ULTRA_WORKER_NUMCODECS_VERSION=0.16.5
+ARG ULTRA_WORKER_ZARR_VERSION=3.1.5
 # git + ripgrep are worker-side tools: git clones repos for stage_git_repo_for_analysis
 # (host-side; the sandbox stays --network none), and ripgrep is the fast, reliable
 # backend for the filesystem grep tool (the Python fallback skips files >10 MB).
@@ -18,6 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY . /app/deepagents_runtime
-RUN pip install --no-cache-dir /app/deepagents_runtime
+# Install the numerical ABI and project in one transaction so resolver changes
+# cannot silently float the worker away from the qualified NumPy build.
+RUN pip install --no-cache-dir \
+  "numpy==${ULTRA_WORKER_NUMPY_VERSION}" \
+  "numcodecs==${ULTRA_WORKER_NUMCODECS_VERSION}" \
+  "zarr==${ULTRA_WORKER_ZARR_VERSION}" \
+  /app/deepagents_runtime
+# Build-time production import closure: these modules are imported by routed
+# materials requests before any optional imaging or development extra exists.
+RUN python -c "import numpy, numcodecs, zarr; assert numpy.__version__ == '${ULTRA_WORKER_NUMPY_VERSION}'; assert numcodecs.__version__ == '${ULTRA_WORKER_NUMCODECS_VERSION}'; assert zarr.__version__ == '${ULTRA_WORKER_ZARR_VERSION}'; import ultra_deepagents.crystal_plasticity_tools; import ultra_deepagents.degradation_characterization_tools; import ultra_deepagents.sensors.tools; import ultra_deepagents.agent"
+RUN python /app/deepagents_runtime/tests/test_sensor_worker_core_smoke.py
 # Durable run worker; compose can override `command` for other roles.
 CMD ["python", "-m", "ultra_deepagents.nats_worker"]

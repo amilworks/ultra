@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+const testCalphadRuntimeImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("ULTRA_CONTROL_APP_VERSION", "test-version")
 	cfg := Load()
@@ -53,6 +55,20 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.RunRecoveryBatchLimit <= 0 {
 		t.Fatalf("RunRecoveryBatchLimit must have a positive default")
+	}
+}
+
+func TestLoadCalphadRuntimeImagePolicy(t *testing.T) {
+	t.Setenv("ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID", "  SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA  ")
+	if got := Load().CalphadRuntimeImageID; got != testCalphadRuntimeImageID {
+		t.Fatalf("CalphadRuntimeImageID=%q, want normalized immutable image ID", got)
+	}
+}
+
+func TestValidateRejectsMutableCalphadRuntimeImagePolicy(t *testing.T) {
+	t.Parallel()
+	if err := (Config{Environment: "development", CalphadRuntimeImageID: "materials:latest"}).Validate(); err == nil || !strings.Contains(err.Error(), "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID") {
+		t.Fatalf("Validate() error=%v, want immutable CALPHAD image requirement", err)
 	}
 }
 
@@ -181,6 +197,27 @@ func TestValidateRequiresDurableBackendsInProduction(t *testing.T) {
 
 func TestValidateAllowsProductionWithPostgresAndNATS(t *testing.T) {
 	cfg := Config{
+		Environment:           "production",
+		DatabaseURL:           "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:               "nats://127.0.0.1:4222",
+		AuthProvider:          "workos",
+		WorkOSClientID:        "client_test",
+		WorkOSAPIKey:          "sk_test",
+		WorkOSRedirectURI:     "https://ultra.example.org/v2/auth/workos/callback",
+		WorkOSCookiePassword:  "workos-cookie-password-for-production-test",
+		CalphadRuntimeImageID: testCalphadRuntimeImageID,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+// With materials disabled (the default), production boot does NOT require the
+// CALPHAD runtime image ID — the control plane boots exactly as before the
+// materials work landed.
+func TestValidateWithoutMaterialsDoesNotRequireCalphadImage(t *testing.T) {
+	cfg := Config{
 		Environment:          "production",
 		DatabaseURL:          "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
 		NATSURL:              "nats://127.0.0.1:4222",
@@ -189,10 +226,33 @@ func TestValidateAllowsProductionWithPostgresAndNATS(t *testing.T) {
 		WorkOSAPIKey:         "sk_test",
 		WorkOSRedirectURI:    "https://ultra.example.org/v2/auth/workos/callback",
 		WorkOSCookiePassword: "workos-cookie-password-for-production-test",
+		// MaterialsEnabled defaults false; no CalphadRuntimeImageID.
 	}
-
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate() error = %v, want nil", err)
+		t.Fatalf("Validate() error = %v, want nil (CALPHAD image not required when materials disabled)", err)
+	}
+}
+
+// With materials enabled, the CALPHAD runtime image ID becomes required.
+func TestValidateWithMaterialsRequiresCalphadImage(t *testing.T) {
+	cfg := Config{
+		Environment:          "production",
+		MaterialsEnabled:     true,
+		DatabaseURL:          "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:              "nats://127.0.0.1:4222",
+		AuthProvider:         "workos",
+		WorkOSClientID:       "client_test",
+		WorkOSAPIKey:         "sk_test",
+		WorkOSRedirectURI:    "https://ultra.example.org/v2/auth/workos/callback",
+		WorkOSCookiePassword: "workos-cookie-password-for-production-test",
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID") {
+		t.Fatalf("Validate() error = %v, want CALPHAD image requirement when materials enabled", err)
+	}
+	cfg.CalphadRuntimeImageID = testCalphadRuntimeImageID
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil once CALPHAD image ID is supplied", err)
 	}
 }
 
@@ -231,6 +291,7 @@ func TestValidateAllowsExplicitDevAuthInProduction(t *testing.T) {
 		DevAdminEnabled:          true,
 		SecretEncryptionKey:      "01234567890123456789012345678901",
 		SecretEncryptionKeyID:    "dev-auth-production-cutover-test",
+		CalphadRuntimeImageID:    testCalphadRuntimeImageID,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -240,15 +301,16 @@ func TestValidateAllowsExplicitDevAuthInProduction(t *testing.T) {
 
 func TestValidateRequiresSecretEncryptionKeyWhenBisqueIsConfiguredInProduction(t *testing.T) {
 	cfg := Config{
-		Environment:          "production",
-		DatabaseURL:          "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
-		NATSURL:              "nats://127.0.0.1:4222",
-		BisqueRootURL:        "https://bisque.example.org",
-		AuthProvider:         "workos",
-		WorkOSClientID:       "client_test",
-		WorkOSAPIKey:         "sk_test",
-		WorkOSRedirectURI:    "https://ultra.example.org/v2/auth/workos/callback",
-		WorkOSCookiePassword: "workos-cookie-password-for-production-test",
+		Environment:           "production",
+		DatabaseURL:           "postgresql://postgres:postgres@127.0.0.1:55432/ultra",
+		NATSURL:               "nats://127.0.0.1:4222",
+		BisqueRootURL:         "https://bisque.example.org",
+		AuthProvider:          "workos",
+		WorkOSClientID:        "client_test",
+		WorkOSAPIKey:          "sk_test",
+		WorkOSRedirectURI:     "https://ultra.example.org/v2/auth/workos/callback",
+		WorkOSCookiePassword:  "workos-cookie-password-for-production-test",
+		CalphadRuntimeImageID: testCalphadRuntimeImageID,
 	}
 
 	err := cfg.Validate()

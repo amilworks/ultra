@@ -1,8 +1,15 @@
 package httpapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
@@ -19,6 +26,40 @@ import (
 // finalize step agree on the bundle id + on-disk layout.
 
 const bundlesDirName = "bundles"
+
+const (
+	resourceTreeIdentitySchema = "ultra.resource-tree-identity.v1"
+	treeManifestSchema         = "ultra.tree-manifest.v1"
+	canonicalJSONSchema        = "ultra.canonical-json.v1"
+	treeManifestPath           = ".ultra/tree-manifest.json"
+	treeIdentityScope          = "all_regular_files_except_tree_manifest"
+)
+
+// bundleTreeManifest uses lexicographically ordered JSON field declarations so
+// encoding/json emits exactly the same compact bytes as ultra.canonical-json.v1
+// for this closed, ASCII-only schema. Bundle upload paths are already restricted
+// to [A-Za-z0-9._/-], and the entries are sorted below.
+type bundleTreeManifest struct {
+	Entries []bundleTreeManifestEntry `json:"entries"`
+	Schema  string                    `json:"schema"`
+}
+
+type bundleTreeManifestEntry struct {
+	Path      string `json:"path"`
+	SHA256    string `json:"sha256"`
+	SizeBytes int64  `json:"size_bytes"`
+}
+
+type bundleTreeIdentity struct {
+	ManifestSHA256 string
+	EntryCount     int
+	SizeBytes      int64
+}
+
+type bundleTreeActualFile struct {
+	SHA256    string
+	SizeBytes int64
+}
 
 // bundleInfo identifies a directory-format bundle within an upload session.
 type bundleInfo struct {
@@ -170,6 +211,342 @@ func bundleMemberTarget(root string, session domain.UploadSessionRecord, file do
 		return "", bundleInfo{}, false
 	}
 	return dest, b, true
+}
+
+// finalizedBundleTreeIdentity builds and installs the catalog-authoritative
+// identity for a completed directory-format upload. It rereads and hashes every
+// final member under the bundle lock, compares those bytes with the SHA-256
+// authored while assembling verified chunks, proves directory closure, and
+// only then binds normalized relative paths, hashes, and sizes into a canonical
+// manifest that is atomically installed at treeManifestPath.
+//
+// treeManifestPath is server-owned final state. A client may include that path
+// in an upload (for round-trip compatibility), but its completed upload row is
+// only an ingress record: mismatched bytes are replaced and exact bytes are
+// adopted without rewriting. The manifest is excluded from its own entries to
+// avoid a self-hash cycle. SizeBytes is the physical retained size, including
+// the final server manifest; EntryCount and manifest entries exclude it.
+func finalizedBundleTreeIdentity(
+	dir string,
+	bundleTop string,
+	bundle bundleInfo,
+	files []domain.UploadSessionFileRecord,
+) (bundleTreeIdentity, error) {
+	rootInfo, err := os.Lstat(dir)
+	if err != nil {
+		return bundleTreeIdentity{}, err
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 || !rootInfo.IsDir() {
+		return bundleTreeIdentity{}, errors.New("bundle root must be a real directory")
+	}
+
+	expected := make(map[string]domain.UploadSessionFileRecord)
+	declared := make(map[string]struct{})
+	for _, file := range files {
+		if firstPathSegment(file.RelativePath) != bundleTop {
+			continue
+		}
+		relative, ok := relativeBundleMemberPath(bundleTop, bundle, file.RelativePath)
+		if !ok {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle member has an invalid relative path: %q", file.RelativePath)
+		}
+		if _, duplicate := declared[relative]; duplicate {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle contains duplicate member path %q", relative)
+		}
+		declared[relative] = struct{}{}
+		if file.Status != "completed" || file.ResourceID != bundle.ID {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle member %q is not committed", relative)
+		}
+		computedSHA := strings.ToLower(strings.TrimSpace(file.ComputedSHA256))
+		if !isSHA256Hex(computedSHA) {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle member %q has no verified sha256", relative)
+		}
+		if file.SizeBytes < 0 {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle member %q has a negative size", relative)
+		}
+		file.ComputedSHA256 = computedSHA
+		if relative == treeManifestPath {
+			continue
+		}
+		expected[relative] = file
+	}
+	if len(expected) == 0 {
+		return bundleTreeIdentity{}, errors.New("bundle has no declared members")
+	}
+
+	actual := make(map[string]bundleTreeActualFile, len(expected))
+	err = filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == dir {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("bundle contains symbolic link %q", entry.Name())
+		}
+		relative, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		relative = filepath.ToSlash(relative)
+		if relative == treeManifestPath {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			if !info.Mode().IsRegular() {
+				return errors.New("reserved tree manifest path must be a regular file")
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		actualFile, hashErr := finalizedBundleFileIdentity(path)
+		if hashErr != nil {
+			return hashErr
+		}
+		if _, duplicate := actual[relative]; duplicate {
+			return fmt.Errorf("bundle contains duplicate filesystem path %q", relative)
+		}
+		actual[relative] = actualFile
+		return nil
+	})
+	if err != nil {
+		return bundleTreeIdentity{}, err
+	}
+	if len(actual) != len(expected) {
+		return bundleTreeIdentity{}, fmt.Errorf(
+			"bundle tree closure mismatch: declared=%d actual=%d", len(expected), len(actual),
+		)
+	}
+
+	entries := make([]bundleTreeManifestEntry, 0, len(expected))
+	var totalSize int64
+	for relative, file := range expected {
+		actualFile, exists := actual[relative]
+		if !exists {
+			return bundleTreeIdentity{}, fmt.Errorf("bundle member %q is missing", relative)
+		}
+		if actualFile.SizeBytes != file.SizeBytes {
+			return bundleTreeIdentity{}, fmt.Errorf(
+				"bundle member %q size changed: declared=%d actual=%d",
+				relative, file.SizeBytes, actualFile.SizeBytes,
+			)
+		}
+		if !strings.EqualFold(actualFile.SHA256, file.ComputedSHA256) {
+			return bundleTreeIdentity{}, fmt.Errorf(
+				"bundle member %q content changed after verified upload", relative,
+			)
+		}
+		if actualFile.SizeBytes > math.MaxInt64-totalSize {
+			return bundleTreeIdentity{}, errors.New("bundle byte size overflows int64")
+		}
+		totalSize += actualFile.SizeBytes
+		entries = append(entries, bundleTreeManifestEntry{
+			Path: relative, SHA256: actualFile.SHA256, SizeBytes: actualFile.SizeBytes,
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	canonical, err := json.Marshal(bundleTreeManifest{Entries: entries, Schema: treeManifestSchema})
+	if err != nil {
+		return bundleTreeIdentity{}, err
+	}
+	digest := sha256.Sum256(canonical)
+	digestText := hex.EncodeToString(digest[:])
+	if int64(len(canonical)) > math.MaxInt64-totalSize {
+		return bundleTreeIdentity{}, errors.New("bundle byte size overflows int64")
+	}
+	manifestFile, err := authorCanonicalBundleTreeManifest(dir, canonical, digestText)
+	if err != nil {
+		return bundleTreeIdentity{}, err
+	}
+	totalSize += manifestFile.SizeBytes
+	return bundleTreeIdentity{
+		ManifestSHA256: digestText,
+		EntryCount:     len(entries),
+		SizeBytes:      totalSize,
+	}, nil
+}
+
+// authorCanonicalBundleTreeManifest installs canonical as one atomic rename on
+// the bundle filesystem. The temporary file lives beside (not inside) the
+// verified tree, so neither readers nor a retry can observe it as an undeclared
+// tree member. An already exact regular manifest is a non-mutating retry.
+func authorCanonicalBundleTreeManifest(
+	dir string,
+	canonical []byte,
+	digest string,
+) (bundleTreeActualFile, error) {
+	target := filepath.Join(dir, filepath.FromSlash(treeManifestPath))
+	if info, err := os.Lstat(target); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return bundleTreeActualFile{}, errors.New("reserved tree manifest path must be a regular file")
+		}
+		identity, identityErr := finalizedBundleFileIdentity(target)
+		if identityErr != nil {
+			return bundleTreeActualFile{}, identityErr
+		}
+		if identity.SHA256 == digest && identity.SizeBytes == int64(len(canonical)) {
+			return identity, nil
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return bundleTreeActualFile{}, err
+	}
+
+	manifestDir := filepath.Dir(target)
+	if err := os.Mkdir(manifestDir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+		return bundleTreeActualFile{}, err
+	}
+	manifestDirInfo, err := os.Lstat(manifestDir)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	if manifestDirInfo.Mode()&os.ModeSymlink != 0 || !manifestDirInfo.IsDir() {
+		return bundleTreeActualFile{}, errors.New("tree manifest parent must be a real directory")
+	}
+
+	temporary, err := os.CreateTemp(filepath.Dir(dir), ".tree-manifest-*")
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return bundleTreeActualFile{}, err
+	}
+	if _, err := temporary.Write(canonical); err != nil {
+		_ = temporary.Close()
+		return bundleTreeActualFile{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return bundleTreeActualFile{}, err
+	}
+	if err := temporary.Close(); err != nil {
+		return bundleTreeActualFile{}, err
+	}
+
+	currentManifestDir, err := os.Lstat(manifestDir)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	if currentManifestDir.Mode()&os.ModeSymlink != 0 || !currentManifestDir.IsDir() ||
+		!os.SameFile(manifestDirInfo, currentManifestDir) {
+		return bundleTreeActualFile{}, errors.New("tree manifest parent changed while finalizing")
+	}
+	if current, statErr := os.Lstat(target); statErr == nil {
+		if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() {
+			return bundleTreeActualFile{}, errors.New("reserved tree manifest path must be a regular file")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return bundleTreeActualFile{}, statErr
+	}
+	if err := os.Rename(temporaryPath, target); err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	manifestDirectory, err := os.Open(manifestDir)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	syncErr := manifestDirectory.Sync()
+	closeErr := manifestDirectory.Close()
+	if syncErr != nil {
+		return bundleTreeActualFile{}, syncErr
+	}
+	if closeErr != nil {
+		return bundleTreeActualFile{}, closeErr
+	}
+	identity, err := finalizedBundleFileIdentity(target)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	if identity.SHA256 != digest || identity.SizeBytes != int64(len(canonical)) {
+		return bundleTreeActualFile{}, errors.New("server-authored tree manifest failed verification")
+	}
+	return identity, nil
+}
+
+func finalizedBundleFileIdentity(path string) (bundleTreeActualFile, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return bundleTreeActualFile{}, fmt.Errorf("bundle contains non-regular entry %q", filepath.Base(path))
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	before, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return bundleTreeActualFile{}, err
+	}
+	if !before.Mode().IsRegular() {
+		_ = file.Close()
+		return bundleTreeActualFile{}, fmt.Errorf("bundle contains non-regular entry %q", filepath.Base(path))
+	}
+	hasher := sha256.New()
+	written, hashErr := copyWithPooledBuffer(hasher, file)
+	after, statErr := file.Stat()
+	closeErr := file.Close()
+	if hashErr != nil {
+		return bundleTreeActualFile{}, hashErr
+	}
+	if statErr != nil {
+		return bundleTreeActualFile{}, statErr
+	}
+	if closeErr != nil {
+		return bundleTreeActualFile{}, closeErr
+	}
+	if written != before.Size() || written != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		return bundleTreeActualFile{}, fmt.Errorf("bundle member %q changed while hashing", filepath.Base(path))
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return bundleTreeActualFile{}, err
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+		!os.SameFile(after, current) {
+		return bundleTreeActualFile{}, fmt.Errorf("bundle member %q changed while hashing", filepath.Base(path))
+	}
+	return bundleTreeActualFile{
+		SHA256: hex.EncodeToString(hasher.Sum(nil)), SizeBytes: written,
+	}, nil
+}
+
+func relativeBundleMemberPath(bundleTop string, bundle bundleInfo, raw string) (string, bool) {
+	safe, ok := sanitizeBundleRelPath(raw)
+	if !ok {
+		return "", false
+	}
+	parts := strings.Split(safe, "/")
+	safeTop, ok := sanitizeBundleSegment(bundleTop)
+	if !ok || safeTop != bundle.Name || len(parts) < 2 || parts[0] != safeTop {
+		return "", false
+	}
+	return strings.Join(parts[1:], "/"), true
+}
+
+func resourceTreeIdentityDescriptor(manifestSHA256 string) domain.JSONMap {
+	digest := strings.ToLower(strings.TrimSpace(manifestSHA256))
+	if !isSHA256Hex(digest) {
+		return nil
+	}
+	return domain.JSONMap{
+		"schema":                resourceTreeIdentitySchema,
+		"authority":             "control_resource_catalog",
+		"canonical_json_schema": canonicalJSONSchema,
+		"tree_manifest_schema":  treeManifestSchema,
+		"tree_manifest_path":    treeManifestPath,
+		"tree_manifest_sha256":  digest,
+		"scope":                 treeIdentityScope,
+	}
 }
 
 // dirSizeBytes sums the sizes of all regular files under dir (best-effort).

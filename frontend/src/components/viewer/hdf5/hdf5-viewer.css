@@ -145,6 +145,11 @@
   color: var(--text-muted);
 }
 
+.viewer-hdf-context-card-section .viewer-hdf-context-provenance {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
 .viewer-hdf-dashboard-card {
   min-height: 0;
   overflow: hidden;

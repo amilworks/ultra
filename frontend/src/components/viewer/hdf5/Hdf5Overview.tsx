@@ -9,6 +9,7 @@ import type { Hdf5DatasetSummary, Hdf5MaterialsDashboardResponse, UploadViewerIn
 import { Hdf5Inspector } from "./Hdf5Inspector";
 import { MaterialsHdf5Dashboard } from "./MaterialsHdf5Dashboard";
 import { Hdf5Navigator } from "./Hdf5Navigator";
+import { PhaseMetadataSummary } from "./PhaseMetadataSummary";
 import { formatCount, formatSummaryToken } from "./formatters";
 
 import "./hdf5-viewer.css";
@@ -281,12 +282,11 @@ export function Hdf5ViewerShell({
                         <p>{datasetKinds.join(" • ")}</p>
                       </div>
                     ) : null}
-                    {materials?.phase_names?.length ? (
-                      <div className="viewer-hdf-context-card-section" data-hdf5-material-phases="true">
-                        <strong>Detected phases</strong>
-                        <p>{materials.phase_names.join(" • ")}</p>
-                      </div>
-                    ) : null}
+                    <PhaseMetadataSummary
+                      phaseNames={materials?.phase_names ?? []}
+                      source={materials?.phase_names_source}
+                      provenance={materials?.phase_names_provenance}
+                    />
                     {materials?.capabilities?.length ? (
                       <div className="viewer-hdf-context-card-section">
                         <strong>Capabilities</strong>

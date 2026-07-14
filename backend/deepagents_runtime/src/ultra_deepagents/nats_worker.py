@@ -28,6 +28,7 @@ from ultra_deepagents.code_execution.cleanup import (
     reap_orphaned_sandbox_containers,
 )
 from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.evaluation_profiles import evaluation_profile_policy
 from ultra_deepagents.runner import RunEventSequencer, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
@@ -721,6 +722,12 @@ async def fetch_job_messages(
         return []
 
 
+def _should_load_user_profile(job: RunJobEnvelope) -> bool:
+    """Only ordinary jobs may consult durable control-plane profile state."""
+
+    return evaluation_profile_policy(job.evaluation_profile) is None
+
+
 # Connection-level NATS failures (dropped/drained link, no servers, stale connection)
 # that must reconnect the worker's message pump rather than crash the process and orphan
 # the in-flight run. nats.errors.Error is the base of all of them (DrainTimeoutError,
@@ -1190,9 +1197,13 @@ class NATSDeepAgentsWorker:
                         lease_keepalive.start()
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
-                    user_profile = await self._load_user_profile(job.run_id)
-                    if user_profile:
-                        resume_kwargs["user_profile"] = user_profile
+                    if _should_load_user_profile(job):
+                        user_profile = await self._load_user_profile(job.run_id)
+                        if user_profile:
+                            resume_kwargs["user_profile"] = user_profile
+                    if control_lease is not None:
+                        resume_kwargs["run_lease_worker_id"] = control_lease.worker_id
+                        resume_kwargs["run_lease_token"] = control_lease.lease_token
                     try:
                         response_text = await self._run_job(
                             job,

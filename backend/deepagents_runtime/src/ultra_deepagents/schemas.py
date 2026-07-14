@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ultra_deepagents.context import AgentRunContext
+from ultra_deepagents.evaluation_profiles import (
+    EvaluationProfileError,
+    evaluation_profile_policy,
+    normalize_evaluation_profile,
+)
 
 
 @dataclass(frozen=True)
@@ -11,6 +16,8 @@ class RunJobEnvelope:
     run_id: str
     thread_id: str
     user_id: str
+    evaluation_profile: str = ""
+    remote_mutation_intents: tuple[str, ...] = field(default_factory=tuple)
     goal: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
     file_ids: list[str] = field(default_factory=list)
@@ -27,12 +34,38 @@ class RunJobEnvelope:
     reasoning_mode: str = "auto"
     response_contract: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        profile = normalize_evaluation_profile(self.evaluation_profile)
+        object.__setattr__(self, "evaluation_profile", profile)
+        policy = evaluation_profile_policy(profile)
+        if policy is None:
+            return
+        if not str(self.goal or "").strip():
+            raise EvaluationProfileError(f"{profile} requires a non-empty goal")
+        forbidden = {
+            "dataset_uris": self.dataset_uris,
+            "file_ids": self.file_ids,
+            "knowledge_context": self.knowledge_context,
+            "resource_descriptors": self.resource_descriptors,
+            "resource_uris": self.resource_uris,
+            "remote_mutation_intents": self.remote_mutation_intents,
+        }
+        present = sorted(name for name, value in forbidden.items() if value)
+        if present:
+            raise EvaluationProfileError(
+                f"{profile} forbids selected or preloaded context: {', '.join(present)}"
+            )
+
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "RunJobEnvelope":
+    def from_dict(cls, payload: dict[str, Any]) -> RunJobEnvelope:
         return cls(
             run_id=_string(payload.get("run_id")),
             thread_id=_string(payload.get("thread_id")),
             user_id=_string(payload.get("user_id")),
+            evaluation_profile=normalize_evaluation_profile(payload.get("evaluation_profile")),
+            remote_mutation_intents=_remote_mutation_intents(
+                payload.get("remote_mutation_intents")
+            ),
             goal=_string(payload.get("goal")),
             messages=_message_list(payload.get("messages")),
             file_ids=_string_list(payload.get("file_ids")),
@@ -50,12 +83,27 @@ class RunJobEnvelope:
             response_contract=_dict(payload.get("response_contract")),
         )
 
-    def to_context(self, *, artifact_root: str, workspace_root: str) -> AgentRunContext:
+    def to_context(
+        self,
+        *,
+        artifact_root: str,
+        workspace_root: str,
+        run_lease_worker_id: str = "",
+        run_lease_token: str = "",
+    ) -> AgentRunContext:
+        policy = evaluation_profile_policy(self.evaluation_profile)
         principal = _dict(self.metadata.get("principal"))
-        org_id = _string(principal.get("org_id")) or _string(self.metadata.get("org_id")) or "local-org"
+        org_id = (
+            _string(principal.get("org_id")) or _string(self.metadata.get("org_id")) or "local-org"
+        )
         role = _string(principal.get("role")) or _string(self.metadata.get("role")) or "researcher"
         auth_claims = dict(principal)
         auth_claims.setdefault("role", role)
+        run_metadata = dict(self.metadata)
+        # Never retain a metadata lookalike for the trusted typed field. Policy
+        # decisions below use only ``RunJobEnvelope.evaluation_profile``.
+        run_metadata.pop("evaluation_profile", None)
+        run_metadata.pop("remote_mutation_intents", None)
         return AgentRunContext(
             assistant_id=_string(self.metadata.get("assistant_id")) or "ultra-research-agent",
             org_id=org_id,
@@ -65,23 +113,33 @@ class RunJobEnvelope:
             run_id=self.run_id,
             goal=self.goal,
             model_profile=_string(self.metadata.get("model_profile")) or "vllm",
-            selected_file_ids=tuple(self.file_ids),
-            selected_resource_uris=tuple(self.resource_uris),
-            selected_dataset_uris=tuple(self.dataset_uris),
-            allowed_tool_packs=tuple(self.selected_tool_names),
-            knowledge_context=dict(self.knowledge_context),
-            selection_context=dict(self.selection_context),
-            workflow_hint=dict(self.workflow_hint),
-            reasoning_mode=self.reasoning_mode,
-            benchmark=dict(self.benchmark),
-            runtime_facts=_dict(self.metadata.get("runtime_facts")),
-            run_metadata=dict(self.metadata),
-            resource_descriptors=tuple(dict(item) for item in self.resource_descriptors),
-            response_contract=dict(self.response_contract),
-            budget=dict(self.budgets),
+            evaluation_profile=self.evaluation_profile,
+            remote_mutation_intents=(
+                () if policy is not None else tuple(self.remote_mutation_intents)
+            ),
+            selected_file_ids=() if policy is not None else tuple(self.file_ids),
+            selected_resource_uris=() if policy is not None else tuple(self.resource_uris),
+            selected_dataset_uris=() if policy is not None else tuple(self.dataset_uris),
+            allowed_tool_packs=() if policy is not None else tuple(self.selected_tool_names),
+            knowledge_context={} if policy is not None else dict(self.knowledge_context),
+            selection_context={} if policy is not None else dict(self.selection_context),
+            workflow_hint={} if policy is not None else dict(self.workflow_hint),
+            reasoning_mode="auto" if policy is not None else self.reasoning_mode,
+            benchmark={} if policy is not None else dict(self.benchmark),
+            runtime_facts=({} if policy is not None else _dict(self.metadata.get("runtime_facts"))),
+            run_metadata={} if policy is not None else run_metadata,
+            resource_descriptors=(
+                ()
+                if policy is not None
+                else tuple(dict(item) for item in self.resource_descriptors)
+            ),
+            response_contract={} if policy is not None else dict(self.response_contract),
+            budget={} if policy is not None else dict(self.budgets),
             auth_claims=auth_claims,
             artifact_root=artifact_root,
             workspace_root=workspace_root,
+            run_lease_worker_id=run_lease_worker_id,
+            run_lease_token=run_lease_token,
         )
 
 
@@ -107,6 +165,18 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list | tuple):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _remote_mutation_intents(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list | tuple):
+        return ()
+    if any(not isinstance(item, str) for item in value):
+        return ()
+    requested = {item.strip().lower() for item in value}
+    allowed_order = ("bisque.upload", "bisque.create_dataset")
+    if any(item not in allowed_order for item in requested):
+        return ()
+    return tuple(item for item in allowed_order if item in requested)
 
 
 def _message_list(value: Any) -> list[dict[str, Any]]:

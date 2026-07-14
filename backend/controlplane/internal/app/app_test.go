@@ -70,6 +70,22 @@ func TestNewRejectsUnreachablePostgresBeforeServing(t *testing.T) {
 	}
 }
 
+func TestNewProductionServingRejectsMigrationCredentials(t *testing.T) {
+	t.Parallel()
+	_, err := New(config.Config{
+		Environment:              "production",
+		DatabaseURL:              "postgresql://serving:serving@127.0.0.1:1/ultra",
+		MigrationDatabaseURL:     "postgresql://migration:migration@127.0.0.1:1/ultra",
+		NATSURL:                  "nats://127.0.0.1:4222",
+		CalphadRuntimeImageID:    "sha256:" + strings.Repeat("a", 64),
+		AuthProvider:             "dev",
+		AllowDevAuthInProduction: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "must not receive ULTRA_CONTROL_MIGRATION_DATABASE_URL") {
+		t.Fatalf("New() error=%v, want migration credential isolation", err)
+	}
+}
+
 func TestPostgresPoolConfigAppliesConnectionLimits(t *testing.T) {
 	t.Parallel()
 
@@ -518,5 +534,63 @@ func TestMigratePostgresRejectsUnreachablePostgres(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "postgres") {
 		t.Fatalf("MigratePostgres() error = %q, want Postgres context", err)
+	}
+}
+
+func TestMigratePostgresProductionRequiresSeparateRoleOnSameDatabase(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		servingURL   string
+		migrationURL string
+		want         string
+	}{
+		{
+			name:         "same role",
+			servingURL:   "postgresql://same:one@127.0.0.1:1/ultra",
+			migrationURL: "postgresql://same:two@127.0.0.1:1/ultra",
+			want:         "distinct non-empty roles",
+		},
+		{
+			name:         "different database",
+			servingURL:   "postgresql://serving:one@127.0.0.1:1/ultra",
+			migrationURL: "postgresql://migration:two@127.0.0.1:1/other",
+			want:         "same database",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := MigratePostgres(context.Background(), config.Config{
+				Environment: "production", DatabaseURL: test.servingURL,
+				MigrationDatabaseURL: test.migrationURL,
+				MaterialsEnabled:     true,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("MigratePostgres() error=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// With materials disabled (the default), production migrations run with the
+// single serving role — the two-role split is a materials-only requirement, so
+// the schema applies exactly as it did before the materials work landed.
+func TestMigratePostgresWithoutMaterialsAllowsSingleRole(t *testing.T) {
+	t.Parallel()
+	err := MigratePostgres(context.Background(), config.Config{
+		Environment: "production",
+		DatabaseURL: "postgresql://single:pw@127.0.0.1:1/ultra",
+		// no MigrationDatabaseURL, MaterialsEnabled defaults false
+	})
+	// It must NOT reject on the role split; it proceeds to connect (and fails on
+	// the unreachable :1 host, which is the expected non-materials path).
+	if err == nil {
+		t.Fatalf("MigratePostgres() error = nil, want an unreachable-Postgres error")
+	}
+	for _, forbidden := range []string{"distinct non-empty roles", "MIGRATION_DATABASE_URL is required", "same database"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("MigratePostgres() error=%q must not enforce the materials two-role split when materials is disabled", err)
+		}
 	}
 }

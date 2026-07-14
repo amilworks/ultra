@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,95 @@ from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import artifact_source_path
 
+_BISQUE_UPLOAD_VERB = (
+    r"(?:upload(?:s|ed|ing)?|push(?:es|ed|ing)?|publish(?:es|ed|ing)?|"
+    r"send(?:s|ing)?|sent|cop(?:y|ies|ied|ying))"
+)
+_BISQUE_DATASET_VERB = (
+    r"(?:creat(?:e|es|ed|ing)|mak(?:e|es|ing)|made|"
+    r"group(?:s|ed|ing)?|organiz(?:e|es|ed|ing))"
+)
+_BISQUE_NEGATION = r"(?:do\s+not|don't|never|without|cannot|can't|shouldn't|mustn't)"
+_BISQUE_REMOTE_DESTINATION = (
+    r"(?:(?:(?:my|the|our|your|their|a|an)\s+)?(?:linked\s+)?"
+    r"bisque(?:\s+(?:account|server|instance))?|"
+    r"(?:(?:my|the|our|your|their|a|an)\s+)?(?:linked\s+)?"
+    r"(?:account|server|instance)\s+(?:in|on)\s+bisque)"
+)
+_BISQUE_UPLOAD_INTENT = re.compile(
+    rf"\b{_BISQUE_UPLOAD_VERB}\b[^.!?,;\n]{{0,96}}"
+    rf"\b(?:to|into|onto|on|in|via|using)\s+{_BISQUE_REMOTE_DESTINATION}\b|"
+    rf"\b{_BISQUE_REMOTE_DESTINATION}\b\s*[:;,-]?\s*\b{_BISQUE_UPLOAD_VERB}\b",
+    re.IGNORECASE,
+)
+_BISQUE_UPLOAD_DENIAL = re.compile(
+    rf"\b{_BISQUE_NEGATION}\b[^.!?\n]{{0,48}}\b{_BISQUE_UPLOAD_VERB}\b|"
+    rf"\b{_BISQUE_UPLOAD_VERB}\b[^.!?\n]{{0,32}}\b(?:not|nothing|no\s+files?)\b",
+    re.IGNORECASE,
+)
+_BISQUE_DATASET_INTENT = re.compile(
+    rf"\b{_BISQUE_DATASET_VERB}\b[^.!?,;\n]{{0,96}}(?:"
+    rf"\b{_BISQUE_REMOTE_DESTINATION}\s+dataset\b|"
+    rf"\bdataset\b[^.!?,;\n]{{0,32}}\b(?:in|on|into|within|under)\s+"
+    rf"{_BISQUE_REMOTE_DESTINATION}\b)",
+    re.IGNORECASE,
+)
+_BISQUE_DATASET_DENIAL = re.compile(
+    rf"\b{_BISQUE_NEGATION}\b[^.!?\n]{{0,48}}\b{_BISQUE_DATASET_VERB}\b"
+    rf"[^.!?\n]{{0,48}}\bdataset\b|"
+    rf"\b{_BISQUE_DATASET_VERB}\b[^.!?\n]{{0,32}}\b(?:no|not)\b"
+    rf"[^.!?\n]{{0,32}}\bdataset\b|"
+    rf"\b{_BISQUE_DATASET_VERB}\b[^.!?\n]{{0,32}}\blocal\b"
+    rf"[^.!?\n]{{0,32}}\bdataset\b",
+    re.IGNORECASE,
+)
+_BISQUE_NON_CONSENT = re.compile(
+    r"\b(?:if\s+(?:i|we)|explain\s+how|how\s+(?:do|can|could|would)|"
+    r"can\s+(?:ultra|you)|could\s+(?:ultra|you)|would\s+(?:ultra|you)|"
+    r"did(?:\s+not|n't)\s+ask)\b",
+    re.IGNORECASE,
+)
+
+
+def _bisque_mutation_authorized(context: AgentRunContext | None, action: str) -> bool:
+    """Require the exact server-authored run capability for this operation."""
+
+    if context is None:
+        return False
+    required = {
+        "upload": "bisque.upload",
+        "create_dataset": "bisque.create_dataset",
+    }.get(action)
+    return bool(required and required in tuple(context.remote_mutation_intents))
+
+
+def bisque_mutation_goal_authorized(goal: str, action: str) -> bool:
+    """Accept only an explicit verb plus a BisQue remote destination in this turn."""
+
+    goal = str(goal or "").strip()
+    if _BISQUE_NON_CONSENT.search(goal):
+        return False
+    if action == "upload":
+        return not _BISQUE_UPLOAD_DENIAL.search(goal) and bool(_BISQUE_UPLOAD_INTENT.search(goal))
+    if action == "create_dataset":
+        return not _BISQUE_DATASET_DENIAL.search(goal) and bool(_BISQUE_DATASET_INTENT.search(goal))
+    return False
+
+
+def _blocked_bisque_mutation(action: str) -> str:
+    return _json_text(
+        {
+            "ok": False,
+            "blocked": True,
+            "error": "explicit_user_request_required",
+            "action": action,
+            "message": (
+                "This mutating BisQue action is outside the immutable capability granted when "
+                "the current run was created. Local /outputs artifacts are collected automatically."
+            ),
+        }
+    )
+
 
 def control_post_json(
     settings: RuntimeSettings,
@@ -19,12 +109,13 @@ def control_post_json(
     payload: dict[str, Any],
     *,
     context: AgentRunContext | None = None,
+    timeout: float = 60.0,
 ) -> dict[str, Any]:
     """Post to the Go control plane without forwarding model/provider credentials."""
     import httpx
 
     url = f"{settings.control_base_url.rstrip('/')}/{path.lstrip('/')}"
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         response = client.post(
             url,
             json=payload,
@@ -108,6 +199,97 @@ def search_bisque_resources(
     )
 
 
+def bisque_dataset_member_count(
+    settings: RuntimeSettings,
+    *,
+    dataset_uniq: str = "",
+    resource_uri: str = "",
+    limit: int = 0,
+    offset: int = 0,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """Return the TRUE member count of a BisQue dataset (and page its members).
+
+    Reads the dataset resource's own member list, so it answers "how many images
+    are in this dataset" correctly — unlike a scoped image search, which counts
+    the whole owner+shared pool.
+    """
+    ref = str(dataset_uniq or "").strip() or str(resource_uri or "").strip()
+    if not ref:
+        return {"ok": False, "error": "dataset_uniq_required"}
+    payload: dict[str, Any] = {"dataset_uniq": ref}
+    if int(limit or 0) > 0:
+        payload["limit"] = int(limit)
+    if int(offset or 0) > 0:
+        payload["offset"] = int(offset)
+    response = control_post_json(settings, "/v2/bisque/dataset-members", payload, context=context)
+    if isinstance(response, dict) and "ok" not in response:
+        response["ok"] = "member_count" in response
+    return response
+
+
+def bisque_image_annotation_count(
+    settings: RuntimeSettings,
+    *,
+    image_uniq: str = "",
+    resource_uri: str = "",
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """Return the number of graphical (gobject) annotation shapes on one image.
+
+    Walks the full nested gobject tree (BisQue nests shapes under class groups,
+    e.g. gt2 -> burrow -> many rectangles) and counts the primitive shapes
+    (rectangle/polygon/point/...), not the group containers. Returns
+    annotation_count (total shapes) and label_counts (shapes per class label,
+    e.g. {"burrow": 29, "prairie_dog": 9}).
+    """
+    ref = str(image_uniq or "").strip() or str(resource_uri or "").strip()
+    if not ref:
+        return {"ok": False, "error": "image_uniq_required"}
+    response = control_post_json(
+        settings, "/v2/bisque/image-annotations", {"image_uniq": ref}, context=context
+    )
+    if isinstance(response, dict) and "ok" not in response:
+        response["ok"] = "annotation_count" in response
+    return response
+
+
+def bisque_dataset_annotation_summary(
+    settings: RuntimeSettings,
+    *,
+    dataset_uniq: str = "",
+    resource_uri: str = "",
+    max_images: int = 0,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """Answer "how many images in this dataset have annotations".
+
+    Scans every member image for graphical (gobject) annotation shapes and
+    returns images_with_annotations, total_annotations (total shapes across the
+    dataset), label_totals (shapes per class, e.g. {"burrow": 118,
+    "prairie_dog": 30}), and the per-image annotated list. May take up to a
+    minute for a several-thousand-member dataset.
+    """
+    ref = str(dataset_uniq or "").strip() or str(resource_uri or "").strip()
+    if not ref:
+        return {"ok": False, "error": "dataset_uniq_required"}
+    payload: dict[str, Any] = {"dataset_uniq": ref}
+    if int(max_images or 0) > 0:
+        payload["max_images"] = int(max_images)
+    # A dataset-wide scan probes each member image; give the control plane room
+    # to finish a few-thousand-member sweep before the client times out.
+    response = control_post_json(
+        settings,
+        "/v2/bisque/dataset-annotations",
+        payload,
+        context=context,
+        timeout=600.0,
+    )
+    if isinstance(response, dict) and "ok" not in response:
+        response["ok"] = "images_with_annotations" in response
+    return response
+
+
 def list_bisque_module_runs(
     settings: RuntimeSettings,
     *,
@@ -146,7 +328,9 @@ def list_bisque_module_runs(
     ]
     return {
         "ok": True,
-        "count": response.get("count", len(summary)) if isinstance(response, dict) else len(summary),
+        "count": response.get("count", len(summary))
+        if isinstance(response, dict)
+        else len(summary),
         "runs": summary,
     }
 
@@ -203,16 +387,16 @@ def download_bisque_resources(
             results.append(_control_failure_result(resource, exc))
             continue
 
-        resource_uploads = [
-            item
-            for item in response.get("uploaded", [])
-            if isinstance(item, dict)
-        ] if isinstance(response.get("uploaded"), list) else []
-        resource_imports = [
-            item
-            for item in response.get("imports", [])
-            if isinstance(item, dict)
-        ] if isinstance(response.get("imports"), list) else []
+        resource_uploads = (
+            [item for item in response.get("uploaded", []) if isinstance(item, dict)]
+            if isinstance(response.get("uploaded"), list)
+            else []
+        )
+        resource_imports = (
+            [item for item in response.get("imports", []) if isinstance(item, dict)]
+            if isinstance(response.get("imports"), list)
+            else []
+        )
         uploaded.extend(resource_uploads)
         imports.extend(resource_imports)
         results.append(
@@ -246,15 +430,11 @@ def upload_bisque_outputs(
     artifact_ids: list[str] | None = None,
     context: AgentRunContext | None = None,
 ) -> dict[str, Any]:
-    cleaned = [
-        str(file_id).strip()
-        for file_id in (file_ids or [])
-        if str(file_id).strip()
-    ]
+    if not _bisque_mutation_authorized(context, "upload"):
+        return json.loads(_blocked_bisque_mutation("upload"))
+    cleaned = [str(file_id).strip() for file_id in (file_ids or []) if str(file_id).strip()]
     cleaned_artifacts = [
-        str(artifact_id).strip()
-        for artifact_id in (artifact_ids or [])
-        if str(artifact_id).strip()
+        str(artifact_id).strip() for artifact_id in (artifact_ids or []) if str(artifact_id).strip()
     ]
     try:
         return control_post_json(
@@ -289,6 +469,8 @@ def upload_bisque_workspace_files(
 ) -> dict[str, Any]:
     if context is None:
         return {"ok": False, "error": "missing_run_context"}
+    if not _bisque_mutation_authorized(context, "upload"):
+        return json.loads(_blocked_bisque_mutation("upload"))
     targets, missing = _resolve_bisque_upload_targets(paths, context)
     if not targets:
         return {
@@ -328,15 +510,21 @@ def upload_bisque_workspace_files(
                 except OSError:
                     pass
         uploaded = upload_response.get("uploaded")
-        file_ids = [
-            str(item.get("file_id") or "").strip()
-            for item in uploaded
-            if isinstance(item, dict) and str(item.get("file_id") or "").strip()
-        ] if isinstance(uploaded, list) else []
+        file_ids = (
+            [
+                str(item.get("file_id") or "").strip()
+                for item in uploaded
+                if isinstance(item, dict) and str(item.get("file_id") or "").strip()
+            ]
+            if isinstance(uploaded, list)
+            else []
+        )
         result["control_upload"] = upload_response
         result["uploaded_file_ids"] = file_ids
         if file_ids:
-            bisque_upload = upload_bisque_outputs(settings, file_ids=file_ids, artifact_ids=[], context=context)
+            bisque_upload = upload_bisque_outputs(
+                settings, file_ids=file_ids, artifact_ids=[], context=context
+            )
             result["bisque_upload_files"] = bisque_upload
             result["pushed"].extend(_collect_pushed(bisque_upload, "workspace_file"))
         else:
@@ -347,7 +535,9 @@ def upload_bisque_workspace_files(
     if artifact_targets:
         artifact_ids = [target.artifact_id for target in artifact_targets]
         result["artifact_ids"] = artifact_ids
-        bisque_upload = upload_bisque_outputs(settings, file_ids=[], artifact_ids=artifact_ids, context=context)
+        bisque_upload = upload_bisque_outputs(
+            settings, file_ids=[], artifact_ids=artifact_ids, context=context
+        )
         result["bisque_upload_artifacts"] = bisque_upload
         result["pushed"].extend(_collect_pushed(bisque_upload, "durable_artifact"))
 
@@ -401,6 +591,8 @@ def create_bisque_dataset(
     members = _string_list(resource_uris)
     if not members:
         return {"ok": False, "error": "no_member_resource_uris"}
+    if not _bisque_mutation_authorized(context, "create_dataset"):
+        return json.loads(_blocked_bisque_mutation("create_dataset"))
     response = control_post_json(
         settings,
         "/v2/bisque/datasets",
@@ -412,7 +604,11 @@ def create_bisque_dataset(
     return response
 
 
-def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
+def build_bisque_tools(
+    settings: RuntimeSettings,
+    *,
+    context: AgentRunContext | None = None,
+) -> list[Any]:
     @tool
     def bisque_search_resources(
         runtime: ToolRuntime[AgentRunContext],
@@ -437,6 +633,14 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         results, name_contains for filename fragments, and extensions such as ["png"]
         or ["nii", "nii.gz"] for file-type searches. Set count_all=True only when the
         user asks for an inventory count or total.
+
+        Do NOT use this to count images IN a specific dataset or to find images
+        with annotations — a scoped image search counts the whole owner+shared
+        pool, not a dataset's members, and there is no "annotation" resource type.
+        For "how many images are in dataset X" use bisque_dataset_members; for
+        "how many images have annotations" use bisque_dataset_annotation_summary;
+        for one image's annotations use bisque_image_annotations. Use this tool
+        first only to locate the dataset's resource_uniq (resource_type="dataset").
 
         For NUMERIC metadata tag comparisons (age, slice count, dose, year, etc.) use
         metadata_filters, NOT tag_query — BisQue compares numeric tags lexically, so
@@ -470,6 +674,82 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         )
 
     @tool
+    def bisque_dataset_members(
+        runtime: ToolRuntime[AgentRunContext],
+        dataset_uniq: str = "",
+        limit: int = 0,
+        offset: int = 0,
+    ) -> str:
+        """Count and list the member images of a BisQue dataset.
+
+        Use this to answer "how many images are in dataset X" — it reads the
+        dataset's own membership, so it is correct even for a shared dataset.
+        Do NOT answer dataset size with bisque_search_resources(resource_type=
+        "image", count_all=True): that counts every image visible to the user
+        (their own + everything shared with them), not this dataset's members.
+
+        Pass dataset_uniq (the dataset's resource_uniq, e.g. 00-38LMdmudw4LFsFRQ39XFSc,
+        obtainable from bisque_search_resources(resource_type="dataset")).
+        Returns member_count plus a page of members (use limit/offset to page).
+        """
+        return _json_text(
+            bisque_dataset_member_count(
+                settings,
+                dataset_uniq=dataset_uniq,
+                limit=limit,
+                offset=offset,
+                context=runtime.context,
+            )
+        )
+
+    @tool
+    def bisque_image_annotations(
+        runtime: ToolRuntime[AgentRunContext],
+        image_uniq: str = "",
+    ) -> str:
+        """Count the graphical (gobject) annotations on one BisQue image.
+
+        Use this to determine whether an image has annotations and how many.
+        BisQue graphical annotations are gobjects attached to the image (the
+        overlay layers shown in the viewer), and they are NESTED — shapes sit
+        under class groups (e.g. gt2 -> burrow -> many rectangles). This tool
+        walks the full tree and counts the actual shapes. There is no top-level
+        "annotation" resource — do NOT search resource_type="annotation" (it is
+        not a real BisQue type). Pass the image's resource_uniq. Returns
+        annotation_count (total shapes) and label_counts (shapes per class,
+        e.g. {"burrow": 29, "prairie_dog": 9}).
+        """
+        return _json_text(
+            bisque_image_annotation_count(
+                settings, image_uniq=image_uniq, context=runtime.context
+            )
+        )
+
+    @tool
+    def bisque_dataset_annotation_summary(
+        runtime: ToolRuntime[AgentRunContext],
+        dataset_uniq: str = "",
+        max_images: int = 0,
+    ) -> str:
+        """Answer "how many images in this dataset have associated annotations".
+
+        Scans every member image of the dataset for graphical (gobject)
+        annotations and returns member_count, images_with_annotations,
+        total_annotations, and the list of annotated images (with names and
+        counts). This is the correct way to answer annotation-coverage questions
+        about a dataset; it may take up to a minute for a large dataset. Pass the
+        dataset's resource_uniq.
+        """
+        return _json_text(
+            bisque_dataset_annotation_summary(
+                settings,
+                dataset_uniq=dataset_uniq,
+                max_images=max_images,
+                context=runtime.context,
+            )
+        )
+
+    @tool
     def bisque_download_resource(
         runtime: ToolRuntime[AgentRunContext],
         resource_uri: str = "",
@@ -479,7 +759,9 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         resources = _resource_list(resource_uri, resource_uris)
         if not resources:
             resources = list(runtime.context.selected_resource_uris)
-        return _json_text(download_bisque_resources(settings, resources=resources, context=runtime.context))
+        return _json_text(
+            download_bisque_resources(settings, resources=resources, context=runtime.context)
+        )
 
     @tool
     def bisque_upload_files(
@@ -493,6 +775,8 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         opens the resource in the web viewer. Report that URL to the user, not the bare
         resource_uri (the data_service API URL).
         """
+        if not _bisque_mutation_authorized(runtime.context, "upload"):
+            return _blocked_bisque_mutation("upload")
         selected = _string_list(file_ids)
         if not selected:
             selected = list(runtime.context.selected_file_ids)
@@ -520,7 +804,11 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         durable artifacts — this tool resolves them automatically and pushes them by
         artifact_id, so "push these resulting images to BisQue" works across turns.
         """
-        return _json_text(upload_bisque_workspace_files(settings, paths=paths, context=runtime.context))
+        if not _bisque_mutation_authorized(runtime.context, "upload"):
+            return _blocked_bisque_mutation("upload")
+        return _json_text(
+            upload_bisque_workspace_files(settings, paths=paths, context=runtime.context)
+        )
 
     @tool
     def bisque_create_dataset(
@@ -534,6 +822,8 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
         bisque_upload_workspace_files, or bisque_search_resources. Use this after
         uploading multiple related outputs so they appear as one dataset in BisQue.
         """
+        if not _bisque_mutation_authorized(runtime.context, "create_dataset"):
+            return _blocked_bisque_mutation("create_dataset")
         return _json_text(
             create_bisque_dataset(
                 settings,
@@ -579,14 +869,19 @@ def build_bisque_tools(settings: RuntimeSettings) -> list[Any]:
             )
         )
 
-    return [
+    resolved = [
         bisque_search_resources,
+        bisque_dataset_members,
+        bisque_image_annotations,
+        bisque_dataset_annotation_summary,
         bisque_download_resource,
-        bisque_upload_files,
-        bisque_upload_workspace_files,
-        bisque_create_dataset,
         bisque_module_runs,
     ]
+    if _bisque_mutation_authorized(context, "upload"):
+        resolved.extend([bisque_upload_files, bisque_upload_workspace_files])
+    if _bisque_mutation_authorized(context, "create_dataset"):
+        resolved.append(bisque_create_dataset)
+    return resolved
 
 
 def _control_headers(
@@ -604,6 +899,12 @@ def _control_headers(
     run_id = str(context.run_id or "").strip()
     if run_id:
         headers["X-Ultra-Run-Id"] = run_id
+    lease_worker_id = str(context.run_lease_worker_id or "").strip()
+    lease_token = str(context.run_lease_token or "").strip()
+    if lease_worker_id:
+        headers["X-Ultra-Worker-Id"] = lease_worker_id
+    if lease_token:
+        headers["X-Ultra-Run-Lease-Token"] = lease_token
     session_id = str(context.run_metadata.get("bisque_session_id") or "").strip()
     if session_id:
         headers["X-Ultra-Bisque-Session-Id"] = session_id
@@ -746,7 +1047,9 @@ def _resolve_current_run_host_file(raw: str, context: AgentRunContext) -> Path |
             resolved = candidate.resolve()
         except OSError:
             continue
-        if not (_path_is_under(resolved, workspace_root) or _path_is_under(resolved, artifact_root)):
+        if not (
+            _path_is_under(resolved, workspace_root) or _path_is_under(resolved, artifact_root)
+        ):
             continue
         if resolved.exists() and resolved.is_file():
             return resolved
@@ -779,7 +1082,9 @@ def _match_prior_artifact_descriptor(
         # Deterministic: prefer the most recently created artifact when several
         # prior figures share a basename.
         basename_matches.sort(
-            key=lambda descriptor: str(descriptor.get("created_at") or descriptor.get("run_id") or ""),
+            key=lambda descriptor: str(
+                descriptor.get("created_at") or descriptor.get("run_id") or ""
+            ),
             reverse=True,
         )
         return basename_matches[0]
@@ -875,7 +1180,13 @@ def _metadata_filter_list(
             continue
         op = str(item.get("op") or item.get("operator") or "eq").strip().lower() or "eq"
         filter_value = item.get("value")
-        filters.append({"tag": tag, "op": op, "value": "" if filter_value is None else str(filter_value).strip()})
+        filters.append(
+            {
+                "tag": tag,
+                "op": op,
+                "value": "" if filter_value is None else str(filter_value).strip(),
+            }
+        )
     return filters
 
 

@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,7 @@ from ultra_deepagents.context import AgentRunContext
 
 
 def test_async_delegation_middleware_uses_public_sdk_instead_of_private_deepagents_helpers():
-    source_path = (
-        Path(__file__).parents[1]
-        / "src"
-        / "ultra_deepagents"
-        / "async_delegation.py"
-    )
+    source_path = Path(__file__).parents[1] / "src" / "ultra_deepagents" / "async_delegation.py"
     tree = ast.parse(source_path.read_text())
 
     private_deepagents_imports = []
@@ -552,9 +548,7 @@ def test_start_async_task_persists_failed_launch_after_thread_created(monkeypatc
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
-    assert "Failed to launch async subagent 'remote-training-runner'" in str(
-        message.content
-    )
+    assert "Failed to launch async subagent 'remote-training-runner'" in str(message.content)
     assert "task_id: async-thread-1" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
     assert task["task_id"] == "async-thread-1"
@@ -592,9 +586,7 @@ def test_start_async_task_persists_malformed_run_response_after_thread_created(m
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
-    assert "Failed to launch async subagent 'remote-training-runner'" in str(
-        message.content
-    )
+    assert "Failed to launch async subagent 'remote-training-runner'" in str(message.content)
     assert "missing run_id" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
     assert task["task_id"] == "async-thread-1"
@@ -633,9 +625,7 @@ def test_astart_async_task_persists_malformed_run_response_after_thread_created(
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
-    assert "Failed to launch async subagent 'remote-training-runner'" in str(
-        message.content
-    )
+    assert "Failed to launch async subagent 'remote-training-runner'" in str(message.content)
     assert "missing run_id" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
     assert task["run_id"] == "__ultra_async_launch_failed__"
@@ -672,9 +662,7 @@ def test_start_async_task_rejects_malformed_thread_response_before_task_state(
 
     assert isinstance(result, ToolMessage)
     assert result.tool_call_id == "call-start-async-task"
-    assert "Failed to launch async subagent 'remote-training-runner'" in str(
-        result.content
-    )
+    assert "Failed to launch async subagent 'remote-training-runner'" in str(result.content)
     assert "missing thread_id" in str(result.content)
 
 
@@ -707,9 +695,7 @@ def test_astart_async_task_rejects_malformed_thread_response_before_task_state(
 
     assert isinstance(result, ToolMessage)
     assert result.tool_call_id == "call-start-async-task"
-    assert "Failed to launch async subagent 'remote-training-runner'" in str(
-        result.content
-    )
+    assert "Failed to launch async subagent 'remote-training-runner'" in str(result.content)
     assert "missing thread_id" in str(result.content)
 
 
@@ -1878,8 +1864,7 @@ def test_async_subagent_context_payload_preserves_remote_safe_artifact_storage_u
                 "run_id": "prior-run",
                 "kind": "report",
                 "storage_uri": (
-                    "https://control.example.test/v2/artifacts/"
-                    "artifact-control-download/download"
+                    "https://control.example.test/v2/artifacts/artifact-control-download/download"
                 ),
             },
             {
@@ -1887,10 +1872,7 @@ def test_async_subagent_context_payload_preserves_remote_safe_artifact_storage_u
                 "artifact_id": "artifact-presigned",
                 "run_id": "prior-run",
                 "kind": "model",
-                "storage_uri": (
-                    "https://storage.example.test/model.bin"
-                    "?X-Amz-Signature=secret"
-                ),
+                "storage_uri": ("https://storage.example.test/model.bin?X-Amz-Signature=secret"),
             },
             {
                 "type": "artifact",
@@ -1908,8 +1890,7 @@ def test_async_subagent_context_payload_preserves_remote_safe_artifact_storage_u
     )
 
     descriptors = {
-        descriptor["artifact_id"]: descriptor
-        for descriptor in payload["resource_descriptors"]
+        descriptor["artifact_id"]: descriptor for descriptor in payload["resource_descriptors"]
     }
     assert descriptors["artifact-object"]["remote_storage_uri"] == (
         "s3://ultra-artifacts/local-org/prior-run/result.csv"
@@ -1961,6 +1942,80 @@ def test_async_subagent_context_payload_strips_parent_local_selection_uris():
         "dataset://cells",
         "bisque://dataset/2",
     ]
+
+
+def test_async_subagent_context_preserves_safe_selected_tdb_catalog_binding():
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="local-org",
+        user_id="researcher-1",
+        project_id="local-project",
+        thread_id="thread-async",
+        run_id="run-async",
+        selected_file_ids=("file-tdb",),
+        resource_descriptors=(
+            {
+                "type": "selected_resource",
+                "binding_schema": "ultra.selected_resource.v1",
+                "authority": "control_resource_catalog",
+                "resource_id": "file-tdb",
+                "file_id": "file-tdb",
+                "original_name": "Al-Co-W.tdb",
+                "database_format": "tdb",
+                "content_type": "application/x-thermocalc-tdb",
+                "resource_kind": "document",
+                "source_type": "upload",
+                "sha256": "a" * 64,
+                "size_bytes": 21274,
+                "storage_uri": "file:///private/catalog/Al-Co-W.tdb",
+                "metadata": {
+                    "calphad": {
+                        "source_uri": "https://materials.example.test/assessment",
+                        "license_id": "owner-authorized-use",
+                        "assessment_scope": "owner-declared Al-Co-W scope",
+                        "reference_state": "SER",
+                        "assessment_pressure_limits_Pa": [101325.0, 101325.0],
+                        "validation_status": "forged-validated",
+                        "credentials": {"token": "secret"},
+                    }
+                },
+            },
+        ),
+    )
+
+    payload = async_subagent_context_payload(context, subagent_name="materials-analyst")
+
+    assert payload["selected_file_ids"] == ["file-tdb"]
+    assert payload["resource_descriptors"] == [
+        {
+            "type": "selected_resource",
+            "binding_schema": "ultra.selected_resource.v1",
+            "authority": "control_resource_catalog",
+            "resource_id": "file-tdb",
+            "file_id": "file-tdb",
+            "original_name": "Al-Co-W.tdb",
+            "database_format": "tdb",
+            "content_type": "application/x-thermocalc-tdb",
+            "resource_kind": "document",
+            "source_type": "upload",
+            "sha256": "a" * 64,
+            "size_bytes": 21274,
+            "metadata": {
+                "calphad": {
+                    "source_uri": "https://materials.example.test/assessment",
+                    "license_id": "owner-authorized-use",
+                    "assessment_scope": "owner-declared Al-Co-W scope",
+                    "reference_state": "SER",
+                    "assessment_pressure_limits_Pa": [101325.0, 101325.0],
+                    "declaration_authority": "resource_owner",
+                }
+            },
+        }
+    ]
+    encoded = json.dumps(payload)
+    assert "file:///private" not in encoded
+    assert "forged-validated" not in encoded
+    assert "secret" not in encoded
 
 
 def test_async_subagent_context_payload_strips_private_and_signed_url_references():
@@ -2097,10 +2152,10 @@ def test_async_subagent_context_payload_strips_nested_secrets_and_local_paths():
                 "local_path": r"C:\Users\researcher\private.nd2",
             },
         },
-		workflow_hint={
-			"kind": "training",
-			"cookie": "operator-cookie-placeholder",
-		},
+        workflow_hint={
+            "kind": "training",
+            "cookie": "operator-cookie-placeholder",
+        },
         benchmark={
             "max_runtime_seconds": 30,
             "scratch_dir": "../private/scratch",
@@ -2109,11 +2164,11 @@ def test_async_subagent_context_payload_strips_nested_secrets_and_local_paths():
             "format": "markdown",
             "authorization": "Bearer secret",
         },
-		budget={
-			"max_tokens": 4000,
-			"api_key": "api-key-placeholder",
-			"github-token": "github-token-placeholder",
-		},
+        budget={
+            "max_tokens": 4000,
+            "api_key": "api-key-placeholder",
+            "github-token": "github-token-placeholder",
+        },
         sandbox_policy={
             "network": "none",
             "mount_path": "/srv/ultra/private",
@@ -2281,9 +2336,7 @@ def test_list_async_tasks_returns_tool_message_for_malformed_terminal_task():
 
     assert isinstance(result, ToolMessage)
     assert result.tool_call_id == "call-list-async-tasks-malformed"
-    assert "Async subagent task is missing required state: async-thread-1" in str(
-        result.content
-    )
+    assert "Async subagent task is missing required state: async-thread-1" in str(result.content)
 
 
 def test_alist_async_tasks_returns_tool_message_for_malformed_terminal_task():
@@ -2297,9 +2350,7 @@ def test_alist_async_tasks_returns_tool_message_for_malformed_terminal_task():
 
     assert isinstance(result, ToolMessage)
     assert result.tool_call_id == "call-list-async-tasks-malformed"
-    assert "Async subagent task is missing required state: async-thread-1" in str(
-        result.content
-    )
+    assert "Async subagent task is missing required state: async-thread-1" in str(result.content)
 
 
 def test_check_async_task_returns_tool_message_when_subagent_has_no_sync_url():

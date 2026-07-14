@@ -99,6 +99,42 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 	}
 }
 
+func TestGetResourceForUserSQLCContractIncludesPublicShareGrants(t *testing.T) {
+	t.Parallel()
+
+	source, err := os.ReadFile("queries.sql")
+	if err != nil {
+		t.Fatalf("read queries.sql: %v", err)
+	}
+	generated, err := os.ReadFile("sqlc/queries.sql.go")
+	if err != nil {
+		t.Fatalf("read generated sqlc queries: %v", err)
+	}
+	publicPredicate := "COALESCE(g.grantee_user_id, '') = '__public__'"
+	for _, contract := range []struct {
+		name  string
+		text  string
+		start string
+		end   string
+	}{
+		{name: "queries.sql", text: string(source), start: "-- name: GetResourceForUser :one", end: "-- name: GetResourceForOwner :one"},
+		{name: "generated sqlc", text: string(generated), start: "const getResourceForUser = `", end: "type GetResourceForUserParams struct"},
+	} {
+		start := strings.Index(contract.text, contract.start)
+		if start < 0 {
+			t.Fatalf("%s missing %q", contract.name, contract.start)
+		}
+		endOffset := strings.Index(contract.text[start:], contract.end)
+		if endOffset < 0 {
+			t.Fatalf("%s missing %q after GetResourceForUser", contract.name, contract.end)
+		}
+		section := contract.text[start : start+endOffset]
+		if !strings.Contains(section, publicPredicate) {
+			t.Fatalf("%s GetResourceForUser omits active public grants", contract.name)
+		}
+	}
+}
+
 func TestResourceSearchQueriesUseMetadataValuesNotSerializedJSONKeys(t *testing.T) {
 	t.Parallel()
 

@@ -1,0 +1,1035 @@
+name: Materials Production Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact lowercase commit SHA selected from main
+        required: true
+        type: string
+      source_ref:
+        description: Protected source ref (main only)
+        required: true
+        default: refs/heads/main
+        type: choice
+        options:
+          - refs/heads/main
+      domain_image_ref:
+        description: Preloaded deterministic-domain image by OCI digest
+        required: true
+        type: string
+      domain_image_id:
+        description: Expected deterministic-domain Docker config ID (sha256:...)
+        required: true
+        type: string
+      runtime_image_ref:
+        description: Preloaded production scientific sandbox by OCI digest
+        required: true
+        type: string
+      runtime_image_id:
+        description: Expected production sandbox Docker config ID (sha256:...)
+        required: true
+        type: string
+      evaluator_image_ref:
+        description: Preloaded MatTools evaluator image by OCI digest
+        required: true
+        type: string
+      evaluator_image_id:
+        description: Expected MatTools evaluator Docker config ID (sha256:...)
+        required: true
+        type: string
+      operator_public_key_sha256:
+        description: Reviewed SHA-256 of security/release-operator-public.pem
+        required: true
+        type: string
+      mattools_license_basis:
+        description: Approved benchmark-use basis reviewed by the protected environment
+        required: true
+        type: choice
+        options:
+          - noncommercial
+          - separately_licensed
+
+# One qualification campaign may execute at a time. Never cancel a campaign: its
+# restricted evidence closure must reach a terminal state.
+concurrency:
+  group: materials-production-qualification
+  cancel-in-progress: false
+
+# Every job declares its own minimum permissions.
+permissions: {}
+
+env:
+  EXPECTED_REPOSITORY: amilworks/ultra
+  EXPECTED_REPOSITORY_ID: "1204778765"
+  EXPECTED_OWNER_ID: "22850980"
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  SOURCE_REF: ${{ inputs.source_ref }}
+  DOMAIN_IMAGE_REF: ${{ inputs.domain_image_ref }}
+  DOMAIN_IMAGE_ID: ${{ inputs.domain_image_id }}
+  RUNTIME_IMAGE_REF: ${{ inputs.runtime_image_ref }}
+  RUNTIME_IMAGE_ID: ${{ inputs.runtime_image_id }}
+  EVALUATOR_IMAGE_REF: ${{ inputs.evaluator_image_ref }}
+  EVALUATOR_IMAGE_ID: ${{ inputs.evaluator_image_id }}
+  OPERATOR_PUBLIC_KEY_SHA256: ${{ inputs.operator_public_key_sha256 }}
+  MATTOOLS_LICENSE_BASIS: ${{ inputs.mattools_license_basis }}
+  WORKFLOW_PATH: .github/workflows/materials-production-qualification.yml
+
+jobs:
+  qualify:
+    name: Protected ARM64 materials qualification
+    environment:
+      name: materials-production-qualification
+    # This runner group must admit only one-shot runners registered with
+    # `--ephemeral`; the labels are part of the protected environment contract.
+    runs-on:
+      group: materials-production-qualification-ephemeral
+      labels:
+        - self-hosted
+        - Linux
+        - ARM64
+    # Leave a one-hour safety margin before the GITHUB_TOKEN 24-hour expiry.
+    # Eight isolated attempts keep the 147-run worst case below this bound even
+    # when each batch consumes the full 30-minute poll cap and both evaluator
+    # replays consume their full two-hour caps. Incomplete campaigns still block.
+    timeout-minutes: 1380
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARCHIVE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}/evidence
+      EVIDENCE_ROOT_MANIFEST: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}/materials-evidence-root-v1.json
+      LEDGER_PG_CONTAINER: ultra-materials-ledger-${{ github.run_id }}-${{ github.run_attempt }}
+      CROSS_LANGUAGE_PG_CONTAINER: ultra-materials-cross-language-${{ github.run_id }}-${{ github.run_attempt }}
+      POSTGRES_IMAGE_REF: ${{ vars.MATERIALS_POSTGRES_IMAGE_REF }}
+      RELEASE_GOARCH: ${{ vars.MATERIALS_RELEASE_GOARCH }}
+      RUNTIME_PYMATGEN_VERSION: ${{ vars.MATERIALS_RUNTIME_PYMATGEN_VERSION }}
+      RUNTIME_DEFECTS_VERSION: ${{ vars.MATERIALS_RUNTIME_DEFECTS_VERSION }}
+      MATTOOLS_LICENSE_EVIDENCE_SHA256: ${{ vars.MATTOOLS_LICENSE_EVIDENCE_SHA256 }}
+      MATTOOLS_LICENSE_EVIDENCE_PATH: ${{ vars.MATTOOLS_LICENSE_EVIDENCE_PATH }}
+      MATTOOLS_BENCHMARK_ROOT: ${{ vars.MATTOOLS_BENCHMARK_ROOT }}
+      MATTOOLS_USE_PURPOSE: ${{ vars.MATTOOLS_USE_PURPOSE }}
+      MATTOOLS_SANDBOX_ATTESTATION: ${{ vars.MATTOOLS_SANDBOX_ATTESTATION }}
+      MATTOOLS_SANDBOX_SIGNATURE: ${{ vars.MATTOOLS_SANDBOX_SIGNATURE }}
+      MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}
+      MATERIALS_RESTRICTED_EVIDENCE_STORE_POLICY: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_POLICY }}
+      ULTRA_LIVE_TRACE_BASE_URL: ${{ vars.ULTRA_LIVE_TRACE_BASE_URL }}
+
+    steps:
+      - name: Check out the exact immutable source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fail closed on invocation, trust anchor, and runner policy
+        env:
+          ULTRA_LIVE_TRACE_COOKIE: ${{ secrets.ULTRA_LIVE_TRACE_COOKIE }}
+          ULTRA_LIVE_TRACE_AUTHORIZATION: ${{ secrets.ULTRA_LIVE_TRACE_AUTHORIZATION }}
+        run: |
+          set -euo pipefail
+
+          sha_re='^[0-9a-f]{40}$'
+          sha256_re='^[0-9a-f]{64}$'
+          image_id_re='^sha256:[0-9a-f]{64}$'
+          digest_ref_re='^[-A-Za-z0-9._/:]+@sha256:[0-9a-f]{64}$'
+
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REPOSITORY}" == "${EXPECTED_REPOSITORY}" ]]
+          [[ "${GITHUB_REPOSITORY_ID}" == "${EXPECTED_REPOSITORY_ID}" ]]
+          [[ "${GITHUB_REPOSITORY_OWNER_ID}" == "${EXPECTED_OWNER_ID}" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${SOURCE_REF}" == "refs/heads/main" ]]
+          [[ "${SOURCE_SHA}" =~ ${sha_re} ]]
+          [[ "${GITHUB_SHA}" == "${SOURCE_SHA}" ]]
+          [[ "${GITHUB_WORKFLOW_SHA}" == "${SOURCE_SHA}" ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${RUNNER_OS}" == "Linux" ]]
+          [[ "${RUNNER_ARCH}" == "ARM64" ]]
+          [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]
+
+          [[ "${DOMAIN_IMAGE_REF}" =~ ${digest_ref_re} ]]
+          [[ "${RUNTIME_IMAGE_REF}" =~ ${digest_ref_re} ]]
+          [[ "${EVALUATOR_IMAGE_REF}" =~ ${digest_ref_re} ]]
+          [[ "${POSTGRES_IMAGE_REF}" =~ ${digest_ref_re} ]]
+          [[ "${DOMAIN_IMAGE_ID}" =~ ${image_id_re} ]]
+          [[ "${RUNTIME_IMAGE_ID}" =~ ${image_id_re} ]]
+          [[ "${EVALUATOR_IMAGE_ID}" =~ ${image_id_re} ]]
+          [[ "${OPERATOR_PUBLIC_KEY_SHA256}" =~ ${sha256_re} ]]
+          case "${MATTOOLS_LICENSE_BASIS}" in
+            noncommercial)
+              [[ -z "${MATTOOLS_LICENSE_EVIDENCE_SHA256}" ]]
+              [[ -z "${MATTOOLS_LICENSE_EVIDENCE_PATH}" ]]
+              ;;
+            separately_licensed)
+              [[ "${MATTOOLS_LICENSE_EVIDENCE_SHA256}" =~ ${sha256_re} ]]
+              [[ -f "${MATTOOLS_LICENSE_EVIDENCE_PATH}" ]]
+              [[ ! -L "${MATTOOLS_LICENSE_EVIDENCE_PATH}" ]]
+              observed_license_sha256="$(sha256sum "${MATTOOLS_LICENSE_EVIDENCE_PATH}" | awk '{print $1}')"
+              [[ "${observed_license_sha256}" == "${MATTOOLS_LICENSE_EVIDENCE_SHA256}" ]]
+              license_evidence_size="$(stat -c '%s' "${MATTOOLS_LICENSE_EVIDENCE_PATH}")"
+              [[ "${license_evidence_size}" -gt 0 ]]
+              [[ "${license_evidence_size}" -le 16777216 ]]
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          [[ "${RELEASE_GOARCH}" == "amd64" || "${RELEASE_GOARCH}" == "arm64" ]]
+          [[ "${RUNTIME_PYMATGEN_VERSION}" =~ ^[-A-Za-z0-9._+]+$ ]]
+          [[ "${RUNTIME_DEFECTS_VERSION}" =~ ^[-A-Za-z0-9._+]+$ ]]
+
+          [[ -d "${MATTOOLS_BENCHMARK_ROOT}" ]]
+          [[ ! -L "${MATTOOLS_BENCHMARK_ROOT}" ]]
+          [[ -f "${MATTOOLS_SANDBOX_ATTESTATION}" ]]
+          [[ ! -L "${MATTOOLS_SANDBOX_ATTESTATION}" ]]
+          [[ -f "${MATTOOLS_SANDBOX_SIGNATURE}" ]]
+          [[ ! -L "${MATTOOLS_SANDBOX_SIGNATURE}" ]]
+          [[ -d "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}" ]]
+          [[ ! -L "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}" ]]
+          [[ "${MATERIALS_RESTRICTED_EVIDENCE_STORE_POLICY}" == "restricted-encrypted-worm-v1" ]]
+          [[ -n "${MATTOOLS_USE_PURPOSE}" ]]
+          [[ -n "${ULTRA_LIVE_TRACE_BASE_URL}" ]]
+          [[ -n "${ULTRA_LIVE_TRACE_COOKIE}" || -n "${ULTRA_LIVE_TRACE_AUTHORIZATION}" ]]
+
+          key_path="security/release-operator-public.pem"
+          [[ -f "${key_path}" ]]
+          [[ ! -L "${key_path}" ]]
+          [[ -s "${key_path}" ]]
+          git ls-files --error-unmatch -- "${key_path}" >/dev/null
+          git diff --quiet -- "${key_path}"
+          git diff --cached --quiet -- "${key_path}"
+          observed_key_sha256="$(sha256sum "${key_path}" | awk '{print $1}')"
+          [[ "${observed_key_sha256}" == "${OPERATOR_PUBLIC_KEY_SHA256}" ]]
+
+          for required_command in docker git go node openssl pnpm python3 sha256sum tar uv; do
+            command -v "${required_command}" >/dev/null
+          done
+
+          workflow_sha256="$(sha256sum "${WORKFLOW_PATH}" | awk '{print $1}')"
+          echo "WORKFLOW_SHA256=${workflow_sha256}" >> "${GITHUB_ENV}"
+          qualification_root="${RUNNER_TEMP}/materials-production-qualification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "QUALIFICATION_ROOT=${qualification_root}" >> "${GITHUB_ENV}"
+          echo "PUBLIC_ENVELOPE=${qualification_root}/public/materials-release-envelope-v1.json" >> "${GITHUB_ENV}"
+          echo "RELEASE_WORK_DIR=${qualification_root}/release-work" >> "${GITHUB_ENV}"
+
+      - name: Initialize private evidence workspace
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ ! -e "${QUALIFICATION_ROOT}" ]]
+          [[ ! -e "${ARCHIVE_ROOT}" ]]
+          restricted_root="$(realpath -e "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}")"
+          [[ "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}" == "${restricted_root}" ]]
+          expected_archive_root="${restricted_root}/${EXPECTED_REPOSITORY_ID}/${SOURCE_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "${ARCHIVE_ROOT}" == "${expected_archive_root}" ]]
+          repository_archive_root="${restricted_root}/${EXPECTED_REPOSITORY_ID}"
+          source_archive_root="${repository_archive_root}/${SOURCE_SHA}"
+          for parent in "${repository_archive_root}" "${source_archive_root}"; do
+            if [[ -e "${parent}" ]]; then
+              [[ -d "${parent}" ]]
+              [[ ! -L "${parent}" ]]
+            else
+              mkdir -m 0700 "${parent}"
+            fi
+          done
+          mkdir -m 0700 "${ARCHIVE_ROOT}"
+          mkdir -p \
+            "${EVIDENCE_ROOT}/deterministic" \
+            "${EVIDENCE_ROOT}/production-parity" \
+            "${EVIDENCE_ROOT}/calphad-ledger" \
+            "${EVIDENCE_ROOT}/calphad-cross-language" \
+            "${EVIDENCE_ROOT}/live-trace/retained-validation" \
+            "${EVIDENCE_ROOT}/license" \
+            "${EVIDENCE_ROOT}/mattools" \
+            "${EVIDENCE_ROOT}/operator-logs" \
+            "${EVIDENCE_ROOT}/readiness" \
+            "${EVIDENCE_ROOT}/release" \
+            "$(dirname "${PUBLIC_ENVELOPE}")"
+
+      - name: Retain exact separate-license evidence when required
+        run: |
+          set -euo pipefail
+          retained_license="${EVIDENCE_ROOT}/license/license-evidence.bin"
+          if [[ "${MATTOOLS_LICENSE_BASIS}" == "separately_licensed" ]]; then
+            install -m 0400 "${MATTOOLS_LICENSE_EVIDENCE_PATH}" "${retained_license}"
+            observed_sha256="$(sha256sum "${retained_license}" | awk '{print $1}')"
+            [[ "${observed_sha256}" == "${MATTOOLS_LICENSE_EVIDENCE_SHA256}" ]]
+          else
+            [[ ! -e "${retained_license}" ]]
+          fi
+
+      - name: Verify exact preloaded image identities
+        run: |
+          set -euo pipefail
+
+          verify_image() {
+            local image_ref="$1"
+            local expected_id="$2"
+            local observed_id
+            observed_id="$(docker image inspect --format '{{.Id}}' "${image_ref}")"
+            [[ "${observed_id}" == "${expected_id}" ]]
+          }
+
+          verify_image "${DOMAIN_IMAGE_REF}" "${DOMAIN_IMAGE_ID}"
+          verify_image "${RUNTIME_IMAGE_REF}" "${RUNTIME_IMAGE_ID}"
+          verify_image "${EVALUATOR_IMAGE_REF}" "${EVALUATOR_IMAGE_ID}"
+
+          domain_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${DOMAIN_IMAGE_REF}")"
+          runtime_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "${RUNTIME_IMAGE_REF}")"
+          [[ "${domain_revision}" == "${SOURCE_SHA}" ]]
+          [[ "${runtime_revision}" == "${SOURCE_SHA}" ]]
+
+          # The reviewed evaluator tooling uses this fixed local name. It is
+          # rebound only after the digest reference and config ID agree.
+          docker image tag "${EVALUATOR_IMAGE_REF}" mat-tool-ben
+
+      - name: Build and extract the immutable release artifact
+        env:
+          RELEASE_SHA: ${{ inputs.source_sha }}
+          RELEASE_NAME: ${{ inputs.source_sha }}
+          RELEASE_OUT_DIR: ${{ env.EVIDENCE_ROOT }}/release
+          GOOS: linux
+          GOARCH: ${{ env.RELEASE_GOARCH }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+
+          scripts/release_codescan.sh
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+          RELEASE_WORK_DIR="${RELEASE_WORK_DIR}" scripts/build_ultra_release_artifact.sh \
+            > "${EVIDENCE_ROOT}/operator-logs/release-build.log" 2>&1
+
+          release_tarball="${RELEASE_OUT_DIR}/ultra-release-${SOURCE_SHA}.tar.gz"
+          release_manifest="${RELEASE_OUT_DIR}/release-manifest-${SOURCE_SHA}.json"
+          [[ -f "${release_tarball}" ]]
+          [[ -f "${release_manifest}" ]]
+          (
+            cd "${RELEASE_OUT_DIR}"
+            sha256sum --check "ultra-release-${SOURCE_SHA}.tar.gz.sha256"
+          )
+
+          extracted_parent="${QUALIFICATION_ROOT}/release-extracted"
+          [[ ! -e "${extracted_parent}" ]]
+          mkdir -p "${extracted_parent}"
+          tar -xzf "${release_tarball}" -C "${extracted_parent}"
+          release_root="${extracted_parent}/${SOURCE_SHA}"
+          [[ -f "${release_root}/release-manifest.json" ]]
+          [[ ! -e "${release_root}/.git" ]]
+
+          echo "MATERIALS_RELEASE_ROOT=${release_root}" >> "${GITHUB_ENV}"
+          echo "RELEASE_TARBALL=${release_tarball}" >> "${GITHUB_ENV}"
+          echo "RELEASE_MANIFEST=${release_manifest}" >> "${GITHUB_ENV}"
+
+      - name: Run deterministic materials gate in its exact image
+        env:
+          MATERIALS_DOMAIN_GATE_IMAGE: ${{ inputs.domain_image_ref }}
+          MATERIALS_DOMAIN_GATE_SKIP_BUILD: "1"
+          MATERIALS_DOMAIN_GATE_REQUIRE_CLEAN_PROVENANCE: "1"
+          MATERIALS_DOMAIN_GATE_REPORT_DIR: ${{ env.EVIDENCE_ROOT }}/deterministic
+        run: |
+          set -euo pipefail
+          export MATERIALS_DOMAIN_GATE_IMAGE_DIGEST="${DOMAIN_IMAGE_REF##*@}"
+          make materials-domain-gate \
+            > "${EVIDENCE_ROOT}/operator-logs/deterministic-domain.log" 2>&1
+          [[ -f "${MATERIALS_DOMAIN_GATE_REPORT_DIR}/materials-domain-gate.json" ]]
+
+      - name: Run full production-image parity from the release tree
+        env:
+          MATERIALS_EXPECTED_GIT_SHA: ${{ inputs.source_sha }}
+          MATERIALS_PRODUCTION_PARITY_IMAGE: ${{ inputs.runtime_image_ref }}
+          MATERIALS_PRODUCTION_PARITY_REPORT_DIR: ${{ env.EVIDENCE_ROOT }}/production-parity
+        run: |
+          set -euo pipefail
+          make materials-production-parity \
+            > "${EVIDENCE_ROOT}/operator-logs/production-parity.log" 2>&1
+          mapfile -t reports < <(find "${MATERIALS_PRODUCTION_PARITY_REPORT_DIR}" -maxdepth 1 -type f -name 'production-materials-sandbox-parity-*.json' -print)
+          [[ "${#reports[@]}" -eq 1 ]]
+
+      - name: Qualify CALPHAD ledger in a fresh PostgreSQL database
+        env:
+          MATERIALS_EXPECTED_GIT_SHA: ${{ inputs.source_sha }}
+          MATERIALS_CALPHAD_LEDGER_OUTPUT_DIR: ${{ env.EVIDENCE_ROOT }}/calphad-ledger
+        run: |
+          set -euo pipefail
+
+          admin_password="$(openssl rand -hex 24)"
+          serving_password="$(openssl rand -hex 24)"
+          echo "::add-mask::${admin_password}"
+          echo "::add-mask::${serving_password}"
+
+          docker run --detach --pull always \
+            --name "${LEDGER_PG_CONTAINER}" \
+            --publish 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql:rw,nosuid,nodev,size=4g \
+            --env POSTGRES_DB=ultra_calphad_ledger_qualification \
+            --env POSTGRES_USER=postgres \
+            --env "POSTGRES_PASSWORD=${admin_password}" \
+            "${POSTGRES_IMAGE_REF}" >/dev/null
+
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec "${LEDGER_PG_CONTAINER}" pg_isready -U postgres -d ultra_calphad_ledger_qualification >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "${ready}" == "true" ]]
+
+          port="$(docker port "${LEDGER_PG_CONTAINER}" 5432/tcp)"
+          port="${port##*:}"
+          [[ "${port}" =~ ^[0-9]+$ ]]
+          docker exec "${LEDGER_PG_CONTAINER}" \
+            psql -U postgres -d ultra_calphad_ledger_qualification -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE ultra_calphad_serving LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '${serving_password}'" >/dev/null
+
+          ULTRA_CONTROL_TEST_DATABASE_URL="postgresql://ultra_calphad_serving:${serving_password}@127.0.0.1:${port}/ultra_calphad_ledger_qualification" \
+          ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL="postgresql://postgres:${admin_password}@127.0.0.1:${port}/ultra_calphad_ledger_qualification" \
+          MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED=dedicated-test-database \
+            make calphad-ledger-qualification \
+              > "${EVIDENCE_ROOT}/operator-logs/calphad-ledger.log" 2>&1
+
+          mapfile -t reports < <(find "${MATERIALS_CALPHAD_LEDGER_OUTPUT_DIR}" -maxdepth 1 -type f -name 'calphad-ledger-postgres-qualification-*.json' -print)
+          [[ "${#reports[@]}" -eq 1 ]]
+
+      - name: Qualify typed CALPHAD through a separate fresh PostgreSQL database
+        env:
+          MATERIALS_EXPECTED_GIT_SHA: ${{ inputs.source_sha }}
+          MATERIALS_CALPHAD_CROSS_LANGUAGE_IMAGE: ${{ inputs.runtime_image_ref }}
+          MATERIALS_EXPECTED_CROSS_LANGUAGE_IMAGE: ${{ inputs.runtime_image_id }}
+          MATERIALS_CALPHAD_CROSS_LANGUAGE_OUTPUT_DIR: ${{ env.EVIDENCE_ROOT }}/calphad-cross-language
+        run: |
+          set -euo pipefail
+
+          admin_password="$(openssl rand -hex 24)"
+          serving_password="$(openssl rand -hex 24)"
+          echo "::add-mask::${admin_password}"
+          echo "::add-mask::${serving_password}"
+
+          docker run --detach --pull always \
+            --name "${CROSS_LANGUAGE_PG_CONTAINER}" \
+            --publish 127.0.0.1::5432 \
+            --tmpfs /var/lib/postgresql:rw,nosuid,nodev,size=4g \
+            --env POSTGRES_DB=ultra_calphad_cross_language_qualification \
+            --env POSTGRES_USER=postgres \
+            --env "POSTGRES_PASSWORD=${admin_password}" \
+            "${POSTGRES_IMAGE_REF}" >/dev/null
+
+          ready=false
+          for attempt in $(seq 1 60); do
+            if docker exec "${CROSS_LANGUAGE_PG_CONTAINER}" pg_isready -U postgres -d ultra_calphad_cross_language_qualification >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "${ready}" == "true" ]]
+
+          port="$(docker port "${CROSS_LANGUAGE_PG_CONTAINER}" 5432/tcp)"
+          port="${port##*:}"
+          [[ "${port}" =~ ^[0-9]+$ ]]
+          docker exec "${CROSS_LANGUAGE_PG_CONTAINER}" \
+            psql -U postgres -d ultra_calphad_cross_language_qualification -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE ultra_calphad_serving LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT PASSWORD '${serving_password}'" >/dev/null
+
+          ULTRA_CONTROL_TEST_DATABASE_URL="postgresql://ultra_calphad_serving:${serving_password}@127.0.0.1:${port}/ultra_calphad_cross_language_qualification" \
+          ULTRA_CONTROL_TEST_MIGRATION_DATABASE_URL="postgresql://postgres:${admin_password}@127.0.0.1:${port}/ultra_calphad_cross_language_qualification" \
+          MATERIALS_CALPHAD_QUALIFICATION_CONFIRMED=dedicated-test-database \
+            make calphad-cross-language-qualification \
+              > "${EVIDENCE_ROOT}/operator-logs/calphad-cross-language.log" 2>&1
+
+          mapfile -t reports < <(find "${MATERIALS_CALPHAD_CROSS_LANGUAGE_OUTPUT_DIR}" -maxdepth 1 -type f -name 'calphad-cross-language-qualification-*.json' -print)
+          [[ "${#reports[@]}" -eq 1 ]]
+          [[ -f "${MATERIALS_CALPHAD_CROSS_LANGUAGE_OUTPUT_DIR}/report_manifest.json" ]]
+
+      - name: Run designated live CALPHAD trace with retained validation bytes
+        env:
+          ULTRA_LIVE_TRACE_COOKIE: ${{ secrets.ULTRA_LIVE_TRACE_COOKIE }}
+          ULTRA_LIVE_TRACE_AUTHORIZATION: ${{ secrets.ULTRA_LIVE_TRACE_AUTHORIZATION }}
+        run: |
+          set -euo pipefail
+
+          trace_path="${EVIDENCE_ROOT}/live-trace/materials-live-trace.json"
+          PYTHONDONTWRITEBYTECODE=1 uv run --frozen \
+            --project "${MATERIALS_RELEASE_ROOT}/backend/deepagents_runtime" \
+            --python 3.11 python -m ultra_deepagents.live_trace \
+            --base-url "${ULTRA_LIVE_TRACE_BASE_URL}" \
+            --title "Materials production CALPHAD qualification ${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
+            --prompt "Use the uploaded reviewed NIST Wang-2017 Al-Co-W database through the typed CALPHAD tools. Inspect it, then compute global equilibrium over all 18 declared phases at T=1173 K, P=101325 Pa, X(CO)=0.26, and X(W)=0.065. Verify the expected AL4W, AL5CO2, and BCC_B2 three-phase field, phase/vertex closure, bulk reconstruction, and Gibbs-Euler residual; explain the same-assessment evidence scope and provenance; return a downloadable materials_validation.json with all scientific checks verified." \
+            --upload-file "${MATERIALS_RELEASE_ROOT}/backend/deepagents_runtime/materials_data/calphad/alcow_CALPHAD-2017-Wang.tdb" \
+            --upload-calphad-manifest "${MATERIALS_RELEASE_ROOT}/backend/deepagents_runtime/materials_data/calphad/manifest.json" \
+            --suggested-domain materials \
+            --timeout 1800 \
+            --poll-interval 2 \
+            --http-timeout 30 \
+            --verify-downloads \
+            --require-downloads \
+            --min-artifacts 1 \
+            --min-response-chars 200 \
+            --materials-quality \
+            --require-materials-quality \
+            --min-materials-quality-score 9.0 \
+            --materials-performance \
+            --require-materials-performance \
+            --materials-max-model-calls 8 \
+            --materials-max-input-tokens 250000 \
+            --materials-max-tool-calls 12 \
+            --materials-max-input-amplification 6.0 \
+            --materials-evidence-dir "${EVIDENCE_ROOT}/live-trace/retained-validation" \
+            > "${trace_path}" \
+            2> "${EVIDENCE_ROOT}/operator-logs/live-trace.log"
+          [[ -s "${trace_path}" ]]
+
+      - name: Verify evaluator and run exactly three complete MatTools trials
+        env:
+          MATTOOLS_EVALUATOR_ENV_LOCK: deploy/docker/mattools-evaluator-linux-arm64-lock.json
+          MATTOOLS_OUTPUT_DIR: ${{ env.EVIDENCE_ROOT }}/mattools
+          MATTOOLS_LICENSE_BASIS: ${{ env.MATTOOLS_LICENSE_BASIS }}
+          MATTOOLS_LICENSE_EVIDENCE_SHA256: ${{ env.MATTOOLS_LICENSE_EVIDENCE_SHA256 }}
+          MATTOOLS_SANDBOX_PUBLIC_KEY: security/release-operator-public.pem
+          MATTOOLS_EVALUATOR_IMAGE_ID: ${{ inputs.evaluator_image_id }}
+          MATTOOLS_CONCURRENCY: "8"
+          ULTRA_RUNTIME_IMAGE_DIGEST: ${{ inputs.runtime_image_id }}
+          ULTRA_RUNTIME_PYMATGEN_VERSION: ${{ env.RUNTIME_PYMATGEN_VERSION }}
+          ULTRA_RUNTIME_DEFECTS_VERSION: ${{ env.RUNTIME_DEFECTS_VERSION }}
+          ULTRA_LIVE_TRACE_COOKIE: ${{ secrets.ULTRA_LIVE_TRACE_COOKIE }}
+          ULTRA_LIVE_TRACE_AUTHORIZATION: ${{ secrets.ULTRA_LIVE_TRACE_AUTHORIZATION }}
+          ULTRA_MODEL_ID: ${{ secrets.ULTRA_MODEL_ID }}
+          ULTRA_PROVIDER_ID: ${{ secrets.ULTRA_PROVIDER_ID }}
+        run: |
+          set -euo pipefail
+          mattools_qualification_log="${EVIDENCE_ROOT}/operator-logs/mattools-qualification.log"
+          {
+            make mattools-evaluator-verify
+            make mattools-promotion-gate
+          } > "${mattools_qualification_log}" 2>&1
+          [[ -f "${MATTOOLS_OUTPUT_DIR}/results.json" ]]
+          [[ -f "${MATTOOLS_OUTPUT_DIR}/report_manifest.json" ]]
+          python3 - "${MATTOOLS_OUTPUT_DIR}/results.json" \
+            >> "${mattools_qualification_log}" 2>&1 <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert len(report["trials"]) == 3
+          assert report["hard_gates"]["three_trial_completeness"] is True
+          PY
+
+      - name: Aggregate an evidence-qualified readiness candidate
+        env:
+          MATERIALS_DETERMINISTIC_REPORT: ${{ env.EVIDENCE_ROOT }}/deterministic/materials-domain-gate.json
+          MATTOOLS_REPORT: ${{ env.EVIDENCE_ROOT }}/mattools/results.json
+          MATTOOLS_REPORT_MANIFEST: ${{ env.EVIDENCE_ROOT }}/mattools/report_manifest.json
+          MATERIALS_LIVE_TRACE_REPORT: ${{ env.EVIDENCE_ROOT }}/live-trace/materials-live-trace.json
+          MATERIALS_EXPECTED_GIT_SHA: ${{ inputs.source_sha }}
+          MATERIALS_EXPECTED_DOMAIN_IMAGE: ${{ inputs.domain_image_id }}
+          MATERIALS_EXPECTED_RUNTIME_IMAGE: ${{ inputs.runtime_image_id }}
+          MATERIALS_EXPECTED_EVALUATOR_IMAGE: ${{ inputs.evaluator_image_id }}
+          MATERIALS_READINESS_OUTPUT_DIR: ${{ env.EVIDENCE_ROOT }}/readiness
+        run: |
+          set -euo pipefail
+
+          mapfile -t parity_reports < <(find "${EVIDENCE_ROOT}/production-parity" -maxdepth 1 -type f -name 'production-materials-sandbox-parity-*.json' -print)
+          mapfile -t ledger_reports < <(find "${EVIDENCE_ROOT}/calphad-ledger" -maxdepth 1 -type f -name 'calphad-ledger-postgres-qualification-*.json' -print)
+          mapfile -t cross_reports < <(find "${EVIDENCE_ROOT}/calphad-cross-language" -maxdepth 1 -type f -name 'calphad-cross-language-qualification-*.json' -print)
+          [[ "${#parity_reports[@]}" -eq 1 ]]
+          [[ "${#ledger_reports[@]}" -eq 1 ]]
+          [[ "${#cross_reports[@]}" -eq 1 ]]
+
+          export MATERIALS_PRODUCTION_PARITY_REPORT="${parity_reports[0]}"
+          export MATERIALS_CALPHAD_LEDGER_REPORT="${ledger_reports[0]}"
+          export MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT="${cross_reports[0]}"
+          export MATERIALS_CALPHAD_CROSS_LANGUAGE_REPORT_MANIFEST="${EVIDENCE_ROOT}/calphad-cross-language/report_manifest.json"
+          readiness_log="${EVIDENCE_ROOT}/operator-logs/readiness.log"
+          make materials-production-readiness > "${readiness_log}" 2>&1
+
+          python3 - "${MATERIALS_READINESS_OUTPUT_DIR}/materials-production-readiness.json" \
+            >> "${readiness_log}" 2>&1 <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          assert report["status"] == "candidate_for_attestation"
+          assert report["promotion"]["evidence_passed"] is True
+          assert report["promotion"]["attestation_required"] is True
+          assert report["promotion"]["distribution_ready"] is False
+          assert report["promotion"]["full_materials_production_ready"] is False
+          PY
+
+      - name: Create and verify the restricted closure and sanitized envelope
+        run: |
+          set -euo pipefail
+
+          one_report() {
+            local directory="$1"
+            local pattern="$2"
+            local reports=()
+            mapfile -t reports < <(find "${directory}" -maxdepth 1 -type f -name "${pattern}" -print)
+            [[ "${#reports[@]}" -eq 1 ]]
+            printf '%s\n' "${reports[0]}"
+          }
+
+          parity_report="$(one_report "${EVIDENCE_ROOT}/production-parity" 'production-materials-sandbox-parity-*.json')"
+          ledger_report="$(one_report "${EVIDENCE_ROOT}/calphad-ledger" 'calphad-ledger-postgres-qualification-*.json')"
+          cross_report="$(one_report "${EVIDENCE_ROOT}/calphad-cross-language" 'calphad-cross-language-qualification-*.json')"
+
+          readiness_manifest="${EVIDENCE_ROOT}/readiness/materials-production-readiness-manifest.json"
+          readiness_report_name="$(python3 - "${readiness_manifest}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          print(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["report"]["path"])
+          PY
+          )"
+          readiness_report="${EVIDENCE_ROOT}/readiness/${readiness_report_name}"
+          [[ -f "${readiness_report}" ]]
+
+          runtime_oci_digest="${RUNTIME_IMAGE_REF##*@}"
+          workflow_signer_digest="${GITHUB_WORKFLOW_SHA}"
+          restricted_store_locator_sha256="$(printf '%s' "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}" | sha256sum | awk '{print $1}')"
+          license_role_args=()
+          license_evidence_args=()
+          if [[ "${MATTOOLS_LICENSE_BASIS}" == "separately_licensed" ]]; then
+            license_role_args+=(--role "license_evidence=license/license-evidence.bin")
+            license_evidence_args+=(
+              --license-evidence-sha256 "${MATTOOLS_LICENSE_EVIDENCE_SHA256}"
+            )
+          fi
+
+          uv run --isolated --no-project --python 3.11 python \
+            scripts/materials_promotion_envelope.py create \
+            --evidence-root "${EVIDENCE_ROOT}" \
+            --evidence-root-manifest "${EVIDENCE_ROOT_MANIFEST}" \
+            --envelope "${PUBLIC_ENVELOPE}" \
+            --role "readiness_report=${readiness_report#"${EVIDENCE_ROOT}/"}" \
+            --role "readiness_manifest=${readiness_manifest#"${EVIDENCE_ROOT}/"}" \
+            --role "deterministic_report=deterministic/materials-domain-gate.json" \
+            --role "production_parity_report=${parity_report#"${EVIDENCE_ROOT}/"}" \
+            --role "calphad_ledger_report=${ledger_report#"${EVIDENCE_ROOT}/"}" \
+            --role "calphad_cross_language_report=${cross_report#"${EVIDENCE_ROOT}/"}" \
+            --role "calphad_cross_language_manifest=calphad-cross-language/report_manifest.json" \
+            --role "mattools_report=mattools/results.json" \
+            --role "mattools_manifest=mattools/report_manifest.json" \
+            --role "live_trace:1=live-trace/materials-live-trace.json" \
+            --role "release_tarball=release/ultra-release-${SOURCE_SHA}.tar.gz" \
+            --role "release_manifest=release/release-manifest-${SOURCE_SHA}.json" \
+            "${license_role_args[@]}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --repository-id "${GITHUB_REPOSITORY_ID}" \
+            --owner-id "${GITHUB_REPOSITORY_OWNER_ID}" \
+            --source-git-sha "${SOURCE_SHA}" \
+            --source-ref "${SOURCE_REF}" \
+            --workflow-path "${WORKFLOW_PATH}" \
+            --workflow-file "${WORKFLOW_PATH}" \
+            --workflow-signer-digest "${workflow_signer_digest}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --environment materials-production-qualification \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --runtime-oci-digest "${runtime_oci_digest}" \
+            --runtime-config-id "${RUNTIME_IMAGE_ID}" \
+            --domain-image-id "${DOMAIN_IMAGE_ID}" \
+            --evaluator-image-id "${EVALUATOR_IMAGE_ID}" \
+            --license-basis "${MATTOOLS_LICENSE_BASIS}" \
+            "${license_evidence_args[@]}" \
+            --restricted-store-locator-sha256 "${restricted_store_locator_sha256}" \
+            > "${QUALIFICATION_ROOT}/promotion-boundary.log" 2>&1
+
+          uv run --isolated --no-project --python 3.11 python \
+            scripts/materials_promotion_envelope.py verify-root \
+            --evidence-root "${EVIDENCE_ROOT}" \
+            --evidence-root-manifest "${EVIDENCE_ROOT_MANIFEST}" \
+            >> "${QUALIFICATION_ROOT}/promotion-boundary.log" 2>&1
+
+          [[ -f "${PUBLIC_ENVELOPE}" ]]
+          [[ ! -L "${PUBLIC_ENVELOPE}" ]]
+
+      - name: Seal raw evidence in place in the restricted encrypted WORM store
+        run: |
+          set -euo pipefail
+          sync
+
+          uv run --isolated --no-project --python 3.11 python \
+            scripts/materials_promotion_envelope.py verify-root \
+            --evidence-root "${EVIDENCE_ROOT}" \
+            --evidence-root-manifest "${EVIDENCE_ROOT_MANIFEST}" \
+            >> "${QUALIFICATION_ROOT}/promotion-boundary.log" 2>&1
+
+          chmod -R a-w "${ARCHIVE_ROOT}"
+
+      # This is deliberately the only artifact upload in the qualification job.
+      # The repository is public; the raw campaign and closure manifest must
+      # never enter GitHub Actions artifact storage.
+      - name: Transfer only the sanitized release envelope
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: materials-release-envelope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-production-qualification-${{ github.run_id }}-${{ github.run_attempt }}/public/materials-release-envelope-v1.json
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+
+      - name: Clean qualification containers and ephemeral raw workspace
+        if: always()
+        run: |
+          set -euo pipefail
+
+          for container in "${LEDGER_PG_CONTAINER}" "${CROSS_LANGUAGE_PG_CONTAINER}"; do
+            if docker container inspect "${container}" >/dev/null 2>&1; then
+              docker container rm --force --volumes "${container}" >/dev/null
+            fi
+          done
+
+          if [[ -d "${ARCHIVE_ROOT}" ]]; then
+            chmod -R a-w "${ARCHIVE_ROOT}"
+          fi
+
+          case "${QUALIFICATION_ROOT}" in
+            "${RUNNER_TEMP}"/materials-production-qualification-*)
+              rm -rf "${QUALIFICATION_ROOT}"
+              ;;
+            *)
+              echo "Refusing unsafe cleanup path" >&2
+              exit 1
+              ;;
+          esac
+
+  attest:
+    name: Attest the sanitized materials envelope
+    needs: qualify
+    environment:
+      name: materials-production-attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download the sanitized envelope only
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: materials-release-envelope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-release-envelope
+
+      - name: Refuse any unexpected transferred file
+        shell: bash
+        run: |
+          set -euo pipefail
+          ATTESTATION_ROOT="${RUNNER_TEMP}/materials-release-envelope"
+          PUBLIC_ENVELOPE="${ATTESTATION_ROOT}/materials-release-envelope-v1.json"
+          [[ -f "${PUBLIC_ENVELOPE}" ]]
+          [[ ! -L "${PUBLIC_ENVELOPE}" ]]
+          mapfile -t transferred < <(find "${ATTESTATION_ROOT}" -type f -print)
+          [[ "${#transferred[@]}" -eq 1 ]]
+          [[ "${transferred[0]}" == "${PUBLIC_ENVELOPE}" ]]
+
+      - name: Create GitHub Sigstore provenance for the sanitized envelope
+        id: attest-envelope
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: ${{ runner.temp }}/materials-release-envelope/materials-release-envelope-v1.json
+
+      - name: Refuse an unsafe envelope attestation bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest-envelope.outputs.bundle-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${BUNDLE_PATH}" ]]
+          [[ -f "${BUNDLE_PATH}" ]]
+          [[ ! -L "${BUNDLE_PATH}" ]]
+          case "${BUNDLE_PATH}" in
+            "${RUNNER_TEMP}"/*) ;;
+            *) exit 1 ;;
+          esac
+
+      - name: Transfer only the safe envelope attestation bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: materials-envelope-attestation-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.attest-envelope.outputs.bundle-path }}
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+
+      - name: Record the non-promoting attestation boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "### Materials qualification envelope attested"
+            echo
+            echo "The attested subject is the sanitized envelope only."
+            echo "Raw evidence remains in the restricted store."
+            echo "This job does not deploy or mark the product fully production-ready;"
+            echo "a later protected verifier must re-open the raw closure and verify this attestation."
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  verify:
+    name: Independently verify the sealed materials closure
+    needs: attest
+    environment:
+      name: materials-production-verification
+    # This group must admit only one-shot runners registered with --ephemeral
+    # and mount the qualification evidence store read-only.
+    runs-on:
+      group: materials-production-verification
+      labels:
+        - self-hosted
+        - Linux
+        - ARM64
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARCHIVE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}/evidence
+      EVIDENCE_ROOT_MANIFEST: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}/${{ github.repository_id }}/${{ inputs.source_sha }}/${{ github.run_id }}-${{ github.run_attempt }}/materials-evidence-root-v1.json
+      MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT: ${{ vars.MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT }}
+      MATTOOLS_BENCHMARK_ROOT: ${{ vars.MATTOOLS_BENCHMARK_ROOT }}
+
+    steps:
+      - name: Check out the exact verifier source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download the sanitized envelope for independent verification
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: materials-release-envelope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-production-verification/envelope
+
+      - name: Download the envelope attestation bundle only
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: materials-envelope-attestation-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-production-verification/bundle
+
+      - name: Revalidate the sealed closure and exact GitHub attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+          [[ "${GITHUB_REPOSITORY}" == "${EXPECTED_REPOSITORY}" ]]
+          [[ "${GITHUB_REPOSITORY_ID}" == "${EXPECTED_REPOSITORY_ID}" ]]
+          [[ "${GITHUB_REPOSITORY_OWNER_ID}" == "${EXPECTED_OWNER_ID}" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${SOURCE_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_SHA}" == "${SOURCE_SHA}" ]]
+          [[ "${GITHUB_WORKFLOW_SHA}" == "${SOURCE_SHA}" ]]
+          [[ "$(git rev-parse HEAD)" == "${SOURCE_SHA}" ]]
+          [[ "${RUNNER_OS}" == "Linux" ]]
+          [[ "${RUNNER_ARCH}" == "ARM64" ]]
+          [[ "${RUNNER_ENVIRONMENT}" == "self-hosted" ]]
+          command -v git >/dev/null
+          command -v go >/dev/null
+          command -v gh >/dev/null
+          command -v findmnt >/dev/null
+          command -v openssl >/dev/null
+          command -v python3 >/dev/null
+          command -v sha256sum >/dev/null
+          command -v uv >/dev/null
+          [[ -d "${MATTOOLS_BENCHMARK_ROOT}" ]]
+          [[ ! -L "${MATTOOLS_BENCHMARK_ROOT}" ]]
+
+          restricted_root="$(realpath -e "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}")"
+          [[ "${MATERIALS_RESTRICTED_EVIDENCE_STORE_ROOT}" == "${restricted_root}" ]]
+          expected_archive_root="${restricted_root}/${EXPECTED_REPOSITORY_ID}/${SOURCE_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ "${ARCHIVE_ROOT}" == "${expected_archive_root}" ]]
+          [[ -d "${EVIDENCE_ROOT}" ]]
+          [[ ! -L "${EVIDENCE_ROOT}" ]]
+          [[ ! -w "${EVIDENCE_ROOT}" ]]
+          [[ -f "${EVIDENCE_ROOT_MANIFEST}" ]]
+          [[ ! -L "${EVIDENCE_ROOT_MANIFEST}" ]]
+          [[ ! -w "${EVIDENCE_ROOT_MANIFEST}" ]]
+          mount_options="$(findmnt --noheadings --output OPTIONS --target "${EVIDENCE_ROOT}")"
+          case ",${mount_options}," in
+            *,ro,*) ;;
+            *) exit 1 ;;
+          esac
+
+          envelope_root="${RUNNER_TEMP}/materials-production-verification/envelope"
+          envelope="${envelope_root}/materials-release-envelope-v1.json"
+          [[ -f "${envelope}" ]]
+          [[ ! -L "${envelope}" ]]
+          mapfile -t envelope_files < <(find "${envelope_root}" -type f -print)
+          [[ "${#envelope_files[@]}" -eq 1 ]]
+          [[ "${envelope_files[0]}" == "${envelope}" ]]
+
+          bundle_root="${RUNNER_TEMP}/materials-production-verification/bundle"
+          mapfile -t bundle_files < <(find "${bundle_root}" -type f -print)
+          [[ "${#bundle_files[@]}" -eq 1 ]]
+          bundle="${bundle_files[0]}"
+          [[ -f "${bundle}" ]]
+          [[ ! -L "${bundle}" ]]
+
+          verification_root="${RUNNER_TEMP}/materials-production-verification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          [[ ! -e "${verification_root}" ]]
+          mkdir -m 0700 "${verification_root}"
+
+          python3 scripts/mattools_promotion_gate.py verify-report \
+            --benchmark-root "${MATTOOLS_BENCHMARK_ROOT}" \
+            --report-manifest "${EVIDENCE_ROOT}/mattools/report_manifest.json" \
+            > "${verification_root}/mattools-revalidation.log" 2>&1
+
+          one_report() {
+            local directory="$1"
+            local pattern="$2"
+            local reports=()
+            mapfile -t reports < <(find "${directory}" -maxdepth 1 -type f -name "${pattern}" -print)
+            [[ "${#reports[@]}" -eq 1 ]]
+            printf '%s\n' "${reports[0]}"
+          }
+
+          parity_report="$(one_report "${EVIDENCE_ROOT}/production-parity" 'production-materials-sandbox-parity-*.json')"
+          ledger_report="$(one_report "${EVIDENCE_ROOT}/calphad-ledger" 'calphad-ledger-postgres-qualification-*.json')"
+          cross_report="$(one_report "${EVIDENCE_ROOT}/calphad-cross-language" 'calphad-cross-language-qualification-*.json')"
+          readiness_output="${verification_root}/readiness-revalidation"
+          mkdir -m 0700 "${readiness_output}"
+
+          python3 scripts/materials_readiness_gate.py \
+            --deterministic-report "${EVIDENCE_ROOT}/deterministic/materials-domain-gate.json" \
+            --production-parity-report "${parity_report}" \
+            --calphad-ledger-report "${ledger_report}" \
+            --calphad-cross-language-report "${cross_report}" \
+            --calphad-cross-language-report-manifest "${EVIDENCE_ROOT}/calphad-cross-language/report_manifest.json" \
+            --mattools-report "${EVIDENCE_ROOT}/mattools/results.json" \
+            --mattools-report-manifest "${EVIDENCE_ROOT}/mattools/report_manifest.json" \
+            --live-trace "${EVIDENCE_ROOT}/live-trace/materials-live-trace.json" \
+            --repository-root . \
+            --benchmark-root "${MATTOOLS_BENCHMARK_ROOT}" \
+            --expected-git-sha "${SOURCE_SHA}" \
+            --expected-domain-image "${DOMAIN_IMAGE_ID}" \
+            --expected-runtime-image "${RUNTIME_IMAGE_ID}" \
+            --expected-evaluator-image "${EVALUATOR_IMAGE_ID}" \
+            --output-json "${readiness_output}/materials-production-readiness.json" \
+            --output-markdown "${readiness_output}/materials-production-readiness.md" \
+            --output-manifest "${readiness_output}/materials-production-readiness-manifest.json" \
+            > "${verification_root}/readiness-revalidation.log" 2>&1
+
+          python3 - "${readiness_output}/materials-production-readiness.json" \
+            >> "${verification_root}/readiness-revalidation.log" 2>&1 <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          hard_gates = report["hard_gates"]
+          assert report["status"] == "candidate_for_attestation"
+          assert hard_gates and all(value is True for value in hard_gates.values())
+          assert report["promotion"]["evidence_passed"] is True
+          assert report["promotion"]["attestation_required"] is True
+          assert report["promotion"]["distribution_ready"] is False
+          assert report["promotion"]["full_materials_production_ready"] is False
+          assert report["promotion"]["reasons"] == []
+          PY
+
+          verdict="${verification_root}/materials-production-verdict.json"
+          workflow_sha256="$(sha256sum "${WORKFLOW_PATH}" | awk '{print $1}')"
+
+          python3 scripts/materials_promotion_envelope.py verify-attestation \
+            --evidence-root "${EVIDENCE_ROOT}" \
+            --evidence-root-manifest "${EVIDENCE_ROOT_MANIFEST}" \
+            --envelope "${envelope}" \
+            --bundle "${bundle}" \
+            --output "${verdict}" \
+            --repository "${EXPECTED_REPOSITORY}" \
+            --repository-id "${EXPECTED_REPOSITORY_ID}" \
+            --owner-id "${EXPECTED_OWNER_ID}" \
+            --signer-repo "${EXPECTED_REPOSITORY}" \
+            --signer-workflow "${EXPECTED_REPOSITORY}/${WORKFLOW_PATH}" \
+            --signer-digest "${SOURCE_SHA}" \
+            --source-digest "${SOURCE_SHA}" \
+            --source-ref "${SOURCE_REF}" \
+            --expected-run-id "${GITHUB_RUN_ID}" \
+            --expected-run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --expected-environment materials-production-qualification \
+            --expected-event-name workflow_dispatch \
+            --expected-workflow-sha256 "${workflow_sha256}" \
+            --cert-oidc-issuer https://token.actions.githubusercontent.com \
+            > "${verification_root}/verification-command.log" 2>&1
+
+          [[ -f "${verdict}" ]]
+          [[ ! -L "${verdict}" ]]
+
+      - name: Transfer only the sanitized final verification report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: materials-production-verdict-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-production-verification-${{ github.run_id }}-${{ github.run_attempt }}/materials-production-verdict.json
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: false
+
+      - name: Remove the ephemeral verifier workspace
+        if: always()
+        run: |
+          set -euo pipefail
+          verification_root="${RUNNER_TEMP}/materials-production-verification-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          case "${verification_root}" in
+            "${RUNNER_TEMP}"/materials-production-verification-*)
+              rm -rf "${verification_root}"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          download_root="${RUNNER_TEMP}/materials-production-verification"
+          [[ "${download_root}" == "${RUNNER_TEMP}/materials-production-verification" ]]
+          rm -rf "${download_root}"
+
+  attest-verdict:
+    name: Attest the independently verified materials verdict
+    needs: verify
+    environment:
+      name: materials-production-attestation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Download the sanitized final verification report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: materials-production-verdict-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/materials-production-verdict
+
+      - name: Refuse any unexpected verdict file
+        shell: bash
+        run: |
+          set -euo pipefail
+          verdict_root="${RUNNER_TEMP}/materials-production-verdict"
+          verdict="${verdict_root}/materials-production-verdict.json"
+          [[ -f "${verdict}" ]]
+          [[ ! -L "${verdict}" ]]
+          mapfile -t transferred < <(find "${verdict_root}" -type f -print)
+          [[ "${#transferred[@]}" -eq 1 ]]
+          [[ "${transferred[0]}" == "${verdict}" ]]
+
+      - name: Attest the sanitized final materials verdict
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        with:
+          subject-path: ${{ runner.temp }}/materials-production-verdict/materials-production-verdict.json

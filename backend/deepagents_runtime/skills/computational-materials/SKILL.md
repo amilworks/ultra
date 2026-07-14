@@ -1,139 +1,143 @@
 ---
 name: computational-materials
-description: Domain toolkit and rigor for computational materials science — superalloy microstructure, EBSD/crystallographic orientation analysis, 3D serial-section/tomography (TriBeam) segmentation and quantification (grains, phases, precipitates, porosity), CALPHAD phase stability, and materials-informatics featurization. Use when a task involves EBSD orientation/misorientation/texture, 3D microstructure segmentation from serial-section or tomography volumes, grain/phase/precipitate/porosity quantification, crystal structure or space-group analysis, phase-diagram / phase-fraction / phase-stability (gamma-prime, TCP) prediction, or ML over alloy composition/process space. Read it before writing code that would otherwise reach for a hand-rolled surrogate (a home-made quaternion misorientation, a hand-rolled IPF colour mapping, a bare intensity threshold for grains, an averaged-atomic-property feature vector, or an ad-hoc phase-stability heuristic).
+description: Compatibility skill for materials microstructure and EBSD analysis — crystallographic orientations, IPF/pole-figure/ODF and misorientation work, raw Kikuchi indexing, TriBeam or tomography segmentation, grain/phase/precipitate morphology, stereology, and porosity. Use for EBSD maps, DREAM.3D-style microstructures, serial-section volumes, grain statistics, texture, boundary character, and pore networks. For CIF/space-group/CALPHAD work use materials-structure-thermo; for XRD/Raman/XPS/EDS use materials-characterization.
 ---
 
-# Computational Materials
+# Materials Microstructure and EBSD
 
-## When to use
-Read this before any microstructure, crystallographic-orientation, phase-thermodynamics, or
-materials-informatics analysis. It is biased toward the Ni/Co-base superalloy, TriBeam-tomography,
-and ICME research line (single-crystal turbine-blade alloys, γ/γ′, TCP phases, rafting,
-creep/fatigue, thermal-barrier coatings, high-throughput/ML alloy + additive-manufacturing
-process design). The point is to use the field's actual named tools and validation methods
-instead of re-deriving weaker surrogates from numpy, and to prove any microstructural quantity
-or phase you report is real and stable rather than an artifact of a parameter choice. This is
-domain tooling; the rigor protocol in `/skills/computational-experiment-rigor/SKILL.md` still
-applies on top of it.
+## Scope and compatibility
 
-## Environment — one interpreter, no isolation
-The entire materials stack lives in the default `python` (numpy 1.26.4) — no isolated env (the
-contrast with computational-biology). Available: `orix`, `kikuchipy` (+hyperspy/rosettasciio),
-`diffsims`, `defdap`, `porespy` for characterization; `pymatgen` (+`spglib`), `pycalphad`,
-`matminer`, `ase` for crystallography/thermodynamics/informatics; plus baked scikit-image,
-scipy, scikit-learn, networkx, pandas, matplotlib, dask, zarr, h5py, xarray, and the
-SimpleITK/nibabel 3D-imaging stack. State the interpreter and versions. Two caveats: **`pymatgen`
-and `defdap` expose no top-level `__version__`** (record their versions from pip metadata), and
-**`pycalphad` needs a user-supplied TDB thermodynamic database** — none is bundled, so name the
-database you used and never fabricate one.
+This path is retained for compatibility with prior runs and prompts that name
+`computational-materials`. Its production scope is now deliberately narrow:
 
-## Protocol
-Apply proportionally: a quick orientation-map render needs only §1 and §6; a reported grain-size
-distribution, texture strength, or predicted phase fraction that drives a conclusion needs all.
+- EBSD orientations, IPF maps, pole figures, ODF/texture, misorientation, and boundaries;
+- raw Kikuchi-pattern indexing and simulated diffraction dictionaries;
+- TriBeam, serial-section, and tomography segmentation and 3D reconstruction;
+- grain, phase, precipitate, inclusion, and pore morphology and stereology; and
+- microstructure-derived datasets and uncertainty-aware statistics.
 
-### 1. Use the field-standard named tool, name the method, pin its parameters
-Do not substitute a generic surrogate when a canonical materials tool exists.
-**Before writing analysis code, copy the vetted recipe** — correct call + a runnable self-check +
-the named anti-pattern — from **[references/materials-recipes.md](references/materials-recipes.md)**
-(misorientation vs Mackenzie, grain segmentation + stereology, CALPHAD phase fractions, space-group ID,
-Magpie featurization, porosity) and **[references/ebsd-ipf-recipe.md](references/ebsd-ipf-recipe.md)**
-(IPF colouring). Hand-rolling these is how wrong-but-plausible results ship; run the self-check first.
-- **EBSD / orientation:** use **orix** for orientations, symmetry, misorientation, and
-  IPF/pole-figure/ODF plotting — never a hand-written quaternion, Euler misorientation, **or IPF
-  RGB mapping**. The naive "sort the vector so x≤y≤z, then R=x,G=y,B=z" paints the whole triangle
-  blue/cyan — it is WRONG. The correct cubic IPF-Z key is **001=red, 101=green, 111=blue**, which
-  `orix.plot.IPFColorKeyTSL` renders (and colours orientations) for you. Copy the vetted recipe —
-  colour key, per-pixel map, and a self-check — from
-  **[references/ebsd-ipf-recipe.md](references/ebsd-ipf-recipe.md)**. This holds even for a quick
-  *illustrative/teaching* figure: a wrong colour key shown to a user is worse than none. State the
-  crystal symmetry (point group / Laue class), which sample direction the IPF is for (ND=IPF-Z /
-  RD=IPF-X / TD=IPF-Y), and the orientation representation. Use **kikuchipy** from raw Kikuchi
-  patterns (state the indexing — Hough or dictionary — and its parameters); **diffsims** to build
-  the simulated-diffraction dictionary.
-- **3D microstructure segmentation (TriBeam volumes):** use **scikit-image** named methods —
-  marker-controlled `watershed` for grains, `label`+`regionprops_table` for per-grain/phase/
-  precipitate/pore metrics, `morphology` for cleanup — not a bare intensity threshold. State the
-  full pipeline (denoise → threshold/method → markers → watershed → connectivity), every
-  parameter, and the physical voxel size (TriBeam z-slice spacing and in-plane pixel size). Use
-  **porespy** for named porosity/pore-size/tortuosity/two-point-correlation metrics.
-- **Crystal structure / phase symmetry:** **pymatgen** (`SpacegroupAnalyzer`, via **spglib**) to
-  identify space group and phase — γ FCC (Fm-3m), γ′ L1₂ (Pm-3m), TCP σ/μ/Laves — tolerance
-  stated; **ase** for structure I/O.
-- **Phase stability / thermodynamics:** **pycalphad** (`equilibrium`/`calculate`) against a NAMED
-  TDB for phase fractions and phase diagrams; pymatgen phase-diagram / energy-above-hull for
-  DFT-energy stability. Never invent an ad-hoc "stability score".
-- **Materials informatics:** **matminer** featurizers (name them — Magpie ElementProperty,
-  oxidation-state, stoichiometry) to turn composition/structure into descriptors, not a
-  hand-averaged atomic-property vector; then baked scikit-learn.
-Name the method at the level you are confident in; never fabricate a citation, database name, or number.
+Read `/skills/materials-structure-thermo/SKILL.md` for CIF, crystal symmetry, phase diagrams,
+CALPHAD, and composition featurization. Read `/skills/materials-characterization/SKILL.md` for
+XRD, SAED, Raman, XPS, or EDS. A task spanning raw EBSD patterns and orientation maps should read
+this skill plus the characterization skill. Do not turn this compatibility path back into a
+monolithic materials agent.
 
-### 2. Validate against a principled null or ground truth (the hallucination test)
-A segmentation or orientation map returns *something* on any input; a number is not a result
-until it beats a principled baseline.
-- **Segmentation:** sweep the decisive parameter (threshold, watershed markers, min-object size)
-  and report how grain count, mean grain size, and phase/pore volume fraction move — a quantity
-  that swings wildly with a threshold is not resolved. Cross-check a phase volume fraction against
-  an independent estimate (e.g. composition + a CALPHAD phase-fraction prediction) and reconcile.
-- **Texture:** report ODF/pole-figure intensity in **multiples-of-random-distribution (MRD)** or
-  the texture index relative to a UNIFORM reference; "strong texture" with no random baseline is
-  not a claim.
-- **Misorientation / boundaries:** compare the grain-boundary misorientation-angle distribution
-  against the random-orientation **Mackenzie distribution** for the crystal symmetry; deviations
-  are what indicate real texture / special boundaries.
-- **Phase prediction:** state the database and conditions; corroborate a predicted phase against
-  what EBSD/EDS/structure actually shows, and reconcile disagreements rather than reporting only
-  the model.
+The default interpreter includes `orix`, `kikuchipy`, `diffsims`, `defdap`, `porespy`,
+scikit-image, scipy, h5py, xarray, dask, zarr, SimpleITK, and nibabel. Record versions with
+`importlib.metadata.version()`; `defdap` has no reliable top-level `__version__`.
 
-### 3. Quantify uncertainty and stability on every decision-relevant estimate
-Report grain-size, aspect-ratio, and volume-fraction as **distributions with N and spread**
-(mean, median, P10–P90, count), not a single mean; state whether stereological correction was
-applied, and flag/exclude boundary-touching grains (report how many). Re-run the segmentation
-across the decisive parameter range and across sub-volumes; report each metric as mean ± spread.
-If a metric changes by more than its spread across reasonable parameters, label it "not resolved
-at this precision." Report the number of grains/particles/pores analyzed and the analyzed volume
-+ voxel size so representativeness can be judged (a 20-grain volume does not support a grain-size
-distribution claim).
+## Required workflow
 
-### 4. Respect the microstructure and the physics of the data
-- **3D reconstruction integrity:** TriBeam serial sectioning is destructive — slice-to-slice
-  registration/drift, anisotropic voxels (z-spacing vs in-plane), and ablation artifacts
-  propagate into 3D grain shapes. State the voxel dimensions, whether slices were registered, and
-  any anisotropy; a 3D grain shape from unregistered or strongly anisotropic slices is suspect.
-- **Multimodal alignment:** TriBeam produces co-registered SE (morphology), EBSD (orientation/
-  phase), and EDS (chemistry) channels. State which modality drives a quantity and confirm the
-  channels share a grid before fusing.
-- **Crystallography conventions:** state symmetry / point group, Euler convention (e.g. Bunge
-  ZXZ), and reference frame for every orientation quantity; a misorientation or IPF colour is only
-  meaningful with symmetry applied. For superalloys respect the γ/γ′ cube-cube orientation
-  relationship and L1₂ ordering.
-- **Preprocessing you must state:** denoising, orientation cleanup / grain dilation,
-  grain-reconstruction misorientation tolerance, pattern-quality masking — each changes grain
-  count and boundary character.
+### 1. Preserve data and conventions
 
-### 5. Reproducibility record
-Record the interpreter, package versions (pip metadata for pymatgen/defdap, which lack
-`__version__`), the exact segmentation pipeline and parameters, crystal symmetry / Euler
-convention / reference frame, voxel dimensions, the CALPHAD **database name/version and conditions
-(composition, T, P)**, matminer featurizer names, seeds, and the parameter sweeps. Prefer
-idempotent script entrypoints. Write intermediate artifacts (segmented label volumes, orientation
-maps, per-grain regionprops tables) to `/workspace` / `/outputs`.
+- Stage the selected input and identify it by path/artifact ID and SHA-256. Never overwrite it.
+- Record array shape, dtype, channel names, physical voxel size `(dz, dy, dx)`, axis order,
+  coordinate units, and whether the volume is anisotropic.
+- For EBSD, record phase, point group/Laue class, Euler convention, degrees vs radians,
+  active/passive convention, crystal-to-sample direction, and the sample direction used by each
+  IPF (ND/IPF-Z, RD/IPF-X, TD/IPF-Y).
+- For multimodal TriBeam data, identify the modality driving each quantity and verify SE, EBSD,
+  and EDS channels share a registered physical grid before fusion.
 
-### 6. Honest accounting
-If a real named tool was unavailable and you used a surrogate, say so and name what was lost — do
-not present a numpy reimplementation as orix or an averaged-atomic-property vector as a matminer
-featurizer. If pycalphad had no appropriate TDB, say the phase prediction was not run rather than
-substitute a heuristic. Every conclusion (this is a TCP σ phase; the texture is ⟨110⟩ fiber; γ′
-volume fraction is X%; this composition is single-phase) gets a confidence level tied to §2–§3 —
-the null/ground-truth comparison, the parameter stability, the sampling adequacy — not just that
-a tool returned something. Report which validations you ran and which you did not; report
-wall-clock vs compute time separately for long tomography or CALPHAD sweeps.
+### 2. Use the named domain implementation
 
-## Cross-reference and delegation note
-`/skills/scientific-reporting` is the write-up contract. TriBeam volumes are 3D image stacks
-structurally like medical volumes — reuse the SimpleITK/nibabel stack and the
-`/skills/medical-volume-slices` tool to render correctly-proportioned single-panel slices for
-the vision-reasoner instead of hand-writing montage code. When delegating a verification subtask
-(e.g. "confirm this grain-size distribution / texture / phase fraction survives a parameter sweep
-and beats the random baseline"), give the subagent this skill's null (Mackenzie / MRD /
-independent phase-fraction), the sweep, and the sampling count, and reconcile to yours against
-the spread.
+Copy and run the vetted recipes before adapting them:
+
+- [EBSD/IPF color and map recipe](references/ebsd-ipf-recipe.md)
+- [Misorientation, texture, segmentation, stereology, and porosity recipes](references/materials-recipes.md)
+
+Required boundaries:
+
+- Use `orix` symmetry operations for orientation, disorientation, IPF color, pole figures, and
+  ODF work. Never hand-roll quaternion symmetry reduction, Euler misorientation, or IPF RGB.
+- The cubic TSL IPF key invariant is **001=red, 101=green, 111=blue**. Assert the 001/cube red
+  condition in code before promoting an IPF artifact.
+- Use `kikuchipy` for raw Kikuchi patterns and state Hough vs dictionary indexing, detector
+  geometry/calibration, phase library, and every indexing/cleanup parameter. Use `diffsims` for
+  a simulated diffraction dictionary; do not label a hand-made spot field as a dictionary.
+- Use anisotropy-aware distance transforms and marker-controlled `skimage.segmentation.watershed`
+  for touching grains when justified, then `label`/`regionprops_table` for named measurements.
+  A bare threshold is a foreground mask, not a grain segmentation.
+- Use `porespy` for named pore-network metrics and preserve its **True = void** convention.
+
+### 3. Validate the quantity, not only the file
+
+- IPF: require the programmatic 001-red invariant and record the point group and sample direction.
+- Misorientation: compare the symmetry-reduced boundary distribution with a random-orientation
+  Mackenzie baseline for cubic material (or the appropriate named null for another symmetry).
+- Texture: report MRD or texture index relative to a uniform reference; raw pole density alone
+  does not establish texture.
+- Segmentation: sweep the decisive threshold, marker spacing, or cleanup size over a defensible
+  neighborhood. Report how grain count, equivalent diameter, aspect ratio, and phase/pore volume
+  fraction change. If the parameter effect exceeds sampling spread, mark the quantity not resolved
+  at the stated precision.
+- Stereology: check physical-volume recovery on a synthetic anisotropic object before analyzing
+  the specimen. Report boundary-touching exclusions and results both before and after exclusion.
+- Porosity: verify True=void on a labeled synthetic pore and compare the observed dense/porous
+  direction with acquisition knowledge; `porosity == void.mean()` is only an identity, not a
+  convention check.
+
+### 4. Quantify sampling and uncertainty
+
+Report distributions with count, mean, median, spread, and P10-P90 for decision-relevant grain,
+particle, or pore quantities. Record analyzed physical volume and sub-volume layout. Use spatial
+sub-volumes or specimen-level replicates for representativeness; pixels from one field of view are
+not independent replicates. Seeds are relevant only when an algorithm is stochastic, and never
+replace parameter stability or independent specimens.
+
+### 5. Emit scientific validation separately from run success
+
+Every analysis that makes a scientific claim must write
+`/outputs/materials_validation.json`. A successfully completed process is not scientific
+validation. Generate the record with
+`ultra_deepagents.materials.validation.assess_scientific_status` and
+`canonical_record_json`. The production sandbox guarantees this import at build time. If the
+canonical module cannot be imported, treat that as release-infrastructure failure: do not
+hand-author top-level verdict fields or claim verification. The top level contains `schema_version`,
+`run_status`, `scientific_status` (`verified`, `failed`, `unsupported`, or `unverified`),
+`verified`, `silent_success`, `capability_supported`, `required_validator_ids`,
+`missing_validator_ids`, `critical_failures`, `contradiction_failures`, `reasons`, and `checks`.
+For a supported task with no prose/artifact contradiction, the corresponding fields are
+`"capability_supported": true` and `"contradiction_failures": []`; do not infer them from run
+success. Every check follows this shape:
+
+```json
+{
+  "validator_id": "materials.microstructure.ipf_001_red.v1",
+  "outcome": "pass",
+  "observed": {"rgb": [1.0, 0.0, 0.0]},
+  "expected": {"red_min": 0.8, "green_max": 0.3, "blue_max": 0.3},
+  "units": "unitless RGB",
+  "tolerance_rationale": "TSL cubic IPF key invariant with rendering tolerance",
+  "required": true,
+  "critical": true,
+  "library_versions": {"orix": "<installed-version>"},
+  "evidence": [
+    {"name": "ipf_map.png", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "path": "/outputs/ipf_map.png"}
+  ],
+  "message": "Cube/ND maps to the red TSL corner"
+}
+```
+
+The all-zero digest above is a syntactically valid documentation placeholder, not evidence. It
+must be replaced with the final file's actual lowercase SHA-256; trace validation resolves the
+durable artifact and rejects a digest or size mismatch. Keep the complete validation record below
+1,000,000 bytes so the bounded trace inspector can parse it.
+
+Use only `pass`, `fail`, or `skip` for `outcome`. Declare the required validator IDs before
+assessment; a missing or skipped required check must fail closed to `unverified`, a deterministic
+failure to `failed`, and a missing release capability to `unsupported`. Hash the exact final
+evidence artifact, not a temporary predecessor. Include validator IDs for convention checks,
+synthetic controls, parameter sweeps, and independent/null comparisons.
+
+### 6. Required outputs and accounting
+
+Write final code, parameters, per-object tables, labels/orientation maps, figures, and
+`materials_validation.json` under `/outputs`; keep exploratory diagnostics under `/workspace`.
+State package versions, compute time and run wall-clock separately, failed or skipped checks, and
+the evidence supporting each conclusion. If an input lacks voxel calibration, phase identity,
+orientation convention, or enough sampled objects, report the bounded result that remains and
+label the affected conclusion `unverified`; do not manufacture metadata.
+
+For user-facing scientific status, summarize the JSON status and distinguish it explicitly from
+run success. A correct-looking artifact without the required invariant record is not promotable.

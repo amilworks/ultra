@@ -92,6 +92,7 @@ import {
   DEFAULT_BISQUE_BROWSER_URL,
 } from "./lib/config";
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
+import { remoteMutationIntentsForUserText } from "./lib/bisqueMutationIntent";
 import { formatBytes, formatTokens } from "./lib/format";
 import { thumbnailScrubAxis } from "./lib/thumbnailScrubAxis";
 import {
@@ -10222,6 +10223,7 @@ export function App() {
         conversation_id: conversationId,
         goal: modelPromptForTurn,
         selected_tool_names: effectiveSelectedToolNamesForTurn,
+        remote_mutation_intents: remoteMutationIntentsForUserText(text),
         selection_context: selectionContextForTurn,
         workflow_hint: composerWorkflowPreset?.workflowHint ?? null,
         reasoning_mode: "deep" as const,

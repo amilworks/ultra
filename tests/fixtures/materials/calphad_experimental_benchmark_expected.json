@@ -1,0 +1,40 @@
+{
+  "schema_version": "1",
+  "benchmark_id": "materials.calphad.al_co_w_experimental_two_lane.v1",
+  "database_sha256": "107c7330f0326a334742632f7494c7beadf53370edbc188df1a030853ceab5a8",
+  "solver": {
+    "pycalphad": "0.11.2",
+    "numpy": "1.26.4",
+    "phase_fraction_epsilon": 1e-8,
+    "bisection_iterations": 16
+  },
+  "calibration_predictions_atomic_fraction": {
+    "nist_2014_gamma_al": 0.08556812596341536,
+    "nist_2014_gamma_w": 0.0557054416645947,
+    "nist_2014_d019_al": 0.019783314072459486,
+    "nist_2014_d019_w": 0.22004453517186048,
+    "nist_2014_b2_al": 0.3337637314270297,
+    "nist_2014_b2_w": 0.029445909631097195
+  },
+  "held_out_predictions": {
+    "tomaszewska_2018_measured_composition": {
+      "solidus_K": 1731.5275192260742,
+      "liquidus_K": 1760.6159210205078
+    },
+    "migas_2020_nominal_composition": {
+      "solidus_K": 1734.2282485961914,
+      "liquidus_K": 1761.567611694336
+    }
+  },
+  "expected_metrics": {
+    "calibration_weighted_rms_z": 0.48684161008180205,
+    "calibration_max_abs_z": 0.7846818475917525,
+    "held_out_mae_K": 12.334825134277253,
+    "held_out_max_abs_error_K": 20.417611694335847
+  },
+  "numeric_comparison_tolerance": {
+    "prediction_K": 0.01,
+    "composition_atomic_fraction": 1e-10,
+    "metric": 1e-10
+  }
+}

@@ -9,10 +9,14 @@ napari/vizarr render OME-Zarr.
 from __future__ import annotations
 
 import io
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from ultra_deepagents.ngff.reader import NgffChannel, NgffImage
+from ultra_deepagents.ngff.reader import NgffChannel, NgffError, NgffImage
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 __all__ = ["render_slice_png", "render_thumbnail_png", "render_tile_png"]
 
@@ -46,26 +50,34 @@ def _auto_window(plane: np.ndarray) -> tuple[float, float]:
 
 def _global_window(img: NgffImage, ci: int) -> tuple[float, float]:
     """Resolve the display window for a channel ONCE and cache it, so every slice/tile
-    maps identically (no per-tile contrast checkerboard). Honors the OME `omero` window
-    only when it actually overlaps the data — a stale/default window (e.g. 0–255 on
-    uint16 data, the common case) would saturate/black the image, so we fall back to
-    robust auto-contrast computed on the SMALLEST multiscale level (representative + cheap)."""
+    maps identically (no per-tile contrast checkerboard). The OME ``omero`` window is
+    honored only when it is finite, non-degenerate, AND overlaps the actual data — a
+    stale/default window (e.g. 0-255 declared on uint16 data, a common converter
+    artifact) would otherwise render the image blown-out, so in that case robust
+    auto-contrast wins. Auto-contrast uses a bounded, spatially distributed sample from
+    the smallest multiscale level; it never full-reads that plane to render a first tile."""
     cached = img.window_cache.get(ci)
     if cached is not None:
         return cached
 
-    # Auto-contrast reference from the smallest level (fast; whole-image-representative).
-    small_level = len(img.levels) - 1
-    ref = img.read_plane(t=0, c=ci, z=0, level=small_level).astype(np.float32, copy=False)
-    auto_lo, auto_hi = _auto_window(ref)
+    # Compute robust auto-contrast from a bounded sample; it is both the fallback and
+    # the sanity check that keeps a stale omero window from blowing out the image.
+    reference = img.read_display_sample(c=ci).astype(np.float32, copy=False)
+    auto_lo, auto_hi = _auto_window(reference)
 
-    window = (auto_lo, auto_hi)
     ch = img.channels[ci] if ci < len(img.channels) else None
     if ch is not None and ch.window_start is not None and ch.window_end is not None:
         start, end = float(ch.window_start), float(ch.window_end)
-        # Use omero only if the window is non-degenerate AND overlaps the actual data.
-        if end > start and not (end <= auto_lo or start >= auto_hi):
-            window = (start, end)
+        if (
+            np.isfinite(start)
+            and np.isfinite(end)
+            and end > start
+            and not (end <= auto_lo or start >= auto_hi)
+        ):
+            img.window_cache[ci] = (start, end)
+            return (start, end)
+
+    window = (auto_lo, auto_hi)
     img.window_cache[ci] = window
     return window
 
@@ -77,12 +89,22 @@ def _window_to_uint8(plane: np.ndarray, start: float, end: float) -> np.ndarray:
         end = start + 1.0
     scaled = (p - float(start)) / (float(end) - float(start))
     np.clip(scaled, 0.0, 1.0, out=scaled)
-    return (scaled * 255.0 + 0.5).astype(np.uint8)
+    return cast(np.ndarray, (scaled * 255.0 + 0.5).astype(np.uint8))
 
 
 def _selected_channels(img: NgffImage, channels: list[int] | None) -> list[int]:
     if channels:
-        return [c for c in channels if 0 <= c < img.num_c]
+        selected: list[int] = []
+        for channel in channels:
+            if isinstance(channel, (bool, np.bool_)) or not isinstance(channel, (int, np.integer)):
+                raise NgffError("channel indices must be integers")
+            index = int(channel)
+            if index < 0 or index >= img.num_c:
+                raise NgffError(f"c index {index} is outside [0, {img.num_c - 1}]")
+            if index in selected:
+                raise NgffError(f"channel index {index} is duplicated")
+            selected.append(index)
+        return selected
     active = [i for i, ch in enumerate(img.channels[: img.num_c]) if ch.active]
     return active or list(range(img.num_c))
 
@@ -91,14 +113,18 @@ def _is_grayscale(ch: NgffChannel) -> bool:
     return ch.color.upper() in ("FFFFFF", "")
 
 
-def _compose_channels(img: NgffImage, planes: dict[int, np.ndarray], selected: list[int]) -> "Image.Image":
+def _compose_channels(
+    img: NgffImage, planes: dict[int, np.ndarray], selected: list[int]
+) -> Image.Image:
     """Composite already-read per-channel 2D arrays into a display image, using the global
     (cached) per-channel window so every plane/tile maps identically. Shared by the full-plane
     (slice/thumbnail) and bounded-region (tile) paths."""
     from PIL import Image
 
     # Single grayscale/white channel → 8-bit grayscale (matches brightfield/typical 1ch).
-    if len(selected) == 1 and _is_grayscale(img.channels[selected[0]] if img.channels else NgffChannel("", "FFFFFF", None, None, True)):
+    if len(selected) == 1 and _is_grayscale(
+        img.channels[selected[0]] if img.channels else NgffChannel("", "FFFFFF", None, None, True)
+    ):
         ci = selected[0]
         start, end = _global_window(img, ci)
         gray = _window_to_uint8(planes[ci], start, end)
@@ -107,7 +133,11 @@ def _compose_channels(img: NgffImage, planes: dict[int, np.ndarray], selected: l
     # Otherwise composite the selected channels additively in RGB.
     rgb: np.ndarray | None = None
     for ci in selected:
-        ch = img.channels[ci] if ci < len(img.channels) else NgffChannel("", "FFFFFF", None, None, True)
+        ch = (
+            img.channels[ci]
+            if ci < len(img.channels)
+            else NgffChannel("", "FFFFFF", None, None, True)
+        )
         start, end = _global_window(img, ci)
         gray = _window_to_uint8(planes[ci], start, end).astype(np.float32)
         if rgb is None:
@@ -122,7 +152,9 @@ def _compose_channels(img: NgffImage, planes: dict[int, np.ndarray], selected: l
     return Image.fromarray(rgb.astype(np.uint8), mode="RGB")
 
 
-def _render(img: NgffImage, *, t: int, z: int, level: int, channels: list[int] | None) -> "Image.Image":
+def _render(
+    img: NgffImage, *, t: int, z: int, level: int, channels: list[int] | None
+) -> Image.Image:
     selected = _selected_channels(img, channels)
     planes = {ci: img.read_plane(t=t, c=ci, z=z, level=level) for ci in selected}
     return _compose_channels(img, planes, selected)
@@ -149,7 +181,7 @@ def render_slice_png(
 
     image = _render(img, t=t, z=z, level=level, channels=channels)
     if max_dim and max(image.size) > max_dim:
-        image.thumbnail((max_dim, max_dim), Image.BILINEAR)
+        image.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
     return _to_png(image)
 
 
@@ -170,7 +202,6 @@ def render_tile_png(
     (the tile_scheme advertises the same level list). Edge tiles return the cropped region."""
     from PIL import Image
 
-    level = max(0, min(int(level), len(img.levels) - 1))
     tile_size = max(1, int(tile_size))
     h, w = img.level_yx(level)
     y0, x0 = int(row) * tile_size, int(col) * tile_size
@@ -192,5 +223,5 @@ def render_thumbnail_png(img: NgffImage, *, max_size: int = 256, t: int = 0, z: 
     level = img.thumbnail_level(max_size)
     image = _render(img, t=t, z=z, level=level, channels=None)
     if max(image.size) > max_size:
-        image.thumbnail((max_size, max_size), Image.BILINEAR)
+        image.thumbnail((max_size, max_size), Image.Resampling.BILINEAR)
     return _to_png(image)

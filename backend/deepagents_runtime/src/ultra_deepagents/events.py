@@ -193,6 +193,7 @@ def normalize_token_usage(
     usage: dict[str, Any],
     *,
     model: str = "",
+    provider: str = "",
     usage_event_id: str = "",
 ) -> dict[str, Any]:
     payload = {
@@ -203,6 +204,8 @@ def normalize_token_usage(
     }
     if model:
         payload["model"] = model
+    if provider:
+        payload["provider"] = provider
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,

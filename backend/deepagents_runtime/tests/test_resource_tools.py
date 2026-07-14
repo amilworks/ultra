@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
-from ultra_deepagents.context_tools import _public_stage_result, stage_catalog_resources
+from ultra_deepagents.context_tools import (
+    _public_stage_result,
+    public_selected_resource_descriptor,
+    stage_catalog_resources,
+    stage_uploaded_files,
+)
 from ultra_deepagents.resources.tools import (
     resolve_catalog_resources,
     search_resources_catalog,
@@ -72,7 +78,11 @@ def test_search_resources_posts_run_anchored_request(monkeypatch, tmp_path):
         captured,
         {
             "resources": [
-                {"resource_id": "file_norm_ct", "original_name": "norm_ct_1.tiff", "resource_kind": "image"}
+                {
+                    "resource_id": "file_norm_ct",
+                    "original_name": "norm_ct_1.tiff",
+                    "resource_kind": "image",
+                }
             ],
             "total_count": 1,
         },
@@ -105,7 +115,10 @@ def test_resolve_resources_posts_resource_ids(monkeypatch, tmp_path):
     _fake_httpx(
         monkeypatch,
         captured,
-        {"resources": [{"resource_id": "file_a", "original_name": "a.tiff"}], "missing": ["file_b"]},
+        {
+            "resources": [{"resource_id": "file_a", "original_name": "a.tiff"}],
+            "missing": ["file_b"],
+        },
     )
     result = resolve_catalog_resources(
         _settings(), context=_context(tmp_path), resource_ids=["file_a", "file_b"]
@@ -120,14 +133,41 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     # Canonical upload storage: {resource_id}__{original_name}
-    (uploads / "file_npm1__NPM1_13054_IM.tiff").write_bytes(b"TIFFDATA")
+    (uploads / "file_npm1__Al-Co-W.tdb").write_bytes(b"TDBDATA!")
     context = _context(tmp_path)
 
     result = stage_catalog_resources(
         context,
         upload_roots=(str(uploads),),
         resources=[
-            {"resource_id": "file_npm1", "original_name": "NPM1_13054_IM.tiff", "source_type": "upload"},
+            {
+                "resource_id": "file_npm1",
+                "original_name": "Al-Co-W.tdb",
+                "database_format": "tdb",
+                "content_type": "application/x-thermocalc-tdb",
+                "resource_kind": "document",
+                "source_type": "upload",
+                "sha256": "d" * 64,
+                "size_bytes": 8,
+                "metadata": {
+                    "source": "upload_store",
+                    "calphad": {
+                        "database_id": "owner-declared-database",
+                        "citation": "Concise published assessment citation",
+                        "source": "https://vendor-user:catalog-secret@example.org/private",
+                        "license_id": "CC0-1.0",
+                        "license_identifier": "Private license agreement terms",
+                        "assessment_scope": "equilibrium research",
+                        "assessment_pressure_limits_Pa": [101325.0, 101325.0],
+                        "components": ["NI", "VA"],
+                        "phases": ["FCC_A1"],
+                        "validation_status": "validated",
+                        "content_sha256": "f" * 64,
+                        "license_text": "private vendor license prose",
+                        "credentials": {"token": "catalog-secret"},
+                    },
+                },
+            },
             {"resource_id": "file_gone", "original_name": "gone.tiff", "source_type": "upload"},
         ],
     )
@@ -135,10 +175,28 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     assert len(result["staged_resources"]) == 1
     staged = result["staged_resources"][0]
     assert staged["resource_id"] == "file_npm1"
-    assert staged["sandbox_path"] == "/workspace/staged_resources/file_npm1/NPM1_13054_IM.tiff"
+    assert staged["binding_schema"] == "ultra.catalog_resource.v1"
+    assert staged["binding_authority"] == "control_resource_catalog"
+    assert staged["sha256"] == "d" * 64
+    assert staged["size_bytes"] == 8
+    assert staged["database_format"] == "tdb"
+    assert staged["content_type"] == "application/x-thermocalc-tdb"
+    calphad = staged["metadata"]["calphad"]
+    assert calphad["database_id"] == "owner-declared-database"
+    assert calphad["citation"] == "Concise published assessment citation"
+    assert calphad["license_id"] == "CC0-1.0"
+    assert calphad["declaration_authority"] == "resource_owner"
+    assert calphad["assessment_pressure_limits_Pa"] == [101325.0, 101325.0]
+    assert "validation_status" not in calphad
+    assert "content_sha256" not in calphad
+    assert "license_text" not in calphad
+    assert "credentials" not in calphad
+    assert "source" not in calphad
+    assert "license_identifier" not in calphad
+    assert staged["sandbox_path"] == "/workspace/staged_resources/file_npm1/Al-Co-W.tdb"
     # The file is physically copied into the run workspace.
-    copied = Path(context.workspace_root) / "staged_resources" / "file_npm1" / "NPM1_13054_IM.tiff"
-    assert copied.read_bytes() == b"TIFFDATA"
+    copied = Path(context.workspace_root) / "staged_resources" / "file_npm1" / "Al-Co-W.tdb"
+    assert copied.read_bytes() == b"TDBDATA!"
     # A resource with no local file is reported, not silently dropped.
     assert result["unavailable"][0]["resource_id"] == "file_gone"
 
@@ -149,6 +207,9 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     assert str(tmp_path) not in payload
     assert public["staged_resources"][0]["staged_path"] == staged["sandbox_path"]
     assert "source_path" not in public["staged_resources"][0]
+    assert "catalog-secret" not in payload
+    assert "private vendor license prose" not in payload
+    assert "f" * 64 not in payload
 
 
 def test_stage_catalog_resources_copies_ome_zarr_bundle_directory(tmp_path):
@@ -169,13 +230,29 @@ def test_stage_catalog_resources_copies_ome_zarr_bundle_directory(tmp_path):
         context,
         upload_roots=(str(uploads),),
         resources=[
-            {"resource_id": "file_zarr1", "original_name": "scan.ome.zarr", "source_type": "upload"},
+            {
+                "resource_id": "file_zarr1",
+                "original_name": "scan.ome.zarr",
+                "source_type": "upload",
+                "sha256": "a" * 64,
+                "size_bytes": 123,
+                "tree_identity": {
+                    "schema": "ultra.resource-tree-identity.v1",
+                    "authority": "control_resource_catalog",
+                    "canonical_json_schema": "ultra.canonical-json.v1",
+                    "tree_manifest_schema": "ultra.tree-manifest.v1",
+                    "tree_manifest_path": ".ultra/tree-manifest.json",
+                    "tree_manifest_sha256": "a" * 64,
+                    "scope": "all_regular_files_except_tree_manifest",
+                },
+            },
         ],
     )
     assert result["ok"] is True
     staged = result["staged_resources"][0]
     assert staged["kind"] == "directory"
     assert staged["sandbox_path"] == "/workspace/staged_resources/file_zarr1/scan.ome.zarr"
+    assert staged["tree_identity"]["tree_manifest_sha256"] == "a" * 64
     # The whole zarr tree is physically copied into the run workspace.
     copied = Path(context.workspace_root) / "staged_resources" / "file_zarr1" / "scan.ome.zarr"
     assert copied.is_dir()
@@ -185,6 +262,64 @@ def test_stage_catalog_resources_copies_ome_zarr_bundle_directory(tmp_path):
     public = _public_stage_result(result)
     assert str(uploads) not in json.dumps(public)
     assert public["staged_resources"][0]["kind"] == "directory"
+
+
+def test_selected_bundle_tree_identity_survives_delegation_and_staging(tmp_path):
+    uploads = tmp_path / "uploads"
+    bundle = uploads / "bundles" / "file_sensor" / "signals.zarr"
+    bundle.mkdir(parents=True)
+    (bundle / ".zattrs").write_text("{}")
+    identity = {
+        "schema": "ultra.resource-tree-identity.v1",
+        "authority": "control_resource_catalog",
+        "canonical_json_schema": "ultra.canonical-json.v1",
+        "tree_manifest_schema": "ultra.tree-manifest.v1",
+        "tree_manifest_path": ".ultra/tree-manifest.json",
+        "tree_manifest_sha256": "b" * 64,
+        "scope": "all_regular_files_except_tree_manifest",
+    }
+    sensor_format = {
+        "schema": "ultra.sensor-format-binding.v1",
+        "authority": "control_resource_catalog",
+        "container": "zarr",
+        "sensor_schema": "ultra.sensor-series.v1",
+        "resource_sha256": "b" * 64,
+        "detection": "bounded_root_attributes",
+    }
+    descriptor = {
+        "type": "selected_resource",
+        "binding_schema": "ultra.selected_resource.v1",
+        "authority": "control_resource_catalog",
+        "resource_id": "file_sensor",
+        "file_id": "file_sensor",
+        "original_name": "signals.zarr",
+        "sha256": "b" * 64,
+        "size_bytes": 2,
+        "tree_identity": identity,
+        "sensor_format": sensor_format,
+    }
+    delegated = public_selected_resource_descriptor(descriptor)
+    assert delegated["tree_identity"] == identity
+    assert delegated["sensor_format"] == sensor_format
+
+    context = replace(
+        _context(tmp_path),
+        selected_file_ids=("file_sensor",),
+        resource_descriptors=(descriptor,),
+    )
+    result = stage_uploaded_files(context, upload_roots=(uploads,))
+    assert result["ok"] is True
+    assert result["staged_files"][0]["tree_identity"] == identity
+    assert result["staged_files"][0]["sensor_format"] == sensor_format
+
+    # A nested digest that is not the catalog's top-level digest is denied.
+    forged = {**descriptor, "tree_identity": {**identity, "tree_manifest_sha256": "c" * 64}}
+    assert "tree_identity" not in public_selected_resource_descriptor(forged)
+    forged_sensor = {
+        **descriptor,
+        "sensor_format": {**sensor_format, "resource_sha256": "c" * 64},
+    }
+    assert "sensor_format" not in public_selected_resource_descriptor(forged_sensor)
 
 
 def test_stage_catalog_resources_rejects_unsafe_resource_id_before_glob(tmp_path):
@@ -232,8 +367,13 @@ def test_resource_tools_registered_only_for_authenticated_runs(tmp_path):
                 model=object(),
                 workspace_dir=tmp_path / "ws" / "r",
                 context=AgentRunContext(
-                    assistant_id="a", org_id="o", user_id=user_id, project_id="p",
-                    thread_id="t", run_id="r", goal="analyze my data",
+                    assistant_id="a",
+                    org_id="o",
+                    user_id=user_id,
+                    project_id="p",
+                    thread_id="t",
+                    run_id="r",
+                    goal="analyze my data",
                 ),
             )
         finally:

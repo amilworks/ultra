@@ -213,6 +213,13 @@ func bundleMemberTarget(root string, session domain.UploadSessionRecord, file do
 	return dest, b, true
 }
 
+// bundleFinalizeReHashMaxTotalBytes is the total bundle size at or below which
+// finalize re-reads and re-hashes every member (integrity re-verification).
+// Above it, finalize trusts the commit-time sha256 and checks only presence +
+// size, so a large OME-Zarr does not block the request re-reading every chunk.
+// A package var so tests can lower it; 2 GiB by default.
+var bundleFinalizeReHashMaxTotalBytes int64 = 2 << 30
+
 // finalizedBundleTreeIdentity builds and installs the catalog-authoritative
 // identity for a completed directory-format upload. It rereads and hashes every
 // final member under the bundle lock, compares those bytes with the SHA-256
@@ -274,6 +281,25 @@ func finalizedBundleTreeIdentity(
 		return bundleTreeIdentity{}, errors.New("bundle has no declared members")
 	}
 
+	// Re-hashing every file at finalize re-verifies on-disk content but costs
+	// O(all bytes). For a large bundle (a multi-GB OME-Zarr with thousands of
+	// chunks) that blocks the finalize request on NFS and risks an edge-proxy
+	// timeout. Above a bounded total we trust the sha256 each member had verified
+	// at commit time and check only presence + size, keeping finalize a stat-walk.
+	// Normal (small) bundles still get the full content re-hash.
+	var expectedTotal int64
+	for _, file := range expected {
+		if file.SizeBytes <= 0 {
+			continue
+		}
+		if file.SizeBytes > math.MaxInt64-expectedTotal {
+			expectedTotal = math.MaxInt64
+			break
+		}
+		expectedTotal += file.SizeBytes
+	}
+	verifyContent := expectedTotal <= bundleFinalizeReHashMaxTotalBytes
+
 	actual := make(map[string]bundleTreeActualFile, len(expected))
 	err = filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -303,7 +329,7 @@ func finalizedBundleTreeIdentity(
 		if entry.IsDir() {
 			return nil
 		}
-		actualFile, hashErr := finalizedBundleFileIdentity(path)
+		actualFile, hashErr := finalizedBundleFileIdentity(path, verifyContent)
 		if hashErr != nil {
 			return hashErr
 		}
@@ -335,17 +361,21 @@ func finalizedBundleTreeIdentity(
 				relative, file.SizeBytes, actualFile.SizeBytes,
 			)
 		}
-		if !strings.EqualFold(actualFile.SHA256, file.ComputedSHA256) {
-			return bundleTreeIdentity{}, fmt.Errorf(
-				"bundle member %q content changed after verified upload", relative,
-			)
+		entrySHA := file.ComputedSHA256
+		if verifyContent {
+			if !strings.EqualFold(actualFile.SHA256, file.ComputedSHA256) {
+				return bundleTreeIdentity{}, fmt.Errorf(
+					"bundle member %q content changed after verified upload", relative,
+				)
+			}
+			entrySHA = actualFile.SHA256
 		}
 		if actualFile.SizeBytes > math.MaxInt64-totalSize {
 			return bundleTreeIdentity{}, errors.New("bundle byte size overflows int64")
 		}
 		totalSize += actualFile.SizeBytes
 		entries = append(entries, bundleTreeManifestEntry{
-			Path: relative, SHA256: actualFile.SHA256, SizeBytes: actualFile.SizeBytes,
+			Path: relative, SHA256: entrySHA, SizeBytes: actualFile.SizeBytes,
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
@@ -384,7 +414,7 @@ func authorCanonicalBundleTreeManifest(
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return bundleTreeActualFile{}, errors.New("reserved tree manifest path must be a regular file")
 		}
-		identity, identityErr := finalizedBundleFileIdentity(target)
+		identity, identityErr := finalizedBundleFileIdentity(target, true)
 		if identityErr != nil {
 			return bundleTreeActualFile{}, identityErr
 		}
@@ -459,7 +489,7 @@ func authorCanonicalBundleTreeManifest(
 	if closeErr != nil {
 		return bundleTreeActualFile{}, closeErr
 	}
-	identity, err := finalizedBundleFileIdentity(target)
+	identity, err := finalizedBundleFileIdentity(target, true)
 	if err != nil {
 		return bundleTreeActualFile{}, err
 	}
@@ -469,13 +499,21 @@ func authorCanonicalBundleTreeManifest(
 	return identity, nil
 }
 
-func finalizedBundleFileIdentity(path string) (bundleTreeActualFile, error) {
+func finalizedBundleFileIdentity(path string, verifyContent bool) (bundleTreeActualFile, error) {
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
 		return bundleTreeActualFile{}, err
 	}
 	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
 		return bundleTreeActualFile{}, fmt.Errorf("bundle contains non-regular entry %q", filepath.Base(path))
+	}
+	if !verifyContent {
+		// Presence + size only: trust the sha256 verified at commit time. Used for
+		// large bundles (e.g. multi-GB OME-Zarr with thousands of chunks) where
+		// re-reading every file synchronously at finalize would block the request
+		// and risk an edge-proxy timeout. SHA256 is left empty; the caller
+		// substitutes the committed hash for the manifest.
+		return bundleTreeActualFile{SizeBytes: pathInfo.Size()}, nil
 	}
 	file, err := os.Open(path)
 	if err != nil {

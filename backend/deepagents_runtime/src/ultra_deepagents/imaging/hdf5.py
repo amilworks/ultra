@@ -284,28 +284,46 @@ def _is_integer_dtype(dt: Any) -> bool:
     return getattr(dt, "kind", "") in ("i", "u", "b")
 
 
-def _hard_child(group: Any, key: str) -> Any | None:
-    """Resolve one direct child only when its HDF5 link is a hard link.
+_MAX_LINK_RESOLUTION_DEPTH = 16
 
-    Calling ``group[key]`` or ``group.get(key)`` without this check follows soft and
-    external links. Files uploaded by users are untrusted, so every structural walk
-    and endpoint resolution uses this gate before object access.
+
+def _hard_child(group: Any, key: str, *, _depth: int = 0) -> Any | None:
+    """Resolve one direct child, following only links that stay INSIDE this file.
+
+    Hard links resolve directly. Internal soft links are followed — they are used
+    pervasively by legitimate scientific HDF5 (e.g. NeXus ``/entry/data`` -> detector
+    data) — but the soft link's target is re-resolved through this SAME gate, so a
+    soft link that chains to an external link is rejected at the external hop and the
+    referenced outside file is never opened. External links (which reference OTHER
+    files by path — a traversal risk on untrusted uploads), soft-link chains deeper
+    than a bounded limit, and unknown link types are always rejected.
     """
     import h5py
 
-    if not _is_group(group):
+    if not _is_group(group) or _depth > _MAX_LINK_RESOLUTION_DEPTH:
         return None
     try:
         link = group.get(str(key), getlink=True)
-        if not isinstance(link, h5py.HardLink):
-            return None
-        return group.get(str(key))
+        if isinstance(link, h5py.HardLink):
+            return group.get(str(key))
+        if isinstance(link, h5py.SoftLink):
+            target = str(getattr(link, "path", "") or "")
+            if not target:
+                return None
+            root = group.file if target.startswith("/") else group
+            return _hard_object_at_path(root, target, _depth=_depth + 1)
+        # ExternalLink or an unknown link type: never dereferenced.
+        return None
     except Exception:  # noqa: BLE001
         return None
 
 
-def _hard_object_at_path(h5: Any, path: str) -> Any | None:
-    """Resolve ``path`` component-by-component without following any non-hard link."""
+def _hard_object_at_path(h5: Any, path: str, *, _depth: int = 0) -> Any | None:
+    """Resolve ``path`` component-by-component, following only in-file links.
+
+    ``_depth`` tracks soft-link resolution hops (not path length) so a soft-link
+    chain cannot recurse without bound.
+    """
     text = str(path or "")
     if "\x00" in text:
         return None
@@ -318,7 +336,7 @@ def _hard_object_at_path(h5: Any, path: str) -> Any | None:
         return h5 if text in {"/", ""} else None
     current = h5
     for index, part in enumerate(parts):
-        current = _hard_child(current, part)
+        current = _hard_child(current, part, _depth=_depth)
         if current is None:
             return None
         if index < len(parts) - 1 and not _is_group(current):

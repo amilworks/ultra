@@ -564,10 +564,33 @@ func TestMigratePostgresProductionRequiresSeparateRoleOnSameDatabase(t *testing.
 			err := MigratePostgres(context.Background(), config.Config{
 				Environment: "production", DatabaseURL: test.servingURL,
 				MigrationDatabaseURL: test.migrationURL,
+				MaterialsEnabled:     true,
 			})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("MigratePostgres() error=%v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+// With materials disabled (the default), production migrations run with the
+// single serving role — the two-role split is a materials-only requirement, so
+// the schema applies exactly as it did before the materials work landed.
+func TestMigratePostgresWithoutMaterialsAllowsSingleRole(t *testing.T) {
+	t.Parallel()
+	err := MigratePostgres(context.Background(), config.Config{
+		Environment: "production",
+		DatabaseURL: "postgresql://single:pw@127.0.0.1:1/ultra",
+		// no MigrationDatabaseURL, MaterialsEnabled defaults false
+	})
+	// It must NOT reject on the role split; it proceeds to connect (and fails on
+	// the unreachable :1 host, which is the expected non-materials path).
+	if err == nil {
+		t.Fatalf("MigratePostgres() error = nil, want an unreachable-Postgres error")
+	}
+	for _, forbidden := range []string{"distinct non-empty roles", "MIGRATION_DATABASE_URL is required", "same database"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("MigratePostgres() error=%q must not enforce the materials two-role split when materials is disabled", err)
+		}
 	}
 }

@@ -1342,6 +1342,23 @@ def is_materials_context(context: AgentRunContext | None) -> bool:
     )
 
 
+def _materials_platform_enabled() -> bool:
+    """Whether the materials-science platform is switched on for this deployment.
+
+    Mirrors ``RuntimeSettings.materials_enabled`` (same env var). The prompt
+    builders below do not receive ``settings``, so they use this to suppress the
+    materials skill-routing brief and the materials results contract on a
+    materials-disabled deployment — where a prompt might still trip the shared
+    (dual-use) materials tokens but must not be steered into materials framing.
+    """
+    return os.getenv("ULTRA_DEEPAGENTS_MATERIALS_ENABLED", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 _CALPHAD_TOOL_GOAL_TOKENS = (
     "alloy phase stability",
     "calphad",
@@ -1878,7 +1895,7 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     ]
     if context.goal.strip():
         lines.append(f"- goal: {context.goal.strip()}")
-    if is_materials_context(context):
+    if _materials_platform_enabled() and is_materials_context(context):
         lines.extend(
             [
                 "- suggested_domain: materials (selection-context hint or prompt-classifier "
@@ -2100,7 +2117,11 @@ def build_runtime_prompt_suffix(
             "compute time as separate labeled numbers."
         )
     if is_rigor_intelligence(context):
-        if is_materials_context(context) and _should_register_scoped_delegation_subagents(context):
+        if (
+            _materials_platform_enabled()
+            and is_materials_context(context)
+            and _should_register_scoped_delegation_subagents(context)
+        ):
             sections.append(MATERIALS_RESULTS_CONTRACT_GUIDANCE.strip())
         elif looks_quantitative_rigor_goal(context.goal):
             sections.append(RESULTS_CONTRACT_GUIDANCE.strip())
@@ -2366,6 +2387,53 @@ SKILLS_SOURCES = ["/skills/"]
 """Backend-relative skill sources for SkillsMiddleware (progressive disclosure)."""
 
 
+# The materials skills live alongside the general skills under the skills root.
+# When the materials platform is disabled we hide them from the skill listing so
+# every non-materials run does not pay the ~1k prompt tokens their descriptions
+# would otherwise add on every model call.
+_MATERIALS_SKILL_DIR_NAMES = frozenset(
+    {
+        "computational-materials",
+        "materials-characterization",
+        "materials-characterization-advanced",
+        "materials-crystal-plasticity",
+        "materials-mechanics-degradation",
+        "materials-processing-kinetics",
+        "materials-sensor-data",
+        "materials-structure-thermo",
+    }
+)
+
+
+def _skill_directory_name(entry: dict[str, Any]) -> str:
+    path = str(entry.get("path", "")).rstrip("/")
+    return path.rsplit("/", 1)[-1] if path else ""
+
+
+class _MaterialsFilteredSkillsBackend(FilesystemBackend):
+    """FilesystemBackend that hides the materials skills from directory listings.
+
+    SkillsMiddleware discovers skills by listing the skills root and reading each
+    subdirectory's ``SKILL.md``. Filtering ``ls`` therefore keeps the materials
+    skills out of the always-on skill index (and its prompt-token cost) while the
+    materials platform is disabled, without moving any files. Reads are untouched.
+    """
+
+    def ls(self, path: str) -> Any:
+        result = super().ls(path)
+        entries = getattr(result, "entries", None)
+        if not entries:
+            return result
+        filtered = [
+            entry
+            for entry in entries
+            if _skill_directory_name(entry) not in _MATERIALS_SKILL_DIR_NAMES
+        ]
+        if len(filtered) == len(entries):
+            return result
+        return replace(result, entries=filtered)
+
+
 def resolve_skills_root(settings: RuntimeSettings) -> Path | None:
     """Directory holding repo-shipped agent skills, or None when unavailable.
 
@@ -2445,7 +2513,11 @@ def build_agent_backend(
     }
     skills_root = resolve_skills_root(settings)
     if skills_root is not None:
-        routes["/skills/"] = FilesystemBackend(skills_root, virtual_mode=True)
+        routes["/skills/"] = (
+            FilesystemBackend(skills_root, virtual_mode=True)
+            if _materials_platform_enabled()
+            else _MaterialsFilteredSkillsBackend(skills_root, virtual_mode=True)
+        )
     policies_root = (
         evaluation_policy_dir(settings.memory_root, evaluation_profile, run_id or "")
         if cleanroom
@@ -2694,11 +2766,16 @@ def build_research_agent(
         else []
     )
     resolved_tools.extend(context_tools)
-    resolved_tools.extend(calphad_tools)
-    resolved_tools.extend(kinetics_tools)
-    resolved_tools.extend(crystal_plasticity_tools)
-    resolved_tools.extend(degradation_characterization_tools)
-    resolved_tools.extend(sensor_tools)
+    # Materials tool families are registered only on a materials-enabled
+    # deployment. The per-context _should_register_* gates already keep them off
+    # non-materials runs; this flag keeps them off entirely until the platform is
+    # switched on (and its runtime images/roles are provisioned).
+    if _materials_platform_enabled():
+        resolved_tools.extend(calphad_tools)
+        resolved_tools.extend(kinetics_tools)
+        resolved_tools.extend(crystal_plasticity_tools)
+        resolved_tools.extend(degradation_characterization_tools)
+        resolved_tools.extend(sensor_tools)
     resolved_tools.extend(paper_tools)
     if _should_register_bisque_tools(context):
         resolved_tools.extend(build_bisque_tools(settings, context=context))

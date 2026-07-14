@@ -694,20 +694,26 @@ def test_untrusted_links_are_never_dereferenced(tmp_path):
             yield from _tree_paths(node["children"])
 
     paths = set(_tree_paths(viewer["hdf5"]["tree"]))
+    # External links, and soft links that CHAIN to an external link, are never
+    # dereferenced (the outside file is never opened).
     assert "/ExternalSecret" not in paths
-    assert "/SoftSecret" not in paths
-    assert "/DataContainers/Image/CellData/FeatureIds" not in paths
-    assert "/DataContainers/Image/CellData/SoftFeatureIds" not in paths
+    assert "/SoftSecret" not in paths  # soft -> external chain, rejected at the external hop
+    assert "/DataContainers/Image/CellData/FeatureIds" not in paths  # external link
 
     for linked_path in (
         "/ExternalSecret",
         "/SoftSecret",
         "/DataContainers/Image/CellData/ExternalSecret",
         "/DataContainers/Image/CellData/FeatureIds",
-        "/DataContainers/Image/CellData/SoftFeatureIds",
     ):
         with pytest.raises(hdf5.Hdf5DatasetNotFound):
             hdf5.dataset_summary(source, linked_path)
+
+    # An INTERNAL soft link (NeXus-style, staying inside this file) resolves to its
+    # in-file target — it is not treated as untrusted. No outside file is touched.
+    resolved = hdf5.dataset_summary(source, "/DataContainers/Image/CellData/SoftFeatureIds")
+    assert resolved is not None
+    assert "OUTSIDE-SECRET" not in json.dumps(resolved)
 
 
 def test_phase_metadata_requires_string_ensemble_data_and_is_byte_bounded(tmp_path):

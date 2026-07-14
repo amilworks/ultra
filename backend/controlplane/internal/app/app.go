@@ -75,7 +75,7 @@ func New(cfg config.Config) (*App, error) {
 			pool.Close()
 			return nil, err
 		}
-		if cfg.Environment == "production" {
+		if cfg.Environment == "production" && cfg.MaterialsEnabled {
 			if err := store.VerifyCalphadServingRole(ctx, pool); err != nil {
 				pool.Close()
 				return nil, err
@@ -610,8 +610,11 @@ func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	}
 	migrationURL := strings.TrimSpace(cfg.MigrationDatabaseURL)
 	if migrationURL == "" {
-		if cfg.Environment == "production" {
-			return fmt.Errorf("ULTRA_CONTROL_MIGRATION_DATABASE_URL is required for production migrations")
+		// The dedicated migration role is only required by the materials (CALPHAD)
+		// execute-only serving model. With materials disabled the schema applies
+		// with the single serving role, exactly as before the materials work.
+		if cfg.Environment == "production" && cfg.MaterialsEnabled {
+			return fmt.Errorf("ULTRA_CONTROL_MIGRATION_DATABASE_URL is required for production migrations when ULTRA_CONTROL_MATERIALS_ENABLED=true")
 		}
 		migrationURL = cfg.DatabaseURL
 	}
@@ -627,10 +630,10 @@ func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	}
 	servingRole := strings.TrimSpace(servingPoolConfig.ConnConfig.User)
 	migrationRole := strings.TrimSpace(poolConfig.ConnConfig.User)
-	if cfg.Environment == "production" && (servingRole == "" || migrationRole == "" || servingRole == migrationRole) {
-		return fmt.Errorf("production Postgres serving and migration URLs must use distinct non-empty roles")
+	if cfg.Environment == "production" && cfg.MaterialsEnabled && (servingRole == "" || migrationRole == "" || servingRole == migrationRole) {
+		return fmt.Errorf("production Postgres serving and migration URLs must use distinct non-empty roles when ULTRA_CONTROL_MATERIALS_ENABLED=true")
 	}
-	if cfg.Environment == "production" &&
+	if cfg.Environment == "production" && cfg.MaterialsEnabled &&
 		(strings.TrimSpace(servingPoolConfig.ConnConfig.Host) != strings.TrimSpace(poolConfig.ConnConfig.Host) ||
 			servingPoolConfig.ConnConfig.Port != poolConfig.ConnConfig.Port ||
 			strings.TrimSpace(servingPoolConfig.ConnConfig.Database) != strings.TrimSpace(poolConfig.ConnConfig.Database)) {

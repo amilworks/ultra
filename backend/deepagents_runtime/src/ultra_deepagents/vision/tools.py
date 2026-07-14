@@ -56,7 +56,20 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUNTIME_IDENTITY_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MIN_GRID_SLOT_WIDTH_PX = 16.0
 _MIN_GRID_SLOT_HEIGHT_PX = 12.0
-_MAX_INFLIGHT_VLM_WORKERS = 8
+def _resolve_max_inflight_vlm_workers() -> int:
+    raw = os.getenv("ULTRA_QWEN_VLM_MAX_INFLIGHT_WORKERS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    # Bound the orphaned daemon threads a persistently hung vision endpoint can
+    # leave behind, while staying well above the fleet's healthy concurrency
+    # (worker_max_concurrency x per-run VLM fan-out) so real concurrent calls
+    # queue for a slot instead of being failed with a misleading "stalled" error.
+    return value if value > 0 else 64
+
+
+_MAX_INFLIGHT_VLM_WORKERS = _resolve_max_inflight_vlm_workers()
 _VLM_WORKER_SLOTS = threading.BoundedSemaphore(_MAX_INFLIGHT_VLM_WORKERS)
 # Defuse PIL decompression bombs globally: raise instead of warn past this pixel count.
 Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS
@@ -116,9 +129,13 @@ def _invoke_with_deadline(call: Any, *, timeout: float) -> Any:
     is occupied, later calls fail immediately instead of creating an unbounded series
     of daemon threads around a persistently hanging endpoint.
     """
-    if not _VLM_WORKER_SLOTS.acquire(blocking=False):
+    # Wait (bounded by the call's own deadline) for a slot, so healthy concurrent
+    # vision calls queue instead of failing fast. Only a genuinely saturated pool —
+    # every slot held by a hung call for a full deadline — raises. This is the
+    # orphan-thread cap, not a concurrency throttle.
+    if not _VLM_WORKER_SLOTS.acquire(timeout=max(1.0, float(timeout))):
         raise _VlmCapacityError(
-            "vision worker capacity is occupied by stalled or concurrent model calls"
+            "vision worker capacity is saturated by stalled model calls"
         )
     box: dict[str, Any] = {}
 

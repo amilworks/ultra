@@ -75,6 +75,13 @@ type Config struct {
 	RunEventDeltaRetention    time.Duration
 	WorkerToken               string
 	CalphadRuntimeImageID     string
+	// MaterialsEnabled gates the materials-science (CALPHAD) platform. When
+	// false (the default), the control plane boots and behaves exactly as it did
+	// before the materials work landed: the CALPHAD runtime image ID is not
+	// required, the two-role serving/migration Postgres topology is not enforced,
+	// and no CALPHAD-specific serving privileges are applied. Turn it on only on a
+	// deployment that has provisioned the materials runtime image and role split.
+	MaterialsEnabled bool
 }
 
 func Load() Config {
@@ -87,11 +94,11 @@ func Load() Config {
 			"ULTRA_CONTROL_DEFAULT_USER_TIMEZONE",
 			envString("TZ", "UTC"),
 		),
-		HTTPAddr:          envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
-		ReadHeaderTimeout: envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
-		ReadTimeout:       envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
-		WriteTimeout:      envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
-		IdleTimeout:       envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
+		HTTPAddr:             envString("ULTRA_CONTROL_HTTP_ADDR", "127.0.0.1:8088"),
+		ReadHeaderTimeout:    envDurationSeconds("ULTRA_CONTROL_READ_HEADER_TIMEOUT_SECONDS", 10),
+		ReadTimeout:          envDurationSeconds("ULTRA_CONTROL_READ_TIMEOUT_SECONDS", 0),
+		WriteTimeout:         envDurationSeconds("ULTRA_CONTROL_WRITE_TIMEOUT_SECONDS", 0),
+		IdleTimeout:          envDurationSeconds("ULTRA_CONTROL_IDLE_TIMEOUT_SECONDS", 120),
 		DatabaseURL:          envString("ULTRA_CONTROL_DATABASE_URL", envString("RUN_STORE_PATH", "")),
 		MigrationDatabaseURL: envString("ULTRA_CONTROL_MIGRATION_DATABASE_URL", ""),
 		DatabaseMaxConns:     envInt("ULTRA_CONTROL_DATABASE_MAX_CONNS", 8),
@@ -159,6 +166,7 @@ func Load() Config {
 		RunEventDeltaRetention: envDurationSeconds("ULTRA_CONTROL_RUN_EVENT_DELTA_TTL_SECONDS", 0),
 		WorkerToken:            envString("ULTRA_CONTROL_WORKER_TOKEN", ""),
 		CalphadRuntimeImageID:  strings.ToLower(strings.TrimSpace(envString("ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID", ""))),
+		MaterialsEnabled:       envBool("ULTRA_CONTROL_MATERIALS_ENABLED", false),
 	}
 }
 
@@ -176,8 +184,8 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.NATSURL) == "" {
 		missing = append(missing, "ULTRA_CONTROL_NATS_URL")
 	}
-	if !isImmutableImageID(strings.ToLower(strings.TrimSpace(c.CalphadRuntimeImageID))) {
-		missing = append(missing, "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID=sha256:<64hex>")
+	if c.MaterialsEnabled && !isImmutableImageID(strings.ToLower(strings.TrimSpace(c.CalphadRuntimeImageID))) {
+		missing = append(missing, "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID=sha256:<64hex> (required when ULTRA_CONTROL_MATERIALS_ENABLED=true)")
 	}
 	if strings.TrimSpace(c.BisqueRootURL) != "" && strings.TrimSpace(c.SecretEncryptionKey) == "" {
 		missing = append(missing, "ULTRA_CONTROL_SECRET_ENCRYPTION_KEY")

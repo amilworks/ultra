@@ -50,23 +50,34 @@ def _auto_window(plane: np.ndarray) -> tuple[float, float]:
 
 def _global_window(img: NgffImage, ci: int) -> tuple[float, float]:
     """Resolve the display window for a channel ONCE and cache it, so every slice/tile
-    maps identically (no per-tile contrast checkerboard). A finite, non-degenerate OME
-    ``omero`` window is authoritative. Otherwise robust auto-contrast uses a bounded,
-    spatially distributed sample from the smallest multiscale level; it never full-reads
-    that plane solely to render a first tile."""
+    maps identically (no per-tile contrast checkerboard). The OME ``omero`` window is
+    honored only when it is finite, non-degenerate, AND overlaps the actual data — a
+    stale/default window (e.g. 0-255 declared on uint16 data, a common converter
+    artifact) would otherwise render the image blown-out, so in that case robust
+    auto-contrast wins. Auto-contrast uses a bounded, spatially distributed sample from
+    the smallest multiscale level; it never full-reads that plane to render a first tile."""
     cached = img.window_cache.get(ci)
     if cached is not None:
         return cached
 
+    # Compute robust auto-contrast from a bounded sample; it is both the fallback and
+    # the sanity check that keeps a stale omero window from blowing out the image.
+    reference = img.read_display_sample(c=ci).astype(np.float32, copy=False)
+    auto_lo, auto_hi = _auto_window(reference)
+
     ch = img.channels[ci] if ci < len(img.channels) else None
     if ch is not None and ch.window_start is not None and ch.window_end is not None:
         start, end = float(ch.window_start), float(ch.window_end)
-        if np.isfinite(start) and np.isfinite(end) and end > start:
+        if (
+            np.isfinite(start)
+            and np.isfinite(end)
+            and end > start
+            and not (end <= auto_lo or start >= auto_hi)
+        ):
             img.window_cache[ci] = (start, end)
             return (start, end)
 
-    reference = img.read_display_sample(c=ci).astype(np.float32, copy=False)
-    window = _auto_window(reference)
+    window = (auto_lo, auto_hi)
     img.window_cache[ci] = window
     return window
 

@@ -553,3 +553,60 @@ func BenchmarkFinalizedBundleTreeIdentity64MiB(b *testing.B) {
 		}
 	}
 }
+
+func TestFinalizedBundleTreeIdentitySkipsReHashAboveSizeGate(t *testing.T) {
+	root := t.TempDir()
+	bundle := bundleInfo{ID: "file_big", Name: "big.zarr", FormatID: "ome-zarr"}
+	dir := filepath.Join(root, bundle.Name)
+	payload := []byte("ORIGINAL")
+	rel := "chunks/0"
+	path := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	committedSHA := hex.EncodeToString(digest[:])
+	files := []domain.UploadSessionFileRecord{{
+		RelativePath:   bundle.Name + "/" + rel,
+		ResourceID:     bundle.ID,
+		SizeBytes:      int64(len(payload)),
+		ComputedSHA256: committedSHA,
+		Status:         "completed",
+	}}
+
+	// Baseline (default threshold => re-hash): the identity binds to the committed sha.
+	baseline, err := finalizedBundleTreeIdentity(dir, bundle.Name, bundle, files)
+	if err != nil {
+		t.Fatalf("baseline finalize: %v", err)
+	}
+
+	// Same-size mutation is caught while re-hashing (small bundle stays verified).
+	tampered := []byte("TAMPERED") // same length (8) as ORIGINAL
+	if len(tampered) != len(payload) {
+		t.Fatalf("test bug: tamper must be same size")
+	}
+	if err := os.WriteFile(path, tampered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := finalizedBundleTreeIdentity(dir, bundle.Name, bundle, files); err == nil ||
+		!strings.Contains(err.Error(), "content changed after verified upload") {
+		t.Fatalf("re-hash tamper result=%v, want content-change rejection", err)
+	}
+
+	// Above the re-hash size gate, finalize trusts the committed sha and checks
+	// only presence + size, so the same-size mutation is tolerated and the
+	// identity matches the committed baseline (no full-tree re-read).
+	prev := bundleFinalizeReHashMaxTotalBytes
+	bundleFinalizeReHashMaxTotalBytes = 0
+	t.Cleanup(func() { bundleFinalizeReHashMaxTotalBytes = prev })
+	skipped, err := finalizedBundleTreeIdentity(dir, bundle.Name, bundle, files)
+	if err != nil {
+		t.Fatalf("above-gate finalize (skip re-hash): %v", err)
+	}
+	if skipped.ManifestSHA256 != baseline.ManifestSHA256 {
+		t.Fatalf("skip-path identity=%q, want committed baseline %q", skipped.ManifestSHA256, baseline.ManifestSHA256)
+	}
+}

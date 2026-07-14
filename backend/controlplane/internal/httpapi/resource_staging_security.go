@@ -23,9 +23,11 @@ const (
 )
 
 // authorizeRunFileIDs turns selected resource ids into a tenant-scoped run
-// capability. It intentionally returns one generic not-found error for any
-// unreadable id so callers cannot distinguish nonexistent from foreign data.
-// The returned catalog records are also the sole source for immutable binding
+// capability. An id the caller cannot read (nonexistent OR foreign — the two are
+// intentionally indistinguishable) is DROPPED from the selection rather than
+// failing the whole run: a stale/deleted/unshared leftover selection in the
+// client must not block run creation. Only a genuine store error propagates. The
+// returned catalog records are also the sole source for immutable binding
 // descriptors; caller-supplied descriptors never provide checksum authority.
 func authorizeRunFileIDs(
 	ctx context.Context,
@@ -34,18 +36,22 @@ func authorizeRunFileIDs(
 	fileIDs []string,
 ) ([]string, []domain.ResourceRecord, error) {
 	fileIDs = uniqueTrimmedStringValues(fileIDs)
+	authorized := make([]string, 0, len(fileIDs))
 	resources := make([]domain.ResourceRecord, 0, len(fileIDs))
 	for _, fileID := range fileIDs {
 		resource, err := catalog.GetResourceForUser(ctx, fileID, principal.UserID, principal.OrgID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				return nil, nil, store.ErrNotFound
+				// Skip an unreadable selection; do not leak whether it was
+				// nonexistent or foreign, and do not fail the run.
+				continue
 			}
 			return nil, nil, err
 		}
+		authorized = append(authorized, fileID)
 		resources = append(resources, resource)
 	}
-	return fileIDs, resources, nil
+	return authorized, resources, nil
 }
 
 func withAuthorizedSelectedResourceDescriptors(

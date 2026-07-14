@@ -72,26 +72,30 @@ func TestCreateRunAuthorizesAndDeduplicatesSelectedResourcesBeforeDispatch(t *te
 		return rec
 	}
 
-	// One foreign id rejects the entire request before either the durable run or
-	// queue job exists. The response masks which requested id exists.
-	rejected := post(`{"user_id":"body-forged-user","goal":"load CALPHAD","file_ids":["file-owned-tdb","file-foreign-tdb"]}`)
-	if rejected.Code != http.StatusNotFound {
-		t.Fatalf("foreign selected id status = %d body=%s, want 404", rejected.Code, rejected.Body.String())
+	// A foreign/unreadable selected id is DROPPED (not a 404) so a stale client
+	// selection cannot block run creation. The run proceeds with only the
+	// readable id, and the response still masks whether the foreign id exists.
+	dropped := post(`{"user_id":"body-forged-user","goal":"load CALPHAD","file_ids":["file-owned-tdb","file-foreign-tdb"]}`)
+	if dropped.Code != http.StatusOK {
+		t.Fatalf("mixed selection status = %d body=%s, want 200 (foreign id dropped)", dropped.Code, dropped.Body.String())
 	}
-	if strings.Contains(rejected.Body.String(), "file-foreign-tdb") || strings.Contains(rejected.Body.String(), "user-b") {
-		t.Fatalf("foreign resource existence leaked: %s", rejected.Body.String())
+	if strings.Contains(dropped.Body.String(), "file-foreign-tdb") || strings.Contains(dropped.Body.String(), "user-b") {
+		t.Fatalf("foreign resource existence leaked: %s", dropped.Body.String())
 	}
-	runs, err := mem.ListRuns(ctx, thread.ThreadID, "", 10, 0)
-	if err != nil {
-		t.Fatalf("ListRuns: %v", err)
+	var droppedRun domain.RunRecord
+	if err := json.Unmarshal(dropped.Body.Bytes(), &droppedRun); err != nil {
+		t.Fatalf("decode dropped-selection run: %v", err)
 	}
-	if len(runs) != 0 {
-		t.Fatalf("foreign selection persisted runs: %+v", runs)
+	if got := droppedRun.Metadata["file_ids"]; !jsonArrayEquals(got, []string{"file-owned-tdb"}) {
+		t.Fatalf("dropped-selection run file_ids = %#v, want only the readable id", droppedRun.Metadata["file_ids"])
 	}
 	select {
 	case job := <-bus.Jobs():
-		t.Fatalf("foreign selection dispatched job: %+v", job)
+		if len(job.FileIDs) != 1 || job.FileIDs[0] != "file-owned-tdb" {
+			t.Fatalf("dropped-selection job file_ids = %#v, want only [file-owned-tdb]", job.FileIDs)
+		}
 	default:
+		t.Fatal("dropped-selection did not dispatch a job")
 	}
 
 	accepted := post(`{"user_id":"body-forged-user","goal":"load CALPHAD","file_ids":[" file-owned-tdb ","file-owned-tdb","file-owned-tdb"],"resource_descriptors":[{"type":"selected_resource","resource_id":"file-owned-tdb","file_id":"file-owned-tdb","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","size_bytes":1,"metadata":{"calphad":{"validation_status":"validated","credentials":{"token":"body-descriptor-secret"}}}}]}`)
@@ -692,4 +696,49 @@ func assertSelectedResourceBinding(t *testing.T, descriptors []domain.JSONMap, r
 		return
 	}
 	t.Fatalf("missing selected resource descriptor for %q: %#v", resourceID, descriptors)
+}
+
+// A remote-mutation intent from the client, with no linked BisQue account, must
+// NOT fail the chat turn at run creation. The run starts without the mutation
+// capability; the mutating tool then fails gracefully at tool time.
+func TestCreateRunWithoutBisqueAccountDropsMutationIntentInsteadOf409(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := runcontrol.NewService(mem, bus)
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Runs:    service,
+		Store:   mem,
+		WorkOS:  testWorkOSAuth(t, WorkOSAuthConfig{}),
+	})
+	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
+		UserID: "workos:user_a",
+		Title:  "bisque intent without account",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	cookie := testWorkOSSessionCookie(t, "user_a", "user-a@example.org", "org-a", "researcher")
+
+	req := httptest.NewRequest(
+		http.MethodPost, "/v2/threads/"+thread.ThreadID+"/runs",
+		strings.NewReader(`{"goal":"upload the plot to my BisQue account","remote_mutation_intents":["bisque.upload"]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("run-create status = %d body=%s, want 200 (intent dropped, turn not failed)", rec.Code, rec.Body.String())
+	}
+	select {
+	case job := <-bus.Jobs():
+		if len(job.RemoteMutationIntents) != 0 {
+			t.Fatalf("run started with mutation intents despite no linked account: %#v", job.RemoteMutationIntents)
+		}
+	default:
+		t.Fatal("run did not dispatch a job")
+	}
 }

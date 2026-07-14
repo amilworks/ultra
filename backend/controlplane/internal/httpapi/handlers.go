@@ -3410,8 +3410,12 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		runMetadata[domain.BisqueAccountBindingMetadataKey] = binding
 		jobMetadata["bisque_session_id"] = sessionID
 	} else if len(remoteMutationIntents) > 0 {
-		writeError(w, http.StatusConflict, errors.New("link a durable BisQue account before authorizing remote mutations"))
-		return
+		// No durable BisQue account is linked, so a remote mutation cannot be
+		// authorized for this run. Start the run WITHOUT the mutation capability
+		// instead of failing the whole chat turn at creation — a mutating BisQue
+		// tool call then returns a clean, actionable "link an account" error at
+		// tool time, exactly as it did before run-create gained this gate.
+		remoteMutationIntents = nil
 	}
 	run, err := deps.Runs.CreateRun(r.Context(), runcontrol.CreateRunRequest{
 		ThreadID:              threadID,

@@ -208,6 +208,7 @@ type ResourceBrowserProps = {
   onClearActiveCollection?: () => void;
   thumbnailUrlFor: (resource: ResourceRecord) => string;
   downloadUrlFor?: (resource: ResourceRecord) => string;
+  collectionDownloadUrlFor?: (collection: ResourceCollectionRecord) => string;
   quickPeekFetch?: (fileId: string, maxBytes: number) => Promise<ResourceTextHead>;
   onPushResourceToBisque?: (resource: ResourceRecord) => Promise<void> | void;
   onPushCollectionToBisque?: (collection: ResourceCollectionRecord) => Promise<void> | void;
@@ -655,6 +656,7 @@ export function ResourceBrowser({
   thumbnailUrlFor,
   zScrubThumbnail,
   downloadUrlFor,
+  collectionDownloadUrlFor,
   quickPeekFetch,
   onPushResourceToBisque,
   onPushCollectionToBisque,
@@ -751,6 +753,29 @@ export function ResourceBrowser({
   const tableBottomSpacerHeight = tableVirtualized
     ? Math.max(0, (cardResources.length - tableEndIndex) * RESOURCE_TABLE_ROW_HEIGHT)
     : 0;
+  // Duplicate awareness over the loaded page: identical content = same
+  // sha256 + size. Deliberately pagination-blind (a server-side count is the
+  // follow-up); empty checksums (bisque imports, bundles) never group.
+  const duplicateShaCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const resource of cardResources) {
+      const sha = String(resource.sha256 ?? "").trim().toLowerCase();
+      if (!sha || resource.status === "deleted") {
+        continue;
+      }
+      const key = `${sha}:${resource.size_bytes ?? 0}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [cardResources]);
+  const duplicateCountFor = (resource: ResourceRecord): number => {
+    const sha = String(resource.sha256 ?? "").trim().toLowerCase();
+    if (!sha) {
+      return 0;
+    }
+    return duplicateShaCounts.get(`${sha}:${resource.size_bytes ?? 0}`) ?? 0;
+  };
+
   const selectedResourcesInOrder = useMemo(
     () =>
       cardResources.filter((resource) => selectedResourceIds[resource.file_id]),
@@ -778,6 +803,23 @@ export function ResourceBrowser({
       ),
     [resourceCollections]
   );
+  // Nested browsing: the strip shows roots at the top level and children of
+  // the open folder inside it. A child whose parent is not in the loaded list
+  // (200-cap / filter scoping) surfaces at root rather than vanishing.
+  const loadedCollectionIds = useMemo(
+    () => new Set(resourceCollections.map((collection) => collection.collection_id)),
+    [resourceCollections]
+  );
+  const visibleFolderCollections = useMemo(() => {
+    const activeId = activeResourceCollection?.collection_id ?? "";
+    return availableFolderCollections.filter((collection) => {
+      const parentId = String(collection.parent_collection_id ?? "").trim();
+      if (activeId) {
+        return parentId === activeId;
+      }
+      return parentId === "" || !loadedCollectionIds.has(parentId);
+    });
+  }, [availableFolderCollections, activeResourceCollection, loadedCollectionIds]);
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
   const activeCollectionName = String(activeResourceCollection?.name ?? "").trim();
@@ -1658,6 +1700,18 @@ export function ResourceBrowser({
             Share
           </ContextMenuItem>
         ) : null}
+        {collectionDownloadUrlFor ? (
+          <ContextMenuItem asChild>
+            {/* Server streams the folder as a zip (bundles included as trees). */}
+            <a
+              href={collectionDownloadUrlFor(collection)}
+              download={`${String(collection.name ?? "").trim() || collection.collection_id}.zip`}
+            >
+              <Download data-icon="inline-start" />
+              Download as zip
+            </a>
+          </ContextMenuItem>
+        ) : null}
         {onDeleteCollection ? (
           <>
             <ContextMenuSeparator />
@@ -2178,9 +2232,9 @@ export function ResourceBrowser({
               </ContextMenuContent>
             </ContextMenu>
           ) : null}
-          {!activeResourceCollection && onOpenCollection && availableFolderCollections.length > 0 ? (
+          {onOpenCollection && visibleFolderCollections.length > 0 ? (
             <div className="resource-browser-collection-strip" aria-label="Resource folders">
-              {availableFolderCollections.map((collection) => {
+              {visibleFolderCollections.map((collection) => {
                 const resourceCount = Math.max(0, Number(collection.resource_count) || 0);
                 return (
                   <ContextMenu key={collection.collection_id}>
@@ -2867,6 +2921,15 @@ export function ResourceBrowser({
                               aria-label={`Lifecycle status for ${displayName}`}
                             >
                               <span>Deleted</span>
+                            </div>
+                          ) : null}
+                          {!isDeleted && duplicateCountFor(resource) > 1 ? (
+                            <div
+                              className="resource-browser-dup-chip"
+                              aria-label={`${displayName} has identical copies in view`}
+                              title="Identical content (same checksum and size) appears more than once in this view"
+                            >
+                              <span>Duplicate ×{duplicateCountFor(resource)}</span>
                             </div>
                           ) : null}
                           {resourceTags.length > 0 ? (

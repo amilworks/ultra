@@ -4058,6 +4058,11 @@ export class ApiClient {
     return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`);
   }
 
+  resourceCollectionDownloadUrl(collectionId: string): string {
+    const safeCollectionId = encodeURIComponent(collectionId);
+    return buildUrl(this.baseUrl, `/v2/resource-collections/${safeCollectionId}/download`);
+  }
+
   // resourceTextHead fetches a bounded, UTF-8-safe window of a text/data resource
   // plus metadata (total size, truncation, encoding, line estimate). O(window).
   async resourceTextHead(

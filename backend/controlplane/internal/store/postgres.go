@@ -4279,6 +4279,19 @@ func (s *PostgresStore) SoftDeleteResourceCollectionForUser(ctx context.Context,
 	if deletedAt.IsZero() {
 		deletedAt = domain.Now()
 	}
+	// Block deleting a folder that still has active subfolders: children keep
+	// pointing at the deleted parent and become unreachable in nested browsing.
+	var hasActiveChildren bool
+	if err := s.pool.QueryRow(ctx, `
+	SELECT EXISTS(
+	  SELECT 1 FROM control_resource_collections
+	  WHERE parent_collection_id = $1 AND status = 'active'
+	)`, strings.TrimSpace(collectionID)).Scan(&hasActiveChildren); err != nil {
+		return domain.ResourceCollectionRecord{}, mapPgError(err)
+	}
+	if hasActiveChildren {
+		return domain.ResourceCollectionRecord{}, fmt.Errorf("%w: collection has active subfolders", ErrConflict)
+	}
 	collection, err := scanResourceCollectionRow(s.pool.QueryRow(ctx, `
 	UPDATE control_resource_collections c
 	SET status = 'deleted',
@@ -7271,6 +7284,24 @@ FOR UPDATE`, resourceID, ownerUserID, ownerOrgID).Scan(&canonicalOwnerUserID, &c
 		return domain.ResourceShareGrantRecord{}, mapPgError(err)
 	}
 
+	// Idempotent share: re-sharing with the same grantee returns the existing
+	// active grant instead of stacking duplicates (the table has no unique
+	// constraint, and duplicates make "People with access" lie).
+	existing, existingErr := scanResourceShareGrantRow(tx.QueryRow(ctx, `
+SELECT grant_id, resource_id, owner_user_id, COALESCE(owner_org_id, ''), COALESCE(owner_role, ''),
+       COALESCE(grantee_user_id, ''), COALESCE(grantee_org_id, ''), role, status,
+       COALESCE(created_by_user_id, ''), created_at, updated_at, revoked_at, metadata
+FROM control_resource_share_grants
+WHERE resource_id = $1 AND status = 'active'
+  AND COALESCE(grantee_user_id, '') = $2 AND COALESCE(grantee_org_id, '') = $3
+ORDER BY created_at ASC
+LIMIT 1`, resourceID, granteeUserID, granteeOrgID))
+	if existingErr == nil {
+		return existing, nil
+	}
+	if !errors.Is(mapPgError(existingErr), ErrNotFound) {
+		return domain.ResourceShareGrantRecord{}, mapPgError(existingErr)
+	}
 	grant, err := scanResourceShareGrantRow(tx.QueryRow(ctx, `
 INSERT INTO control_resource_share_grants (
   grant_id, resource_id, owner_user_id, owner_org_id, owner_role,
@@ -8444,6 +8475,11 @@ func mapPgError(err error) error {
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		return ErrConflict
 	}
+	// Foreign-key violation (e.g. a collection parent that vanished between
+	// validation and insert) is a caller problem, not a server fault.
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return ErrNotFound
+	}
 	return err
 }
 
@@ -8532,4 +8568,91 @@ func offset32(offset int) int32 {
 		return 0
 	}
 	return int32(offset)
+}
+
+// ListResourceCollectionShareGrantsForCollection returns the owner's active
+// and revoked collection-level grants — the missing half of folder sharing:
+// without it a folder share could be created but never seen or undone.
+func (s *PostgresStore) ListResourceCollectionShareGrantsForCollection(ctx context.Context, collectionID string, ownerUserID string, ownerOrgID string) ([]domain.ResourceCollectionShareGrantRecord, error) {
+	rows, err := s.pool.Query(ctx, `
+SELECT g.grant_id, g.collection_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+       COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+       COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata
+FROM control_resource_collection_share_grants g
+JOIN control_resource_collections c ON c.collection_id = g.collection_id
+WHERE g.collection_id = $1
+  AND c.owner_user_id = $2
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $3)
+ORDER BY g.created_at DESC`,
+		strings.TrimSpace(collectionID),
+		strings.TrimSpace(ownerUserID),
+		strings.TrimSpace(ownerOrgID),
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	grants := []domain.ResourceCollectionShareGrantRecord{}
+	for rows.Next() {
+		grant, err := scanResourceCollectionShareGrantRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, grant)
+	}
+	return grants, rows.Err()
+}
+
+// RevokeResourceCollectionShareGrant flips a collection grant to revoked and
+// cascades to every inherited per-resource grant carrying its back-pointer —
+// one call fully un-shares a folder, however many members it fanned out to.
+func (s *PostgresStore) RevokeResourceCollectionShareGrant(ctx context.Context, collectionID string, grantID string, ownerUserID string, ownerOrgID string, revokedAt time.Time) (domain.ResourceCollectionShareGrantRecord, error) {
+	if revokedAt.IsZero() {
+		revokedAt = domain.Now()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceCollectionShareGrantRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	grant, err := scanResourceCollectionShareGrantRow(tx.QueryRow(ctx, `
+UPDATE control_resource_collection_share_grants g
+SET status = 'revoked',
+    revoked_at = $5,
+    updated_at = $5
+FROM control_resource_collections c
+WHERE g.grant_id = $2
+  AND g.collection_id = $1
+  AND g.collection_id = c.collection_id
+  AND c.owner_user_id = $3
+  AND (COALESCE(c.owner_org_id, '') = '' OR c.owner_org_id = $4)
+  AND g.status = 'active'
+RETURNING g.grant_id, g.collection_id, g.owner_user_id, COALESCE(g.owner_org_id, ''), COALESCE(g.owner_role, ''),
+          COALESCE(g.grantee_user_id, ''), COALESCE(g.grantee_org_id, ''), g.role, g.status,
+          COALESCE(g.created_by_user_id, ''), g.created_at, g.updated_at, g.revoked_at, g.metadata`,
+		strings.TrimSpace(collectionID),
+		strings.TrimSpace(grantID),
+		strings.TrimSpace(ownerUserID),
+		strings.TrimSpace(ownerOrgID),
+		timestamptz(revokedAt),
+	))
+	if err != nil {
+		return domain.ResourceCollectionShareGrantRecord{}, mapPgError(err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE control_resource_share_grants
+SET status = 'revoked',
+    revoked_at = $2,
+    updated_at = $2
+WHERE status = 'active'
+  AND metadata->>'collection_share_grant_id' = $1`,
+		grant.GrantID,
+		timestamptz(revokedAt),
+	); err != nil {
+		return domain.ResourceCollectionShareGrantRecord{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceCollectionShareGrantRecord{}, err
+	}
+	return grant, nil
 }

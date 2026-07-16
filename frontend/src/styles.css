@@ -3913,6 +3913,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-width: 0;
 }
 
+/* Duplicate chip shares the quiet chip register — it is information, not an
+   alarm: identical content (sha256+size) appearing more than once in view. */
+.resource-browser-dup-chip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+  min-width: 0;
+}
+
+.resource-browser-dup-chip > span,
 .resource-browser-share-status-chips > span,
 .resource-browser-lifecycle-chip > span {
   display: inline-flex;

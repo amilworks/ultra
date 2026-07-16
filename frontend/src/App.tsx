@@ -7733,6 +7733,7 @@ export function App() {
       setResourcesUploading(true);
       setResourcesError(null);
       try {
+        const uploadStartedAtMs = Date.now();
         const uploadOptions = {
           onProgress: updateResourceUploadProgress,
           resumeSession,
@@ -7753,6 +7754,19 @@ export function App() {
           allUploaded = response.uploaded;
         }
         const uploadedFileIds = uniqueFileIds(allUploaded.map((file) => file.file_id));
+        // Server-side checksum dedupe returns the EXISTING record with no
+        // explicit flag — the only client-visible trace is a created_at that
+        // predates this upload. Surface it so re-uploads of shared datasets
+        // read as intentional reuse instead of silent weirdness.
+        const reusedCount = allUploaded.filter((record) => {
+          const createdAtMs = Date.parse(record.created_at ?? "");
+          return Number.isFinite(createdAtMs) && createdAtMs < uploadStartedAtMs - 5000;
+        }).length;
+        if (reusedCount > 0) {
+          showSuccessToast(
+            `${reusedCount} ${reusedCount === 1 ? "file" : "files"} matched existing content — reused your ${reusedCount === 1 ? "copy" : "copies"} instead of duplicating`
+          );
+        }
         if (activeUploadCollectionId && uploadedFileIds.length > 0) {
           try {
             const collectionResponse = await apiClient.addResourcesToCollection(
@@ -7998,6 +8012,9 @@ export function App() {
         const collectionResponse = await apiClient.createResourceCollection({
           name: folderName,
           collection_type: "folder",
+          // Creating a folder while one is open nests it there — the server
+          // validates parent ownership and rejects deleted/non-folder parents.
+          parent_collection_id: activeResourceCollection?.collection_id || undefined,
           metadata: {
             source,
             selected_resource_count: resourceIds.length,
@@ -8020,7 +8037,7 @@ export function App() {
         throw Object.assign(new Error(message), { cause: error });
       }
     },
-    [apiClient]
+    [activeResourceCollection, apiClient]
   );
 
   const addResourcesToFolderFromSelection = useCallback(
@@ -11498,6 +11515,9 @@ export function App() {
                 }}
                 downloadUrlFor={(resource: ResourceRecord) =>
                   apiClient.resourceDownloadUrl(resource.file_id)
+                }
+                collectionDownloadUrlFor={(collection: ResourceCollectionRecord) =>
+                  apiClient.resourceCollectionDownloadUrl(collection.collection_id)
                 }
                 quickPeekFetch={(fileId: string, maxBytes: number) =>
                   apiClient.resourceTextHead(fileId, { maxBytes })

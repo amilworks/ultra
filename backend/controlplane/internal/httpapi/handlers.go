@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -447,6 +448,8 @@ type resourceShareGrantStore interface {
 
 type resourceCollectionShareGrantStore interface {
 	CreateResourceCollectionShareGrant(context.Context, domain.CreateResourceCollectionShareGrantInput) (domain.CreateResourceCollectionShareGrantResult, error)
+	ListResourceCollectionShareGrantsForCollection(ctx context.Context, collectionID string, ownerUserID string, ownerOrgID string) ([]domain.ResourceCollectionShareGrantRecord, error)
+	RevokeResourceCollectionShareGrant(ctx context.Context, collectionID string, grantID string, ownerUserID string, ownerOrgID string, revokedAt time.Time) (domain.ResourceCollectionShareGrantRecord, error)
 }
 
 type datasetSnapshotShareGrantStore interface {
@@ -652,14 +655,18 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/resources/{file_id}/shares", deps.handleListResourceShareGrants)
 			r.Post("/resources/{file_id}/shares", deps.handleCreateResourceShareGrant)
 			r.Delete("/resources/{file_id}/shares/{grant_id}", deps.handleRevokeResourceShareGrant)
+			r.Get("/share-targets", deps.handleListShareTargets)
 			r.Post("/resource-collections", deps.handleCreateResourceCollection)
 			r.Get("/resource-collections", deps.handleListResourceCollections)
 			r.Patch("/resource-collections/{collection_id}", deps.handlePatchResourceCollection)
 			r.Delete("/resource-collections/{collection_id}", deps.handleDeleteResourceCollection)
 			r.Post("/resource-collections/{collection_id}/restore", deps.handleRestoreResourceCollection)
 			r.Post("/resource-collections/{collection_id}/shares", deps.handleCreateResourceCollectionShareGrants)
+			r.Get("/resource-collections/{collection_id}/shares", deps.handleListResourceCollectionShareGrants)
+			r.Delete("/resource-collections/{collection_id}/shares/{grant_id}", deps.handleRevokeResourceCollectionShareGrant)
 			r.Post("/resource-collections/{collection_id}/resources", deps.handleAddResourcesToCollection)
 			r.Get("/resource-collections/{collection_id}/resources", deps.handleListResourceCollectionResources)
+			r.Get("/resource-collections/{collection_id}/download", deps.handleDownloadResourceCollection)
 			r.Delete("/resource-collections/{collection_id}/resources/{file_id}", deps.handleRemoveResourceFromCollection)
 			r.Post("/dataset-snapshots", deps.handleCreateDatasetSnapshot)
 			r.Get("/dataset-snapshots", deps.handleListDatasetSnapshots)
@@ -5048,13 +5055,37 @@ func (deps ServerDeps) handleCreateResourceCollection(w http.ResponseWriter, r *
 		return
 	}
 	principal := deps.principalFromRequest(r, "")
+	parentCollectionID := strings.TrimSpace(req.ParentCollectionID)
+	if parentCollectionID != "" {
+		// Owner-scoped parent validation. Without it any caller could nest a
+		// collection under another user's folder by guessing its id (the FK
+		// checks existence only), and a bad id surfaced as a raw 500.
+		parent, parentErr := collections.GetResourceCollectionForUser(
+			r.Context(), parentCollectionID, principal.UserID, principal.OrgID)
+		if parentErr != nil {
+			if errors.Is(parentErr, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, errors.New("parent collection not found"))
+				return
+			}
+			writeStoreError(w, parentErr)
+			return
+		}
+		if parent.Status == "deleted" {
+			writeError(w, http.StatusConflict, errors.New("parent collection is deleted"))
+			return
+		}
+		if parent.CollectionType != "folder" {
+			writeError(w, http.StatusBadRequest, errors.New("parent collection must be a folder"))
+			return
+		}
+	}
 	now := domain.Now()
 	collection, err := collections.CreateResourceCollection(r.Context(), domain.CreateResourceCollectionInput{
 		OwnerUserID:        principal.UserID,
 		OwnerOrgID:         principal.OrgID,
 		OwnerRole:          principal.Role,
 		ProjectID:          strings.TrimSpace(req.ProjectID),
-		ParentCollectionID: strings.TrimSpace(req.ParentCollectionID),
+		ParentCollectionID: parentCollectionID,
 		Name:               name,
 		Description:        strings.TrimSpace(req.Description),
 		CollectionType:     collectionType,
@@ -5246,6 +5277,52 @@ func (deps ServerDeps) handleRestoreResourceCollection(w http.ResponseWriter, r 
 		})
 	}
 	writeJSON(w, http.StatusOK, resourceCollectionResponse{Collection: collection})
+}
+
+// handleListResourceCollectionShareGrants: owner-only view of a folder's
+// collection-level grants — the "People with access" list for folders.
+func (deps ServerDeps) handleListResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request) {
+	collections, ok := deps.Store.(resourceCollectionShareGrantStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "collection sharing is not configured"})
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	collectionID := strings.TrimSpace(chi.URLParam(r, "collection_id"))
+	if collectionID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("collection id is required"))
+		return
+	}
+	grants, err := collections.ListResourceCollectionShareGrantsForCollection(r.Context(), collectionID, principal.UserID, principal.OrgID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grants": grants})
+}
+
+// handleRevokeResourceCollectionShareGrant un-shares a folder in one call:
+// the collection grant flips to revoked and every inherited per-resource
+// grant cascades with it (store-side, transactional in Postgres).
+func (deps ServerDeps) handleRevokeResourceCollectionShareGrant(w http.ResponseWriter, r *http.Request) {
+	collections, ok := deps.Store.(resourceCollectionShareGrantStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "collection sharing is not configured"})
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	collectionID := strings.TrimSpace(chi.URLParam(r, "collection_id"))
+	grantID := strings.TrimSpace(chi.URLParam(r, "grant_id"))
+	if collectionID == "" || grantID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("collection id and grant id are required"))
+		return
+	}
+	grant, err := collections.RevokeResourceCollectionShareGrant(r.Context(), collectionID, grantID, principal.UserID, principal.OrgID, domain.Now())
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"grant": grant})
 }
 
 func (deps ServerDeps) handleCreateResourceCollectionShareGrants(w http.ResponseWriter, r *http.Request) {
@@ -6798,6 +6875,217 @@ func (deps ServerDeps) handleGetResource(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, resourceResponse{Resource: record})
+}
+
+// handleDownloadResourceCollection streams a zip of a collection's member
+// resources. Best-effort per member: an unreadable member is skipped and
+// counted in a trailing manifest entry rather than aborting a long stream
+// (write errors to the client DO abort). Bundle resources (directory trees)
+// are walked into the archive under their resource name; only regular files
+// are copied, so symlinks can never pull bytes from outside the upload root.
+// Direct members only — child folders are separate collections.
+// shareTarget is one pickable grantee: a same-org person or the org itself.
+type shareTarget struct {
+	Kind          string `json:"kind"`
+	GranteeUserID string `json:"grantee_user_id,omitempty"`
+	GranteeOrgID  string `json:"grantee_org_id,omitempty"`
+	Label         string `json:"label"`
+	Detail        string `json:"detail,omitempty"`
+}
+
+// handleListShareTargets resolves who a user can share with: people in their
+// own organization (never a deployment-wide directory) plus the organization
+// itself as a single "everyone" target. This is what makes sharing reliable —
+// grantees are picked from real principals instead of typed as free text,
+// which silently matched nobody (principal ids are synthetic, not emails).
+func (deps ServerDeps) handleListShareTargets(w http.ResponseWriter, r *http.Request) {
+	accounts, ok := deps.Store.(accountStore)
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "share targets are not configured"})
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	principalOrg := strings.TrimSpace(principal.OrgID)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	records, err := accounts.ListUsers(r.Context(), 500, query)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	targets := []shareTarget{}
+	if principalOrg != "" && (query == "" || strings.Contains(strings.ToLower("everyone organization "+principalOrg), strings.ToLower(query))) {
+		targets = append(targets, shareTarget{
+			Kind:         "org",
+			GranteeOrgID: principalOrg,
+			Label:        "Everyone in your organization",
+			Detail:       principalOrg,
+		})
+	}
+	const maxPeople = 20
+	people := 0
+	for _, record := range records {
+		if people >= maxPeople {
+			break
+		}
+		if record.UserID == principal.UserID {
+			continue
+		}
+		if principalOrg == "" || strings.TrimSpace(record.OrgID) != principalOrg {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(record.Status), "rejected") {
+			continue
+		}
+		label := strings.TrimSpace(record.DisplayName)
+		if label == "" {
+			label = strings.TrimSpace(record.Email)
+		}
+		if label == "" {
+			label = record.UserID
+		}
+		targets = append(targets, shareTarget{
+			Kind:          "user",
+			GranteeUserID: record.UserID,
+			Label:         label,
+			Detail:        strings.TrimSpace(record.Email),
+		})
+		people++
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"targets": targets})
+}
+
+func (deps ServerDeps) handleDownloadResourceCollection(w http.ResponseWriter, r *http.Request) {
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	collections, ok := deps.resourceCollectionStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource collections are not configured"})
+		return
+	}
+	catalog, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeStoreError(w, store.ErrNotFound)
+		return
+	}
+	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	collectionID := strings.TrimSpace(chi.URLParam(r, "collection_id"))
+	collection, err := collections.GetResourceCollectionForUser(r.Context(), collectionID, principal.UserID, principal.OrgID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	members, err := collections.ListResourcesForCollectionForUser(r.Context(), domain.ResourceCollectionResourceListInput{
+		CollectionID: collection.CollectionID,
+		UserID:       principal.UserID,
+		OrgID:        principal.OrgID,
+		Limit:        uploadSessionMaxFilesPerBatch,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+
+	archiveName := strings.TrimSpace(collection.Name)
+	if archiveName == "" {
+		archiveName = collection.CollectionID
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", archiveName+".zip"))
+	w.WriteHeader(http.StatusOK)
+	archive := zip.NewWriter(w)
+	defer archive.Close()
+
+	usedEntryNames := map[string]int{}
+	uniqueEntryName := func(name string) string {
+		if strings.TrimSpace(name) == "" {
+			name = "resource"
+		}
+		count := usedEntryNames[name]
+		usedEntryNames[name] = count + 1
+		if count == 0 {
+			return name
+		}
+		extension := filepath.Ext(name)
+		return fmt.Sprintf("%s (%d)%s", strings.TrimSuffix(name, extension), count, extension)
+	}
+
+	skipped := 0
+	for _, member := range members.Resources {
+		resource, memberErr := catalog.GetResourceForUser(r.Context(), member.ResourceID, principal.UserID, principal.OrgID)
+		if memberErr != nil {
+			skipped++
+			continue
+		}
+		path, pathErr := resolveCatalogResourcePath(root, resource)
+		if pathErr != nil {
+			skipped++
+			continue
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			skipped++
+			continue
+		}
+		memberName := strings.TrimSpace(resource.OriginalName)
+		if memberName == "" {
+			memberName = resource.ResourceID
+		}
+		if info.IsDir() {
+			base := uniqueEntryName(memberName)
+			walkErr := filepath.Walk(path, func(memberPath string, fileInfo os.FileInfo, walkErr error) error {
+				if walkErr != nil || fileInfo == nil || !fileInfo.Mode().IsRegular() {
+					return nil
+				}
+				relative, relErr := filepath.Rel(path, memberPath)
+				if relErr != nil {
+					return nil
+				}
+				file, openErr := os.Open(memberPath)
+				if openErr != nil {
+					return nil
+				}
+				defer file.Close()
+				entry, entryErr := archive.Create(base + "/" + filepath.ToSlash(relative))
+				if entryErr != nil {
+					return entryErr
+				}
+				_, copyErr := io.Copy(entry, file)
+				return copyErr
+			})
+			if walkErr != nil {
+				// Zip-writer/client write failure mid-stream: nothing more to send.
+				return
+			}
+			continue
+		}
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			skipped++
+			continue
+		}
+		entry, entryErr := archive.Create(uniqueEntryName(memberName))
+		if entryErr != nil {
+			file.Close()
+			return
+		}
+		if _, copyErr := io.Copy(entry, file); copyErr != nil {
+			file.Close()
+			return
+		}
+		file.Close()
+	}
+	if skipped > 0 {
+		if entry, entryErr := archive.Create("SKIPPED.txt"); entryErr == nil {
+			fmt.Fprintf(entry, "%d member resource(s) could not be read and were skipped\n", skipped)
+		}
+	}
 }
 
 func (deps ServerDeps) handleDownloadResource(w http.ResponseWriter, r *http.Request) {

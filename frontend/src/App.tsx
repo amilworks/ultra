@@ -86,6 +86,7 @@ import {
   type LightboxFigure,
 } from "./lib/figureLightbox";
 import { bundleRootForRelativePath, groupPendingUploads } from "./lib/pendingBundles";
+import { filesFromClipboard } from "./lib/clipboardFiles";
 import {
   collectDroppedFiles,
   isOsFileDrag,
@@ -7856,6 +7857,59 @@ export function App() {
     ]
   );
 
+  // Resources-panel paste-to-upload: Cmd+V with a file-bearing clipboard
+  // uploads into the open folder (uploadResourceFiles defaults to the active
+  // collection). Guarded so it never hijacks pastes into the search box,
+  // rename fields, or open dialogs; text-only pastes are untouched.
+  useEffect(() => {
+    const handleResourcesPaste = (event: ClipboardEvent): void => {
+      if (activePanel !== "resources" || viewerOpen) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, [contenteditable='true'], [contenteditable='']")) {
+        return;
+      }
+      if (document.querySelector('[role="dialog"][data-state="open"]')) {
+        return;
+      }
+      const pastedFiles = filesFromClipboard(event.clipboardData);
+      if (pastedFiles.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      void uploadResourceFiles(pastedFiles);
+    };
+    window.addEventListener("paste", handleResourcesPaste);
+    return () => window.removeEventListener("paste", handleResourcesPaste);
+  }, [activePanel, uploadResourceFiles, viewerOpen]);
+
+  // Resources-panel catch-all drop: bubble phase, deliberately — the precise
+  // zones (content area, folder tiles) stopPropagation on the drops they
+  // consume, so this fires only for drops that would otherwise be discarded
+  // (sidebar, header). Those upload to the open folder/root instead of
+  // vanishing.
+  useEffect(() => {
+    const handleUnhandledResourcesDrop = (event: DragEvent): void => {
+      if (activePanel !== "resources" || viewerOpen || !isOsFileDrag(event.dataTransfer)) {
+        return;
+      }
+      event.preventDefault();
+      const payload = snapshotDropPayload(event.dataTransfer as DataTransfer);
+      void collectDroppedFiles(payload).then((dropped) => {
+        const message = summarizeDropIssues(dropped);
+        if (message) {
+          showErrorToast(message);
+        }
+        if (dropped.files.length > 0) {
+          void uploadResourceFiles(dropped.files);
+        }
+      });
+    };
+    window.addEventListener("drop", handleUnhandledResourcesDrop);
+    return () => window.removeEventListener("drop", handleUnhandledResourcesDrop);
+  }, [activePanel, uploadResourceFiles, viewerOpen]);
+
   const dismissResourceUploadProgress = useCallback((item: ResourceUploadProgress): void => {
     void resourceUploadQueueStore.remove(item.id);
     setResourceUploadProgress((current) => {
@@ -11644,6 +11698,18 @@ export function App() {
                       placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
                       className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
+                      onPaste={(event) => {
+                        // File-bearing pastes (screenshots, Finder-copied
+                        // files) attach instead of pasting; text-only pastes
+                        // fall through untouched. Files win over rich text —
+                        // paste-without-formatting is the text escape hatch.
+                        const pastedFiles = filesFromClipboard(event.clipboardData);
+                        if (pastedFiles.length === 0) {
+                          return;
+                        }
+                        event.preventDefault();
+                        attachFilesToActiveConversation(pastedFiles);
+                      }}
                       onKeyDown={(event) => {
                         if (
                           composerResourcePickerOpen &&
@@ -12062,6 +12128,15 @@ export function App() {
                 Files and folders upload when you send
               </p>
             </div>
+          </div>
+        ) : null}
+        {/* Resources drag hint: pointer-events none on purpose — the precise
+            drop zones (tiles, content area) must keep receiving the drop; the
+            catch-all bubble handler covers everywhere else. */}
+        {windowFileDragActive && activePanel === "resources" && !viewerOpen ? (
+          <div className="app-resources-drop-hint" aria-hidden="true">
+            Drop anywhere to upload
+            {activeResourceCollection ? ` into "${activeResourceCollection.name}"` : " to Resources"}
           </div>
         ) : null}
         {viewerOpen ? (

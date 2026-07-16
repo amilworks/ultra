@@ -6500,6 +6500,30 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
 }
 
+/* Resources drag hint: a quiet pill that never intercepts the drop. */
+.app-resources-drop-hint {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  pointer-events: none;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid color-mix(in oklab, var(--text-main) 30%, transparent);
+  border-radius: 999px;
+  background: var(--bg-panel-strong);
+  box-shadow: 0 10px 26px rgba(12, 12, 12, 0.14);
+  font-size: 0.85rem;
+  color: var(--text-main);
+  animation: app-chat-drop-overlay-in 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-resources-drop-hint {
+    animation: none;
+  }
+}
+
 .app-composer-icon-button,
 .app-composer-submit-button,
 .app-composer-stop-button {

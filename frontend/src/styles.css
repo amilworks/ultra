@@ -1910,12 +1910,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* Lock the idle pill to exactly 3rem and center the single placeholder line
      optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
      font-size clamp. min = max defeats any stale autosize inline height, so the
-     pill and its text land identically every time. */
+     pill and its text land identically every time. padding-left clears the
+     idle attach button (0.5rem inset + 2.5rem button + breathing room). */
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
     min-height: 3rem;
     max-height: 3rem;
     padding-top: calc((3rem - 1.45em) / 2);
     padding-bottom: calc((3rem - 1.45em) / 2);
+    padding-left: 3.4rem;
   }
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
     margin-top: 0;
@@ -1944,12 +1946,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     padding-top: 0;
     padding-bottom: 0;
   }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-mode {
+    opacity: 1;
+  }
 }
 
 @media (min-width: 641px) and (prefers-reduced-motion: reduce) {
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions,
   .app-composer-shell .app-composer-actions-start {
+    transition: none;
+  }
+  .app-composer-shell .app-composer-idle-mode {
     transition: none;
   }
 }
@@ -6370,7 +6378,62 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .app-composer-actions-end {
+  position: relative;
   margin-left: auto;
+}
+
+/* Idle-only mode echo (see App.tsx actions-end): anchored off the send button
+   so it never participates in toolbar flow — no layout shift when the row
+   expands and the real selector returns. Speaks in the placeholder's exact
+   voice (same clamp/weight/tracking/color as .app-composer-textarea +
+   --composer-placeholder) so the idle line reads as one quiet layer:
+   "Ask anything … Pro". Hidden below 641px; the phone composer keeps its own
+   behavior. */
+.app-composer-idle-mode {
+  position: absolute;
+  right: calc(100% + 1rem);
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
+     `font: inherit` out-orders that clamp, so the field actually renders at the
+     card's inherited size — inheriting here matches the real placeholder. */
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  color: var(--composer-placeholder);
+  white-space: nowrap;
+  transition: opacity 160ms ease;
+}
+
+/* Idle-only attach button (see App.tsx card-body): the pill's left affordance,
+   anchored to the position:relative card so the collapsed toolbar's clipping
+   and fade never touch it. Unlike the decorative idle send/mode echo this one
+   IS interactive at idle — attaching is a first-class idle action — so it
+   gates with visibility (out of the a11y tree when the full toolbar owns the
+   attach affordance). Desktop-only, like the rest of the idle treatment. */
+.app-composer-idle-attach {
+  display: none;
+}
+
+@media (min-width: 641px) {
+  .app-composer-idle-attach {
+    display: inline-flex;
+    position: absolute;
+    left: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 160ms ease, visibility 0s linear 160ms;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-attach {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 160ms ease;
+  }
 }
 
 .app-composer-icon-button,

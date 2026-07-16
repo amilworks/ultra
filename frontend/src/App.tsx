@@ -11405,6 +11405,28 @@ export function App() {
                     </Suspense>
                   ) : null}
                   <div className="app-composer-card-body">
+                    {/* Idle-only attach affordance: the toolbar's + collapses
+                        away inside actions-start (whose opacity fade would
+                        swallow any child), so the idle pill gets its own
+                        trigger anchored to the card, like the idle mode echo.
+                        Pointer-only on purpose: preventDefault on mousedown
+                        keeps the click from focusing it (focus would expand
+                        the composer and hide this button mid-click), and
+                        keyboard users reach attach via the expanded toolbar. */}
+                    <FileUploadTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        tabIndex={-1}
+                        aria-label="Attach files"
+                        onMouseDown={(event) => event.preventDefault()}
+                        className="app-composer-idle-attach app-composer-icon-button size-10 rounded-full"
+                        disabled={!activeConversationHydrated}
+                      >
+                        <Plus size={18} />
+                      </Button>
+                    </FileUploadTrigger>
                     {activeSending ? (
                       <div className="composer-running">
                         <Loader
@@ -11763,6 +11785,13 @@ export function App() {
                         </DropdownMenu>
                       </div>
                       <div className="app-composer-actions-end">
+                        {/* Idle-only echo of the intelligence mode (the real
+                            selector collapses away with actions-start). A quiet
+                            label, not a control: no chevron, no pointer events —
+                            focusing the pill restores the actual selector. */}
+                        <span className="app-composer-idle-mode" aria-hidden="true">
+                          {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                        </span>
                         {activeSending ? (
                           <Button
                             size="icon"

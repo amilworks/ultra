@@ -1907,11 +1907,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
      was expanded; releases back to the pk max-height on focus. */
+  /* Lock the idle pill to exactly 3rem and center the single placeholder line
+     optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
+     font-size clamp. min = max defeats any stale autosize inline height, so the
+     pill and its text land identically every time. */
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
-    min-height: 2.55rem;
+    min-height: 3rem;
     max-height: 3rem;
-    padding-top: 0.7rem;
-    padding-bottom: 0.7rem;
+    padding-top: calc((3rem - 1.45em) / 2);
+    padding-bottom: calc((3rem - 1.45em) / 2);
   }
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
     margin-top: 0;
@@ -2173,9 +2177,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
-  font-weight: 500;
+  /* Light display weight: the hero is an invitation, not a heading in a
+     document — at this size 300 carries fine and reads calmer. Tracking eased
+     to match (tight negative tracking crowds light strokes). */
+  font-weight: 300;
   line-height: 1.2;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
   color: var(--text-main);
 }
 
@@ -9855,10 +9862,15 @@ details {
   scrollbar-gutter: stable;
 }
 
+/* Auto table layout (not `fixed`): columns size to content, so numeric columns
+   stay narrow and label/filename columns get the room, instead of every column
+   taking an equal 1/N slice that force-wraps long headers. Long cells cannot
+   hog a row: `.pk-table-cell-long` caps their intrinsic contribution at 72ch.
+   A table whose unbreakable content (numbers, identifiers) exceeds the wrap
+   width scrolls horizontally inside it rather than squeezing values apart. */
 .pk-table {
   width: 100%;
   min-width: 33rem;
-  table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -9866,7 +9878,6 @@ details {
 
 .pk-table-head-cell,
 .pk-table-cell {
-  max-width: 0;
   padding: 0.78rem 1rem;
   border-bottom: 1px solid var(--line);
   font-size: 0.87rem;
@@ -9874,32 +9885,69 @@ details {
   vertical-align: top;
 }
 
+/* Header = the app's label register (mirrors .admin-table th): smaller, muted,
+   lightly tracked — labels are chrome, data carries the ink. The boundary is a
+   single rule under the header, deliberately the strongest line in the table
+   (row/column hairlines are var(--line)). No fill and no sticky: the wrap
+   never scrolls vertically so sticky never engaged, and the tinted band was a
+   second device doing the rule's job. No uppercase — headers are often literal
+   identifiers, and recasing mutates data. */
 .pk-table-head-cell {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: color-mix(in oklab, var(--bg-main) 78%, var(--bg-panel-strong) 22%);
-  color: var(--text-main);
+  color: var(--text-muted);
+  font-size: 0.74rem;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.02em;
+  padding: 0.62rem 1rem 0.55rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--text-main) 20%, transparent);
+  /* Override the UA's centered th default; column alignment (numeric columns,
+     explicit GFM markers) arrives as an inline style and still wins. */
+  text-align: left;
 }
 
+/* Zebra is the sole row-tracking aid, and deliberately the only row state:
+   chat table rows are inert, and in this app hover marks actionable surfaces
+   (nav items, chips, buttons) — data at rest stays at rest. If rows ever gain
+   an action, add hover back per the motion spec behind @media (hover: hover). */
 .pk-table-body .pk-table-row:nth-child(even) .pk-table-cell {
   background: color-mix(in oklab, var(--bg-main) 60%, transparent);
-}
-
-.pk-table-body .pk-table-row:hover .pk-table-cell {
-  background: color-mix(in oklab, var(--bg-main) 72%, var(--bg-panel-strong) 28%);
 }
 
 .pk-table-body .pk-table-row:last-child .pk-table-cell {
   border-bottom: 0;
 }
 
+/* Cells hold data — identifiers, filenames, counts — not prose, so a value is
+   never mutilated at a wrap point: no dictionary hyphen inserted INTO an
+   identifier (`prairie_dog_in_burrow` → `prairie_-dog_in_burrow`) and no
+   mid-token break inside a number or filename (`100000` → `10000` / `0`).
+   Cells wrap at word boundaries only; when unbreakable content makes the table
+   wider than its wrap, the wrap scrolls horizontally instead. Genuinely long
+   cells opt back into anywhere-breaking via .pk-table-cell-long below. The
+   `:where(a, strong, em)` arm must sit AFTER the `.pk-markdown :where(...)`
+   prose rule (equal specificity) to win back inline elements it re-targets
+   inside cells. */
 .pk-table-head-cell,
 .pk-table-cell {
   word-break: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  hyphens: none;
+}
+
+.pk-table :where(a, strong, em) {
+  hyphens: none;
+}
+
+/* Inline code in a cell is an identifier (filename, class label): keep it on
+   one line — even a break at a real hyphen splits `0210-jGU3.JPG` into what
+   reads as two tokens — and let the wrap scroll instead. Outranks the global
+   .pk-inline-code anywhere-break; cells flagged .pk-table-cell-long (56+ char
+   tokens, e.g. hashes) are exempt so they can still break within their 72ch
+   measure. */
+.pk-table-cell:not(.pk-table-cell-long) .pk-inline-code,
+.pk-table-head-cell:not(.pk-table-cell-long) .pk-inline-code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .pk-table-head-cell + .pk-table-head-cell,
@@ -9917,7 +9965,6 @@ details {
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
-  hyphens: auto;
 }
 
 .pk-table-cell-long :where(a, span, code) {
@@ -9925,11 +9972,7 @@ details {
   word-break: break-word;
 }
 
-.pk-table-cell :where(a),
-.pk-table-head-cell :where(a) {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
+
 
 .pk-table-cell .bisque-link-wrap,
 .pk-table-head-cell .bisque-link-wrap {
@@ -10006,6 +10049,12 @@ details {
   .pk-table-cell {
     padding: 0.5rem 0.62rem;
     font-size: 0.78rem;
+  }
+  /* Keep the header's label register (smaller than body) at phone sizes too —
+     this shared rule above would otherwise snap it back to body size. */
+  .pk-table-head-cell {
+    padding: 0.45rem 0.62rem 0.4rem;
+    font-size: 0.7rem;
   }
   .pk-code-render :where(pre) {
     padding: 0.85rem 1rem 0.95rem;

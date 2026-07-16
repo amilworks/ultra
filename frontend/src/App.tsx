@@ -85,7 +85,14 @@ import {
   registerLightboxOpenInLens,
   type LightboxFigure,
 } from "./lib/figureLightbox";
-import { groupPendingUploads } from "./lib/pendingBundles";
+import { bundleRootForRelativePath, groupPendingUploads } from "./lib/pendingBundles";
+import {
+  collectDroppedFiles,
+  isOsFileDrag,
+  MAX_DROPPED_FILES,
+  snapshotDropPayload,
+  summarizeDropIssues,
+} from "./lib/dropTraversal";
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_API_KEY,
@@ -6134,6 +6141,88 @@ export function App() {
     updateConversation(activeConversation.id, updater);
   }, [activeConversation, updateConversation]);
 
+  // Single entry point for attaching files to the active conversation — used
+  // by the composer FileUpload (pickers + card drops) and the window-level
+  // chat drop overlay, so every path shares identical pending-file semantics.
+  const attachFilesToActiveConversation = useCallback(
+    (files: File[]): void => {
+      if (files.length === 0) {
+        return;
+      }
+      // The per-drop cap protects a single traversal, but drops accumulate in
+      // pendingFiles and the server rejects sessions past the same limit at
+      // send time — refuse the overage here, where the user can still react.
+      const alreadyPending = activeConversation?.pendingFiles.length ?? 0;
+      if (alreadyPending + files.length > MAX_DROPPED_FILES) {
+        showErrorToast(
+          `Attachments are limited to ${MAX_DROPPED_FILES.toLocaleString()} files per message (${alreadyPending.toLocaleString()} already attached).`
+        );
+        return;
+      }
+      updateActiveConversation((conversation) => ({
+        ...conversation,
+        pendingFiles: [...conversation.pendingFiles, ...files],
+      }));
+    },
+    [activeConversation, updateActiveConversation]
+  );
+
+  // Window-level file-drag tracking: (a) preventDefault on dragover/drop so a
+  // drop that misses every target never navigates the tab away from the app,
+  // and (b) a depth counter (dragenter/dragleave fire once per element
+  // boundary) driving the chat drop overlay without enter/leave flicker.
+  const [windowFileDragActive, setWindowFileDragActive] = useState(false);
+  const windowFileDragDepthRef = useRef(0);
+  useEffect(() => {
+    const isFileDrag = (event: DragEvent): boolean => isOsFileDrag(event.dataTransfer);
+    const handleDragEnter = (event: DragEvent): void => {
+      if (!isFileDrag(event)) {
+        return;
+      }
+      windowFileDragDepthRef.current += 1;
+      setWindowFileDragActive(true);
+    };
+    const handleDragLeave = (event: DragEvent): void => {
+      if (!isFileDrag(event)) {
+        return;
+      }
+      windowFileDragDepthRef.current = Math.max(0, windowFileDragDepthRef.current - 1);
+      if (windowFileDragDepthRef.current === 0) {
+        setWindowFileDragActive(false);
+      }
+    };
+    const handleDragOver = (event: DragEvent): void => {
+      if (isFileDrag(event)) {
+        event.preventDefault();
+      }
+    };
+    const handleDrop = (event: DragEvent): void => {
+      windowFileDragDepthRef.current = 0;
+      setWindowFileDragActive(false);
+      if (isFileDrag(event)) {
+        // Inner drop zones already ran (bubble order); for unhandled drops
+        // this stops the browser from opening the file over the app.
+        event.preventDefault();
+      }
+    };
+    // Capture phase, deliberately: inner drop zones (composer FileUpload,
+    // ResourceBrowser tiles) stopPropagation in their handlers, and React
+    // delegates at #root — a bubble-phase window listener would never fire for
+    // handled drops, wedging the drag state and leaving the overlay stuck over
+    // the app. Capture runs before any of that. preventDefault does not stop
+    // propagation, so inner handlers still receive the drop.
+    window.addEventListener("dragenter", handleDragEnter, true);
+    window.addEventListener("dragleave", handleDragLeave, true);
+    window.addEventListener("dragover", handleDragOver, true);
+    window.addEventListener("drop", handleDrop, true);
+    return () => {
+      window.removeEventListener("dragenter", handleDragEnter, true);
+      window.removeEventListener("dragleave", handleDragLeave, true);
+      window.removeEventListener("dragover", handleDragOver, true);
+      window.removeEventListener("drop", handleDrop, true);
+    };
+  }, []);
+
   const clearComposerDraft = useCallback((conversationId: string): void => {
     const normalizedConversationId = String(conversationId || "").trim();
     if (!normalizedConversationId) {
@@ -7576,12 +7665,18 @@ export function App() {
     resourceUploadProgressBatcherRef.current?.enqueue(event);
   }, []);
 
+  // Synchronous reentrancy latch for uploadResourceFiles (see guard inside).
+  const resourcesUploadingRef = useRef(false);
   const uploadResourceFiles = useCallback(
     async (files: File[], context?: ResourceUploadReselectionContext): Promise<void> => {
       const selectedFiles = files.filter((file) => file.size >= 0);
-      if (selectedFiles.length === 0 || resourcesUploading) {
+      // Ref, not just state: drop traversal made callers async, so two quick
+      // drops can both observe stale resourcesUploading=false in their render
+      // closures. The ref is checked-and-set synchronously.
+      if (selectedFiles.length === 0 || resourcesUploading || resourcesUploadingRef.current) {
         return;
       }
+      resourcesUploadingRef.current = true;
       const resumeFrom = context?.resumeFrom;
       const resumeSession =
         selectedFiles.length === 1 && resumeFrom?.sessionId && resumeFrom.fileToken
@@ -7593,18 +7688,70 @@ export function App() {
           : undefined;
       const uploadTargetCollection = context?.uploadTargetCollection ?? activeResourceCollection;
       const activeUploadCollectionId = String(uploadTargetCollection?.collection_id ?? "").trim();
+      // Bundle files (zarr stores) and plain files upload in separate
+      // sessions when both are present: a bundle-bearing session's response
+      // carries only bundle records, which would strip the plain files'
+      // records and defeat folder placement below.
+      const bundleFiles = resumeSession
+        ? []
+        : selectedFiles.filter((file) =>
+            Boolean(bundleRootForRelativePath(file.webkitRelativePath ?? ""))
+          );
+      const plainFiles = resumeSession
+        ? selectedFiles
+        : selectedFiles.filter(
+            (file) => !bundleRootForRelativePath(file.webkitRelativePath ?? "")
+          );
+      const mixedUpload = bundleFiles.length > 0 && plainFiles.length > 0;
+      // Dropped/picked folders land as folders: group plain files by the top
+      // segment of their relative path, keyed to input order (the per-file
+      // upload response is index-aligned with its input). Skipped when the
+      // upload already targets a collection — drops onto a folder tile or
+      // inside an open folder flatten into that folder — and for zarr roots,
+      // which commit as single bundle resources rather than collections.
+      const folderGroupIndices = new Map<string, number[]>();
+      if (!activeUploadCollectionId && !resumeFrom) {
+        plainFiles.forEach((file, index) => {
+          const relativePath = file.webkitRelativePath ?? "";
+          if (!relativePath.includes("/")) {
+            return;
+          }
+          const topSegment = relativePath.split("/")[0] ?? "";
+          if (!topSegment) {
+            return;
+          }
+          const existing = folderGroupIndices.get(topSegment);
+          if (existing) {
+            existing.push(index);
+          } else {
+            folderGroupIndices.set(topSegment, [index]);
+          }
+        });
+      }
       pausedResourceUploadSessionIdsRef.current.clear();
       setResourcesUploading(true);
       setResourcesError(null);
       try {
-        const response = await apiClient.uploadFiles(selectedFiles, {
+        const uploadOptions = {
           onProgress: updateResourceUploadProgress,
           resumeSession,
           pauseSignal: {
             isPaused: (sessionId: string) => pausedResourceUploadSessionIdsRef.current.has(sessionId),
           },
-        });
-        const uploadedFileIds = uniqueFileIds(response.uploaded.map((file) => file.file_id));
+        };
+        let plainUploaded: UploadedFileRecord[];
+        let allUploaded: UploadedFileRecord[];
+        if (mixedUpload) {
+          const bundleResponse = await apiClient.uploadFiles(bundleFiles, uploadOptions);
+          const plainResponse = await apiClient.uploadFiles(plainFiles, uploadOptions);
+          plainUploaded = plainResponse.uploaded;
+          allUploaded = [...bundleResponse.uploaded, ...plainResponse.uploaded];
+        } else {
+          const response = await apiClient.uploadFiles(selectedFiles, uploadOptions);
+          plainUploaded = bundleFiles.length > 0 ? [] : response.uploaded;
+          allUploaded = response.uploaded;
+        }
+        const uploadedFileIds = uniqueFileIds(allUploaded.map((file) => file.file_id));
         if (activeUploadCollectionId && uploadedFileIds.length > 0) {
           try {
             const collectionResponse = await apiClient.addResourcesToCollection(
@@ -7629,6 +7776,57 @@ export function App() {
           } catch (error) {
             setResourcesError(`Uploaded, but could not add to folder: ${normalizeApiError(error)}`);
           }
+        } else if (folderGroupIndices.size > 0 && plainUploaded.length === plainFiles.length) {
+          // Reuse-by-name must consult the server, not the resourceCollections
+          // cache: that state is scoped to the current search/status filters
+          // and capped, so a filtered view would create duplicate folders.
+          // (Server list is capped at 200 folders; misses degrade to creating
+          // a same-named folder, never to misfiling.)
+          let existingFolders: ResourceCollectionRecord[] = [];
+          try {
+            existingFolders = (await loadResourceFolders(apiClient, { limit: 200 })).collections;
+          } catch {
+            // Lookup failure only disables reuse; creation below still works.
+          }
+          for (const [folderName, indices] of folderGroupIndices) {
+            const groupFileIds = uniqueFileIds(
+              indices
+                .map((index) => plainUploaded[index]?.file_id)
+                .filter((fileId): fileId is string => Boolean(fileId))
+            );
+            if (groupFileIds.length === 0) {
+              continue;
+            }
+            try {
+              const existingCollection = existingFolders.find(
+                (collection) =>
+                  collection.name === folderName &&
+                  String(collection.collection_type ?? "") === "folder"
+              );
+              const collectionId = existingCollection
+                ? existingCollection.collection_id
+                : (
+                    await apiClient.createResourceCollection({
+                      name: folderName,
+                      collection_type: "folder",
+                      metadata: { source: "resources_drop_folder" },
+                    })
+                  ).collection.collection_id;
+              await apiClient.addResourcesToCollection(collectionId, groupFileIds, {
+                source: "resources_drop_folder",
+              });
+              const plural = groupFileIds.length === 1 ? "file" : "files";
+              showSuccessToast(
+                existingCollection
+                  ? `Added ${groupFileIds.length} ${plural} to "${folderName}"`
+                  : `Created folder "${folderName}" with ${groupFileIds.length} ${plural}`
+              );
+            } catch (error) {
+              setResourcesError(
+                `Uploaded, but could not file into folder "${folderName}": ${normalizeApiError(error)}`
+              );
+            }
+          }
         }
         flushResourceUploadProgress();
         setResourceUploadProgress((current) => {
@@ -7645,6 +7843,7 @@ export function App() {
         setResourcesError(normalizeApiError(error));
       } finally {
         flushResourceUploadProgress();
+        resourcesUploadingRef.current = false;
         setResourcesUploading(false);
       }
     },
@@ -11357,12 +11556,13 @@ export function App() {
                 </SystemMessage>
               ) : null}
               <FileUpload
-                onFilesAdded={(files) =>
-                  updateActiveConversation((conversation) => ({
-                    ...conversation,
-                    pendingFiles: [...conversation.pendingFiles, ...files],
-                  }))
-                }
+                onFilesAdded={attachFilesToActiveConversation}
+                onDropCollected={(collection) => {
+                  const message = summarizeDropIssues(collection);
+                  if (message) {
+                    showErrorToast(message);
+                  }
+                }}
                 multiple
                 allowDirectories
               >
@@ -11826,6 +12026,44 @@ export function App() {
             </>
           )}
         </main>
+        {/* Chat drop overlay: while an OS file drag is over the window and the
+            chat panel is active, the whole viewport becomes the drop target —
+            "dump files anywhere". Resources has its own zone highlighting, and
+            the viewer sheet suppresses this. */}
+        {windowFileDragActive &&
+        activePanel === "chat" &&
+        Boolean(activeConversation) &&
+        activeConversationHydrated &&
+        !viewerOpen ? (
+          <div
+            className="app-chat-drop-overlay"
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              windowFileDragDepthRef.current = 0;
+              setWindowFileDragActive(false);
+              const payload = snapshotDropPayload(event.dataTransfer);
+              void collectDroppedFiles(payload).then((collection) => {
+                attachFilesToActiveConversation(collection.files);
+                const message = summarizeDropIssues(collection);
+                if (message) {
+                  showErrorToast(message);
+                }
+              });
+            }}
+          >
+            <div className="app-chat-drop-overlay-card">
+              <p className="app-chat-drop-overlay-title">Drop to attach</p>
+              <p className="app-chat-drop-overlay-hint">
+                Files and folders upload when you send
+              </p>
+            </div>
+          </div>
+        ) : null}
         {viewerOpen ? (
           <Suspense fallback={null}>
             <LazyUploadViewerSheet

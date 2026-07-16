@@ -818,7 +818,7 @@ describe("ResourceBrowser", () => {
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
   });
 
-  it("uploads dropped desktop files into the active folder", () => {
+  it("uploads dropped desktop files into the active folder", async () => {
     const onUploadFiles = vi.fn();
     const file = new File(["nifti"], "dropped-brain.nii.gz", {
       type: "application/gzip",
@@ -839,14 +839,16 @@ describe("ResourceBrowser", () => {
     expect(dataTransfer.dropEffect).toBe("copy");
     fireEvent.drop(content as HTMLElement, { dataTransfer });
 
-    expect(onUploadFiles).toHaveBeenCalledTimes(1);
+    // Drop traversal is async (directory-entry walks); the callback fires
+    // after the snapshot resolves.
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
     expect(onUploadFiles.mock.calls[0][1]).toMatchObject({
       uploadTargetCollection: nphFolder,
     });
   });
 
-  it("uploads dropped desktop files directly into a folder tile", () => {
+  it("uploads dropped desktop files directly into a folder tile", async () => {
     const onUploadFiles = vi.fn();
     const file = new File(["table"], "dropped-table.csv", {
       type: "text/csv",
@@ -866,11 +868,75 @@ describe("ResourceBrowser", () => {
     expect(dataTransfer.dropEffect).toBe("copy");
     fireEvent.drop(folderButton, { dataTransfer });
 
-    expect(onUploadFiles).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
     expect(onUploadFiles.mock.calls[0][1]).toMatchObject({
       uploadTargetCollection: nphFolder,
     });
+  });
+
+  it("traverses a dropped directory and uploads its files with relative paths", async () => {
+    const onUploadFiles = vi.fn();
+    const fileEntry = (fullPath: string) => {
+      const entryName = fullPath.split("/").filter(Boolean).pop() ?? "";
+      return {
+        isFile: true,
+        isDirectory: false,
+        name: entryName,
+        fullPath,
+        file: (onSuccess: (file: File) => void) =>
+          onSuccess(new File(["x"], entryName, { type: "application/octet-stream" })),
+      };
+    };
+    const directoryEntry = {
+      isFile: false,
+      isDirectory: true,
+      name: "experiment_A",
+      fullPath: "/experiment_A",
+      createReader: () => {
+        let drained = false;
+        return {
+          readEntries: (
+            onSuccess: (entries: unknown[]) => void
+          ) => {
+            if (drained) {
+              onSuccess([]);
+              return;
+            }
+            drained = true;
+            onSuccess([
+              fileEntry("/experiment_A/a.tif"),
+              fileEntry("/experiment_A/.DS_Store"),
+            ]);
+          },
+        };
+      },
+    };
+    const dataTransfer = {
+      dropEffect: "none",
+      effectAllowed: "all",
+      files: [] as File[],
+      items: [
+        {
+          kind: "file",
+          type: "",
+          webkitGetAsEntry: () => directoryEntry,
+        },
+      ],
+      types: ["Files"],
+      setData: vi.fn(),
+      getData: vi.fn(() => ""),
+    };
+    const { container } = render(
+      <ResourceBrowser {...baseProps} onUploadFiles={onUploadFiles} />
+    );
+    const content = container.querySelector(".resource-browser-content");
+    fireEvent.drop(content as HTMLElement, { dataTransfer });
+
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    const uploadedFiles = onUploadFiles.mock.calls[0][0] as File[];
+    expect(uploadedFiles.map((file) => file.name)).toEqual(["a.tif"]);
+    expect(uploadedFiles[0].webkitRelativePath).toBe("experiment_A/a.tif");
   });
 
   it("shows verified-byte progress for resumable resource uploads", () => {

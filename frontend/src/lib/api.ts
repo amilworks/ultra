@@ -1,3 +1,4 @@
+import { bundleRootForRelativePath } from "./pendingBundles";
 import type {
   AccountRequestPayload,
   AccountRequestResponse,
@@ -2424,7 +2425,14 @@ export class ApiClient {
     if (files.length === 0) {
       return { file_count: 0, uploaded: [] };
     }
-    if (files.length > 1) {
+    // Bundle finalization lives only in the multi-file session path, so a
+    // single-member zarr store (one .zattrs, a lone chunk) must route there
+    // too — the single-file path would land its bytes without ever cataloging
+    // the bundle resource.
+    const singleFileIsBundleMember =
+      files.length === 1 &&
+      Boolean(bundleRootForRelativePath(files[0].webkitRelativePath ?? ""));
+    if (files.length > 1 || singleFileIsBundleMember) {
       return this.uploadMultipleFilesWithV2Session(files, options);
     }
     const uploaded: UploadFilesResponse["uploaded"] = [];

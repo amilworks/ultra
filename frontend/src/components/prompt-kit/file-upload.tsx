@@ -2,6 +2,12 @@ import React from "react";
 import { cn } from "../../lib/cn";
 import { Button } from "@/components/ui/button";
 import { Slot } from "radix-ui";
+import {
+  collectDroppedFiles,
+  isOsFileDrag,
+  snapshotDropPayload,
+  type DropCollection,
+} from "@/lib/dropTraversal";
 
 type FileUploadContextValue = {
   openFilePicker: () => void;
@@ -28,7 +34,19 @@ type FileUploadProps = {
   className?: string;
   /** Enable a folder picker (webkitdirectory) for directory-format uploads (OME-Zarr). */
   allowDirectories?: boolean;
+  /**
+   * Drop outcome beyond the files themselves — skipped OS junk, unreadable
+   * entries, empty/oversized folders. Fires after every drop traversal, even
+   * when no files survive it (an empty drop is a signal the user needs).
+   */
+  onDropCollected?: (collection: DropCollection) => void;
 };
+
+// Only external OS file drags should light the drop affordance or be handled
+// on drop — in-page drags (text selections, images, resource cards) also
+// dispatch drag events over the composer, and image drags even carry "Files".
+const isExternalFileDrag = (event: React.DragEvent): boolean =>
+  isOsFileDrag(event.dataTransfer);
 
 export function FileUpload({
   onFilesAdded,
@@ -37,6 +55,7 @@ export function FileUpload({
   accept,
   className,
   allowDirectories = false,
+  onDropCollected,
 }: FileUploadProps) {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
   const folderInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -72,16 +91,25 @@ export function FileUpload({
       <div
         className={cn("pk-file-upload", dragActive && "pk-file-upload-drag", className)}
         onDragEnter={(event) => {
+          if (!isExternalFileDrag(event)) {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           setDragActive(true);
         }}
         onDragOver={(event) => {
+          if (!isExternalFileDrag(event)) {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           setDragActive(true);
         }}
         onDragLeave={(event) => {
+          if (!isExternalFileDrag(event)) {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           const nextTarget = event.relatedTarget as Node | null;
@@ -90,10 +118,20 @@ export function FileUpload({
           }
         }}
         onDrop={(event) => {
+          if (!isExternalFileDrag(event)) {
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           setDragActive(false);
-          addFiles(event.dataTransfer.files);
+          // Entries are only alive during this dispatch: snapshot NOW, walk async.
+          const payload = snapshotDropPayload(event.dataTransfer);
+          void collectDroppedFiles(payload).then((collection) => {
+            if (collection.files.length > 0) {
+              onFilesAdded(collection.files);
+            }
+            onDropCollected?.(collection);
+          });
         }}
       >
         <input

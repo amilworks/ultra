@@ -8,6 +8,12 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  collectDroppedFiles,
+  isOsFileDrag,
+  snapshotDropPayload,
+  summarizeDropIssues,
+} from "@/lib/dropTraversal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -938,18 +944,13 @@ export function ResourceBrowser({
     onUploadFiles?.(resumeFrom.relativePath ? files : [matchingFile], { resumeFrom });
   };
 
-  const droppedFilesFromEvent = (event: DragEvent<HTMLElement>): File[] =>
-    Array.from(event.dataTransfer.files ?? []).filter((file) => file.size >= 0);
-
   const isExternalFileDrag = (event: DragEvent<HTMLElement>): boolean => {
     if (draggedResourceId) {
       return false;
     }
-    const types = Array.from(event.dataTransfer.types ?? []);
-    if (types.includes("Files")) {
-      return true;
-    }
-    return Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file");
+    // isOsFileDrag also rejects in-page image/link drags, which carry "Files"
+    // alongside text/html or text/uri-list.
+    return isOsFileDrag(event.dataTransfer);
   };
 
   const uploadDroppedFiles = (
@@ -961,16 +962,26 @@ export function ResourceBrowser({
     }
     event.preventDefault();
     event.stopPropagation();
-    const droppedFiles = droppedFilesFromEvent(event);
+    // Entries are only readable during the drop dispatch — snapshot before the
+    // async directory walk. Dropped folders traverse recursively and their
+    // files carry synthesized relative paths, so zarr stores bundle and plain
+    // folders get filed as folders upstream.
+    const payload = snapshotDropPayload(event.dataTransfer);
     setFileDropTargetId("");
-    if (droppedFiles.length === 0) {
-      return true;
-    }
     setUploadReselectionError(null);
-    onUploadFiles(
-      droppedFiles,
-      collection ? { uploadTargetCollection: collection } : undefined
-    );
+    void collectDroppedFiles(payload).then((dropped) => {
+      const message = summarizeDropIssues(dropped);
+      if (message) {
+        setUploadReselectionError(message);
+      }
+      if (dropped.files.length === 0) {
+        return;
+      }
+      onUploadFiles(
+        dropped.files,
+        collection ? { uploadTargetCollection: collection } : undefined
+      );
+    });
     return true;
   };
 

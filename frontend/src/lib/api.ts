@@ -73,6 +73,9 @@ import type {
   ResourceTextHead,
   ResourceCsvRows,
   ResourceShareGrantCreateRequest,
+  ResourceCollectionShareGrantListResponse,
+  ResourceCollectionShareGrantRevokeResponse,
+  ShareTargetListResponse,
   ResourceShareGrantListResponse,
   ResourceShareGrantResponse,
   ResourceShareGrantsCreateRequest,
@@ -3446,6 +3449,38 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as ResourceShareGrantsCreateResponse;
+  }
+
+  // Pickable grantees: same-org people + the org itself. The reliability core
+  // of the sharing redesign — grantees are chosen, never typed as raw ids.
+  async listShareTargets(query: string): Promise<ShareTargetListResponse> {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      return this.fetchJson<ShareTargetListResponse>("/v2/share-targets", { method: "GET" });
+    }
+    return this.fetchJson<ShareTargetListResponse>(
+      `/v2/share-targets?q=${encodeURIComponent(trimmedQuery)}`,
+      { method: "GET" }
+    );
+  }
+
+  async listResourceCollectionShareGrants(
+    collectionId: string
+  ): Promise<ResourceCollectionShareGrantListResponse> {
+    return this.fetchJson<ResourceCollectionShareGrantListResponse>(
+      `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/shares`,
+      { method: "GET" }
+    );
+  }
+
+  async revokeResourceCollectionShareGrant(
+    collectionId: string,
+    grantId: string
+  ): Promise<ResourceCollectionShareGrantRevokeResponse> {
+    return this.fetchJson<ResourceCollectionShareGrantRevokeResponse>(
+      `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/shares/${encodeURIComponent(grantId.trim())}`,
+      { method: "DELETE" }
+    );
   }
 
   async createResourceCollectionShareGrants(

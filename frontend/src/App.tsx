@@ -215,6 +215,8 @@ import type {
   ResourceCollectionRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
+  ResourceCollectionShareGrantRecord,
+  ShareTargetRecord,
   RunEvent,
   SelectionContext,
   TokenUsageResponse,
@@ -8278,6 +8280,10 @@ export function App() {
       setResourcesError(null);
       try {
         const response = await createResourceShareGrantRequest(apiClient, resourceId, request);
+        // Chips and filters read share_summary from the list — refetch so the
+        // UI never claims a stale sharing state.
+        setResourceRefreshToken((value) => value + 1);
+        showSuccessToast("Shared — access is live");
         return response.grant;
       } catch (error) {
         const message = normalizeApiError(error);
@@ -8302,6 +8308,10 @@ export function App() {
       setResourcesError(null);
       try {
         const response = await createBulkResourceShareGrantsRequest(apiClient, resourceIds, request);
+        setResourceRefreshToken((value) => value + 1);
+        showSuccessToast(
+          `Shared ${resourceIds.length} ${resourceIds.length === 1 ? "resource" : "resources"}`
+        );
         return response.grants;
       } catch (error) {
         const message = normalizeApiError(error);
@@ -8328,6 +8338,8 @@ export function App() {
           collectionId,
           request
         );
+        setResourceRefreshToken((value) => value + 1);
+        showSuccessToast("Folder shared — files added later are covered too");
         return response.grants;
       } catch (error) {
         const message = normalizeApiError(error);
@@ -8351,6 +8363,53 @@ export function App() {
       setResourcesError(null);
       try {
         const response = await revokeResourceShareGrantRequest(apiClient, resourceId, grantId);
+        setResourceRefreshToken((value) => value + 1);
+        showSuccessToast("Access revoked");
+        return response.grant;
+      } catch (error) {
+        const message = normalizeApiError(error);
+        setResourcesError(message);
+        throw Object.assign(new Error(message), { cause: error });
+      }
+    },
+    [apiClient]
+  );
+
+  const searchShareTargetsFromResources = useCallback(
+    async (query: string): Promise<ShareTargetRecord[]> => {
+      const response = await apiClient.listShareTargets(query);
+      return response.targets;
+    },
+    [apiClient]
+  );
+
+  const loadResourceCollectionShareGrantsFromResources = useCallback(
+    async (
+      collection: ResourceCollectionRecord
+    ): Promise<ResourceCollectionShareGrantRecord[]> => {
+      const response = await apiClient.listResourceCollectionShareGrants(
+        collection.collection_id
+      );
+      return response.grants;
+    },
+    [apiClient]
+  );
+
+  const revokeResourceCollectionShareGrantFromResources = useCallback(
+    async (
+      collection: ResourceCollectionRecord,
+      grant: ResourceCollectionShareGrantRecord
+    ): Promise<ResourceCollectionShareGrantRecord> => {
+      setResourcesError(null);
+      try {
+        const response = await apiClient.revokeResourceCollectionShareGrant(
+          collection.collection_id,
+          grant.grant_id
+        );
+        // One revoke un-shares the folder AND cascades to every inherited
+        // member grant server-side — refetch so chips reflect it.
+        setResourceRefreshToken((value) => value + 1);
+        showSuccessToast("Folder access revoked");
         return response.grant;
       } catch (error) {
         const message = normalizeApiError(error);
@@ -11479,6 +11538,9 @@ export function App() {
                   createResourceCollectionShareGrantsFromResources
                 }
                 onRevokeResourceShareGrant={revokeResourceShareGrantFromResources}
+                onSearchShareTargets={searchShareTargetsFromResources}
+                onLoadCollectionShareGrants={loadResourceCollectionShareGrantsFromResources}
+                onRevokeCollectionShareGrant={revokeResourceCollectionShareGrantFromResources}
                 onOpenCollection={openResourceCollection}
                 onRenameCollection={renameResourceCollectionFromResources}
                 onDeleteCollection={deleteResourceCollectionFromResources}

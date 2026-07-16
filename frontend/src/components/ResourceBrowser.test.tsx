@@ -2723,3 +2723,68 @@ describe("ResourceBrowser", () => {
     expect(onLoadMore).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("share target picker", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "(max-width: 720px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    );
+  });
+
+  it("replaces free-text grantee ids with picked targets, org row included", async () => {
+    const onSearchShareTargets = vi.fn(async () => [
+      {
+        kind: "org",
+        grantee_org_id: "org-lab",
+        label: "Everyone in your organization",
+        detail: "org-lab",
+      },
+      { kind: "user", grantee_user_id: "workos:bob", label: "Bob", detail: "bob@lab.edu" },
+    ]);
+    const onCreateResourceShareGrant = vi.fn(async () => ({
+      grant_id: "grant_1",
+      resource_id: "file_image",
+      owner_user_id: "me",
+      role: "read",
+      status: "active",
+      created_at: "2026-07-15T00:00:00Z",
+      updated_at: "2026-07-15T00:00:00Z",
+    }));
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        onSearchShareTargets={onSearchShareTargets}
+        onLoadResourceShareGrants={vi.fn(async () => [])}
+        onCreateResourceShareGrant={onCreateResourceShareGrant}
+        onRevokeResourceShareGrant={vi.fn()}
+      />
+    );
+    const card = screen.getByText("prairie-cell-image.png").closest("article");
+    fireEvent.contextMenu(card as HTMLElement);
+    fireEvent.click(await screen.findByText("Share"));
+
+    // Free-text id inputs are gone; the picker search is present.
+    expect(screen.queryByLabelText("Person or user ID")).toBeNull();
+    const search = await screen.findByPlaceholderText("Search people in your organization");
+    expect(search).toBeInTheDocument();
+
+    const orgRow = await screen.findByText("Everyone in your organization");
+    fireEvent.click(orgRow);
+    await waitFor(() =>
+      expect(screen.getByTestId("resource-share-picked")).toHaveTextContent(
+        "Everyone in your organization"
+      )
+    );
+  });
+});

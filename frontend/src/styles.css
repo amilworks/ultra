@@ -2901,6 +2901,114 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 640;
 }
 
+/* Share-target picker: one quiet search, results as plain rows. The org row
+   ("Everyone in your organization") is data with meaning, so it carries a
+   slightly stronger ink — never a color. */
+.resource-browser-share-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.resource-browser-share-picker > label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picker-results {
+  display: flex;
+  flex-direction: column;
+  max-height: 14rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-strong);
+}
+
+.resource-browser-share-picker-results > button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border: 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 70%, transparent);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.resource-browser-share-picker-results > button:last-child {
+  border-bottom: 0;
+}
+
+.resource-browser-share-picker-results > button:hover {
+  background: color-mix(in oklab, var(--bg-main) 60%, transparent);
+}
+
+.resource-browser-share-picker-results > button[data-share-target-kind="org"] .resource-browser-share-picker-label {
+  font-weight: 600;
+}
+
+.resource-browser-share-picker-detail {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picker-empty {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.45rem 0.3rem 0.45rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--bg-main) 55%, transparent);
+  font-size: 0.85rem;
+}
+
+.resource-browser-share-access {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid color-mix(in oklab, var(--text-main) 14%, transparent);
+}
+
+.resource-browser-share-access-title {
+  margin: 0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.resource-browser-share-access-empty {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 .resource-browser-share-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

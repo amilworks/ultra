@@ -133,7 +133,7 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     # Canonical upload storage: {resource_id}__{original_name}
-    (uploads / "file_npm1__Al-Co-W.tdb").write_bytes(b"TDBDATA!")
+    (uploads / "file_npm1__scan.tiff").write_bytes(b"TIFFDATA")
     context = _context(tmp_path)
 
     result = stage_catalog_resources(
@@ -142,30 +142,17 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
         resources=[
             {
                 "resource_id": "file_npm1",
-                "original_name": "Al-Co-W.tdb",
-                "database_format": "tdb",
-                "content_type": "application/x-thermocalc-tdb",
-                "resource_kind": "document",
+                "original_name": "scan.tiff",
+                "content_type": "image/tiff",
+                "resource_kind": "image",
                 "source_type": "upload",
                 "sha256": "d" * 64,
                 "size_bytes": 8,
                 "metadata": {
                     "source": "upload_store",
-                    "calphad": {
-                        "database_id": "owner-declared-database",
-                        "citation": "Concise published assessment citation",
-                        "source": "https://vendor-user:catalog-secret@example.org/private",
-                        "license_id": "CC0-1.0",
-                        "license_identifier": "Private license agreement terms",
-                        "assessment_scope": "equilibrium research",
-                        "assessment_pressure_limits_Pa": [101325.0, 101325.0],
-                        "components": ["NI", "VA"],
-                        "phases": ["FCC_A1"],
-                        "validation_status": "validated",
-                        "content_sha256": "f" * 64,
-                        "license_text": "private vendor license prose",
-                        "credentials": {"token": "catalog-secret"},
-                    },
+                    "caption": "Owner-declared caption",
+                    "credentials": {"token": "catalog-secret"},
+                    "license_text": "private vendor license prose",
                 },
             },
             {"resource_id": "file_gone", "original_name": "gone.tiff", "source_type": "upload"},
@@ -179,24 +166,11 @@ def test_stage_catalog_resources_copies_owned_file_into_workspace(tmp_path):
     assert staged["binding_authority"] == "control_resource_catalog"
     assert staged["sha256"] == "d" * 64
     assert staged["size_bytes"] == 8
-    assert staged["database_format"] == "tdb"
-    assert staged["content_type"] == "application/x-thermocalc-tdb"
-    calphad = staged["metadata"]["calphad"]
-    assert calphad["database_id"] == "owner-declared-database"
-    assert calphad["citation"] == "Concise published assessment citation"
-    assert calphad["license_id"] == "CC0-1.0"
-    assert calphad["declaration_authority"] == "resource_owner"
-    assert calphad["assessment_pressure_limits_Pa"] == [101325.0, 101325.0]
-    assert "validation_status" not in calphad
-    assert "content_sha256" not in calphad
-    assert "license_text" not in calphad
-    assert "credentials" not in calphad
-    assert "source" not in calphad
-    assert "license_identifier" not in calphad
-    assert staged["sandbox_path"] == "/workspace/staged_resources/file_npm1/Al-Co-W.tdb"
+    assert staged["content_type"] == "image/tiff"
+    assert staged["sandbox_path"] == "/workspace/staged_resources/file_npm1/scan.tiff"
     # The file is physically copied into the run workspace.
-    copied = Path(context.workspace_root) / "staged_resources" / "file_npm1" / "Al-Co-W.tdb"
-    assert copied.read_bytes() == b"TDBDATA!"
+    copied = Path(context.workspace_root) / "staged_resources" / "file_npm1" / "scan.tiff"
+    assert copied.read_bytes() == b"TIFFDATA"
     # A resource with no local file is reported, not silently dropped.
     assert result["unavailable"][0]["resource_id"] == "file_gone"
 
@@ -266,7 +240,7 @@ def test_stage_catalog_resources_copies_ome_zarr_bundle_directory(tmp_path):
 
 def test_selected_bundle_tree_identity_survives_delegation_and_staging(tmp_path):
     uploads = tmp_path / "uploads"
-    bundle = uploads / "bundles" / "file_sensor" / "signals.zarr"
+    bundle = uploads / "bundles" / "file_zarr2" / "signals.zarr"
     bundle.mkdir(parents=True)
     (bundle / ".zattrs").write_text("{}")
     identity = {
@@ -278,48 +252,32 @@ def test_selected_bundle_tree_identity_survives_delegation_and_staging(tmp_path)
         "tree_manifest_sha256": "b" * 64,
         "scope": "all_regular_files_except_tree_manifest",
     }
-    sensor_format = {
-        "schema": "ultra.sensor-format-binding.v1",
-        "authority": "control_resource_catalog",
-        "container": "zarr",
-        "sensor_schema": "ultra.sensor-series.v1",
-        "resource_sha256": "b" * 64,
-        "detection": "bounded_root_attributes",
-    }
     descriptor = {
         "type": "selected_resource",
         "binding_schema": "ultra.selected_resource.v1",
         "authority": "control_resource_catalog",
-        "resource_id": "file_sensor",
-        "file_id": "file_sensor",
+        "resource_id": "file_zarr2",
+        "file_id": "file_zarr2",
         "original_name": "signals.zarr",
         "sha256": "b" * 64,
         "size_bytes": 2,
         "tree_identity": identity,
-        "sensor_format": sensor_format,
     }
     delegated = public_selected_resource_descriptor(descriptor)
     assert delegated["tree_identity"] == identity
-    assert delegated["sensor_format"] == sensor_format
 
     context = replace(
         _context(tmp_path),
-        selected_file_ids=("file_sensor",),
+        selected_file_ids=("file_zarr2",),
         resource_descriptors=(descriptor,),
     )
     result = stage_uploaded_files(context, upload_roots=(uploads,))
     assert result["ok"] is True
     assert result["staged_files"][0]["tree_identity"] == identity
-    assert result["staged_files"][0]["sensor_format"] == sensor_format
 
     # A nested digest that is not the catalog's top-level digest is denied.
     forged = {**descriptor, "tree_identity": {**identity, "tree_manifest_sha256": "c" * 64}}
     assert "tree_identity" not in public_selected_resource_descriptor(forged)
-    forged_sensor = {
-        **descriptor,
-        "sensor_format": {**sensor_format, "resource_sha256": "c" * 64},
-    }
-    assert "sensor_format" not in public_selected_resource_descriptor(forged_sensor)
 
 
 def test_stage_catalog_resources_rejects_unsafe_resource_id_before_glob(tmp_path):

@@ -53,7 +53,7 @@ def _settings(**over) -> RuntimeSettings:
 def _attested_settings(tmp_path: Path, **over) -> RuntimeSettings:
     attestation = {
         "schema": "ultra.qwen-vlm-deployment-attestation.v1",
-        "authority": "materials-platform-ci",
+        "authority": "science-platform-ci",
         "request_model_id": "Qwen3.6-27B",
         "model_id": "Qwen3.6-27B",
         "model_revision": "release-2026-07-01.4f9c2d1",

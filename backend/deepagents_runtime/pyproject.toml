@@ -11,15 +11,9 @@ dependencies = [
     "langgraph-checkpoint>=4.1.0,<5",
     "httpx>=0.28.0,<1",
     "nats-py>=2.9.0,<3",
-    # First-class crystal-plasticity, degradation, characterization, and sensor
-    # reducers import NumPy in the production worker. Keep it in the core
-    # dependency closure; Dockerfile.worker separately pins the deployed ABI.
+    # Imported by first-party reducers in the production worker. Keep it in the
+    # core dependency closure; Dockerfile.worker separately pins the deployed ABI.
     "numpy>=1.26.0,<3",
-    # Sensor inspection opens selected Zarr/OME-NGFF stores in the worker itself.
-    # Keep the qualified reader pair exact instead of relying on the optional
-    # NGFF service extra or a transitive dependency.
-    "numcodecs==0.16.5",
-    "zarr==3.1.5",
     "pillow>=10.0.0,<13",
     "psycopg[binary]>=3.2.0,<4",
     "pymupdf>=1.24.0,<2",
@@ -39,7 +33,7 @@ imaging = [
     "lxml>=5.0.0,<6",
     "fastapi>=0.110.0,<1",
     "uvicorn>=0.29.0,<1",
-    # HDF5 data viewer (imaging/hdf5.py): h5py-backed dataset/materials/slice/atlas/
+    # HDF5 data viewer (imaging/hdf5.py): h5py-backed dataset/slice/atlas/
     # scalar-volume/histogram/table endpoints + kind:"hdf5" viewerinfo detection. Ships
     # a prebuilt manylinux/macos wheel bundling libhdf5, so no system HDF5 dev headers
     # are needed at build time. 3.11+ has firm numpy-2 wheels (the imaging extra resolves

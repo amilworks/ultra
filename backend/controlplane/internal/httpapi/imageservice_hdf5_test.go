@@ -20,7 +20,6 @@ import (
 // one place.
 var hdf5ProxyRoutes = map[string]string{
 	"/hdf5/dataset":               "/hdf5/dataset",
-	"/hdf5/materials/dashboard":   "/hdf5/materials/dashboard",
 	"/hdf5/preview/slice":         "/hdf5/preview/slice",
 	"/hdf5/preview/atlas":         "/hdf5/preview/atlas",
 	"/hdf5/preview/scalar-volume": "/hdf5/preview/scalar-volume",
@@ -91,7 +90,7 @@ func TestV2UploadHdf5RoutesProxyImageService(t *testing.T) {
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotQueries[r.URL.Path] = r.URL.Query()
 		switch r.URL.Path {
-		case "/hdf5/dataset", "/hdf5/materials/dashboard", "/hdf5/preview/histogram", "/hdf5/preview/table":
+		case "/hdf5/dataset", "/hdf5/preview/histogram", "/hdf5/preview/table":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write(wantJSON)
 		case "/hdf5/preview/slice", "/hdf5/preview/atlas":
@@ -142,14 +141,6 @@ func TestV2UploadHdf5RoutesProxyImageService(t *testing.T) {
 	// follow-up preview URL from summary.file_id, so the real id must be forwarded.
 	if q.Get("file_id") != fileID {
 		t.Fatalf("dataset forwarded file_id = %q, want %q", q.Get("file_id"), fileID)
-	}
-
-	rec = do("/hdf5/materials/dashboard")
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), wantJSON) {
-		t.Fatalf("dashboard status=%d body=%s, want 200 + proxied JSON", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(gotQueries["/hdf5/materials/dashboard"].Get("path"), fileID) {
-		t.Fatalf("dashboard did not forward the resolved storage path")
 	}
 
 	rec = do("/hdf5/preview/histogram?dataset_path=" + url.QueryEscape(datasetPath) + "&bins=24&component=1")

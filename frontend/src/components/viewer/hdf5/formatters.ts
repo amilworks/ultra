@@ -81,26 +81,6 @@ export const formatSummaryToken = (value: string | null | undefined): string => 
     .join(" ");
 };
 
-export const describePhaseMetadata = (
-  source: string | null | undefined,
-  provenance: string | null | undefined
-): { label: string; detail: string | null } => {
-  const normalizedSource = String(source ?? "").trim().toLowerCase();
-  const normalizedProvenance = String(provenance ?? "").trim() || null;
-  if (normalizedSource === "stored_metadata") {
-    return {
-      label: "Stored phase metadata",
-      detail:
-        normalizedProvenance ??
-        "Names read from file metadata; no phase-identification algorithm was run.",
-    };
-  }
-  return {
-    label: "Reported phase names",
-    detail: normalizedProvenance,
-  };
-};
-
 export const buildSampleCoverage = (summary: Hdf5DatasetSummary): string | null => {
   const sampleCount = summary.sample_statistics?.sample_count;
   if (typeof sampleCount !== "number" || !Number.isFinite(sampleCount) || summary.element_count <= 0) {

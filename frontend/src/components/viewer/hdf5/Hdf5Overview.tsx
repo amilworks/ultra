@@ -2,14 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiClient } from "@/lib/api";
-import type { Hdf5DatasetSummary, Hdf5MaterialsDashboardResponse, UploadViewerInfo } from "@/types";
+import type { Hdf5DatasetSummary, UploadViewerInfo } from "@/types";
 
 import { Hdf5Inspector } from "./Hdf5Inspector";
-import { MaterialsHdf5Dashboard } from "./MaterialsHdf5Dashboard";
 import { Hdf5Navigator } from "./Hdf5Navigator";
-import { PhaseMetadataSummary } from "./PhaseMetadataSummary";
 import { formatCount, formatSummaryToken } from "./formatters";
 
 import "./hdf5-viewer.css";
@@ -21,19 +18,10 @@ type Hdf5ViewerShellProps = {
   onSelectedDatasetPathChange: (path: string) => void;
   selectedDatasetSummary: Hdf5DatasetSummary | null;
   cacheDatasetSummary: (summary: Hdf5DatasetSummary) => void;
-  onUseDatasetInChat?: (fileId: string, datasetPaths: string[]) => void;
 };
-
-type MaterialsSection = "maps" | "grains" | "orientation" | "synthetic" | "explorer";
 
 type DatasetLoadState = {
   key: string;
-  error: string | null;
-};
-
-type MaterialsDashboardState = {
-  key: string;
-  dashboard: Hdf5MaterialsDashboardResponse | null;
   error: string | null;
 };
 
@@ -95,7 +83,6 @@ export function Hdf5ViewerShell({
   onSelectedDatasetPathChange,
   selectedDatasetSummary,
   cacheDatasetSummary,
-  onUseDatasetInChat,
 }: Hdf5ViewerShellProps) {
   const hdf5 = viewerInfo.hdf5;
   const preferredDatasetPath = useMemo(() => {
@@ -109,17 +96,6 @@ export function Hdf5ViewerShell({
     key: "",
     error: null,
   });
-  const [materialsDashboardState, setMaterialsDashboardState] = useState<MaterialsDashboardState>({
-    key: "",
-    dashboard: null,
-    error: null,
-  });
-
-  const materials = hdf5?.materials;
-  const hasMaterialsDashboard = Boolean(materials?.detected);
-  const [activeSection, setActiveSection] = useState<MaterialsSection>(
-    hasMaterialsDashboard && materials?.recommended_view === "materials" ? "maps" : "explorer"
-  );
 
   useEffect(() => {
     if (!selectedDatasetPath && preferredDatasetPath) {
@@ -134,17 +110,6 @@ export function Hdf5ViewerShell({
   const loadingPath =
     datasetLoadKey && datasetLoadState.key !== datasetLoadKey ? activeDatasetPath : null;
   const loadError = datasetLoadState.key === datasetLoadKey ? datasetLoadState.error : null;
-
-  const materialsDashboardKey = hasMaterialsDashboard ? viewerInfo.file_id : "";
-  const currentMaterialsDashboardState =
-    materialsDashboardState.key === materialsDashboardKey
-      ? materialsDashboardState
-      : { key: materialsDashboardKey, dashboard: null, error: null };
-  const materialsDashboard = currentMaterialsDashboardState.dashboard;
-  const materialsDashboardError = currentMaterialsDashboardState.error;
-  const materialsDashboardLoading = Boolean(
-    materialsDashboardKey && materialsDashboardState.key !== materialsDashboardKey
-  );
 
   useEffect(() => {
     if (!datasetLoadKey || datasetLoadState.key === datasetLoadKey) {
@@ -180,34 +145,6 @@ export function Hdf5ViewerShell({
     datasetLoadState.key,
     viewerInfo.file_id,
   ]);
-
-  useEffect(() => {
-    if (!materialsDashboardKey || materialsDashboardState.key === materialsDashboardKey) {
-      return;
-    }
-    let cancelled = false;
-    apiClient
-      .getHdf5MaterialsDashboard(viewerInfo.file_id)
-      .then((payload) => {
-        if (cancelled) {
-          return;
-        }
-        setMaterialsDashboardState({ key: materialsDashboardKey, dashboard: payload, error: null });
-      })
-      .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setMaterialsDashboardState({
-          key: materialsDashboardKey,
-          dashboard: null,
-          error: error instanceof Error ? error.message : "Failed to load the materials dashboard.",
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [apiClient, materialsDashboardKey, materialsDashboardState.key, viewerInfo.file_id]);
 
   if (!hdf5) {
     return <div className="viewer-empty">HDF5 metadata unavailable.</div>;
@@ -263,7 +200,6 @@ export function Hdf5ViewerShell({
                       <strong>Viewer</strong>
                       <p>{hdf5.supported ? "Native preview" : "Metadata only"}</p>
                       {hdf5.summary.truncated ? <p>Fast-open summary</p> : null}
-                      {materials?.schema ? <p>{materials.schema}</p> : null}
                     </div>
                     {activeDatasetPath ? (
                       <div className="viewer-hdf-context-card-section">
@@ -282,17 +218,6 @@ export function Hdf5ViewerShell({
                         <p>{datasetKinds.join(" • ")}</p>
                       </div>
                     ) : null}
-                    <PhaseMetadataSummary
-                      phaseNames={materials?.phase_names ?? []}
-                      source={materials?.phase_names_source}
-                      provenance={materials?.phase_names_provenance}
-                    />
-                    {materials?.capabilities?.length ? (
-                      <div className="viewer-hdf-context-card-section">
-                        <strong>Capabilities</strong>
-                        <p>{materials.capabilities.map((capability) => formatSummaryToken(capability)).join(" • ")}</p>
-                      </div>
-                    ) : null}
                   </div>
                 </HoverCardContent>
               </HoverCard>
@@ -308,118 +233,15 @@ export function Hdf5ViewerShell({
         </div>
       ) : null}
 
-      {hasMaterialsDashboard ? (
-        <Tabs
-          value={activeSection}
-          onValueChange={(value) => setActiveSection(value as MaterialsSection)}
-          className="viewer-hdf-workspace-tabs"
-        >
-          <TabsList className="viewer-hdf-workspace-tabs-list">
-            <TabsTrigger value="maps">Maps</TabsTrigger>
-            {materials?.capabilities.includes("grain_metrics") ? (
-              <TabsTrigger value="grains">Grains</TabsTrigger>
-            ) : null}
-            {materials?.capabilities.includes("orientation") ? (
-              <TabsTrigger value="orientation">Orientation</TabsTrigger>
-            ) : null}
-            {materials?.capabilities.includes("synthetic_stats") ? (
-              <TabsTrigger value="synthetic">Synthetic Stats</TabsTrigger>
-            ) : null}
-            <TabsTrigger value="explorer">Explorer</TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="maps" className="viewer-hdf-workspace-tab">
-            {materialsDashboardLoading ? (
-              <div className="viewer-empty">Loading the materials dashboard…</div>
-            ) : materialsDashboardError ? (
-              <div className="viewer-metadata-note">
-                <strong>Materials dashboard unavailable</strong>
-                <span>{materialsDashboardError}</span>
-              </div>
-            ) : materialsDashboard ? (
-              <MaterialsHdf5Dashboard
-                apiClient={apiClient}
-                dashboard={materialsDashboard}
-                section="maps"
-                selectedDatasetPath={activeDatasetPath}
-                onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-                selectedDatasetSummary={selectedDatasetSummary}
-                onUseDatasetInChat={onUseDatasetInChat}
-              />
-            ) : null}
-          </TabsContent>
-
-          <TabsContent value="grains" className="viewer-hdf-workspace-tab">
-            {materialsDashboard ? (
-              <MaterialsHdf5Dashboard
-                apiClient={apiClient}
-                dashboard={materialsDashboard}
-                section="grains"
-                selectedDatasetPath={activeDatasetPath}
-                onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-                selectedDatasetSummary={selectedDatasetSummary}
-                onUseDatasetInChat={onUseDatasetInChat}
-              />
-            ) : (
-              <div className="viewer-empty">Loading the materials dashboard…</div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="orientation" className="viewer-hdf-workspace-tab">
-            {materialsDashboard ? (
-              <MaterialsHdf5Dashboard
-                apiClient={apiClient}
-                dashboard={materialsDashboard}
-                section="orientation"
-                selectedDatasetPath={activeDatasetPath}
-                onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-                selectedDatasetSummary={selectedDatasetSummary}
-                onUseDatasetInChat={onUseDatasetInChat}
-              />
-            ) : (
-              <div className="viewer-empty">Loading the materials dashboard…</div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="synthetic" className="viewer-hdf-workspace-tab">
-            {materialsDashboard ? (
-              <MaterialsHdf5Dashboard
-                apiClient={apiClient}
-                dashboard={materialsDashboard}
-                section="synthetic"
-                selectedDatasetPath={activeDatasetPath}
-                onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-                selectedDatasetSummary={selectedDatasetSummary}
-                onUseDatasetInChat={onUseDatasetInChat}
-              />
-            ) : (
-              <div className="viewer-empty">Loading the materials dashboard…</div>
-            )}
-          </TabsContent>
-
-          <TabsContent value="explorer" className="viewer-hdf-workspace-tab">
-            <Hdf5ExplorerPanel
-              apiClient={apiClient}
-              hdf5={hdf5}
-              activeDatasetPath={activeDatasetPath}
-              onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-              selectedDatasetSummary={selectedDatasetSummary}
-              loadingPath={loadingPath}
-              loadError={loadError}
-            />
-          </TabsContent>
-        </Tabs>
-      ) : (
-        <Hdf5ExplorerPanel
-          apiClient={apiClient}
-          hdf5={hdf5}
-          activeDatasetPath={activeDatasetPath}
-          onSelectedDatasetPathChange={onSelectedDatasetPathChange}
-          selectedDatasetSummary={selectedDatasetSummary}
-          loadingPath={loadingPath}
-          loadError={loadError}
-        />
-      )}
+      <Hdf5ExplorerPanel
+        apiClient={apiClient}
+        hdf5={hdf5}
+        activeDatasetPath={activeDatasetPath}
+        onSelectedDatasetPathChange={onSelectedDatasetPathChange}
+        selectedDatasetSummary={selectedDatasetSummary}
+        loadingPath={loadingPath}
+        loadError={loadError}
+      />
     </div>
   );
 }

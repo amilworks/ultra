@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -92,22 +91,20 @@ type workerHeartbeatReader interface {
 const heartbeatStatusWriteInterval = 15 * time.Second
 
 type Service struct {
-	store                Store
-	bus                  eventbus.Bus
-	now                  func() time.Time
-	runtimeFacts         RuntimeFactsConfig
-	calphadRuntimePolicy CalphadRuntimePolicyConfig
-	idempotencyLocks     [64]sync.Mutex
-	eventIDLocks         [128]sync.Mutex
+	store            Store
+	bus              eventbus.Bus
+	now              func() time.Time
+	runtimeFacts     RuntimeFactsConfig
+	idempotencyLocks [64]sync.Mutex
+	eventIDLocks     [128]sync.Mutex
 
 	heartbeatMu           sync.Mutex
 	heartbeatStatusWrites map[string]time.Time
 }
 
 type ServiceOptions struct {
-	Now                  func() time.Time
-	RuntimeFacts         RuntimeFactsConfig
-	CalphadRuntimePolicy CalphadRuntimePolicyConfig
+	Now          func() time.Time
+	RuntimeFacts RuntimeFactsConfig
 }
 
 type RuntimeFactsConfig struct {
@@ -117,13 +114,6 @@ type RuntimeFactsConfig struct {
 	Environment         string
 	PublicURL           string
 	DefaultUserTimezone string
-}
-
-// CalphadRuntimePolicyConfig is control-plane configuration, never request
-// metadata. A blank or mutable image reference intentionally stamps no policy,
-// causing CALPHAD validation append to fail closed.
-type CalphadRuntimePolicyConfig struct {
-	RuntimeImageID string
 }
 
 type CreateThreadRequest struct {
@@ -239,7 +229,6 @@ func NewServiceWithOptions(store Store, bus eventbus.Bus, opts ServiceOptions) *
 		bus:                   bus,
 		now:                   now,
 		runtimeFacts:          normalizeRuntimeFactsConfig(opts.RuntimeFacts),
-		calphadRuntimePolicy:  normalizeCalphadRuntimePolicyConfig(opts.CalphadRuntimePolicy),
 		heartbeatStatusWrites: map[string]time.Time{},
 	}
 }
@@ -304,7 +293,6 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 		metadata["idempotency_key"] = idempotencyKey
 	}
 	s.stampRuntimeFacts(metadata)
-	s.stampCalphadRuntimePolicy(metadata)
 	workflowKind := workflowKindForRun(req, metadata)
 	thread, err := s.store.GetThread(ctx, req.ThreadID)
 	if err != nil {
@@ -1733,38 +1721,6 @@ func normalizeRuntimeFactsConfig(config RuntimeFactsConfig) RuntimeFactsConfig {
 		config.DefaultUserTimezone = "UTC"
 	}
 	return config
-}
-
-var calphadRuntimeImageIDPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-
-func normalizeCalphadRuntimePolicyConfig(config CalphadRuntimePolicyConfig) CalphadRuntimePolicyConfig {
-	config.RuntimeImageID = strings.ToLower(strings.TrimSpace(config.RuntimeImageID))
-	if !calphadRuntimeImageIDPattern.MatchString(config.RuntimeImageID) {
-		config.RuntimeImageID = ""
-	}
-	return config
-}
-
-func (s *Service) stampCalphadRuntimePolicy(metadata domain.JSONMap) {
-	// This key is reserved even when the server has no configured policy. A
-	// caller-provided copy must never become authorization for a worker claim.
-	delete(metadata, domain.CalphadRuntimePolicyMetadataKey)
-	if s.calphadRuntimePolicy.RuntimeImageID == "" {
-		return
-	}
-	metadata[domain.CalphadRuntimePolicyMetadataKey] = domain.JSONMap{
-		"schema_version":            domain.CalphadRuntimePolicySchema,
-		"authority":                 "control_plane",
-		"runtime_image_id":          s.calphadRuntimePolicy.RuntimeImageID,
-		"pycalphad_version":         domain.CalphadPycalphadVersion,
-		"network":                   domain.CalphadRuntimeNetwork,
-		"no_new_privileges":         true,
-		"read_only_root_filesystem": true,
-		"cap_drop_all":              true,
-		"cpus_at_most":              domain.CalphadRuntimeCPUsAtMost,
-		"memory_bytes_at_most":      domain.CalphadRuntimeMemoryBytesAtMost,
-		"pids_at_most":              domain.CalphadRuntimePIDsAtMost,
-	}
 }
 
 func (s *Service) stampRuntimeFacts(metadata domain.JSONMap) {

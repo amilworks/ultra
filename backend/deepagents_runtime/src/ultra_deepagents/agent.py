@@ -3,13 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
-import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -44,25 +41,18 @@ from ultra_deepagents.context_tools import (
     build_tool_capability_manifest,
     build_tool_capability_manifest_tool,
 )
-from ultra_deepagents.crystal_plasticity_tools import build_crystal_plasticity_tools
-from ultra_deepagents.degradation_characterization_tools import (
-    build_degradation_characterization_tools,
-)
 from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.evaluation_profiles import (
     evaluation_memory_dir,
     evaluation_policy_dir,
     is_cleanroom_evaluation_profile,
 )
-from ultra_deepagents.kinetics_tools import build_kinetics_tools
-from ultra_deepagents.materials.calphad_tools import build_calphad_tools
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.progress_guard import read_attempt_ledger_digest
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
-from ultra_deepagents.sensors.tools import build_sensor_tools, should_register_sensor_tools
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
 from ultra_deepagents.vision import build_vision_tools
 
@@ -314,19 +304,6 @@ SANDBOX_KEY_PACKAGES = [
     "pynrrd",
     "ome-types",
     "roifile",
-    "pymatgen",
-    "pymatgen-analysis-defects",
-    "ase",
-    "spglib",
-    "pycalphad",
-    "scheil",
-    "damask",
-    "matminer",
-    "orix",
-    "kikuchipy",
-    "diffsims",
-    "defdap",
-    "porespy",
 ]
 
 
@@ -509,81 +486,6 @@ Results contract (Pro intelligence — mandatory for the final chat answer, not 
   report; scratch or diagnostic scripts stay under /workspace (use /workspace/diagnostics/).
 """
 
-MATERIALS_RESULTS_CONTRACT_GUIDANCE = """
-Materials results contract (Pro intelligence — mandatory for the final chat answer and artifacts):
-- Match validation to the materials modality. Deterministic crystallography, simulated XRD,
-  and CALPHAD calculations are verified with tolerance/parameter stability, physical
-  invariants, and provenance checks; do not apply the dynamical-systems replication contract.
-- Identify every input by staged path or artifact ID and record its format, relevant metadata,
-  and a checksum for any user-supplied CIF, diffraction file, spectrum, orientation map, volume,
-  or thermodynamic database used to support a conclusion.
-- For CIF/structure and symmetry claims, report composition, occupancies/disorder assumptions,
-  cell setting, symmetry library, symprec and angle tolerance, and the result across a stated
-  tolerance sweep. Preserve ordered-vs-disordered site identity and flag unstable assignments.
-- For simulated XRD, state the radiation source and wavelength, structure/occupancy assumptions,
-  two-theta range, and broadening model. Emit a peak table with two-theta, relative intensity,
-  and indexed hkl values; label calculated patterns as simulated rather than experimental.
-- For CALPHAD, use `calphad_inspect_database` followed by `calphad_run_equilibrium` or
-  `calphad_run_scheil`; a raw generic `execute` solve is a replay/debug aid and does not satisfy
-  the verified backend contract. Record the content-addressed evidence artifact, exact TDB name/version/source/checksum,
-  components, candidate phases, composition basis, temperature, pressure, and numerical conditions.
-  Retain `VA` whenever the authenticated inspection inventory declares it (without an X(VA) axis),
-  and use the typed runtime's canonical first-sorted physical dependent component.
-  Verify finite phase vertices and chemical potentials, phase and per-vertex composition closure,
-  vertex-weighted bulk mass balance, and Gibbs-Euler consistency. Never use pycalphad package test
-  fixtures as a scientific database or silently replace a missing database with a heuristic.
-- For a classic Scheil--Gulliver solidification path, use `calphad_run_scheil` after the same
-  authenticated inspection. Supply one scalar bulk mole-fraction point, a defensible phase set
-  containing `LIQUID`, an all-liquid start temperature, a bounded temperature step, and a
-  residual-liquid criterion. Pressure is fixed at 101325 Pa; VA is retained without X(VA).
-  Require pointwise phase/composition closure and reconstructed elemental inventory closure across
-  all retained increments. Report the four Scheil assumptions and separate numerical convergence
-  from assessment validity. Never label this result as back diffusion, finite-rate solid diffusion,
-  precipitation, or phase field.
-- For mobility/diffusion/back-diffusion/precipitation kinetics, use the typed
-  `materials_transport_coefficients`, `materials_run_diffusion_1d`, and
-  `materials_run_binary_precipitation_kwn` tools with an explicitly selected governed TDB.
-  Never substitute generic `execute` output for their evidence. Treat back diffusion as
-  post-solidification single-phase diffusion only; never imply a moving solid/liquid interface.
-  Report the Kawin/NumPy/pycalphad versions, selected database provenance, fixed pressure,
-  mass-closure checks, grid/bin convergence status, assumptions, and content-addressed artifact.
-- For crystal-plasticity geometry, resolved shear, Schmid factors, and CPFE input readiness, use
-  `materials_analyze_crystal_slip` and `materials_validate_cpfe_contract` directly. Never make a
-  code-runner discover these Python APIs. Preserve the required phase ID, active
-  crystal-to-sample convention, sample-frame stress, explicit units, selected canonical family,
-  and HCP `c_over_a`. A valid CPFE contract is structural input validation only: the typed tool
-  must report execution as unsupported until a qualified constitutive integrator and FE/spectral
-  solver are bound, and must never fabricate stress-strain or convergence output.
-  When durable outputs are requested and either typed tool returns
-  `analysis_artifact.canonical_json` and
-  `materials_validation_artifact.canonical_json`, write those exact strings directly to the
-  requested analysis JSON and `/outputs/materials_validation.json`; do not introspect the Python
-  validation API, reconstruct verdict fields, or delegate that serialization to code-runner.
-  A deterministic typed input rejection is terminal evidence for that request: report the one
-  error without repeating it across seeds, durations, families, or substitute inputs.
-- Treat DFT, molecular dynamics, phonons, and formation-energy requests as an explicit capability
-  boundary: this runtime has no production DFT or molecular-dynamics engine. Mark the requested
-  calculation unsupported unless a real solver or interatomic potential and its provenance are
-  available; never substitute a heuristic result and present it as a completed calculation.
-- For EBSD and microstructure estimates, state symmetry/reference-frame conventions, voxel size,
-  analyzed volume and sample count; report distributions and boundary exclusions, and sweep the
-  decisive segmentation/indexing parameter over a defensible range. Tie confidence to stability
-  against that sweep and to the named null or independent measurement.
-- State units for every decision-relevant quantity, package versions for every named method, the
-  checks that passed or failed, and a short Limitations paragraph in the chat answer itself.
-- When durable materials evidence is requested, write /outputs/materials_validation.json with the canonical
-  ultra_deepagents.materials.validation schema: per-check validator_id/outcome/observed/expected,
-  tolerance rationale, units, versions, and hashed evidence; report its scientific_status
-  separately from orchestration run_status, record capability_supported and
-  contradiction_failures, and fail closed on missing required validators. Read the relevant
-  materials skill before analysis. Build the verdict only with `assess_scientific_status`,
-  serialize only that returned assessment with `canonical_record_json`, and require
-  `parse_assessment_record` to accept the exact final bytes. Never invent a substitute schema or
-  edit top-level verdict fields; a parse failure makes the claim unverified.
-- Durable /outputs hold final code, validation records, tables, figures, and reports; scratch or
-  diagnostic scripts stay under /workspace (use /workspace/diagnostics/).
-"""
-
 SCOPED_DELEGATION_CONFIDENCE_LEVELS = ["high", "medium", "low", "unresolved"]
 
 SCOPED_DELEGATION_RESPONSE_FORMAT = {
@@ -675,23 +577,6 @@ BASE_SUBAGENTS = [
 
 SCOPED_DELEGATION_CONTEXT_TOOLS = {
     "artifact_manifest",
-    "calphad_inspect_database",
-    "calphad_run_equilibrium",
-    "calphad_run_scheil",
-    "materials_run_binary_precipitation_kwn",
-    "materials_run_diffusion_1d",
-    "materials_analyze_crystal_slip",
-    "materials_calculate_diffraction_profile_metrics",
-    "materials_convert_uniform_corrosion",
-    "materials_evaluate_mode_i_lefm",
-    "materials_evaluate_norton_arrhenius_creep",
-    "materials_evaluate_oxidation_mass_gain",
-    "materials_fit_held_out_rigid_registration",
-    "materials_fit_paris_law",
-    "materials_processing_method_support",
-    "materials_transport_coefficients",
-    "materials_validate_cpfe_contract",
-    "inspect_selected_sensor_series",
     "stage_artifact_for_analysis",
     "stage_uploaded_files_for_analysis",
 }
@@ -1110,559 +995,11 @@ def _filter_tools_by_name(
     return [tool for tool in tools if getattr(tool, "name", "") in names]
 
 
-_MATERIALS_METHOD_TOKENS = (
-    "4d stem",
-    "4d-stem",
-    "acoustic emission",
-    "antisite",
-    "atom probe",
-    "back diffusion",
-    "calphad",
-    "cif",
-    "cp2k",
-    "cpfe",
-    "corrosion",
-    "creep",
-    "crystal plasticity",
-    "crystal structure",
-    "crystallographic",
-    "crystallography",
-    "defect",
-    "diffraction",
-    "diffusion mobility",
-    "dft",
-    "density functional",
-    "density-functional theory",
-    "dream.3d",
-    "dream3d",
-    "eds",
-    "ebsd",
-    "energy above hull",
-    "energy-above-hull",
-    "formation energy",
-    "fracture",
-    "fatigue",
-    "frenkel",
-    "grain boundary",
-    "grain size",
-    "inverse pole figure",
-    "interstitial",
-    "ipf map",
-    "kikuchi",
-    "lammps",
-    "materials science",
-    "microstructure",
-    "misorientation",
-    "molecular dynamics",
-    "molecular-dynamics",
-    "oxidation",
-    "phase fraction",
-    "phase field",
-    "phase diagram",
-    "phonon",
-    "photodiode",
-    "pole figure",
-    "porosity",
-    "poscar",
-    "precipitation",
-    "process telemetry",
-    "raman",
-    "resolved shear",
-    "rietveld",
-    "saed",
-    "scheil",
-    "schmid factor",
-    "sensor data",
-    "sensor telemetry",
-    "slip system",
-    "slip-system",
-    "solidification",
-    "space group",
-    "spacegroup",
-    "substitutional",
-    "substitution",
-    "substitute",
-    "spectroscopic",
-    "spectroscopy",
-    "stress-strain",
-    "tdb",
-    "thermodynamic database",
-    "thermodynamic",
-    "thermodynamics",
-    "thermal imaging",
-    "thermocouple",
-    "transmission electron microscopy",
-    "vacancy",
-    "quantum espresso",
-    "vasp",
-    "x-ray diffraction",
-    "xps",
-    "xrd",
-    "waveform",
-)
-
-_COMPUTATIONAL_ACTION_TOKENS = (
-    "analy",
-    "build",
-    "calculat",
-    "characteriz",
-    "classif",
-    "comput",
-    "construct",
-    "convert",
-    "creat",
-    "determin",
-    "estimat",
-    "evaluat",
-    "extract",
-    "featur",
-    "fit",
-    "find",
-    "generat",
-    "identif",
-    "index",
-    "inspect",
-    "measur",
-    "model",
-    "enumerat",
-    "plot",
-    "predict",
-    "process",
-    "quantif",
-    "refine",
-    "render",
-    "run",
-    "segment",
-    "simulat",
-    "solve",
-    "sweep",
-    "substitut",
-    "validat",
-)
-
-
-def _plural_tolerant_method_pattern(token: str) -> re.Pattern[str]:
-    """Word-bounded matcher that also accepts the token's regular plural.
-
-    The flagship phrasing "equilibrium phase fractions" previously missed the
-    singular token "phase fraction" because the trailing word boundary rejected
-    the plural. Regular ``-s``/``-es`` and ``-y``/``-ies`` inflections match;
-    the leading boundary still keeps acronyms like ``cif`` exact.
-    """
-    escaped = re.escape(token)
-    if token.endswith("y"):
-        escaped = escaped[:-1] + "(?:y|ies)"
-    else:
-        escaped += "(?:e?s)?"
-    return re.compile(rf"(?<!\w){escaped}(?!\w)")
-
-
-_MATERIALS_METHOD_PATTERNS = tuple(
-    _plural_tolerant_method_pattern(token) for token in _MATERIALS_METHOD_TOKENS
-)
-
-
-def looks_materials_computational_goal(goal: str) -> bool:
-    """Return whether the request calls for a named materials computation.
-
-    The general delegation classifier historically keyed on words such as
-    ``simulation`` and ``analyze``. Canonical materials requests instead say
-    "identify this CIF", "calculate an XRD pattern", or "build a CALPHAD
-    phase diagram", so they silently ran without a computational delegate.
-    Requiring both a domain method and an action avoids registering one for a
-    purely definitional question such as "what is XRD?". Method tokens are
-    word-bounded so the acronym ``CIF`` cannot match an unrelated word such as
-    ``specific``.
-    """
-    request_text = request_classification_text(goal)
-    lowered = " ".join(request_text.lower().split())
-    has_materials_method = any(pattern.search(lowered) for pattern in _MATERIALS_METHOD_PATTERNS)
-    has_action = any(
-        re.search(rf"\b{re.escape(token)}", lowered) for token in _COMPUTATIONAL_ACTION_TOKENS
-    )
-    strong_materials_pair = any(
-        left.search(lowered) and right.search(lowered)
-        for left, right in (
-            (re.compile(r"\bspace[- ]?group\b"), re.compile(r"\bcif\b")),
-            (
-                re.compile(r"\bphases?\b"),
-                re.compile(r"\b(?:xrd|x[- ]?ray diffraction)\b"),
-            ),
-            (re.compile(r"\bgrains?\b"), re.compile(r"\bdream(?:\.?3d|\.3d)\b")),
-        )
-    )
-    dft_shorthand = bool(
-        re.search(r"\bdft\b", lowered)
-        and (
-            has_action
-            or re.search(
-                r"\b(?:silicon|gallium|gan|sic|alloy|crystal|material|"
-                r"band structure|electronic structure|poscar|cif)\b",
-                lowered,
-            )
-        )
-    )
-    md_shorthand = bool(
-        re.search(r"\bmd\b", lowered)
-        and re.search(r"\b(?:simulat|run|model|trajectory|atomistic|lammps)", lowered)
-    )
-    return (
-        (has_materials_method and has_action)
-        or strong_materials_pair
-        or dft_shorthand
-        or md_shorthand
-    )
-
-
-def _selection_suggested_domain(context: AgentRunContext | None) -> str:
-    if context is None or not isinstance(context.selection_context, dict):
-        return ""
-    raw = str(context.selection_context.get("suggested_domain") or "")
-    normalized = re.sub(r"[^a-z0-9]+", "_", raw.strip().lower()).strip("_")
-    if normalized in {"material", "materials", "material_science", "materials_science"}:
-        return "materials"
-    return normalized
-
-
-def is_materials_context(context: AgentRunContext | None) -> bool:
-    """Treat the UI hint as routing evidence, with prompt detection as fallback.
-
-    A CALPHAD-shaped run (goal tokens or a selected thermodynamic database)
-    also counts: a run that carries the typed CALPHAD tools must carry the
-    materials skill routing and, on Pro, the materials results contract —
-    previously "equilibrium phase fractions" registered the tools without
-    either.
-    """
-    if context is None:
-        return False
-    return (
-        _selection_suggested_domain(context) == "materials"
-        or looks_materials_computational_goal(context.goal)
-        or _should_register_calphad_tools(context)
-        or _should_register_kinetics_tools(context)
-        or _should_register_crystal_plasticity_tools(context)
-        or _should_register_degradation_tools(context)
-        or _should_register_characterization_validation_tools(context)
-        or _should_register_processing_support_tool(context)
-        or should_register_sensor_tools(context)
-    )
-
-
-def _materials_platform_enabled() -> bool:
-    """Whether the materials-science platform is switched on for this deployment.
-
-    Mirrors ``RuntimeSettings.materials_enabled`` (same env var). The prompt
-    builders below do not receive ``settings``, so they use this to suppress the
-    materials skill-routing brief and the materials results contract on a
-    materials-disabled deployment — where a prompt might still trip the shared
-    (dual-use) materials tokens but must not be steered into materials framing.
-    """
-    return os.getenv("ULTRA_DEEPAGENTS_MATERIALS_ENABLED", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
-
-
-_CALPHAD_TOOL_GOAL_TOKENS = (
-    "alloy phase stability",
-    "calphad",
-    "equilibrium phase fraction",
-    "equilibrium phase fractions",
-    "isothermal section",
-    "phase diagram",
-    "phase equilibria",
-    "phase equilibrium",
-    "scheil",
-    "scheil-gulliver",
-    "solidification path",
-    "solidification segregation",
-    "tdb",
-    "thermodynamic database",
-    "thermodynamic phase stability",
-)
-
-
-def _should_register_calphad_tools(context: AgentRunContext | None) -> bool:
-    """Register the narrow typed primitive only for a CALPHAD-shaped run.
-
-    A generic materials run (for example EBSD or XRD) should not carry the tool
-    schema. A selected TDB descriptor is sufficient even when the user's wording
-    is terse; otherwise the request must explicitly name CALPHAD/TDB work.
-    """
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    if any(token in goal for token in _CALPHAD_TOOL_GOAL_TOKENS):
-        return True
-    for descriptor in context.resource_descriptors:
-        if str(descriptor.get("type") or "").strip() != "selected_resource":
-            continue
-        name = str(descriptor.get("original_name") or "").strip().lower()
-        content_type = str(descriptor.get("content_type") or "").strip().lower()
-        metadata = descriptor.get("metadata")
-        if (
-            # .db is deliberately absent: the binding layer rejects it as
-            # unsupported_calphad_resource_format, and since the CALPHAD gate
-            # now implies the materials context, a selected SQLite file must
-            # not flip a run into materials routing.
-            name.endswith((".tdb", ".dat"))
-            or content_type == "application/x-thermocalc-tdb"
-            or (isinstance(metadata, dict) and isinstance(metadata.get("calphad"), dict))
-        ):
-            return True
-    return False
-
-
-_KINETICS_TOOL_GOAL_TOKENS = (
-    "1-d diffusion",
-    "1d diffusion",
-    "back diffusion",
-    "binary precipitation",
-    "diffusion coefficient",
-    "diffusion coefficients",
-    "diffusion couple",
-    "diffusion profile",
-    "diffusivity",
-    "finite-volume diffusion",
-    "interdiffusion",
-    "kawin",
-    "kampmann-wagner",
-    "kampmann wagner",
-    "kwn precipitation",
-    "mobility coefficient",
-    "mobility coefficients",
-    "one-dimensional diffusion",
-    "precipitation kinetics",
-    "single-phase diffusion",
-    "tracer diffusivity",
-)
-
-
-def _should_register_kinetics_tools(context: AgentRunContext | None) -> bool:
-    """Register Kawin only for an explicitly kinetics-shaped materials run."""
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    return any(token in goal for token in _KINETICS_TOOL_GOAL_TOKENS)
-
-
-_CRYSTAL_PLASTICITY_TOOL_GOAL_TOKENS = (
-    "basal slip",
-    "cpfe",
-    "crss",
-    "crystal plasticity",
-    "crystal-plasticity",
-    "octahedral slip",
-    "prismatic slip",
-    "pyramidal c+a",
-    "pyramidal slip",
-    "resolved shear",
-    "schmid factor",
-    "slip geometry",
-    "slip families",
-    "slip family",
-    "slip-system",
-    "slip system",
-)
-
-
-def _should_register_crystal_plasticity_tools(context: AgentRunContext | None) -> bool:
-    """Register only the bounded analytical/CPFE-contract surface."""
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    return any(token in goal for token in _CRYSTAL_PLASTICITY_TOOL_GOAL_TOKENS)
-
-
-_DEGRADATION_TOOL_GOAL_TOKENS = (
-    "corrosion penetration",
-    "corrosion current density",
-    "creep rate",
-    "fatigue crack growth",
-    "faraday corrosion",
-    "faraday law",
-    "lefm",
-    "linear elastic fracture mechanics",
-    "mode i fracture",
-    "mode-i fracture",
-    "mass gain law",
-    "mass-gain law",
-    "norton creep",
-    "norton-arrhenius",
-    "norton law",
-    "oxidation kinetics",
-    "oxidation mass gain",
-    "parabolic oxidation",
-    "paris law",
-    "paris equation",
-    "paris relation",
-    "secondary creep",
-    "steady-state creep",
-    "stress intensity factor",
-    "uniform corrosion",
-)
-
-_DEGRADATION_TYPED_TOOL_NAMES = frozenset(
-    {
-        "materials_convert_uniform_corrosion",
-        "materials_evaluate_mode_i_lefm",
-        "materials_evaluate_norton_arrhenius_creep",
-        "materials_evaluate_oxidation_mass_gain",
-        "materials_fit_paris_law",
-    }
-)
-
-
-def _requests_allowlisted_typed_tool_execution(goal: str, tool_names: Collection[str]) -> bool:
-    """Match a direct imperative for an exact first-party typed tool name.
-
-    ``goal`` has already passed through :func:`request_classification_text`, so
-    fenced examples and explicitly negated clauses are absent.  Requiring an
-    imperative at the start of a request clause keeps documentation questions
-    and incidental identifier mentions from expanding the tool surface.
-    """
-
-    normalized = goal.replace("`", "")
-    request_prefix = (
-        r"(?:^|[.!?;:\n])\s*"
-        r"(?:(?:please|then)\s+|(?:can|could|would)\s+you\s+|"
-        r"i\s+(?:want|need)\s+you\s+to\s+)?"
-        r"(?:call|invoke|run|execute|use)\s+"
-        r"(?:the\s+)?(?:(?:first-party|bounded|typed)\s+)*(?:tool\s+)?"
-    )
-    return any(
-        re.search(
-            rf"{request_prefix}(?<![a-z0-9_]){re.escape(tool_name)}(?![a-z0-9_])",
-            normalized,
-        )
-        is not None
-        for tool_name in tool_names
-    )
-
-
-def _has_explicit_computational_action(goal: str) -> bool:
-    return any(
-        re.search(rf"\b{re.escape(token)}", goal) for token in _COMPUTATIONAL_ACTION_TOKENS
-    ) or bool(re.search(r"\b(?:register|screen|score)\w*\b", goal))
-
-
-def _should_register_degradation_tools(context: AgentRunContext | None) -> bool:
-    """Register bounded degradation reducers only for an explicit calculation.
-
-    A purely explanatory fatigue/fracture/corrosion question should not carry five
-    numerical schemas. The specialized method and an action must both be present.
-    """
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    # An exact first-party tool request is already a closed computational intent.
-    # Underscores are word characters, so phrases such as
-    # ``materials_evaluate_oxidation_mass_gain`` do not match the natural-language
-    # tokens or action regexes above.  Without this exact-name lane, a user who
-    # explicitly requests the typed tool is paradoxically routed to generic tool
-    # discovery instead of receiving the bounded degradation surface.
-    if _requests_allowlisted_typed_tool_execution(goal, _DEGRADATION_TYPED_TOOL_NAMES):
-        return True
-    method_named = any(token in goal for token in _DEGRADATION_TOOL_GOAL_TOKENS)
-    return method_named and _has_explicit_computational_action(goal)
-
-
-_CHARACTERIZATION_VALIDATION_TOOL_GOAL_TOKENS = (
-    "diffraction profile comparison",
-    "diffraction profile metric",
-    "diffraction profile residual",
-    "held-out registration",
-    "held out registration",
-    "kabsch",
-    "profile goodness of fit",
-    "rigid registration",
-    "rietveld profile metric",
-)
-
-
-def _should_register_characterization_validation_tools(
-    context: AgentRunContext | None,
-) -> bool:
-    """Register only profile-metric or known-correspondence registration tools."""
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    method_named = (
-        any(token in goal for token in _CHARACTERIZATION_VALIDATION_TOOL_GOAL_TOKENS)
-        or bool(re.search(r"\b(?:rp|rexp|rwp)\b", goal))
-        or bool(
-            re.search(r"\b(?:ebsd|4d[- ]?stem|tem)\b", goal)
-            and re.search(r"\b(?:apt|atom probe|tem)\b", goal)
-            and re.search(r"\b(?:align|correspondence|landmark|register)\w*\b", goal)
-        )
-    )
-    return method_named and _has_explicit_computational_action(goal)
-
-
-_PROCESSING_SUPPORT_METHOD_TOKENS = (
-    "back diffusion",
-    "coupled solidification",
-    "diffusion mobility",
-    "kawin",
-    "kampmann-wagner",
-    "kwn",
-    "mobility diffusion",
-    "phase field",
-    "phase-field",
-    "precipitation kinetics",
-    "processing kinetics",
-    "scheil",
-    "solidification",
-)
-_PROCESSING_SUPPORT_INTENT_RE = re.compile(
-    r"\b(?:availab|boundar|capabilit|implemented|implementation|qualified|readiness|"
-    r"ready|support)\w*\b|\bcan\s+(?:you|the\s+platform|ultra)\b|\bdo\s+we\s+have\b"
-)
-
-
-def _should_register_processing_support_tool(context: AgentRunContext | None) -> bool:
-    """Register the zero-argument support matrix without shadowing real solvers.
-
-    Ordinary Scheil, diffusion, or KWN execution stays on its dedicated typed
-    runtime. Phase-field and coupled moving-interface requests register this
-    boundary tool because no in-process numerical solver is qualified.
-    """
-
-    if context is None:
-        return False
-    goal = " ".join(request_classification_text(context.goal).lower().split())
-    if "materials_processing_method_support" in goal:
-        return True
-    support_intent = _PROCESSING_SUPPORT_INTENT_RE.search(goal) is not None
-    method_named = any(token in goal for token in _PROCESSING_SUPPORT_METHOD_TOKENS)
-    if support_intent and (method_named or "processing method" in goal):
-        return True
-    external_boundary_method = any(
-        token in goal
-        for token in (
-            "phase field",
-            "phase-field",
-            "coupled solidification",
-            "moving-interface solidification",
-        )
-    )
-    return external_boundary_method and _has_explicit_computational_action(goal)
-
-
 def looks_scoped_delegation_goal(goal: str) -> bool:
     """True when a goal is computational-study shaped (and not a RareSpot run).
 
     This is the prompt-only half of scoped subagent registration; selection
     metadata is added by ``_should_register_scoped_delegation_subagents``.
-    Pro result-contract classification is deliberately separate because named
-    materials methods use a domain contract rather than the dynamics contract.
     """
     goal = str(goal or "")
     if looks_report_only_rarespot_goal(goal):
@@ -1679,8 +1016,6 @@ def looks_scoped_delegation_goal(goal: str) -> bool:
         )
     ):
         return False
-    if looks_materials_computational_goal(goal):
-        return True
     return any(
         token in lowered
         for token in (
@@ -1706,10 +1041,7 @@ def looks_quantitative_rigor_goal(goal: str) -> bool:
 
     This is intentionally narrower than scoped delegation. Code review, debug,
     and workflow-analysis prompts can benefit from subagents, but should not be
-    forced into irrelevant ``±`` / 3×-spread language. Named materials analyses
-    use ``MATERIALS_RESULTS_CONTRACT_GUIDANCE`` instead; returning false here also
-    prevents the runner's completion validator from re-imposing dynamics-specific
-    seeds, observation durations, time steps, and initial-condition rules.
+    forced into irrelevant ``±`` / 3×-spread language.
     """
     goal = str(goal or "")
     if looks_report_only_rarespot_goal(goal):
@@ -1725,8 +1057,6 @@ def looks_quantitative_rigor_goal(goal: str) -> bool:
             "burrows",
         )
     ):
-        return False
-    if looks_materials_computational_goal(goal):
         return False
     request_text = request_classification_text(goal)
     lowered = " ".join(request_text.lower().split())
@@ -1781,7 +1111,7 @@ def is_rigor_intelligence(context: AgentRunContext | None) -> bool:
 def _should_register_scoped_delegation_subagents(context: AgentRunContext | None) -> bool:
     if context is None:
         return False
-    return is_materials_context(context) or looks_scoped_delegation_goal(context.goal)
+    return looks_scoped_delegation_goal(context.goal)
 
 
 def _should_register_async_delegation_subagents(context: AgentRunContext | None) -> bool:
@@ -1901,91 +1231,6 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     ]
     if context.goal.strip():
         lines.append(f"- goal: {context.goal.strip()}")
-    if _materials_platform_enabled() and is_materials_context(context):
-        lines.extend(
-            [
-                "- suggested_domain: materials (selection-context hint or prompt-classifier "
-                "routing evidence; confirm it against the selected data)",
-                "- materials skill routing: read /skills/computational-materials/SKILL.md "
-                "for EBSD/microstructure, /skills/materials-structure-thermo/SKILL.md for "
-                "CIF/symmetry/point defects/CALPHAD, "
-                "/skills/materials-processing-kinetics/SKILL.md for solidification/kinetics, "
-                "/skills/materials-characterization/SKILL.md for "
-                "XRD/spectroscopy, and /skills/materials-characterization-advanced/SKILL.md "
-                "for measured profiles/registration/held-out validation, and "
-                "/skills/materials-sensor-data/SKILL.md for calibrated waveforms/telemetry "
-                "and links to OME-NGFF imagery before analysis",
-            ]
-        )
-        if not is_cleanroom_evaluation_profile(
-            context.evaluation_profile
-        ) and should_register_sensor_tools(context):
-            lines.append(
-                "- selected sensor workflow: call inspect_selected_sensor_series before "
-                "execute; validate_values=false is metadata-only, request at most one "
-                "bounded channel envelope, and treat lineage as unbound unless the tool "
-                "explicitly reports tree_verified. Never infer clock synchronization, "
-                "calibration, or units."
-            )
-        if not is_cleanroom_evaluation_profile(
-            context.evaluation_profile
-        ) and _should_register_crystal_plasticity_tools(context):
-            lines.append(
-                "- selected crystal-plasticity skill: read "
-                "/skills/materials-crystal-plasticity/SKILL.md, then call "
-                "materials_analyze_crystal_slip for "
-                "canonical geometry/resolved shear/Schmid factors and "
-                "materials_validate_cpfe_contract for schema-v1 input readiness. Call these "
-                "typed tools directly before considering execute or code-runner delegation. "
-                "Treat geometry as non-constitutive and a valid CPFE contract as "
-                "execution-unsupported until the tool reports a qualified solver binding. "
-                "Copy analysis_artifact.canonical_json and "
-                "materials_validation_artifact.canonical_json directly to requested outputs; "
-                "do not discover or reconstruct the validation API. A deterministic typed input "
-                "rejection is terminal: report the single error without repeated calls or "
-                "substitute inputs. Do not create unrequested output files."
-            )
-        if not is_cleanroom_evaluation_profile(
-            context.evaluation_profile
-        ) and _should_register_degradation_tools(context):
-            lines.append(
-                "- selected degradation skill: read "
-                "/skills/materials-mechanics-degradation/SKILL.md, then use the matching "
-                "bounded typed tool directly before "
-                "execute or code-runner: materials_evaluate_mode_i_lefm, "
-                "materials_fit_paris_law, materials_evaluate_norton_arrhenius_creep, "
-                "materials_evaluate_oxidation_mass_gain, or "
-                "materials_convert_uniform_corrosion. Respect its calibration domain and "
-                "declared provenance. Never invent placeholder hashes, demo citations, material "
-                "states, environments, or validity intervals to satisfy a required schema; when "
-                "the caller has not explicitly supplied required evidence, identify the missing "
-                "fields instead of calling the tool. A deterministic typed input rejection is "
-                "terminal and must not trigger substitute inputs or repeated calls. These reducers "
-                "do not predict fracture/fatigue/creep/"
-                "oxidation/corrosion life or establish ASTM compliance. Copy returned canonical "
-                "analysis and validation artifacts exactly rather than reconstructing them, and "
-                "do not create unrequested output files."
-            )
-        if not is_cleanroom_evaluation_profile(
-            context.evaluation_profile
-        ) and _should_register_characterization_validation_tools(context):
-            lines.append(
-                "- advanced-characterization validation: call "
-                "materials_calculate_diffraction_profile_metrics for supplied observed/calculated "
-                "profiles or materials_fit_held_out_rigid_registration for supplied known "
-                "correspondences. Use fixed disjoint calibration/held-out partitions and copy "
-                "the canonical artifacts exactly. These tools do not refine/index diffraction, "
-                "discover feature correspondences, segment data, or validate physical identity."
-            )
-        if not is_cleanroom_evaluation_profile(
-            context.evaluation_profile
-        ) and _should_register_processing_support_tool(context):
-            lines.append(
-                "- processing-method boundary: call materials_processing_method_support directly "
-                "before execute or code-runner. It is zero-argument static support discovery, "
-                "not evidence that run inputs or a solver are present. Never replace unsupported "
-                "phase-field or coupled moving-interface execution with a toy solver."
-            )
     if context.runtime_facts:
         lines.append("Runtime facts:")
         for key in (
@@ -2122,15 +1367,8 @@ def build_runtime_prompt_suffix(
             "When reporting runtimes, report this wall-clock time and any inner "
             "compute time as separate labeled numbers."
         )
-    if is_rigor_intelligence(context):
-        if (
-            _materials_platform_enabled()
-            and is_materials_context(context)
-            and _should_register_scoped_delegation_subagents(context)
-        ):
-            sections.append(MATERIALS_RESULTS_CONTRACT_GUIDANCE.strip())
-        elif looks_quantitative_rigor_goal(context.goal):
-            sections.append(RESULTS_CONTRACT_GUIDANCE.strip())
+    if is_rigor_intelligence(context) and looks_quantitative_rigor_goal(context.goal):
+        sections.append(RESULTS_CONTRACT_GUIDANCE.strip())
     return "\n\n".join(sections)
 
 
@@ -2393,53 +1631,6 @@ SKILLS_SOURCES = ["/skills/"]
 """Backend-relative skill sources for SkillsMiddleware (progressive disclosure)."""
 
 
-# The materials skills live alongside the general skills under the skills root.
-# When the materials platform is disabled we hide them from the skill listing so
-# every non-materials run does not pay the ~1k prompt tokens their descriptions
-# would otherwise add on every model call.
-_MATERIALS_SKILL_DIR_NAMES = frozenset(
-    {
-        "computational-materials",
-        "materials-characterization",
-        "materials-characterization-advanced",
-        "materials-crystal-plasticity",
-        "materials-mechanics-degradation",
-        "materials-processing-kinetics",
-        "materials-sensor-data",
-        "materials-structure-thermo",
-    }
-)
-
-
-def _skill_directory_name(entry: dict[str, Any]) -> str:
-    path = str(entry.get("path", "")).rstrip("/")
-    return path.rsplit("/", 1)[-1] if path else ""
-
-
-class _MaterialsFilteredSkillsBackend(FilesystemBackend):
-    """FilesystemBackend that hides the materials skills from directory listings.
-
-    SkillsMiddleware discovers skills by listing the skills root and reading each
-    subdirectory's ``SKILL.md``. Filtering ``ls`` therefore keeps the materials
-    skills out of the always-on skill index (and its prompt-token cost) while the
-    materials platform is disabled, without moving any files. Reads are untouched.
-    """
-
-    def ls(self, path: str) -> Any:
-        result = super().ls(path)
-        entries = getattr(result, "entries", None)
-        if not entries:
-            return result
-        filtered = [
-            entry
-            for entry in entries
-            if _skill_directory_name(entry) not in _MATERIALS_SKILL_DIR_NAMES
-        ]
-        if len(filtered) == len(entries):
-            return result
-        return replace(result, entries=filtered)
-
-
 def resolve_skills_root(settings: RuntimeSettings) -> Path | None:
     """Directory holding repo-shipped agent skills, or None when unavailable.
 
@@ -2519,11 +1710,7 @@ def build_agent_backend(
     }
     skills_root = resolve_skills_root(settings)
     if skills_root is not None:
-        routes["/skills/"] = (
-            FilesystemBackend(skills_root, virtual_mode=True)
-            if _materials_platform_enabled()
-            else _MaterialsFilteredSkillsBackend(skills_root, virtual_mode=True)
-        )
+        routes["/skills/"] = FilesystemBackend(skills_root, virtual_mode=True)
     policies_root = (
         evaluation_policy_dir(settings.memory_root, evaluation_profile, run_id or "")
         if cleanroom
@@ -2541,127 +1728,6 @@ def build_agent_backend(
         ),
         routes=routes,
         artifacts_root="/outputs/.deepagents",
-    )
-
-
-def _docker_sandbox_from_backend(backend: Any) -> DockerSandboxBackend | None:
-    """Return the exact immutable sandbox used by the agent's execute surface."""
-
-    if isinstance(backend, DockerSandboxBackend):
-        return backend
-    if isinstance(backend, CompositeBackend) and isinstance(backend.default, DockerSandboxBackend):
-        return backend.default
-    return None
-
-
-_IMMUTABLE_SANDBOX_IMAGE_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_TYPED_CALPHAD_OUTER_TIMEOUT_SECONDS = 60
-_TYPED_CALPHAD_MAX_CPUS = 8.0
-_TYPED_CALPHAD_MAX_MEMORY_BYTES = 32 * 1024**3
-_TYPED_CALPHAD_MAX_PIDS = 4096
-_TYPED_KINETICS_OUTER_TIMEOUT_SECONDS = 30
-_TYPED_KINETICS_MAX_CPUS = 2.0
-_TYPED_KINETICS_MEMORY = "8g"
-_TYPED_KINETICS_MAX_PIDS = 256
-_TYPED_KINETICS_OUTPUT_LIMIT_BYTES = 8 * 1024**2 + 128 * 1024
-
-
-def _docker_memory_bytes(value: str) -> int | None:
-    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([kmgt]?)(?:i?b)?", value.casefold())
-    if match is None:
-        return None
-    amount = float(match.group(1))
-    multipliers = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
-    size = amount * multipliers[match.group(2)]
-    if not math.isfinite(size) or size <= 0 or size > _TYPED_CALPHAD_MAX_MEMORY_BYTES:
-        return None
-    return int(size)
-
-
-def _bounded_calphad_sandbox_backend(
-    backend: DockerSandboxBackend | None,
-) -> DockerSandboxBackend | None:
-    """Clone the run sandbox with a hard outer cap for the typed primitive.
-
-    The ordinary execute surface may intentionally allow long or networked
-    research jobs. The typed CALPHAD path is stricter: immutable image, offline
-    networking, no-new-privileges, and positive CPU/memory/PID bounds are all
-    required in addition to its operator-nonextensible 60-second ceiling.
-    """
-
-    if backend is None or backend.outputs_dir is None:
-        return None
-    image = str(backend.config.image or "").strip().lower()
-    if not _IMMUTABLE_SANDBOX_IMAGE_RE.fullmatch(image):
-        return None
-    cpus = float(backend.config.cpus)
-    memory = str(backend.config.memory or "").strip()
-    pids_limit = int(backend.config.pids_limit)
-    if (
-        not math.isfinite(cpus)
-        or cpus <= 0
-        or _docker_memory_bytes(memory) is None
-        or pids_limit <= 0
-    ):
-        return None
-    operator_cap = int(backend.config.timeout_seconds or 0)
-    timeout_seconds = min(operator_cap, _TYPED_CALPHAD_OUTER_TIMEOUT_SECONDS)
-    if timeout_seconds <= 0:
-        timeout_seconds = _TYPED_CALPHAD_OUTER_TIMEOUT_SECONDS
-    return DockerSandboxBackend(
-        workspace_dir=backend.workspace_dir,
-        outputs_dir=backend.outputs_dir,
-        config=replace(
-            backend.config,
-            image=image,
-            network="none",
-            cpus=min(cpus, _TYPED_CALPHAD_MAX_CPUS),
-            pids_limit=min(pids_limit, _TYPED_CALPHAD_MAX_PIDS),
-            no_new_privileges=True,
-            gpus="",
-            timeout_seconds=timeout_seconds,
-        ),
-        progress_callback=getattr(backend, "_progress_callback", None),
-    )
-
-
-def _bounded_kinetics_sandbox_backend(
-    backend: DockerSandboxBackend | None,
-) -> DockerSandboxBackend | None:
-    """Build the separately authorized, networkless Kawin NumPy-2 backend.
-
-    The operator supplies both a local image reference and the immutable image
-    configuration ID that reference is authorized to resolve to.  Resolving
-    and comparing them here keeps Compose and direct worker launches fail
-    closed even if a launcher-side preflight was accidentally skipped.
-    """
-
-    if backend is None or backend.outputs_dir is None:
-        return None
-    image_reference = os.getenv("ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE", "").strip()
-    authorized_image = os.getenv("ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID", "").strip().lower()
-    if not image_reference or not _IMMUTABLE_SANDBOX_IMAGE_RE.fullmatch(authorized_image):
-        return None
-    resolved_image = resolve_docker_image_id(image_reference).strip().lower()
-    if resolved_image != authorized_image:
-        return None
-    return DockerSandboxBackend(
-        workspace_dir=backend.workspace_dir,
-        outputs_dir=backend.outputs_dir,
-        config=DockerSandboxConfig(
-            image=authorized_image,
-            network="none",
-            cpus=_TYPED_KINETICS_MAX_CPUS,
-            memory=_TYPED_KINETICS_MEMORY,
-            pids_limit=_TYPED_KINETICS_MAX_PIDS,
-            no_new_privileges=True,
-            gpus="",
-            timeout_seconds=_TYPED_KINETICS_OUTER_TIMEOUT_SECONDS,
-            output_limit_bytes=_TYPED_KINETICS_OUTPUT_LIMIT_BYTES,
-            worker_id=backend.config.worker_id,
-            run_id=backend.config.run_id,
-        ),
-        progress_callback=getattr(backend, "_progress_callback", None),
     )
 
 
@@ -2716,53 +1782,6 @@ def build_research_agent(
     context_tools = (
         [] if cleanroom else build_context_tools(upload_roots=settings.rarespot_upload_roots)
     )
-    calphad_tools: list[Any] = []
-    kinetics_tools: list[Any] = []
-    crystal_plasticity_tools: list[Any] = []
-    degradation_characterization_tools: list[Any] = []
-    sensor_tools: list[Any] = []
-    calphad_backend = _bounded_calphad_sandbox_backend(
-        _docker_sandbox_from_backend(resolved_backend)
-    )
-    if (
-        _should_register_calphad_tools(context)
-        and calphad_backend is not None
-        and calphad_backend.outputs_dir is not None
-    ):
-        calphad_tools = build_calphad_tools(
-            settings,
-            backend=calphad_backend,
-            upload_roots=settings.rarespot_upload_roots,
-        )
-    kinetics_backend = _bounded_kinetics_sandbox_backend(
-        _docker_sandbox_from_backend(resolved_backend)
-    )
-    if (
-        not cleanroom
-        and _should_register_kinetics_tools(context)
-        and kinetics_backend is not None
-        and kinetics_backend.outputs_dir is not None
-    ):
-        kinetics_tools = build_kinetics_tools(
-            settings,
-            backend=kinetics_backend,
-            upload_roots=settings.rarespot_upload_roots,
-        )
-    if not cleanroom and _should_register_crystal_plasticity_tools(context):
-        crystal_plasticity_tools = build_crystal_plasticity_tools()
-    register_degradation_tools = _should_register_degradation_tools(context)
-    register_characterization_tools = _should_register_characterization_validation_tools(context)
-    register_processing_support = _should_register_processing_support_tool(context)
-    if not cleanroom and (
-        register_degradation_tools or register_characterization_tools or register_processing_support
-    ):
-        degradation_characterization_tools = build_degradation_characterization_tools(
-            include_degradation=register_degradation_tools,
-            include_characterization=register_characterization_tools,
-            include_processing_support=register_processing_support,
-        )
-    if not cleanroom and should_register_sensor_tools(context):
-        sensor_tools = build_sensor_tools(tuple(settings.rarespot_upload_roots))
     paper_tools = (
         build_paper_tools(
             upload_roots=settings.rarespot_upload_roots,
@@ -2772,16 +1791,6 @@ def build_research_agent(
         else []
     )
     resolved_tools.extend(context_tools)
-    # Materials tool families are registered only on a materials-enabled
-    # deployment. The per-context _should_register_* gates already keep them off
-    # non-materials runs; this flag keeps them off entirely until the platform is
-    # switched on (and its runtime images/roles are provisioned).
-    if _materials_platform_enabled():
-        resolved_tools.extend(calphad_tools)
-        resolved_tools.extend(kinetics_tools)
-        resolved_tools.extend(crystal_plasticity_tools)
-        resolved_tools.extend(degradation_characterization_tools)
-        resolved_tools.extend(sensor_tools)
     resolved_tools.extend(paper_tools)
     if _should_register_bisque_tools(context):
         resolved_tools.extend(build_bisque_tools(settings, context=context))
@@ -2812,14 +1821,7 @@ def build_research_agent(
     subagents = build_subagents(
         paper_tools,
         context=context,
-        context_tools=[
-            *context_tools,
-            *calphad_tools,
-            *kinetics_tools,
-            *crystal_plasticity_tools,
-            *degradation_characterization_tools,
-            *sensor_tools,
-        ],
+        context_tools=list(context_tools),
         text_only_model=not settings.model_supports_multimodal,
         skills_sources=skills_sources,
         vision_tools=vision_tools,

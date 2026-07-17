@@ -73,44 +73,7 @@ def test_control_stack_launcher_defaults_deepagents_worker_to_vllm_capacity():
     assert "ULTRA_DEEPAGENTS_WORKER_MAX_CONCURRENCY:-2" not in text
 
 
-def test_control_stack_launcher_binds_typed_calphad_to_one_immutable_image():
-    script = ROOT / "scripts" / "restart_control_stack.sh"
-    text = script.read_text(encoding="utf-8")
-
-    assert "resolve_local_calphad_runtime_image" in text
-    assert "docker image inspect --format '{{.Id}}'" in text
-    assert (
-        'ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID="$ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID"'
-        in text
-    )
-    assert 'ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$ULTRA_DEEPAGENTS_SANDBOX_IMAGE"' in text
-    assert 'ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$actual"' in text
-
-
-def test_control_stack_launcher_builds_and_binds_separate_kinetics_image():
-    script = ROOT / "scripts" / "restart_control_stack.sh"
-    text = script.read_text(encoding="utf-8")
-
-    assert "resolve_local_kinetics_runtime_image" in text
-    assert "deploy/docker/materials-kinetics.Dockerfile" in text
-    assert "Ultra isolated materials kinetics runtime" in text
-    assert 'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$actual"' in text
-    assert 'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$actual"' in text
-    assert (
-        'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE"'
-        in text
-    )
-    assert (
-        'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID"'
-        in text
-    )
-    start = text.index("start_services()")
-    assert text.index("resolve_local_kinetics_runtime_image", start) < text.index(
-        "start_deepagents_worker", start
-    )
-
-
-def test_control_stack_launcher_has_finite_local_calphad_sandbox_defaults():
+def test_control_stack_launcher_has_finite_local_sandbox_defaults():
     script = ROOT / "scripts" / "restart_control_stack.sh"
     text = script.read_text(encoding="utf-8")
 

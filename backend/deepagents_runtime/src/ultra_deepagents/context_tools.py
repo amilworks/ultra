@@ -725,8 +725,6 @@ def _selected_resource_binding(
     """Return the bounded catalog binding stamped on this selected run input.
 
     The control plane is authoritative for the top-level checksum and byte size.
-    Nested CALPHAD metadata remains explicitly owner-declared and is filtered a
-    second time here so a malformed/legacy job cannot expose arbitrary metadata.
     """
     for descriptor in context.resource_descriptors:
         if str(descriptor.get("type") or "").strip() != "selected_resource":
@@ -777,25 +775,16 @@ def _bounded_catalog_binding(
     tree_identity = _bounded_tree_identity(descriptor.get("tree_identity"), sha256)
     if tree_identity:
         binding["tree_identity"] = tree_identity
-    sensor_format = _bounded_sensor_format(descriptor.get("sensor_format"), sha256)
-    if sensor_format:
-        binding["sensor_format"] = sensor_format
     size_bytes = _safe_nonnegative_int(descriptor.get("size_bytes"))
     if size_bytes is not None:
         binding["size_bytes"] = size_bytes
     original_name = _bounded_metadata_string(descriptor.get("original_name"), 512)
     if original_name:
         binding["original_name"] = _safe_path_token(original_name) or "upload"
-    database_format = str(descriptor.get("database_format") or "").strip()
-    if database_format in {"tdb", "dat"}:
-        binding["database_format"] = database_format
     for key in ("content_type", "resource_kind", "source_type"):
         value = _bounded_metadata_string(descriptor.get(key), 512)
         if value:
             binding[key] = value
-    governance_scope = str(descriptor.get("calphad_governance_scope") or "").strip()
-    if governance_scope in {"owner_validation", "read_only_usage"}:
-        binding["calphad_governance_scope"] = governance_scope
     metadata = _public_selected_resource_metadata(descriptor.get("metadata"))
     if metadata:
         binding["metadata"] = metadata
@@ -835,19 +824,10 @@ def public_selected_resource_descriptor(value: Any) -> dict[str, Any]:
     tree_identity = _bounded_tree_identity(value.get("tree_identity"), sha256)
     if tree_identity:
         public["tree_identity"] = tree_identity
-    sensor_format = _bounded_sensor_format(value.get("sensor_format"), sha256)
-    if sensor_format:
-        public["sensor_format"] = sensor_format
     for key in ("original_name", "content_type", "resource_kind", "source_type"):
         text = _bounded_metadata_string(value.get(key), 512)
         if text:
             public[key] = text
-    database_format = str(value.get("database_format") or "").strip()
-    if database_format in {"tdb", "dat"}:
-        public["database_format"] = database_format
-    governance_scope = str(value.get("calphad_governance_scope") or "").strip()
-    if governance_scope in {"owner_validation", "read_only_usage"}:
-        public["calphad_governance_scope"] = governance_scope
     metadata = _public_selected_resource_metadata(value.get("metadata"))
     if metadata:
         public["metadata"] = metadata
@@ -877,27 +857,6 @@ def _bounded_tree_identity(value: Any, expected_sha256: str) -> dict[str, Any]:
     return expected
 
 
-def _bounded_sensor_format(value: Any, expected_sha256: str) -> dict[str, Any]:
-    """Reconstruct the closed server-authored sensor marker bound to catalog bytes."""
-
-    if not isinstance(value, dict) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
-        return {}
-    expected = {
-        "schema": "ultra.sensor-format-binding.v1",
-        "authority": "control_resource_catalog",
-        "container": "zarr",
-        "sensor_schema": "ultra.sensor-series.v1",
-        "resource_sha256": expected_sha256,
-        "detection": "bounded_root_attributes",
-    }
-    if set(value) != set(expected) or any(
-        str(value.get(key) or "").strip() != expected_value
-        for key, expected_value in expected.items()
-    ):
-        return {}
-    return expected
-
-
 def _public_selected_resource_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -912,80 +871,6 @@ def _public_selected_resource_metadata(value: Any) -> dict[str, Any]:
     descriptors = _bounded_string_list(value.get("scientific_descriptors"), max_items=256)
     if descriptors:
         public["scientific_descriptors"] = descriptors
-    calphad = _public_selected_calphad_metadata(value.get("calphad"))
-    if calphad:
-        public["calphad"] = calphad
-    return public
-
-
-def _public_selected_calphad_metadata(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    public: dict[str, Any] = {}
-    # These are owner declarations, not validation or content-identity claims.
-    for key, max_length in (
-        ("database_id", 512),
-        ("database_name", 512),
-        ("database_version", 256),
-        ("title", 1024),
-        ("citation", 1024),
-        ("publication_doi", 512),
-        ("source", 1024),
-        ("authorized_scope", 512),
-        ("assessment_scope", 1024),
-        ("reference_state", 512),
-    ):
-        declaration = _safe_owner_declaration(value.get(key), max_length=max_length)
-        if declaration:
-            public[key] = declaration
-    for key in ("license_id", "license_identifier"):
-        identifier = _safe_license_identifier(value.get(key))
-        if identifier:
-            public[key] = identifier
-    for key in ("component_count", "phase_count"):
-        scalar = _bounded_metadata_scalar(value.get(key), max_string=0)
-        if isinstance(scalar, int | float) and not isinstance(scalar, bool):
-            public[key] = scalar
-    for key in ("source_uri", "license_uri"):
-        uri = _safe_public_metadata_uri(value.get(key))
-        if uri:
-            public[key] = uri
-    for key in ("authors", "components", "elements", "phases", "required_provenance_fields"):
-        items = _bounded_string_list(value.get(key), max_items=256)
-        if items:
-            public[key] = items
-    temperature_limits = _bounded_scalar_list(value.get("tdb_temperature_limits_K"), max_items=64)
-    if temperature_limits:
-        public["tdb_temperature_limits_K"] = temperature_limits
-    pressure_limits = _bounded_scalar_list(value.get("assessment_pressure_limits_Pa"), max_items=2)
-    if pressure_limits:
-        public["assessment_pressure_limits_Pa"] = pressure_limits
-    limits = value.get("limits")
-    if isinstance(limits, dict):
-        safe_limits: dict[str, Any] = {}
-        for key in (
-            "max_source_bytes",
-            "max_file_bytes",
-            "max_result_bytes",
-            "max_components",
-            "max_phases",
-            "max_conditions",
-            "max_grid_points",
-            "temperature_min_k",
-            "temperature_max_k",
-            "pressure_min_pa",
-            "pressure_max_pa",
-            "composition_min",
-            "composition_max",
-            "total_amount_mol",
-        ):
-            scalar = _bounded_metadata_scalar(limits.get(key), max_string=512)
-            if scalar is not None:
-                safe_limits[key] = scalar
-        if safe_limits:
-            public["limits"] = safe_limits
-    if public:
-        public["declaration_authority"] = "resource_owner"
     return public
 
 
@@ -1056,13 +941,6 @@ def _safe_public_metadata_uri(value: Any) -> str:
     ):
         return ""
     return raw
-
-
-def _safe_license_identifier(value: Any) -> str:
-    identifier = _safe_owner_declaration(value, max_length=128)
-    if not identifier or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+/() -]{0,127}", identifier):
-        return ""
-    return identifier
 
 
 def _safe_owner_declaration(value: Any, *, max_length: int) -> str:

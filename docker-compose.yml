@@ -154,26 +154,6 @@ services:
     command: ["sh", "-c", "echo 'code-exec sandbox image ready'"]
     restart: "no"
 
-  # Build-only, separately pinned NumPy-2/Kawin runtime. The worker resolves
-  # this reference through the mounted host Docker daemon and registers typed
-  # kinetics tools only when it exactly matches the authorized immutable ID.
-  materials-kinetics-runtime:
-    build:
-      context: .
-      dockerfile: deploy/docker/materials-kinetics.Dockerfile
-      args:
-        VCS_REF: ${GITHUB_SHA:-local-compose}
-    image: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-ultra-materials-kinetics:py311}
-    command: ["python", "-I", "-m", "ultra_deepagents.kinetics_runtime.cli", "--self-check"]
-    network_mode: none
-    read_only: true
-    cap_drop: ["ALL"]
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=0700,uid=10001,gid=10001
-    restart: "no"
-
   control-plane:
     build:
       context: backend/controlplane
@@ -242,8 +222,6 @@ services:
       # ULTRA_DATA_DIR host-bind below (not a named volume).
       ULTRA_DEEPAGENTS_SANDBOX_IMAGE: ${ULTRA_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}
       ULTRA_DEEPAGENTS_SANDBOX_NETWORK: ${ULTRA_SANDBOX_NETWORK:-none}
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-ultra-materials-kinetics:py311}
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID: ${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID:-}
       # Aggregate per-worker cap on simultaneous sandbox containers. 0 = unbounded
       # (fine for ONE worker). Set a finite value BEFORE `make scale-workers N=...`
       # so N workers cannot oversubscribe this single host's Docker daemon.
@@ -279,8 +257,6 @@ services:
         condition: service_healthy
       control-plane:
         condition: service_started
-      materials-kinetics-runtime:
-        condition: service_completed_successfully
 
   frontend:
     build:

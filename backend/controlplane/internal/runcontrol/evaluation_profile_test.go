@@ -22,13 +22,17 @@ func TestCreateRunRejectsUnknownAndFreeFormEvaluationProfiles(t *testing.T) {
 		t.Fatalf("CreateThread: %v", err)
 	}
 
-	if _, err := service.CreateRun(ctx, CreateRunRequest{
-		ThreadID:          thread.ThreadID,
-		UserID:            "evaluator",
-		Goal:              "unknown profile",
-		EvaluationProfile: domain.EvaluationProfile("future_profile"),
-	}); !errors.Is(err, ErrInvalidEvaluationProfile) {
-		t.Fatalf("unknown profile err = %v, want ErrInvalidEvaluationProfile", err)
+	// No evaluation profile is supported, so every non-empty profile — including
+	// the former materials_cleanroom_v1 — must be rejected.
+	for _, profile := range []domain.EvaluationProfile{"future_profile", "materials_cleanroom_v1"} {
+		if _, err := service.CreateRun(ctx, CreateRunRequest{
+			ThreadID:          thread.ThreadID,
+			UserID:            "evaluator",
+			Goal:              "unknown profile",
+			EvaluationProfile: profile,
+		}); !errors.Is(err, ErrInvalidEvaluationProfile) {
+			t.Fatalf("profile %q err = %v, want ErrInvalidEvaluationProfile", profile, err)
+		}
 	}
 
 	run, err := service.CreateRun(ctx, CreateRunRequest{
@@ -36,10 +40,10 @@ func TestCreateRunRejectsUnknownAndFreeFormEvaluationProfiles(t *testing.T) {
 		UserID:   "evaluator",
 		Goal:     "metadata cannot grant a profile",
 		Metadata: domain.JSONMap{
-			domain.EvaluationProfileMetadataKey: string(domain.EvaluationProfileMaterialsCleanroomV1),
+			domain.EvaluationProfileMetadataKey: "materials_cleanroom_v1",
 		},
 		JobMetadata: domain.JSONMap{
-			domain.EvaluationProfileMetadataKey: string(domain.EvaluationProfileMaterialsCleanroomV1),
+			domain.EvaluationProfileMetadataKey: "materials_cleanroom_v1",
 		},
 	})
 	if err != nil {
@@ -67,87 +71,43 @@ func TestCreateRunRejectsUnknownAndFreeFormEvaluationProfiles(t *testing.T) {
 	}
 }
 
-func TestMaterialsCleanroomProfilePersistsAndPropagatesFromStoredRun(t *testing.T) {
+// The run record is the only authority for a protected profile. With no profile
+// currently supported, an unrecognized profile stored on the run must never be
+// projected onto a job or an attested event payload.
+func TestStoredEvaluationProfileNeverPropagatesUnrecognizedProfiles(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	mem := store.NewMemoryStore()
-	bus := eventbus.NewMemoryBus()
-	service := NewService(mem, bus)
-	thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "evaluator", Title: "clean room"})
-	if err != nil {
-		t.Fatalf("CreateThread: %v", err)
+	run := domain.RunRecord{Metadata: domain.JSONMap{
+		domain.EvaluationProfileMetadataKey: "materials_cleanroom_v1",
+	}}
+
+	if profile := storedEvaluationProfile(run); profile != "" {
+		t.Fatalf("storedEvaluationProfile = %q, want empty", profile)
+	}
+	if !storedEvaluationProfileMatches(run, "") {
+		t.Fatal("storedEvaluationProfileMatches(run, \"\") = false, want true")
+	}
+	if storedEvaluationProfileMatches(run, "materials_cleanroom_v1") {
+		t.Fatal("an unrecognized stored profile must not match a requested profile")
 	}
 
-	const idempotencyKey = "materials-cleanroom-evaluation"
-	run, err := service.CreateRun(ctx, CreateRunRequest{
-		ThreadID:          thread.ThreadID,
-		UserID:            "evaluator",
-		Goal:              "evaluate materials analysis",
-		EvaluationProfile: domain.EvaluationProfileMaterialsCleanroomV1,
-		IdempotencyKey:    idempotencyKey,
-		Metadata: domain.JSONMap{
-			domain.EvaluationProfileMetadataKey: "caller_forgery",
-		},
-		JobMetadata: domain.JSONMap{
-			domain.EvaluationProfileMetadataKey: "transient_forgery",
-		},
+	metadata := metadataWithStoredEvaluationProfile(run, domain.JSONMap{
+		domain.EvaluationProfileMetadataKey: "forgery",
+		"keep":                              "value",
 	})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
+	if _, found := metadata[domain.EvaluationProfileMetadataKey]; found {
+		t.Fatalf("job metadata retained an evaluation profile: %#v", metadata)
 	}
-	assertStoredMaterialsCleanroomProfile(t, run)
-	initialJob := receiveEvaluationProfileJob(t, bus)
-	assertMaterialsCleanroomJob(t, initialJob)
-
-	events, err := mem.ListRunEvents(ctx, run.RunID, 10)
-	if err != nil {
-		t.Fatalf("ListRunEvents accepted: %v", err)
-	}
-	if len(events) != 1 || events[0].EventKind != "run.accepted" {
-		t.Fatalf("accepted events = %#v", events)
-	}
-	if got := events[0].Payload[domain.EvaluationProfileMetadataKey]; got != string(domain.EvaluationProfileMaterialsCleanroomV1) {
-		t.Fatalf("accepted event profile = %#v", got)
+	if metadata["keep"] != "value" {
+		t.Fatalf("job metadata dropped unrelated keys: %#v", metadata)
 	}
 
-	if _, err := service.CreateRun(ctx, CreateRunRequest{
-		ThreadID:       thread.ThreadID,
-		UserID:         "evaluator",
-		Goal:           "try to change the profile",
-		IdempotencyKey: idempotencyKey,
-	}); !errors.Is(err, store.ErrConflict) {
-		t.Fatalf("idempotent profile change err = %v, want ErrConflict", err)
+	payload := domain.JSONMap{domain.EvaluationProfileMetadataKey: "forgery", "keep": "value"}
+	attestEvaluationProfile(payload, run)
+	if _, found := payload[domain.EvaluationProfileMetadataKey]; found {
+		t.Fatalf("attested payload retained an evaluation profile: %#v", payload)
 	}
-
-	if _, err := service.RequeueRun(ctx, RequeueRunRequest{
-		RunID:  run.RunID,
-		Reason: "clean-room retry",
-		Metadata: domain.JSONMap{
-			domain.EvaluationProfileMetadataKey: "retry_forgery",
-		},
-	}); err != nil {
-		t.Fatalf("RequeueRun: %v", err)
-	}
-	retryJob := receiveEvaluationProfileJob(t, bus)
-	assertMaterialsCleanroomJob(t, retryJob)
-	if retryJob.DispatchID == "" {
-		t.Fatal("retry job missing dispatch id")
-	}
-
-	stored, err := mem.GetRun(ctx, run.RunID)
-	if err != nil {
-		t.Fatalf("GetRun: %v", err)
-	}
-	assertStoredMaterialsCleanroomProfile(t, stored)
-	events, err = mem.ListRunEvents(ctx, run.RunID, 10)
-	if err != nil {
-		t.Fatalf("ListRunEvents requeued: %v", err)
-	}
-	if len(events) != 2 || events[1].EventKind != "run.requeued" {
-		t.Fatalf("events after requeue = %#v", events)
-	}
-	if got := events[1].Payload[domain.EvaluationProfileMetadataKey]; got != string(domain.EvaluationProfileMaterialsCleanroomV1) {
-		t.Fatalf("requeue event profile = %#v", got)
+	if payload["keep"] != "value" {
+		t.Fatalf("attested payload dropped unrelated keys: %#v", payload)
 	}
 }
 
@@ -159,22 +119,5 @@ func receiveEvaluationProfileJob(t *testing.T, bus *eventbus.MemoryBus) eventbus
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for job")
 		return eventbus.Job{}
-	}
-}
-
-func assertStoredMaterialsCleanroomProfile(t *testing.T, run domain.RunRecord) {
-	t.Helper()
-	if got := run.Metadata[domain.EvaluationProfileMetadataKey]; got != string(domain.EvaluationProfileMaterialsCleanroomV1) {
-		t.Fatalf("stored evaluation profile = %#v", got)
-	}
-}
-
-func assertMaterialsCleanroomJob(t *testing.T, job eventbus.Job) {
-	t.Helper()
-	if job.EvaluationProfile != domain.EvaluationProfileMaterialsCleanroomV1 {
-		t.Fatalf("job evaluation profile = %q", job.EvaluationProfile)
-	}
-	if got := job.Metadata[domain.EvaluationProfileMetadataKey]; got != string(domain.EvaluationProfileMaterialsCleanroomV1) {
-		t.Fatalf("job metadata evaluation profile = %#v", got)
 	}
 }

@@ -46,28 +46,15 @@ def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
     assert "SYSTEMD_UNIT_DIR" in script
     assert "ultra-control-stack.target" in script
     assert "ULTRA_CONTROL_DATABASE_URL" in script
-    assert "ULTRA_CONTROL_MIGRATION_DATABASE_URL" in script
-    assert "ULTRA_MIGRATION_ENV_FILE" in script
-    assert "Move ULTRA_CONTROL_MIGRATION_DATABASE_URL out of" in script
     assert "ULTRA_CONTROL_NATS_URL" in script
-    assert "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID" in script
-    assert "verify_calphad_runtime_image_binding" in script
+    assert "verify_sandbox_runtime_image_binding" in script
     assert "docker image inspect --format '{{.Id}}'" in script
     assert "install_sandbox_identity_env" in script
     assert "ULTRA_SANDBOX_IDENTITY_ENV_FILE" in script
     assert "ULTRA_DEEPAGENTS_SANDBOX_IMAGE=%s" in script
-    assert "build_kinetics_runtime_image" in script
-    assert "verify_kinetics_runtime_image_binding" in script
-    assert "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE=%s" in script
-    assert "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID=%s" in script
-    assert "Ultra isolated materials kinetics runtime" in script
     assert 'chmod 0600 "$temporary"' in script
     assert "Using manifest-bound immutable control binary" in script
     assert 'if [ -f "$RELEASE_DIR/release-manifest.json" ]' in script
-    assert '--repo-root "$RELEASE_DIR"' in script
-    assert "--scope production-full" in script
-    assert '"$parity_dir/bundle/release"' in script
-    assert '"$parity_dir/bundle/staged"' in script
     assert "/v1/health" in script
     assert "/v2/admin/overview" in script
 
@@ -81,28 +68,6 @@ def test_deepagents_worker_units_override_mutable_tag_with_verified_image_id() -
         ordinary_environment = text.index("EnvironmentFile=/etc/ultra/ultra-")
         immutable_environment = text.index("EnvironmentFile=/etc/ultra/ultra-sandbox-image.env")
         assert immutable_environment > ordinary_environment
-
-
-def test_compose_binds_worker_to_built_kinetics_runtime_identity() -> None:
-    compose = read_repo_file("docker-compose.yml")
-    makefile = read_repo_file("Makefile")
-
-    assert "materials-kinetics-runtime:" in compose
-    assert "deploy/docker/materials-kinetics.Dockerfile" in compose
-    assert "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:" in compose
-    assert "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID:" in compose
-    assert "condition: service_completed_successfully" in compose
-    assert "materials-kinetics-image:" in makefile
-    assert "docker image inspect --format '{{.Id}}'" in makefile
-    assert 'ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$$image_id"' in makefile
-
-
-def test_migration_database_credential_is_separate_from_serving_environment() -> None:
-    backend = read_repo_file("deploy/env/ultra-backend.env.example")
-    migration = read_repo_file("deploy/env/ultra-migration.env.example")
-
-    assert "ULTRA_CONTROL_MIGRATION_DATABASE_URL" not in backend
-    assert "ULTRA_CONTROL_MIGRATION_DATABASE_URL" in migration
 
 
 def test_frontend_deploy_points_web_root_at_built_dist() -> None:
@@ -128,24 +93,6 @@ def test_release_artifact_script_builds_immutable_control_stack_bundle() -> None
     assert 'head_sha="$(git rev-parse HEAD)"' in script
     assert 'if [ "$RELEASE_SHA" != "$head_sha" ]' in script
     assert "--ignore-submodules=none" in script
-    assert '"control_binary_identity": release_artifacts["control_binary"]' in script
-    assert '"frontend_dist_identity": release_artifacts["frontend_dist"]' in script
-    assert '"full_materials_production_ready": False' in script
-    assert '"required_post_image_gate": "materials-production-readiness"' in script
-    assert '"readiness_result_is_candidate_only": True' in script
-    assert '"ultra.materials.release-envelope.v1"' in script
-    assert '"ultra.materials.production-attestation-verification.v1"' in script
-    assert '"requires_github_sigstore_attestation": True' in script
-    assert '"raw_mattools_evidence_may_be_public_artifact": False' in script
-    assert '"production_parity_scope": module.PRODUCTION_PARITY_SCOPE' in script
-    assert "materials_verifier.EVIDENCE_BUNDLE_SCHEMA_VERSION" in script
-    assert '"docker_sandbox_backend_combined_stdout_stderr"' in script
-    assert "materials_verifier.REQUIRED_CALPHAD_RUNTIME_TEST_COUNT" in script
-    assert "materials_verifier.REQUIRED_CALPHAD_TOOLS_TEST_COUNT" in script
-    assert '"calphad_cross_language_schema"' in script
-    assert '"calphad_cross_language_requires_production_runtime_image": True' in script
-    assert '"mattools_runnable_minimum": module.RUNNABLE_MINIMUM' in script
-    assert '"mattools_scientific_minimum": module.SCIENTIFIC_MINIMUM' in script
 
 
 def _release_builder_fixture(tmp_path: Path) -> tuple[Path, str]:
@@ -235,35 +182,6 @@ def test_main_release_workflow_builds_uploadable_release_artifact() -> None:
     assert "actions/upload-artifact@v4" in workflow
     assert "ultra-release-${{ github.sha }}" in workflow
     assert "release-manifest-${{ github.sha }}.json" in workflow
-    assert "tests/test_materials_readiness_gate.py" in workflow
-    assert "Run deterministic materials evidence gate" in workflow
-    assert "Assert source artifact makes no materials production-readiness claim" in workflow
-    assert 'materials["full_materials_production_ready"] is False' in workflow
-    assert "production_parity_evidence_bundle_schema_version" in workflow
-    assert "docker_sandbox_backend_combined_stdout_stderr" in workflow
-    assert 'materials["required_evidence"]["calphad_runtime_test_count"] == 39' in workflow
-    assert 'materials["required_evidence"]["calphad_tool_test_count"] == 56' in workflow
-    assert 'materials["required_evidence"]["calphad_cross_language_schema"]' in workflow
-    assert "calphad_cross_language_requires_production_runtime_image" in workflow
-    assert "ultra_calphad_qualification" in workflow
-    assert "make calphad-ledger-qualification" in workflow
-    assert "make materials-promotion-envelope-test" in workflow
-
-
-def test_materials_workflow_has_live_ledger_and_nonpromotable_cross_language_preflight() -> None:
-    workflow = read_repo_file(".github/workflows/materials-domain-gate.yml")
-    ledger_gate = read_repo_file("scripts/calphad_ledger_gate.py")
-
-    assert "calphad-ledger-postgres:" in workflow
-    assert "image: postgres:18-alpine" in workflow
-    assert "make calphad-ledger-qualification" in workflow
-    assert "tests/test_calphad_ledger_gate.py" in workflow
-    assert "make calphad-cross-language-test" in workflow
-    assert "make calphad-cross-language-qualification" not in workflow
-    assert "Build pinned typed-CALPHAD runtime image" not in workflow
-    assert "Upload CALPHAD cross-language qualification evidence" not in workflow
-    assert "tests/test_calphad_cross_language_gate.py" in workflow
-    assert "TestPostgresStoreCalphadLedgerIsAppendOnlyTenantScopedAndContentBound" in ledger_gate
 
 
 def test_systemd_units_run_go_control_and_deepagents_workers() -> None:

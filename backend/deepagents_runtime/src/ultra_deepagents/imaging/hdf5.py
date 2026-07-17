@@ -2,7 +2,7 @@
 
 The frontend ships a complete HDF5 viewer (``frontend/src/components/viewer/hdf5``)
 whose backend never existed. This module is that backend: it opens ``.h5``/``.hdf5``/
-``.hdf``/``.dream3d`` files with :mod:`h5py` and produces exactly the JSON/PNG/binary
+``.hdf`` files with :mod:`h5py` and produces exactly the JSON/PNG/binary
 shapes the frontend's frozen wire contract (``frontend/src/types.ts`` ``Hdf5*`` types)
 expects. It is a pure reader — no FastAPI, no libbioimage — so it is unit-testable
 against synthetic files and is dispatched off the event loop through the engine pool
@@ -19,7 +19,6 @@ Entry points used by the engine:
 - :func:`is_hdf5_data_file` — extension gate (``.ims`` Imaris deliberately excluded).
 - :func:`build_hdf5_viewer_info` — the ``UploadViewerInfo.hdf5`` payload + top-level fields.
 - :func:`dataset_summary` — ``Hdf5DatasetSummary``.
-- :func:`materials_dashboard` — ``Hdf5MaterialsDashboardResponse`` (DREAM.3D).
 - :func:`slice_png` / :func:`atlas_png` — ``image/png`` bytes.
 - :func:`scalar_volume` — raw voxel dict (``x-volume-*`` header contract).
 - :func:`dataset_histogram` — ``Hdf5DatasetHistogramResponse``.
@@ -41,7 +40,6 @@ __all__ = [
     "Hdf5DatasetNotFound",
     "build_hdf5_viewer_info",
     "dataset_summary",
-    "materials_dashboard",
     "slice_png",
     "atlas_png",
     "scalar_volume",
@@ -73,35 +71,9 @@ ATLAS_CELL_CAP = 256           # matches viewerinfo.ATLAS_CELL_CAP (kept local t
 SAMPLE_CORNER = 4              # per-axis size of the sample_values corner block
 MAX_ATTRS = 48                 # attributes materialized per node
 MAX_ATTR_ARRAY = 32            # elements kept from an array-valued attribute
-MATERIAL_PHASE_MAX_NAMES = 256  # stored ensemble labels read by the materials probe
-MATERIAL_PHASE_MAX_ITEM_BYTES = 1024
-MATERIAL_PHASE_MAX_TOTAL_BYTES = 16 * 1024
-MATERIAL_ORIENTATION_MAX_ROWS = 2000
-FEATURE_ID_SCAN_CHUNK_VALUES = 1_000_000
-FEATURE_ID_MAX_TRACKED_IDENTITIES = 1_000_000
 MAX_METADATA_ITEM_BYTES = 4096
 MAX_METADATA_TOTAL_BYTES = 64 * 1024
 
-_PHASE_NAMES_PROVENANCE = (
-    "Read from stored DREAM.3D PhaseName/MaterialName metadata; "
-    "no phase-identification algorithm was run."
-)
-_FEATURE_GROUP_NAMES = frozenset(
-    {
-        "cellfeaturedata",
-        "featuredata",
-        "grainfeaturedata",
-        "graindata",
-        "cellgraindata",
-    }
-)
-_ENSEMBLE_GROUP_NAMES = frozenset(
-    {
-        "cellensembledata",
-        "ensembledata",
-        "phaseensembledata",
-    }
-)
 
 # Volume preview kinds the frontend renders through the slice/atlas/volume surface.
 _VOLUME_KINDS = frozenset({"scalar_volume", "label_volume", "rgb_volume", "vector_volume"})
@@ -119,7 +91,7 @@ class Hdf5Error(ValueError):
 
 
 class Hdf5DatasetNotFound(Hdf5Error):
-    """Requested ``dataset_path`` (or materials schema) is absent — mapped to 404."""
+    """Requested ``dataset_path`` is absent — mapped to 404."""
 
 
 # ---------------------------------------------------------------------------
@@ -740,7 +712,7 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
 
 
 # ---------------------------------------------------------------------------
-# Geometry (DREAM.3D _SIMPL_GEOMETRY) + materials probe
+# Geometry (_SIMPL_GEOMETRY)
 # ---------------------------------------------------------------------------
 def _bounded_geometry_vector(dset: Any) -> list[Any] | None:
     """Read one tiny geometry vector without trusting its dataset name alone.
@@ -778,343 +750,20 @@ def _valid_geometry_vector(values: Any, *, positive: bool) -> bool:
     return all(math.isfinite(value) and (not positive or value > 0) for value in numbers)
 
 
-def _normalized_group_name(path: str) -> str:
-    """Normalize only the final group segment for DREAM.3D naming variants."""
-    segment = str(path).rstrip("/").rsplit("/", 1)[-1]
-    return "".join(char for char in segment.casefold() if char.isalnum())
 
 
-def _is_feature_group_path(path: str) -> bool:
-    return _normalized_group_name(path) in _FEATURE_GROUP_NAMES
 
 
-def _is_cell_data_group_path(path: str) -> bool:
-    return _normalized_group_name(path) == "celldata"
 
 
-def _is_ensemble_group_path(path: str) -> bool:
-    return _normalized_group_name(path) in _ENSEMBLE_GROUP_NAMES
 
 
-def _is_orientation_array(name: str, dset: Any, shape: tuple[int, ...]) -> bool:
-    """Require a typed multi-component Euler/quaternion array, not a group hint."""
-    if not _is_dataset(dset) or len(shape) < 2:
-        return False
-    itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
-    if getattr(dset.dtype, "kind", "") not in {"i", "u", "f"} or not (
-        0 < itemsize <= 8
-    ):
-        return False
-    normalized = "".join(char for char in str(name).casefold() if char.isalnum())
-    components = int(shape[-1]) if shape else 0
-    return ("euler" in normalized and components >= 3) or (
-        "quat" in normalized and components >= 4
-    )
 
 
-def _read_bounded_phase_names(
-    dset: Any,
-    *,
-    max_names: int,
-    max_bytes: int,
-) -> tuple[list[str], int, int]:
-    """Read stored string labels one scalar at a time within count/byte caps."""
-    import h5py
-    import numpy as np
-
-    if not _is_dataset(dset) or max_names <= 0 or max_bytes <= 0:
-        return [], 0, 0
-    try:
-        dtype = dset.dtype
-        string_info = h5py.check_string_dtype(dtype)
-        if string_info is None and getattr(dtype, "kind", "") not in {"S", "U"}:
-            return [], 0, 0
-        itemsize = int(getattr(dtype, "itemsize", 0) or 0)
-        # Fixed-width strings have a trustworthy pre-read bound. Vlen strings have
-        # an object descriptor and are read one scalar at a time, then byte-checked.
-        if getattr(dtype, "kind", "") != "O" and not (
-            0 < itemsize <= MATERIAL_PHASE_MAX_ITEM_BYTES
-        ):
-            return [], 0, 0
-        shape = tuple(int(value) for value in dset.shape)
-        total_items = int(np.prod(shape)) if shape else 1
-        limit = min(total_items, max_names, MATERIAL_PHASE_MAX_NAMES)
-        indices = (iter([()]) if not shape else itertools.islice(np.ndindex(shape), limit))
-        names: list[str] = []
-        decoded_bytes = 0
-        items_read = 0
-        for index in indices:
-            raw = dset[index]
-            items_read += 1
-            if isinstance(raw, np.ndarray):
-                if raw.size != 1:
-                    continue
-                raw = raw.reshape(-1)[0]
-            if isinstance(raw, np.generic):
-                raw = raw.item()
-            if isinstance(raw, bytes):
-                raw_bytes = raw.rstrip(b"\x00")
-                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
-                    continue
-                text = raw_bytes.decode("utf-8", "replace")
-            elif isinstance(raw, str):
-                raw_bytes = raw.encode("utf-8", "replace")
-                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
-                    continue
-                text = raw
-            else:
-                continue
-            text = text.strip()
-            item_bytes = len(text.encode("utf-8", "replace"))
-            if item_bytes > MATERIAL_PHASE_MAX_ITEM_BYTES:
-                continue
-            if decoded_bytes + item_bytes > max_bytes:
-                break
-            decoded_bytes += item_bytes
-            names.append(text)
-        return names, decoded_bytes, items_read
-    except Exception:  # noqa: BLE001
-        return [], 0, 0
 
 
-def _feature_id_dataset(h5: Any, geometry: dict[str, Any] | None) -> Any | None:
-    if not isinstance(geometry, dict):
-        return None
-    cell_data_path = geometry.get("cell_data_path")
-    dimensions = geometry.get("dimensions")
-    if not isinstance(cell_data_path, str) or not isinstance(dimensions, list):
-        return None
-    cell_group = _hard_object_at_path(h5, cell_data_path)
-    if not _is_group(cell_group):
-        return None
-    candidates: list[tuple[int, Any]] = []
-    for key in _bounded_child_names(cell_group):
-        normalized = "".join(char for char in str(key).casefold() if char.isalnum())
-        if normalized not in {"featureids", "grainids"}:
-            continue
-        dset = _hard_child(cell_group, key)
-        if not _is_dataset(dset):
-            continue
-        try:
-            shape = tuple(int(value) for value in dset.shape)
-            itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
-            if (
-                getattr(dset.dtype, "kind", "") in {"i", "u"}
-                and 0 < itemsize <= 8
-                and _cell_dataset_matches_geometry(shape, dimensions)
-            ):
-                candidates.append((0 if normalized == "featureids" else 1, dset))
-        except Exception:  # noqa: BLE001
-            continue
-    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
-def _bounded_hyperslabs(shape: tuple[int, ...], max_values: int):
-    """Yield selections whose element count never exceeds ``max_values``."""
-    if not shape or any(dimension <= 0 for dimension in shape):
-        return
-    remaining = max(1, int(max_values))
-    block_shape = [1] * len(shape)
-    for index in range(len(shape) - 1, -1, -1):
-        take = min(int(shape[index]), remaining)
-        block_shape[index] = max(1, take)
-        remaining = max(1, remaining // block_shape[index])
-    starts = [range(0, shape[index], block_shape[index]) for index in range(len(shape))]
-    for origin in itertools.product(*starts):
-        yield tuple(
-            slice(start, min(start + block_shape[index], shape[index]))
-            for index, start in enumerate(origin)
-        )
-
-
-def _scan_feature_ids(dset: Any) -> dict[str, Any]:
-    """Completely scan a valid cell FeatureIds array in bounded hyperslabs.
-
-    The set of distinct identities is itself capped. Crossing that cap makes the
-    relationship unverified (``complete=False``) rather than silently sampling.
-    """
-    import numpy as np
-
-    empty = {
-        "complete": False,
-        "positive_count": None,
-        "positive_min": None,
-        "positive_max": None,
-        "has_negative": None,
-    }
-    if not _is_dataset(dset):
-        return empty
-    try:
-        shape = tuple(int(value) for value in dset.shape)
-        itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
-        if (
-            not shape
-            or getattr(dset.dtype, "kind", "") not in {"i", "u"}
-            or not (0 < itemsize <= 8)
-        ):
-            return empty
-        positive_ids: set[int] = set()
-        has_negative = False
-        for selection in _bounded_hyperslabs(shape, FEATURE_ID_SCAN_CHUNK_VALUES):
-            block = np.asarray(dset[selection])
-            if block.size > FEATURE_ID_SCAN_CHUNK_VALUES:
-                return empty
-            unique = np.unique(block)
-            if getattr(dset.dtype, "kind", "") == "i" and unique.size:
-                has_negative = has_negative or bool(unique[0] < 0)
-            for value in unique:
-                identity = int(value)
-                if identity > 0:
-                    positive_ids.add(identity)
-                    if len(positive_ids) > FEATURE_ID_MAX_TRACKED_IDENTITIES:
-                        return empty
-        return {
-            "complete": True,
-            "positive_count": len(positive_ids),
-            "positive_min": min(positive_ids) if positive_ids else None,
-            "positive_max": max(positive_ids) if positive_ids else None,
-            "has_negative": has_negative,
-        }
-    except Exception:  # noqa: BLE001
-        return empty
-
-
-def _feature_group_declaration(
-    h5: Any,
-    *,
-    group_path: str,
-    geometry_container: str | None,
-    geometry_dimensions: list[Any] | None,
-) -> dict[str, Any] | None:
-    group = _hard_object_at_path(h5, group_path)
-    if not _is_group(group):
-        return None
-    row_length_frequency: dict[int, int] = {}
-    orientation = False
-    for key in _bounded_child_names(group):
-        dset = _hard_child(group, key)
-        if not _is_dataset(dset):
-            continue
-        try:
-            shape = tuple(int(value) for value in dset.shape)
-            if len(shape) >= 1 and int(shape[0]) >= 1:
-                row_count = int(shape[0])
-                row_length_frequency[row_count] = row_length_frequency.get(row_count, 0) + 1
-            orientation = orientation or _is_orientation_array(str(key), dset, shape)
-        except Exception:  # noqa: BLE001
-            continue
-    if not row_length_frequency:
-        return None
-    stored_rows = max(
-        row_length_frequency,
-        key=lambda rows: (row_length_frequency[rows], -rows),
-    )
-    reserved_zero = _feature_group_has_reserved_zero(
-        h5,
-        group=group,
-        geometry_container=geometry_container,
-        geometry_dimensions=geometry_dimensions,
-        stored_rows=stored_rows,
-    )
-    return {
-        "path": group_path,
-        "stored_rows": stored_rows,
-        "declared_count": max(0, stored_rows - int(reserved_zero)),
-        "modal_support": row_length_frequency[stored_rows],
-        "reserved_zero": reserved_zero,
-        "orientation": orientation,
-    }
-
-
-_RESERVED_ZERO_ATTRIBUTE_NAMES = {
-    "haszerotuple",
-    "reservedfeaturezero",
-    "reservedtuplezero",
-    "tuple0isreserved",
-    "tuplezeroisreserved",
-    "zerotupleisreserved",
-}
-
-
-def _attribute_bool(value: Any) -> bool | None:
-    try:
-        if hasattr(value, "tolist"):
-            value = value.tolist()
-        while isinstance(value, (list, tuple)) and len(value) == 1:
-            value = value[0]
-        if isinstance(value, bytes):
-            value = value.decode("utf-8", "replace")
-        if isinstance(value, str):
-            normalized = value.strip().casefold()
-            if normalized in {"1", "true", "yes", "reserved"}:
-                return True
-            if normalized in {"0", "false", "no", "not reserved"}:
-                return False
-            return None
-        if isinstance(value, (bool, int)):
-            return bool(value)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
-
-
-def _feature_group_has_reserved_zero(
-    h5: Any,
-    *,
-    group: Any,
-    geometry_container: str | None,
-    geometry_dimensions: list[Any] | None,
-    stored_rows: int,
-) -> bool:
-    """Require file/schema evidence before dropping per-feature tuple zero.
-
-    An explicit group attribute is authoritative. Otherwise, a typed
-    ``FeatureIds``/``GrainIds`` cell array in the selected DREAM.3D container
-    establishes the schema relationship in which cell label zero refers to the
-    reserved feature tuple. A group name alone is not sufficient evidence.
-    """
-
-    if stored_rows <= 0:
-        return False
-    try:
-        for key, value in _iter_bounded_attrs(group):
-            normalized = "".join(char for char in str(key).casefold() if char.isalnum())
-            if normalized in _RESERVED_ZERO_ATTRIBUTE_NAMES:
-                declared = _attribute_bool(value)
-                if declared is not None:
-                    return declared
-    except Exception:  # noqa: BLE001
-        pass
-    if not geometry_container:
-        return False
-    for cell_name in ("CellData", "Cell Data", "Cell_Data"):
-        cell_group = _hard_object_at_path(
-            h5, geometry_container.rstrip("/") + "/" + cell_name
-        )
-        if not _is_group(cell_group):
-            continue
-        for child_key in _bounded_child_names(cell_group):
-            normalized = "".join(
-                char for char in str(child_key).casefold() if char.isalnum()
-            )
-            if normalized not in {"featureids", "grainids"}:
-                continue
-            try:
-                dataset = _hard_child(cell_group, child_key)
-                if dataset is None:
-                    continue
-                shape = tuple(int(value) for value in dataset.shape)
-                if (
-                    _is_dataset(dataset)
-                    and getattr(dataset.dtype, "kind", "") in {"i", "u"}
-                    and 0 < int(getattr(dataset.dtype, "itemsize", 0) or 0) <= 8
-                    and isinstance(geometry_dimensions, list)
-                    and _cell_dataset_matches_geometry(shape, geometry_dimensions)
-                ):
-                    return True
-            except Exception:  # noqa: BLE001
-                continue
-    return False
 
 
 def _cell_dataset_matches_geometry(shape: tuple[int, ...], dimensions: list[Any]) -> bool:
@@ -1247,22 +896,6 @@ def _find_geometry(h5: Any) -> dict[str, Any] | None:
     return found
 
 
-def _looks_like_dream3d(h5: Any) -> bool:
-    """DREAM.3D heuristic: a ``/DataContainers`` group (or ``/DataStructure`` in
-    DREAM3D-NX), plus a version root attribute or an image geometry marker."""
-    has_container = any(
-        _is_group(_hard_child(h5, key)) for key in ("DataContainers", "DataStructure")
-    )
-    if not has_container:
-        return False
-    try:
-        attrs = {str(k).lower() for k in itertools.islice(h5.attrs.keys(), MAX_ATTRS)}
-    except Exception:  # noqa: BLE001
-        attrs = set()
-    version_attr = any("dream" in a or "fileversion" in a or a == "version" for a in attrs)
-    return version_attr or _find_geometry(h5) is not None
-
-
 def _semantic_role(name: str, kind: str) -> str:
     low = name.strip().lower()
     if "ipf" in low or ("colors" in low and "ipf" in low):
@@ -1288,244 +921,6 @@ def _semantic_role(name: str, kind: str) -> str:
     if kind == "vector_volume":
         return "vector_field"
     return "scalar_field"
-
-
-def _materials_probe(h5: Any) -> dict[str, Any]:
-    """Detect DREAM.3D and collect the materials capabilities/roles/phase names +
-    renderable cell-data maps and relationally validated feature/grain tables.
-
-    Traversal is hard-link-only. Phase labels must be typed string datasets in an
-    ensemble group belonging to the selected geometry container. Grain count is not
-    inferred from table rows: it is published only after a complete cell FeatureIds
-    scan proves that declared tuples and referenced positive identities agree.
-    """
-
-    detected = _looks_like_dream3d(h5)
-    result: dict[str, Any] = {
-        "detected": detected,
-        "geometry": None,
-        "phase_names": [],
-        "phase_names_source": None,
-        "phase_names_provenance": None,
-        "roles": {},
-        "capabilities": [],
-        "feature_count": None,
-        "grain_count": None,
-        "declared_feature_tuple_count": None,
-        "referenced_positive_feature_count": None,
-        "feature_id_scan_complete": False,
-        "feature_id_consistency": None,
-        "maps": [],          # list of (path, name, kind, role)
-        "feature_groups": [],  # selected relationship-backed feature group
-        "feature_group_reserved_zero": {},
-        "feature_zero_reserved": None,
-        "recommended": None,
-    }
-    if not detected:
-        return result
-    result["geometry"] = _find_geometry(h5)
-    geometry = result["geometry"]
-    geometry_container = None
-    if isinstance(geometry, dict) and isinstance(geometry.get("path"), str):
-        geometry_container = geometry["path"].rsplit("/", 1)[0]
-
-    maps: list[tuple[str, str, str, str]] = []
-    feature_group_paths: list[str] = []
-    phase_names: list[str] = []
-    phase_names_seen: set[str] = set()
-    phase_bytes = 0
-    phase_items_read = 0
-    map_orientation = False
-
-    def _visit(name: str, obj: Any) -> bool | None:
-        nonlocal phase_bytes, phase_items_read, map_orientation
-        base = name.rsplit("/", 1)[-1]
-        dataset_path = "/" + name
-        parent = "/" + name.rsplit("/", 1)[0] if "/" in name else "/"
-        in_selected_container = bool(
-            geometry_container
-            and dataset_path.startswith(geometry_container.rstrip("/") + "/")
-        )
-
-        # Phase/material labels are accepted only from a direct, typed ensemble
-        # group inside the geometry container selected by _find_geometry.
-        if base in ("PhaseName", "MaterialName", "PhaseNames") and _is_dataset(obj):
-            ensemble_parent = parent.rsplit("/", 1)[0] if "/" in parent.rstrip("/") else "/"
-            if not (
-                in_selected_container
-                and _is_ensemble_group_path(parent)
-                and ensemble_parent == geometry_container
-            ):
-                return None
-            remaining_names = MATERIAL_PHASE_MAX_NAMES - phase_items_read
-            remaining_bytes = MATERIAL_PHASE_MAX_TOTAL_BYTES - phase_bytes
-            stored_names, used_bytes, items_read = _read_bounded_phase_names(
-                obj, max_names=remaining_names, max_bytes=remaining_bytes
-            )
-            phase_bytes += used_bytes
-            phase_items_read += items_read
-            for text in stored_names:
-                normalized = text.casefold()
-                if (
-                    text
-                    and normalized not in ("invalid phase", "unknown phase")
-                    and normalized not in phase_names_seen
-                ):
-                    phase_names_seen.add(normalized)
-                    phase_names.append(text)
-            return None
-        if not _is_dataset(obj):
-            return None
-        try:
-            dt = obj.dtype
-            shape = tuple(int(s) for s in obj.shape)
-        except Exception:  # noqa: BLE001
-            return None
-        if _is_compound(dt) or _is_string_dtype(dt):
-            return None
-        kind = _classify_shallow(base, dt, shape)
-        # Renderable spatial maps: volumes under a *CellData* group (the per-voxel
-        # spatial arrays). Match the final normalized segment so similarly named
-        # per-feature/per-phase groups never leak into the map list.
-        if in_selected_container and kind in _VOLUME_KINDS and _is_cell_data_group_path(parent):
-            vol = _interpret_volume(shape, dt)
-            if vol is not None and (vol["z"] > 1 or (vol["y"] > 1 and vol["x"] > 1)):
-                role = _semantic_role(base, kind)
-                maps.append((dataset_path, base, kind, role))
-                map_orientation = map_orientation or _is_orientation_array(base, obj, shape)
-        # Per-feature arrays may use classic CellFeatureData or the real pipeline's
-        # ``Grain Data`` spelling. Keep this to known final group names.
-        if in_selected_container and _is_feature_group_path(parent) and len(shape) in (1, 2):
-            grp = parent
-            if grp not in feature_group_paths:
-                feature_group_paths.append(grp)
-        return None
-
-    try:
-        _visit_hard_objects(h5, _visit)
-    except Exception:  # noqa: BLE001
-        pass
-
-    geometry_dimensions = geometry.get("dimensions") if isinstance(geometry, dict) else None
-    declarations = [
-        declaration
-        for group_path in feature_group_paths
-        if (
-            declaration := _feature_group_declaration(
-                h5,
-                group_path=group_path,
-                geometry_container=geometry_container,
-                geometry_dimensions=geometry_dimensions,
-            )
-        )
-        is not None
-    ]
-    feature_id_dset = _feature_id_dataset(h5, geometry)
-    feature_id_scan = _scan_feature_ids(feature_id_dset)
-    referenced_count = feature_id_scan["positive_count"]
-
-    for declaration in declarations:
-        consistency: bool | None = None
-        declared_count = declaration["declared_count"]
-        if feature_id_scan["complete"] and referenced_count is not None:
-            consistency = bool(
-                not feature_id_scan["has_negative"]
-                and referenced_count == declared_count
-                and (
-                    (declared_count == 0 and feature_id_scan["positive_min"] is None)
-                    or (
-                        declared_count > 0
-                        and feature_id_scan["positive_min"] == 1
-                        and feature_id_scan["positive_max"] == declared_count
-                    )
-                )
-            )
-        declaration["consistency"] = consistency
-
-    selected_declaration = None
-    if declarations:
-        def _relationship_score(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int, int]:
-            index, declaration = item
-            consistency = declaration["consistency"]
-            relationship_rank = 2 if consistency is True else (1 if consistency is False else 0)
-            difference = (
-                abs(declaration["declared_count"] - referenced_count)
-                if referenced_count is not None
-                else 0
-            )
-            # Relationship dominates; modal support resolves unverified ties. The
-            # final tie preserves bounded traversal order rather than filename sort.
-            return (
-                relationship_rank,
-                -difference,
-                declaration["modal_support"],
-                -index,
-            )
-
-        selected_declaration = max(enumerate(declarations), key=_relationship_score)[1]
-
-    feature_groups: list[str] = []
-    feature_group_reserved_zero: dict[str, bool] = {}
-    feature_zero_reserved: bool | None = None
-    declared_feature_tuple_count = None
-    feature_id_consistency = None
-    feature_count = None
-    grain_count = None
-    selected_orientation = False
-    if selected_declaration is not None:
-        selected_path = selected_declaration["path"]
-        feature_groups = [selected_path]
-        feature_zero_reserved = selected_declaration["reserved_zero"]
-        feature_group_reserved_zero[selected_path] = feature_zero_reserved
-        declared_feature_tuple_count = selected_declaration["declared_count"]
-        feature_count = declared_feature_tuple_count
-        feature_id_consistency = selected_declaration["consistency"]
-        selected_orientation = selected_declaration["orientation"]
-        if feature_id_consistency is True:
-            grain_count = referenced_count
-
-    caps: list[str] = ["maps"] if maps else []
-    if feature_groups:
-        caps.append("grain_metrics")
-    if map_orientation or selected_orientation:
-        caps.append("orientation")
-
-    roles = {role: path for (path, _n, _k, role) in maps}
-
-    # Recommended map: IPF colors > feature ids > confidence/quality > first.
-    priority = ["ipf_colors", "feature_ids", "confidence_index", "image_quality"]
-    recommended = None
-    for want in priority:
-        for (path, _n, _k, role) in maps:
-            if role == want:
-                recommended = path
-                break
-        if recommended is not None:
-            break
-    if recommended is None and maps:
-        recommended = maps[0][0]
-
-    result.update(
-        {
-            "phase_names": phase_names,
-            "phase_names_source": "stored_metadata" if phase_names else None,
-            "phase_names_provenance": _PHASE_NAMES_PROVENANCE if phase_names else None,
-            "roles": roles,
-            "capabilities": caps,
-            "feature_count": feature_count,
-            "grain_count": grain_count,
-            "declared_feature_tuple_count": declared_feature_tuple_count,
-            "referenced_positive_feature_count": referenced_count,
-            "feature_id_scan_complete": bool(feature_id_scan["complete"]),
-            "feature_id_consistency": feature_id_consistency,
-            "maps": maps,
-            "feature_groups": feature_groups,
-            "feature_group_reserved_zero": feature_group_reserved_zero,
-            "feature_zero_reserved": feature_zero_reserved,
-            "recommended": recommended,
-        }
-    )
-    return result
 
 
 def _is_dataset(obj: Any) -> bool:
@@ -1699,43 +1094,11 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
         root_keys = [str(key) for key in _bounded_child_names(h5)]
         root_attributes = _read_attrs(h5)
         tree, dataset_kinds, truncated, group_count, dataset_count, default_path = _walk_tree(h5)
-        materials_probe = _materials_probe(h5)
 
-        materials_payload = None
-        if materials_probe["detected"]:
-            recommended_view = "materials" if materials_probe["maps"] else "explorer"
-            materials_payload = {
-                "detected": True,
-                "schema": "dream3d",
-                "capabilities": materials_probe["capabilities"],
-                "roles": materials_probe["roles"],
-                "phase_names": materials_probe["phase_names"],
-                "phase_names_source": materials_probe["phase_names_source"],
-                "phase_names_provenance": materials_probe["phase_names_provenance"],
-                "feature_count": materials_probe["feature_count"],
-                "grain_count": materials_probe["grain_count"],
-                "declared_feature_tuple_count": materials_probe[
-                    "declared_feature_tuple_count"
-                ],
-                "referenced_positive_feature_count": materials_probe[
-                    "referenced_positive_feature_count"
-                ],
-                "feature_id_scan_complete": materials_probe["feature_id_scan_complete"],
-                "feature_id_consistency": materials_probe["feature_id_consistency"],
-                "feature_zero_reserved": materials_probe["feature_zero_reserved"],
-                "recommended_view": recommended_view,
-            }
-            top["modality"] = "materials"
+        # Default selection: the largest renderable dataset from the tree walk.
+        default_dataset_path = default_path
 
-        # Default selection: for DREAM.3D prefer the recommended map; else the largest
-        # renderable dataset from the tree walk.
-        default_dataset_path = None
-        if materials_payload is not None and materials_probe["recommended"]:
-            default_dataset_path = materials_probe["recommended"]
-        elif default_path is not None:
-            default_dataset_path = default_path
-
-        geometry = materials_probe["geometry"]
+        geometry = _find_geometry(h5)
 
         limitations: list[str] = []
         if truncated:
@@ -1763,7 +1126,6 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
             "limitations": limitations,
             "selected_dataset_path": default_dataset_path,
             "default_dataset_path": default_dataset_path,
-            "materials": materials_payload,
         }
         top["hdf5"] = hdf5_block
         return top
@@ -1796,7 +1158,6 @@ def _unsupported_hdf5(reason: str) -> dict[str, Any]:
         "limitations": [reason],
         "selected_dataset_path": None,
         "default_dataset_path": None,
-        "materials": None,
     }
 
 
@@ -1929,7 +1290,6 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             "preview_kind": preview_kind,
             "semantic_role": _semantic_role(name, preview_kind or "") if is_volume_kind else None,
             "units_hint": _units_hint(name, dset),
-            "materials_domain_tags": [],
             "dtype": _dtype_str(dt),
             "shape": list(shape),
             "rank": int(rank),
@@ -2491,228 +1851,10 @@ def _matrix_table(dset, shape, offset, limit, np):
     return columns, rows, total_rows, total_columns, []
 
 
-# ---------------------------------------------------------------------------
-# Materials dashboard
-# ---------------------------------------------------------------------------
-def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
-    import numpy as np
-
-    h5 = _open(path)
-    try:
-        probe = _materials_probe(h5)
-        if not probe["detected"]:
-            raise Hdf5DatasetNotFound("materials dashboard is only available for DREAM.3D files")
-
-        geometry = probe["geometry"]
-        spacing_note = None
-        if geometry and geometry.get("spacing"):
-            spacing_note = f"Voxel spacing {geometry['spacing']} (from _SIMPL_GEOMETRY)."
-
-        maps = []
-        for (mpath, mname, kind, role) in probe["maps"]:
-            maps.append({
-                "title": _titleize(mname),
-                "description": None,
-                "dataset_path": mpath,
-                "semantic_role": role,
-                "preview_kind": kind,
-            })
-
-        dataset_links = []
-        for (mpath, mname, kind, role) in probe["maps"]:
-            dataset_links.append({
-                "label": _titleize(mname),
-                "dataset_path": mpath,
-                "semantic_role": role,
-                "group": mpath.rsplit("/", 1)[0] if "/" in mpath else "/",
-            })
-
-        grain_charts = _grain_charts(h5, probe, np)
-        orientation_charts = _orientation_charts(h5, probe, np)
-        synthetic_stats: list[dict[str, Any]] = []
-
-        overview = {
-            "geometry": geometry,
-            "spacing_note": spacing_note,
-            "phase_names": probe["phase_names"],
-            "phase_names_source": probe["phase_names_source"],
-            "phase_names_provenance": probe["phase_names_provenance"],
-            "feature_count": probe["feature_count"],
-            "grain_count": probe["grain_count"],
-            "declared_feature_tuple_count": probe["declared_feature_tuple_count"],
-            "referenced_positive_feature_count": probe[
-                "referenced_positive_feature_count"
-            ],
-            "feature_id_scan_complete": probe["feature_id_scan_complete"],
-            "feature_id_consistency": probe["feature_id_consistency"],
-            "feature_zero_reserved": probe["feature_zero_reserved"],
-            "capabilities": probe["capabilities"],
-            "recommended_map_dataset_path": probe["recommended"],
-        }
-        return {
-            "file_id": file_id,
-            "schema": "dream3d",
-            "overview": overview,
-            "maps": maps,
-            "grain_charts": grain_charts,
-            "orientation_charts": orientation_charts,
-            "synthetic_stats": synthetic_stats,
-            "dataset_links": dataset_links,
-        }
-    finally:
-        _safe_close(h5)
 
 
-def _bounded_feature_row_sample(
-    dset,
-    np,
-    *,
-    max_rows: int,
-    max_columns: int | None = None,
-    reserved_zero: bool,
-):
-    """Sample feature rows, excluding tuple zero only with schema evidence.
-
-    The slice stride is computed before reading, so a multi-gigabyte feature table
-    never enters memory in full. When tuple zero is established as reserved,
-    exclusion is positional: zero-valued measurements in rows 1..N remain valid.
-    """
-    try:
-        shape = tuple(int(value) for value in dset.shape)
-        start_row = 1 if reserved_zero else 0
-        if len(shape) not in (1, 2) or not shape or shape[0] <= start_row:
-            return np.asarray([], dtype="float64")
-        available_rows = shape[0] - start_row
-        step = max(1, math.ceil(available_rows / max(1, max_rows)))
-        row_slice = slice(start_row, shape[0], step)
-        if len(shape) == 1:
-            block = dset[row_slice]
-        else:
-            column_count = shape[1]
-            if max_columns is not None:
-                column_count = min(column_count, max_columns)
-            if column_count <= 0:
-                return np.asarray([], dtype="float64")
-            block = dset[row_slice, :column_count]
-        return np.asarray(block, dtype="float64")
-    except Exception:  # noqa: BLE001
-        return np.asarray([], dtype="float64")
 
 
-def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
-    """Grain-scale distributions from per-feature 1-D arrays (EquivalentDiameters,
-    NumNeighbors, ...). Bounded sampling; empty list if nothing suitable."""
-    charts: list[dict[str, Any]] = []
-    wanted = ("equivalentdiameters", "numneighbors", "numelements", "volumes", "size")
-    for grp_path in probe["feature_groups"]:
-        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
-        grp = _hard_object_at_path(h5, grp_path)
-        if not _is_group(grp):
-            continue
-        for key in _bounded_child_names(grp):
-            low = key.lower()
-            if not any(w in low for w in wanted):
-                continue
-            try:
-                d = _hard_child(grp, key)
-                if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
-                    continue
-                vals = _bounded_feature_row_sample(
-                    d,
-                    np,
-                    max_rows=TABLE_CHART_MAX_ROWS,
-                    max_columns=1,
-                    reserved_zero=reserved_zero,
-                ).ravel()
-                vals = vals[np.isfinite(vals)]
-                if vals.size < 2:
-                    continue
-                counts, edges = np.histogram(vals, bins=min(24, max(8, int(math.sqrt(vals.size)))))
-                data = [{"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])} for i in range(len(counts))]
-                charts.append({
-                    "kind": "bar",
-                    "title": f"{_titleize(key)} distribution",
-                    "description": f"{vals.size} features sampled",
-                    "x_key": "label",
-                    "y_key": "count",
-                    "data": data,
-                    "source_paths": [grp_path.rstrip("/") + "/" + key],
-                    "units_hint": _units_hint(key, d),
-                    "provenance": (
-                        "Bounded sample of per-feature values; reserved feature row 0 "
-                        "excluded by index based on selected-container FeatureIds/GrainIds "
-                        "schema evidence. Zero-valued measurements in real rows are retained."
-                        if reserved_zero
-                        else "Bounded sample of per-feature values; no reserved feature row "
-                        "was established by file/schema evidence, so row 0 is retained."
-                    ),
-                })
-            except Exception:  # noqa: BLE001
-                continue
-            if len(charts) >= 4:
-                return charts
-    return charts
-
-
-def _orientation_charts(h5, probe, np) -> list[dict[str, Any]]:
-    """An orientation scatter (phi1 vs Phi) from a per-feature AvgEulerAngles array,
-    if present. Bounded to :data:`MATERIAL_ORIENTATION_MAX_ROWS` points."""
-    charts: list[dict[str, Any]] = []
-    for grp_path in probe["feature_groups"]:
-        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
-        grp = _hard_object_at_path(h5, grp_path)
-        if not _is_group(grp):
-            continue
-        for key in _bounded_child_names(grp):
-            if "euler" not in key.lower():
-                continue
-            try:
-                d = _hard_child(grp, key)
-                if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
-                    continue
-                arr = _bounded_feature_row_sample(
-                    d,
-                    np,
-                    max_rows=MATERIAL_ORIENTATION_MAX_ROWS,
-                    max_columns=3,
-                    reserved_zero=reserved_zero,
-                )
-                if arr.ndim != 2 or arr.shape[1] < 2:
-                    continue
-                data = [
-                    {"phi1": _num(arr[i, 0]), "value": _num(arr[i, 1])}
-                    for i in range(arr.shape[0])
-                    if math.isfinite(arr[i, 0]) and math.isfinite(arr[i, 1])
-                ]
-                if data:
-                    charts.append({
-                        "kind": "scatter",
-                        "title": f"{_titleize(key)}: φ1 vs Φ",
-                        "description": f"{len(data)} features sampled",
-                        "x_key": "phi1",
-                        "y_key": "value",
-                        "data": data,
-                        "source_paths": [grp_path.rstrip("/") + "/" + key],
-                        "units_hint": _units_hint(key, d),
-                        "provenance": (
-                            "Bounded sample of stored per-feature orientation angles; reserved "
-                            "feature row 0 excluded by index based on selected-container "
-                            "FeatureIds/GrainIds schema evidence."
-                            if reserved_zero
-                            else "Bounded sample of stored per-feature orientation angles; no "
-                            "reserved feature row was established, so row 0 is retained."
-                        ),
-                    })
-            except Exception:  # noqa: BLE001
-                continue
-            if len(charts) >= 2:
-                return charts
-    return charts
-
-
-def _titleize(name: str) -> str:
-    text = str(name).replace("_", " ").strip()
-    return text if text else name
 
 
 # ---------------------------------------------------------------------------

@@ -52,7 +52,7 @@ def _payload() -> dict[str, Any]:
             "config_sha256": "e" * 64,
             "raw_response_sha256": "f" * 64,
             "deployment_attestation_sha256": "3" * 64,
-            "attestation_authority": "materials-platform-ci",
+            "attestation_authority": "science-platform-ci",
             "response_model_id": "Qwen/Qwen3.6-27B-Instruct",
             "response_system_fingerprint": "fp_mock_immutable",
             "model_input_sha256": "4" * 64,

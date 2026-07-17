@@ -50,6 +50,10 @@ func TestCreateRunIgnoresRemoteMutationIntentMetadataSpoof(t *testing.T) {
 	}
 }
 
+// No evaluation profile is currently supported, so a run that requests one
+// alongside remote mutation intents is rejected before dispatch. The
+// evaluation-profile/mutation exclusion in CreateRun stays as the guard that
+// re-arms if a profile is reintroduced.
 func TestCreateRunRejectsRemoteMutationIntentsForProtectedEvaluationProfile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -58,7 +62,7 @@ func TestCreateRunRejectsRemoteMutationIntentsForProtectedEvaluationProfile(t *t
 	service := NewService(mem, bus)
 	thread, err := service.CreateThread(ctx, CreateThreadRequest{
 		UserID: "evaluator",
-		Title:  "protected materials evaluation",
+		Title:  "protected evaluation",
 	})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
@@ -72,12 +76,12 @@ func TestCreateRunRejectsRemoteMutationIntentsForProtectedEvaluationProfile(t *t
 			_, err := service.CreateRun(ctx, CreateRunRequest{
 				ThreadID:              thread.ThreadID,
 				UserID:                "evaluator",
-				Goal:                  "Evaluate materials analysis in a clean room.",
-				EvaluationProfile:     domain.EvaluationProfileMaterialsCleanroomV1,
+				Goal:                  "Evaluate analysis in a clean room.",
+				EvaluationProfile:     domain.EvaluationProfile("protected_profile_v1"),
 				RemoteMutationIntents: []domain.RemoteMutationIntent{intent},
 			})
-			if !errors.Is(err, ErrEvaluationProfileMutation) {
-				t.Fatalf("CreateRun err = %v, want ErrEvaluationProfileMutation", err)
+			if !errors.Is(err, ErrInvalidEvaluationProfile) {
+				t.Fatalf("CreateRun err = %v, want ErrInvalidEvaluationProfile", err)
 			}
 		})
 	}

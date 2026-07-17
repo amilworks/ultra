@@ -19,7 +19,6 @@ from PIL import Image, UnidentifiedImageError
 from ultra_deepagents.agent import (
     attempt_ledger_path,
     build_research_agent,
-    is_materials_context,
     is_rigor_intelligence,
     looks_quantitative_rigor_goal,
     request_classification_text,
@@ -60,7 +59,6 @@ from ultra_deepagents.events import (
     normalize_tool_call,
     normalize_tool_call_progress,
 )
-from ultra_deepagents.materials.trace_binding import typed_materials_result_binding
 from ultra_deepagents.model import build_chat_model
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
@@ -1876,14 +1874,6 @@ def _missing_rigor_contract_kinds(
     """
     if not is_rigor_intelligence(context):
         return []
-    # Materials runs carry a modality-specific Pro results contract.  Do not
-    # re-impose the dynamical-systems seeds/durations/3x-spread contract after
-    # a deterministic crystallography calculation or typed scientific input
-    # refusal has already completed.  Besides being scientifically irrelevant,
-    # that continuation can induce repeated first-party tool calls and a large
-    # token/latency regression.
-    if is_materials_context(context):
-        return []
     if not looks_quantitative_rigor_goal(_run_request_text(job)):
         return []
     response_text = "\n".join(
@@ -2535,7 +2525,6 @@ def _tool_event_from_deepagents_tools_protocol(
             exit_code = _execute_exit_code_from_output(output)
             if exit_code is not None:
                 payload["exit_code"] = exit_code
-        payload.update(typed_materials_result_binding(tool_name, output))
     error = data.get("error")
     if error is not None:
         payload["error"] = _payload_preview_text(error)
@@ -2591,7 +2580,6 @@ def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
             exit_code = _execute_exit_code_from_output(output)
             if exit_code is not None:
                 payload["exit_code"] = exit_code
-        payload.update(typed_materials_result_binding(tool_name, output))
     return _drop_empty_payload_values(payload)
 
 

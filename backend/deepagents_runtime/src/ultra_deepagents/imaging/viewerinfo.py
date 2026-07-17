@@ -546,7 +546,7 @@ def build_viewer_info(
     # A z>1 image is a 3D volume, so it earns BOTH 3D surfaces: the orthogonal
     # The 3D surfaces (reslice + volume) are offered ONLY for medical (clinical)
     # volumes, which have the mature scalar MPR/volume path. Non-medical z-stacks
-    # (microscopy/materials) are intentionally 2D-only for now: the multichannel 3D
+    # (microscopy) are intentionally 2D-only for now: the multichannel 3D
     # render is not yet reliable enough to ship, and a fast 2D view with first-class
     # Z/T scrubbing is the better experience. volume_mode stays "slice_stack" so the
     # 2D Z scrub still knows it is a stack — only the 3D SURFACES are withheld. (To

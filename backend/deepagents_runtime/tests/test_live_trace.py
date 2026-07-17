@@ -3113,14 +3113,14 @@ def test_control_plane_client_create_run_sends_files_and_selection_context():
         messages=[{"role": "user", "content": "Read the uploaded paper."}],
         idempotency_key="key-1",
         file_ids=["file-paper"],
-        selection_context={"suggested_domain": "materials", "source": "live_trace"},
+        selection_context={"suggested_domain": "biology", "source": "live_trace"},
     )
 
     assert run["run_id"] == "run-1"
     assert captured["path"] == "/v2/threads/thread-1/runs"
     assert captured["payload"]["file_ids"] == ["file-paper"]
     assert captured["payload"]["selection_context"] == {
-        "suggested_domain": "materials",
+        "suggested_domain": "biology",
         "source": "live_trace",
     }
     assert captured["headers"] == {"Idempotency-Key": "key-1"}

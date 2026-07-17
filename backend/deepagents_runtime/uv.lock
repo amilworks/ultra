@@ -3210,7 +3210,6 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "nats-py" },
-    { name = "numcodecs" },
     { name = "numpy" },
     { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
@@ -3218,7 +3217,6 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pymupdf" },
     { name = "requests" },
-    { name = "zarr" },
 ]
 
 [package.optional-dependencies]
@@ -3283,7 +3281,6 @@ requires-dist = [
     { name = "langgraph-checkpoint", specifier = ">=4.1.0,<5" },
     { name = "lxml", marker = "extra == 'imaging'", specifier = ">=5.0.0,<6" },
     { name = "nats-py", specifier = ">=2.9.0,<3" },
-    { name = "numcodecs", specifier = "==0.16.5" },
     { name = "numcodecs", marker = "extra == 'ngff'", specifier = ">=0.12.0" },
     { name = "numpy", specifier = ">=1.26.0,<3" },
     { name = "numpy", marker = "extra == 'imaging'", specifier = ">=1.26.0,<3" },
@@ -3301,7 +3298,6 @@ requires-dist = [
     { name = "ultra-deepagents-runtime", extras = ["imaging"], marker = "extra == 'dev'" },
     { name = "uvicorn", marker = "extra == 'imaging'", specifier = ">=0.29.0,<1" },
     { name = "uvicorn", marker = "extra == 'ngff'", specifier = ">=0.29.0,<1" },
-    { name = "zarr", specifier = "==3.1.5" },
     { name = "zarr", marker = "extra == 'ngff'", specifier = ">=2.18,<4" },
 ]
 provides-extras = ["dev", "imaging", "ngff"]

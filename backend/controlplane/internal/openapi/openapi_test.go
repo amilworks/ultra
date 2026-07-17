@@ -42,7 +42,6 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 		"/v2/uploads/{file_id}/slice:",
 		"/v2/uploads/{file_id}/caption:",
 		"/v2/uploads/{file_id}/hdf5/dataset:",
-		"/v2/uploads/{file_id}/hdf5/materials/dashboard:",
 		"/v2/uploads/{file_id}/hdf5/preview/slice:",
 		"/v2/uploads/{file_id}/hdf5/preview/atlas:",
 		"/v2/uploads/{file_id}/hdf5/preview/scalar-volume:",

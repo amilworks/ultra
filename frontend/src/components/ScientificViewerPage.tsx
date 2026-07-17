@@ -11,14 +11,12 @@ type ScientificViewerPageProps = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
-  onUseHdf5DatasetInChat?: (fileId: string, datasetPaths: string[]) => void;
 };
 
 export function ScientificViewerPage({
   uploadedFiles,
   bisqueLinksByFileId,
   apiClient,
-  onUseHdf5DatasetInChat,
 }: ScientificViewerPageProps) {
   return (
     <section className="mx-auto w-full flex-1 overflow-y-auto px-4 py-6 sm:px-6">
@@ -40,7 +38,6 @@ export function ScientificViewerPage({
           uploadedFiles={uploadedFiles}
           bisqueLinksByFileId={bisqueLinksByFileId}
           apiClient={apiClient}
-          onUseHdf5DatasetInChat={onUseHdf5DatasetInChat}
           className="viewer-workspace-embedded"
         />
       </div>

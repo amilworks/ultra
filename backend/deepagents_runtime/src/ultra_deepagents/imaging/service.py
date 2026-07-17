@@ -339,13 +339,6 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
 
-    @app.get("/hdf5/materials/dashboard")
-    async def hdf5_materials_dashboard(path: str, file_id: str = ""):
-        try:
-            return await runner.call("hdf5_materials_dashboard", path, file_id=file_id)
-        except Hdf5DatasetNotFound as exc:
-            return _not_found(exc)
-
     @app.get("/hdf5/preview/slice")
     async def hdf5_slice(
         path: str, dataset_path: str, axis: str = "z", index: int | None = None, component: int = 0,

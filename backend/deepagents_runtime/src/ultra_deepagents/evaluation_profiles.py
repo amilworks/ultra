@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-MATERIALS_CLEANROOM_PROFILE = "materials_cleanroom_v1"
 EVALUATION_PROFILE_ATTESTATION_SCHEMA_VERSION = "1"
 EVALUATION_PROFILE_EVENT_KIND = "run.evaluation_profile_attested"
 EVALUATION_SURFACE_EVENT_KIND = "run.evaluation_surface_attested"
@@ -28,36 +27,9 @@ class EvaluationProfilePolicy:
     run_scoped_workspace: bool
 
 
-_CLEANROOM_DISABLED_CAPABILITIES = (
-    "benchmark_identity_context",
-    "durable_user_memory",
-    "episodic_memory_tools",
-    "external_async_subagents",
-    "linked_account_tools",
-    "organization_policy_memory",
-    "preloaded_knowledge_context",
-    "prior_run_artifact_tools",
-    "prior_thread_messages",
-    "selected_file_context",
-    "user_profile_context",
-    "user_resource_catalog_tools",
-)
-
-
-def _cleanroom_policy(name: str) -> EvaluationProfilePolicy:
-    return EvaluationProfilePolicy(
-        name=name,
-        disabled_capabilities=_CLEANROOM_DISABLED_CAPABILITIES,
-        goal_only_messages=True,
-        run_scoped_memory=True,
-        run_scoped_workspace=True,
-    )
-
-
-_MATERIALS_CLEANROOM_POLICY = _cleanroom_policy(MATERIALS_CLEANROOM_PROFILE)
-_SUPPORTED_PROFILES = {
-    MATERIALS_CLEANROOM_PROFILE: _MATERIALS_CLEANROOM_POLICY,
-}
+# No evaluation profile is registered. Build an EvaluationProfilePolicy and add it
+# here to enable one; every unregistered name is rejected by normalization below.
+_SUPPORTED_PROFILES: dict[str, EvaluationProfilePolicy] = {}
 
 
 def normalize_evaluation_profile(value: Any) -> str:
@@ -78,10 +50,6 @@ def normalize_evaluation_profile(value: Any) -> str:
 def evaluation_profile_policy(value: Any) -> EvaluationProfilePolicy | None:
     profile = normalize_evaluation_profile(value)
     return _SUPPORTED_PROFILES.get(profile)
-
-
-def is_materials_cleanroom_profile(value: Any) -> bool:
-    return normalize_evaluation_profile(value) == MATERIALS_CLEANROOM_PROFILE
 
 
 def is_cleanroom_evaluation_profile(value: Any) -> bool:

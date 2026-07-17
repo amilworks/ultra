@@ -1,8 +1,0 @@
-# Host-only dependencies for the unmodified MatTools result_analysis.py runner.
-# Scientific candidate code and verifiers execute in the separately pinned
-# mat-tool-ben image, not in this host environment.
-docker==7.1.0
-numpy==1.26.4
-openpyxl==3.1.5
-pandas==2.2.2
-pymatgen==2024.8.9

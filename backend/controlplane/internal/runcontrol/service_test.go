@@ -122,67 +122,6 @@ func TestServiceCreateRunStampsRuntimeFacts(t *testing.T) {
 	}
 }
 
-func TestServiceCreateRunStampsOnlyServerAuthorizedCalphadRuntimePolicy(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	runtimeImage := "sha256:" + strings.Repeat("a", 64)
-	for _, test := range []struct {
-		name       string
-		configured string
-		wantPolicy bool
-	}{
-		{name: "configured immutable image", configured: runtimeImage, wantPolicy: true},
-		{name: "missing configuration fails closed", wantPolicy: false},
-		{name: "mutable configuration fails closed", configured: "materials:latest", wantPolicy: false},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			mem := store.NewMemoryStore()
-			bus := eventbus.NewMemoryBus()
-			service := NewServiceWithOptions(mem, bus, ServiceOptions{
-				CalphadRuntimePolicy: CalphadRuntimePolicyConfig{RuntimeImageID: test.configured},
-			})
-			thread, err := service.CreateThread(ctx, CreateThreadRequest{UserID: "calphad-user", Title: "CALPHAD"})
-			if err != nil {
-				t.Fatalf("CreateThread: %v", err)
-			}
-			run, err := service.CreateRun(ctx, CreateRunRequest{
-				ThreadID: thread.ThreadID, UserID: "calphad-user", Goal: "Inspect TDB",
-				Metadata: domain.JSONMap{
-					domain.CalphadRuntimePolicyMetadataKey: domain.JSONMap{
-						"schema_version": domain.CalphadRuntimePolicySchema,
-						"authority":      "control_plane", "runtime_image_id": "sha256:" + strings.Repeat("f", 64),
-						"pycalphad_version": domain.CalphadPycalphadVersion,
-					},
-				},
-			})
-			if err != nil {
-				t.Fatalf("CreateRun: %v", err)
-			}
-			policy, found := run.Metadata[domain.CalphadRuntimePolicyMetadataKey].(domain.JSONMap)
-			if found != test.wantPolicy {
-				t.Fatalf("policy found=%t value=%#v, want found=%t", found, policy, test.wantPolicy)
-			}
-			if test.wantPolicy {
-				if len(policy) != 11 || policy["schema_version"] != domain.CalphadRuntimePolicySchema ||
-					policy["authority"] != "control_plane" ||
-					policy["runtime_image_id"] != runtimeImage ||
-					policy["pycalphad_version"] != domain.CalphadPycalphadVersion ||
-					policy["network"] != domain.CalphadRuntimeNetwork ||
-					policy["no_new_privileges"] != true ||
-					policy["read_only_root_filesystem"] != true ||
-					policy["cap_drop_all"] != true ||
-					policy["cpus_at_most"] != domain.CalphadRuntimeCPUsAtMost ||
-					policy["memory_bytes_at_most"] != domain.CalphadRuntimeMemoryBytesAtMost ||
-					policy["pids_at_most"] != domain.CalphadRuntimePIDsAtMost {
-					t.Fatalf("server policy = %#v", policy)
-				}
-			}
-		})
-	}
-}
-
 func TestServiceCreateRunWithRetiredRareSpotToolUsesDeepAgentsPathAndPreservesMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -3479,7 +3418,7 @@ func TestServiceCreateRunIdempotentQueuedRetryDispatchesOnlyStoredInputContract(
 		ThreadID: thread.ThreadID,
 		UserID:   "user-1",
 		Goal:     "Analyze the originally authorized TDB.",
-		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze original.tdb"}},
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Analyze original.csv"}},
 		Metadata: domain.JSONMap{
 			"idempotency_key":      idempotencyKey,
 			"file_ids":             []string{"file-original"},
@@ -3502,7 +3441,7 @@ func TestServiceCreateRunIdempotentQueuedRetryDispatchesOnlyStoredInputContract(
 		ThreadID:         thread.ThreadID,
 		UserID:           "user-1",
 		Goal:             "Try to replace the stored contract.",
-		Messages:         []domain.ThreadMessage{{Role: "user", Content: "Analyze foreign.tdb"}},
+		Messages:         []domain.ThreadMessage{{Role: "user", Content: "Analyze foreign.csv"}},
 		FileIDs:          []string{"file-foreign"},
 		ResourceURIs:     []string{"catalog://file-foreign"},
 		KnowledgeContext: domain.JSONMap{"source": "retry"},
@@ -3529,7 +3468,7 @@ func TestServiceCreateRunIdempotentQueuedRetryDispatchesOnlyStoredInputContract(
 		if len(job.ResourceDescriptors) != 1 || job.ResourceDescriptors[0]["resource_id"] != "file-original" || job.ResourceDescriptors[0]["sha256"] != strings.Repeat("a", 64) {
 			t.Fatalf("retry job descriptors = %#v, want stored binding", job.ResourceDescriptors)
 		}
-		if len(job.Messages) != 1 || job.Messages[0].Content != "Analyze original.tdb" {
+		if len(job.Messages) != 1 || job.Messages[0].Content != "Analyze original.csv" {
 			t.Fatalf("retry job messages = %#v, want stored transcript", job.Messages)
 		}
 		if job.KnowledgeContext["source"] != "stored" || strings.Contains(fmt.Sprint(job), "file-foreign") {
@@ -4159,7 +4098,7 @@ func TestServiceCreateRunDropsCallerArtifactsButKeepsServerSelectedResources(t *
 		"sha256":         strings.Repeat("a", 64),
 		"size_bytes":     int64(123),
 		"metadata": domain.JSONMap{
-			"calphad": domain.JSONMap{"database_id": "owned-db"},
+			"caption": "owned-db",
 		},
 	}
 	run, err := service.CreateRun(ctx, CreateRunRequest{
@@ -4194,11 +4133,10 @@ func TestServiceCreateRunDropsCallerArtifactsButKeepsServerSelectedResources(t *
 		}
 		metadata, ok := job.ResourceDescriptors[0]["metadata"].(domain.JSONMap)
 		if !ok {
-			t.Fatalf("selected CALPHAD metadata type = %T", job.ResourceDescriptors[0]["metadata"])
+			t.Fatalf("selected resource metadata type = %T", job.ResourceDescriptors[0]["metadata"])
 		}
-		calphad, ok := metadata["calphad"].(domain.JSONMap)
-		if !ok || calphad["database_id"] != "owned-db" {
-			t.Fatalf("selected CALPHAD metadata changed: %#v", metadata)
+		if metadata["caption"] != "owned-db" {
+			t.Fatalf("selected resource metadata changed: %#v", metadata)
 		}
 	default:
 		t.Fatal("CreateRun did not dispatch a job")

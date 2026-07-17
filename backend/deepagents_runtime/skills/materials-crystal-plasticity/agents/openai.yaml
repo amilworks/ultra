@@ -1,4 +1,0 @@
-interface:
-  display_name: "Crystal Plasticity"
-  short_description: "Slip geometry and CPFE input rigor"
-  default_prompt: "Use $materials-crystal-plasticity to analyze slip geometry and validate a CPFE input contract."

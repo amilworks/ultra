@@ -9,16 +9,13 @@ const EvaluationProfileMetadataKey = "evaluation_profile"
 // ordinary user runs must never inherit from free-form metadata.
 type EvaluationProfile string
 
-const EvaluationProfileMaterialsCleanroomV1 EvaluationProfile = "materials_cleanroom_v1"
-
 // ParseEvaluationProfile accepts the empty value (no protected profile) and
-// the explicitly supported profiles only.
+// the explicitly supported profiles only. No profile is currently supported,
+// so every non-empty value is rejected.
 func ParseEvaluationProfile(value string) (EvaluationProfile, bool) {
 	switch profile := EvaluationProfile(strings.TrimSpace(value)); profile {
 	case "":
 		return "", true
-	case EvaluationProfileMaterialsCleanroomV1:
-		return profile, true
 	default:
 		return "", false
 	}

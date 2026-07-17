@@ -52,9 +52,6 @@ class _Hdf5EngineMixin:
     def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
         return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
 
-    def hdf5_materials_dashboard(self, path: str, *, file_id: str = "") -> dict[str, Any]:
-        return hdf5.materials_dashboard(path, file_id=file_id)
-
     def hdf5_slice_png(self, path: str, dataset_path: str, *, axis: str = "z",
                        index: int | None = None, component: int = 0) -> bytes:
         return hdf5.slice_png(path, dataset_path, axis=axis, index=index, component=component)

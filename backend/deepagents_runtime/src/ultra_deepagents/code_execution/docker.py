@@ -274,7 +274,7 @@ class DockerSandboxBackend(BaseSandbox):
 
     def _ensure_numba_cache(self) -> None:
         # The image rootfs is read-only, while Numba-decorated scientific packages
-        # such as orix and PoreSpy request on-disk caches during import.  Give Numba
+        # such as scanpy and umap request on-disk caches during import.  Give Numba
         # an explicit directory on the writable workspace bind mount instead of
         # letting it attempt to cache beside files under /usr/local/site-packages.
         self._ensure_workspace_subdirectory(".cache", "numba")

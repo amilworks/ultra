@@ -38,10 +38,6 @@ type MemoryStore struct {
 	artifacts              map[string]domain.ArtifactRecord
 	resources              map[string]domain.ResourceRecord
 	resourceEvents         []domain.ResourceEventRecord
-	calphadRevisions       map[string]domain.CalphadRevisionRecord
-	calphadInputBlobs      map[string]calphadInputBlob
-	calphadValidations     []domain.CalphadValidationRecord
-	calphadEvidenceBlobs   map[string]calphadEvidenceBlob
 	resourceGrants         map[string]domain.ResourceShareGrantRecord
 	collections            map[string]domain.ResourceCollectionRecord
 	collectionMembers      map[string]domain.ResourceCollectionMembershipRecord
@@ -83,10 +79,6 @@ func NewMemoryStore() *MemoryStore {
 		artifacts:              map[string]domain.ArtifactRecord{},
 		resources:              map[string]domain.ResourceRecord{},
 		resourceEvents:         []domain.ResourceEventRecord{},
-		calphadRevisions:       map[string]domain.CalphadRevisionRecord{},
-		calphadInputBlobs:      map[string]calphadInputBlob{},
-		calphadValidations:     []domain.CalphadValidationRecord{},
-		calphadEvidenceBlobs:   map[string]calphadEvidenceBlob{},
 		resourceGrants:         map[string]domain.ResourceShareGrantRecord{},
 		collections:            map[string]domain.ResourceCollectionRecord{},
 		collectionMembers:      map[string]domain.ResourceCollectionMembershipRecord{},

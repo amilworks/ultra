@@ -52,7 +52,6 @@ export type UploadViewerWorkspaceProps = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
-  onUseHdf5DatasetInChat?: (fileId: string, datasetPaths: string[]) => void;
   active?: boolean;
   className?: string;
 };
@@ -340,7 +339,6 @@ export function UploadViewerWorkspace({
   uploadedFiles,
   bisqueLinksByFileId,
   apiClient,
-  onUseHdf5DatasetInChat,
   active = true,
   className,
 }: UploadViewerWorkspaceProps) {
@@ -742,7 +740,6 @@ export function UploadViewerWorkspace({
                     }
                     selectedDatasetSummary={selectedDatasetSummary}
                     cacheDatasetSummary={cacheDatasetSummary}
-                    onUseDatasetInChat={onUseHdf5DatasetInChat}
                   />
                 ) : (
                   <LazyImageViewerShell
@@ -787,7 +784,6 @@ export function UploadViewerSheet({
   uploadedFiles,
   bisqueLinksByFileId,
   apiClient,
-  onUseHdf5DatasetInChat,
 }: UploadViewerSheetProps) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -808,7 +804,6 @@ export function UploadViewerSheet({
           uploadedFiles={uploadedFiles}
           bisqueLinksByFileId={bisqueLinksByFileId}
           apiClient={apiClient}
-          onUseHdf5DatasetInChat={onUseHdf5DatasetInChat}
           className="viewer-workspace-sheet"
         />
       </SheetContent>

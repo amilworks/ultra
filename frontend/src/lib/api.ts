@@ -33,7 +33,6 @@ import type {
   ConversationListResponse,
   ConversationRecord,
   Hdf5DatasetHistogramResponse,
-  Hdf5MaterialsDashboardResponse,
   Hdf5DatasetSummary,
   Hdf5DatasetTablePreviewResponse,
   PublicConfigResponse,
@@ -1417,7 +1416,6 @@ export class ApiClient {
 
   private buildV2RunRequest(request: ChatRequest): Record<string, unknown> {
     const selectionContext = isRecord(request.selection_context) ? request.selection_context : {};
-    const evaluationProfile = request.evaluation_profile ?? null;
     return {
       goal: asOptionalString(request.goal) ?? lastUserMessageContent(request),
       messages: request.messages.map((message) => ({
@@ -1429,7 +1427,6 @@ export class ApiClient {
       dataset_uris: mergeStringArrays(request.dataset_uris, selectionContext.dataset_uris),
       selected_tool_names: request.selected_tool_names ?? [],
       remote_mutation_intents: request.remote_mutation_intents ?? [],
-      ...(evaluationProfile ? { evaluation_profile: evaluationProfile } : {}),
       knowledge_context: request.knowledge_context ?? null,
       selection_context: request.selection_context ?? null,
       workflow_hint: request.workflow_hint ?? null,
@@ -4523,32 +4520,6 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as Hdf5DatasetSummary;
-  }
-
-  async getHdf5MaterialsDashboard(fileId: string): Promise<Hdf5MaterialsDashboardResponse> {
-    const safeFileId = encodeURIComponent(fileId);
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 20000);
-    let response: Response;
-    try {
-      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/materials/dashboard`), {
-        method: "GET",
-        headers: this.headers(),
-        signal: controller.signal,
-        credentials: "include",
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        throw new ApiError("HDF5 materials dashboard request timed out", 504, null);
-      }
-      throw error;
-    } finally {
-      window.clearTimeout(timeoutId);
-    }
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return (await response.json()) as Hdf5MaterialsDashboardResponse;
   }
 
   hdf5SlicePreviewUrl(

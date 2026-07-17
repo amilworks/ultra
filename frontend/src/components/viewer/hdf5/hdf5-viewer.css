@@ -78,22 +78,6 @@
   gap: 6px;
 }
 
-.viewer-hdf-path-chip {
-  display: block;
-  margin: 0;
-  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent 18%);
-  border-radius: 10px;
-  background: color-mix(in oklab, var(--viewer-panel-bg) 76%, white 24%);
-  padding: 8px 10px;
-  font-size: 0.76rem;
-  line-height: 1.55;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  color: var(--text-main);
-  white-space: pre-wrap;
-  word-break: break-word;
-  flex: 1 1 320px;
-}
-
 .viewer-hdf-context-trigger {
   height: 30px;
   padding-inline: 10px;
@@ -143,11 +127,6 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-muted);
-}
-
-.viewer-hdf-context-card-section .viewer-hdf-context-provenance {
-  color: var(--text-muted);
-  font-size: 0.72rem;
 }
 
 .viewer-hdf-dashboard-card {
@@ -318,31 +297,6 @@
   width: fit-content;
   flex-wrap: wrap;
   gap: 4px;
-}
-
-.viewer-hdf-workspace-tabs {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
-  min-height: 0;
-}
-
-.viewer-hdf-workspace-tabs-list {
-  display: inline-flex;
-  width: fit-content;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.viewer-hdf-workspace-tab {
-  display: grid;
-  min-height: 0;
-  margin-top: 0;
-  overflow: hidden;
-}
-
-.viewer-hdf-workspace-tab[data-state="active"] {
-  display: grid;
 }
 
 .viewer-hdf-detail-tab,
@@ -641,259 +595,6 @@
   min-height: 220px;
 }
 
-.viewer-hdf-material-shell {
-  display: grid;
-  grid-template-rows: minmax(0, 1fr);
-  min-height: 0;
-  overflow: hidden;
-}
-
-.viewer-hdf-material-body {
-  display: grid;
-  gap: 12px;
-  min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.viewer-hdf-material-section-label {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.viewer-hdf-material-note {
-  margin: 0;
-  font-size: 0.78rem;
-  line-height: 1.5;
-  color: var(--text-muted);
-}
-
-.viewer-hdf-material-panel {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-}
-
-.viewer-hdf-material-panel-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.viewer-hdf-material-panel-header h4 {
-  margin: 0;
-  font-size: 0.98rem;
-  line-height: 1.2;
-  color: var(--text-main);
-}
-
-.viewer-hdf-material-map-grid {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.46fr) minmax(0, 1.54fr);
-  gap: 12px;
-  align-items: start;
-}
-
-.viewer-hdf-material-map-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 8px;
-  max-height: min(420px, calc(100vh - 340px));
-  overflow: auto;
-  padding-right: 4px;
-}
-
-.viewer-hdf-material-map-button {
-  flex: 0 1 auto;
-  align-items: flex-start;
-  justify-content: flex-start;
-  width: fit-content;
-  max-width: 100%;
-  height: auto;
-  min-height: 2rem;
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-  white-space: normal;
-}
-
-.viewer-hdf-material-map-button span {
-  font-size: 0.83rem;
-  line-height: 1.25;
-  word-break: break-word;
-}
-
-.viewer-hdf-material-card {
-  min-width: 0;
-  overflow: hidden;
-  border-color: var(--line);
-  background: var(--viewer-panel-bg);
-}
-
-.viewer-hdf-material-selector-card {
-  position: sticky;
-  top: 0;
-  align-self: start;
-}
-
-.viewer-hdf-material-card-header {
-  gap: 8px;
-  padding-bottom: 8px;
-}
-
-.viewer-hdf-material-card-title-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.viewer-hdf-material-card-copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.viewer-hdf-material-source-list {
-  display: grid;
-  gap: 8px;
-}
-
-.viewer-hdf-material-card-badges {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.viewer-hdf-material-source-card {
-  width: min(420px, calc(100vw - 48px));
-}
-
-.viewer-hdf-material-source-card-grid,
-.viewer-hdf-material-source-card-section {
-  display: grid;
-  gap: 8px;
-}
-
-.viewer-hdf-material-source-card-section strong {
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.viewer-hdf-material-source-card-section p {
-  margin: 0;
-  font-size: 0.79rem;
-  line-height: 1.5;
-  color: var(--text-main);
-}
-
-.viewer-hdf-material-path-chip {
-  max-width: 100%;
-}
-
-.viewer-hdf-material-card-content {
-  display: grid;
-  grid-template-rows: minmax(220px, auto) auto;
-  gap: 12px;
-  min-width: 0;
-}
-
-.viewer-hdf-material-chart-canvas {
-  min-width: 0;
-  min-height: 228px;
-  overflow: hidden;
-}
-
-.viewer-hdf-material-chart-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
-  align-items: start;
-}
-
-.viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
-  grid-column: span 6;
-}
-
-.viewer-hdf-material-card-footer {
-  display: grid;
-  gap: 8px;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-}
-
-.viewer-hdf-material-selector-card {
-  align-content: start;
-}
-
-.viewer-hdf-material-preview-card {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.viewer-hdf-material-preview-content {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-preview-toolbar {
-  align-items: center;
-  gap: 8px;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-preview-toolbar-copy {
-  display: none;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-preview-note {
-  display: none;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-inline-field.viewer-hdf-slider-field {
-  gap: 8px;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-preview-compact-toolbar {
-  gap: 12px;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-slice-shell {
-  padding: 8px;
-}
-
-.viewer-hdf-material-preview-card .viewer-hdf-slice-canvas {
-  height: clamp(220px, 27vh, 280px);
-  min-height: clamp(220px, 27vh, 280px);
-  max-height: clamp(220px, 27vh, 280px);
-}
-
-.viewer-hdf-material-preview-card [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
-  height: clamp(240px, 28vh, 280px);
-  min-height: clamp(240px, 28vh, 280px);
-  max-height: clamp(240px, 28vh, 280px);
-}
-
-.viewer-hdf-material-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-start;
-}
-
-.viewer-hdf-material-actions-top {
-  padding-top: 2px;
-}
-
 .viewer-hdf-pagination-actions {
   display: inline-flex;
   gap: 8px;
@@ -979,14 +680,6 @@
   .viewer-hdf-dashboard {
     grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.28fr);
   }
-
-  .viewer-hdf-material-chart-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
-    grid-column: span 1;
-  }
 }
 
 @media (max-width: 1120px) {
@@ -998,18 +691,9 @@
     grid-template-columns: 1fr;
   }
 
-  .viewer-hdf-hero-copy,
-  .viewer-hdf-material-card-title-row {
-    align-items: flex-start;
-  }
-
   .viewer-hdf-hero-copy {
+    align-items: flex-start;
     flex-wrap: wrap;
-  }
-
-  .viewer-hdf-material-map-grid,
-  .viewer-hdf-material-chart-grid {
-    grid-template-columns: 1fr;
   }
 
   .viewer-hdf-slider-panel {

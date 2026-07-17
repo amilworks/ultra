@@ -1590,7 +1590,7 @@ describe("ImageViewerShell", () => {
   });
 
   it("hides CT window presets for non-medical scalar volumes but keeps the window sliders", () => {
-    renderMedicalScalarVolume(buildMedicalScalarVolume("materials"));
+    renderMedicalScalarVolume(buildMedicalScalarVolume("microscopy"));
     openAdvancedControls();
 
     expect(screen.queryByRole("button", { name: "Brain" })).toBeNull();

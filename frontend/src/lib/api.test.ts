@@ -177,21 +177,6 @@ describe("ApiClient HDF5 viewer endpoints", () => {
     expect(init.credentials).toBe("include");
   });
 
-  it("fetches the hdf5 materials dashboard through the V2 upload API", async () => {
-    const fetchMock = jsonFetchMock({ available: false });
-    vi.stubGlobal("fetch", fetchMock);
-
-    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    await client.getHdf5MaterialsDashboard("file-123");
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(String(url)).toBe(
-      "https://ultra.example.org/v2/uploads/file-123/hdf5/materials/dashboard"
-    );
-    expect(init.credentials).toBe("include");
-  });
-
   it("fetches hdf5 scalar volumes through the V2 upload API and reads x-volume headers", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(new Uint8Array([1, 2, 3, 4]).buffer, {

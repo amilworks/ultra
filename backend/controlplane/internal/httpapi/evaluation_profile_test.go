@@ -15,7 +15,11 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 )
 
-func TestCreateRunProtectsMaterialsCleanroomEvaluationProfile(t *testing.T) {
+// No evaluation profile is currently supported, so every non-empty
+// evaluation_profile is rejected at the wire boundary, and free-form metadata
+// can never grant one. The admin gate and profile propagation in the handler
+// stay as the guards that re-arm if a profile is reintroduced.
+func TestCreateRunRejectsEveryEvaluationProfile(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	mem := store.NewMemoryStore()
@@ -27,21 +31,23 @@ func TestCreateRunProtectsMaterialsCleanroomEvaluationProfile(t *testing.T) {
 	}
 	router := NewRouter(ServerDeps{Version: "test-version", Runs: service, Store: mem, Bus: bus})
 
-	invalid := createEvaluationProfileRun(t, router, thread.ThreadID, "admin", map[string]any{
-		"evaluation_profile": "unknown_profile",
-	})
-	if invalid.Code != http.StatusBadRequest {
-		t.Fatalf("unknown profile status = %d body=%s", invalid.Code, invalid.Body.String())
+	// "materials_cleanroom_v1" was the only profile before the materials platform
+	// was removed; an admin principal must not be able to resurrect it.
+	for _, profile := range []string{"unknown_profile", "materials_cleanroom_v1"} {
+		for _, role := range []string{"researcher", "ADMIN"} {
+			rec := createEvaluationProfileRun(t, router, thread.ThreadID, role, map[string]any{
+				"evaluation_profile": profile,
+			})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("profile %q as %q status = %d body=%s, want 400",
+					profile, role, rec.Code, rec.Body.String())
+			}
+		}
 	}
-	forbidden := createEvaluationProfileRun(t, router, thread.ThreadID, "researcher", map[string]any{
-		"evaluation_profile": string(domain.EvaluationProfileMaterialsCleanroomV1),
-	})
-	if forbidden.Code != http.StatusForbidden {
-		t.Fatalf("researcher profile status = %d body=%s", forbidden.Code, forbidden.Body.String())
-	}
+
 	metadataForgery := createEvaluationProfileRun(t, router, thread.ThreadID, "researcher", map[string]any{
 		"metadata": map[string]any{
-			domain.EvaluationProfileMetadataKey: string(domain.EvaluationProfileMaterialsCleanroomV1),
+			domain.EvaluationProfileMetadataKey: "materials_cleanroom_v1",
 		},
 	})
 	if metadataForgery.Code != http.StatusOK {
@@ -57,33 +63,13 @@ func TestCreateRunProtectsMaterialsCleanroomEvaluationProfile(t *testing.T) {
 	if job := receiveHTTPProfileJob(t, bus); job.EvaluationProfile != "" {
 		t.Fatalf("metadata-only job profile = %q", job.EvaluationProfile)
 	}
-
-	authorized := createEvaluationProfileRun(t, router, thread.ThreadID, "ADMIN", map[string]any{
-		"evaluation_profile": string(domain.EvaluationProfileMaterialsCleanroomV1),
-		"metadata": map[string]any{
-			domain.EvaluationProfileMetadataKey: "caller_forgery",
-		},
-	})
-	if authorized.Code != http.StatusOK {
-		t.Fatalf("admin profile status = %d body=%s", authorized.Code, authorized.Body.String())
-	}
-	var protectedRun domain.RunRecord
-	if err := json.Unmarshal(authorized.Body.Bytes(), &protectedRun); err != nil {
-		t.Fatalf("decode protected run: %v", err)
-	}
-	if got := protectedRun.Metadata[domain.EvaluationProfileMetadataKey]; got != string(domain.EvaluationProfileMaterialsCleanroomV1) {
-		t.Fatalf("protected run profile = %#v", got)
-	}
-	if job := receiveHTTPProfileJob(t, bus); job.EvaluationProfile != domain.EvaluationProfileMaterialsCleanroomV1 {
-		t.Fatalf("protected job profile = %q", job.EvaluationProfile)
-	}
 }
 
 func createEvaluationProfileRun(t *testing.T, router http.Handler, threadID string, role string, overrides map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 	body := map[string]any{
-		"goal":     "evaluate materials analysis",
-		"messages": []map[string]string{{"role": "user", "content": "evaluate materials analysis"}},
+		"goal":     "evaluate scientific analysis",
+		"messages": []map[string]string{{"role": "user", "content": "evaluate scientific analysis"}},
 	}
 	for key, value := range overrides {
 		body[key] = value

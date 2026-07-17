@@ -41,9 +41,8 @@ DEFAULT_WORKER_MAX_CONCURRENCY = 64
 class RuntimeSettings:
     openai_base_url: str
     openai_model: str
-    # Runtime-owned provider identity stamped onto token-usage evidence. This is
-    # distinct from MatTools' CLI declaration and is bound to the worker that
-    # instantiated the model transport.
+    # Runtime-owned provider identity stamped onto token-usage evidence. Bound to
+    # the worker that instantiated the model transport.
     model_provider_id: str = "openai-compatible"
     openai_api_key: str = field(default="EMPTY", repr=False)  # keep secrets out of repr/tracebacks
     model_supports_multimodal: bool = False
@@ -94,11 +93,6 @@ class RuntimeSettings:
     # window (prompt+images+thinking+answer must all fit). client_max_edge bounds
     # image longest-side before send so large scientific images do not overload the
     # configured server.
-    # Materials-science (CALPHAD/kinetics/crystal-plasticity/…) platform switch.
-    # Default false: the materials tool families are never registered and the
-    # materials skills are hidden from the skill listing, so non-materials runs
-    # carry no materials prompt/tool cost. Enable only on a materials deployment.
-    materials_enabled: bool = False
     qwen_vlm_enabled: bool = False
     qwen_vlm_base_url: str = ""
     qwen_vlm_model: str = "Qwen3.6-27B"
@@ -308,7 +302,6 @@ class RuntimeSettings:
                 int(os.getenv("ULTRA_DEEPAGENTS_PROGRESS_STALL_MAX_RECOVERIES", "2")),
             ),
             max_retries=int(os.getenv("ULTRA_DEEPAGENTS_MAX_RETRIES", "1")),
-            materials_enabled=_env_bool("ULTRA_DEEPAGENTS_MATERIALS_ENABLED", False),
             qwen_vlm_enabled=_env_bool("QWEN_VLM_ENABLED", False),
             qwen_vlm_base_url=os.getenv("QWEN_VLM_BASE_URL", ""),
             qwen_vlm_model=os.getenv("QWEN_VLM_MODEL", "Qwen3.6-27B"),

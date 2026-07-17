@@ -95,11 +95,9 @@ echo "Writing release manifest"
 export RELEASE_SHA RELEASE_NAME RELEASE_DIR GOOS_VALUE GOARCH_VALUE CGO_ENABLED_VALUE MANIFEST_IN_RELEASE MANIFEST_OUT
 python3 <<'PY'
 import datetime
-import importlib.util
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 
@@ -173,83 +171,6 @@ def go_versions() -> dict[str, str]:
     return versions
 
 
-def load_materials_verifier():
-    release_root = Path(os.environ["RELEASE_DIR"])
-    verifier_path = release_root / "scripts/verify_production_materials_sandbox.py"
-    spec = importlib.util.spec_from_file_location(
-        "ultra_release_materials_verifier", verifier_path
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load materials verifier: {verifier_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def materials_release_status() -> dict[str, object]:
-    """A source bundle is never itself a production-image readiness claim."""
-
-    release_root = Path(os.environ["RELEASE_DIR"])
-    gate_path = release_root / "scripts/materials_readiness_gate.py"
-    spec = importlib.util.spec_from_file_location("ultra_release_materials_readiness", gate_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"cannot load materials readiness policy: {gate_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return {
-        "full_materials_production_ready": False,
-        "qualification_stage": "release-source-artifact",
-        "product_label": "materials science research preview",
-        "required_post_image_gate": "materials-production-readiness",
-        "readiness_result_is_candidate_only": True,
-        "required_release_envelope_schema": (
-            "ultra.materials.release-envelope.v1"
-        ),
-        "required_final_verification_schema": (
-            "ultra.materials.production-attestation-verification.v1"
-        ),
-        "requires_github_sigstore_attestation": True,
-        "raw_mattools_evidence_may_be_public_artifact": False,
-        "required_evidence": {
-            "production_parity_scope": module.PRODUCTION_PARITY_SCOPE,
-            "production_parity_gate": module.PRODUCTION_PARITY_GATE,
-            "production_parity_evidence_bundle_schema_version": (
-                materials_verifier.EVIDENCE_BUNDLE_SCHEMA_VERSION
-            ),
-            "sandbox_output_capture_mode": (
-                "docker_sandbox_backend_combined_stdout_stderr"
-            ),
-            "calphad_runtime_test_count": (
-                materials_verifier.REQUIRED_CALPHAD_RUNTIME_TEST_COUNT
-            ),
-            "calphad_tool_test_count": (
-                materials_verifier.REQUIRED_CALPHAD_TOOLS_TEST_COUNT
-            ),
-            "calphad_cross_language_schema": (
-                "ultra.calphad.cross-language-gate.v1"
-            ),
-            "calphad_cross_language_requires_production_runtime_image": True,
-            "mattools_trial_count": module.TRIAL_COUNT,
-            "mattools_runnable_denominator": module.RUNNABLE_DENOMINATOR,
-            "mattools_runnable_minimum": module.RUNNABLE_MINIMUM,
-            "mattools_scientific_denominator": module.SCIENTIFIC_DENOMINATOR,
-            "mattools_scientific_minimum": module.SCIENTIFIC_MINIMUM,
-        },
-    }
-
-
-materials_verifier = load_materials_verifier()
-required_materials = materials_verifier.build_required_source_manifest(
-    Path(os.environ["RELEASE_DIR"])
-)
-release_artifacts = materials_verifier.build_release_artifact_identities(
-    Path(os.environ["RELEASE_DIR"])
-)
-if not isinstance(required_materials, dict) or not isinstance(release_artifacts, dict):
-    raise RuntimeError("materials verifier returned malformed release integrity evidence")
-
 manifest = {
     "schema_version": 1,
     "release_sha": os.environ["RELEASE_SHA"],
@@ -259,16 +180,13 @@ manifest = {
         "repository": os.environ.get("GITHUB_REPOSITORY") or run_text("git", "config", "--get", "remote.origin.url"),
         "ref": os.environ.get("GITHUB_REF_NAME") or run_text("git", "rev-parse", "--abbrev-ref", "HEAD"),
         "github_run_id": os.environ.get("GITHUB_RUN_ID"),
-        "required_materials": required_materials,
     },
     "targets": {
         "goos": os.environ["GOOS_VALUE"],
         "goarch": os.environ["GOARCH_VALUE"],
         "cgo_enabled": os.environ["CGO_ENABLED_VALUE"],
         "control_binary": "bin/ultra-control",
-        "control_binary_identity": release_artifacts["control_binary"],
         "frontend_dist": "frontend/dist",
-        "frontend_dist_identity": release_artifacts["frontend_dist"],
         "deploy_scripts": [
             "scripts/deploy_ultra_control_stack.sh",
             "scripts/deploy_ultra_frontend.sh",
@@ -287,7 +205,6 @@ manifest = {
         "deepagents_python": python_versions(),
         "frontend": frontend_versions(),
     },
-    "materials": materials_release_status(),
 }
 
 payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"

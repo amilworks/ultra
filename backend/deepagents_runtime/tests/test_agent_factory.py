@@ -1707,99 +1707,6 @@ def test_stage_uploaded_files_for_analysis_text_returns_sandbox_paths_only(tmp_p
     assert (workspace / "staged_uploads" / "file-1" / "prairie.jpg").read_bytes() == b"image-bytes"
 
 
-def test_stage_selected_tdb_returns_catalog_binding_and_only_declared_calphad_metadata(
-    tmp_path: Path,
-):
-    upload_root = tmp_path / "uploads"
-    source = upload_root / "file-tdb__Al-Co-W.tdb"
-    source.parent.mkdir(parents=True)
-    source.write_text("ELEMENT AL FCC_A1 26.9815386 4577.3 28.3215 !\n")
-    workspace = tmp_path / "workspaces" / "run-calphad"
-    catalog_sha256 = "c" * 64
-    context = AgentRunContext(
-        assistant_id="ultra-research-agent",
-        org_id="org-a",
-        user_id="user-a",
-        project_id="local-project",
-        thread_id="thread-calphad",
-        run_id="run-calphad",
-        workspace_root=str(workspace),
-        selected_file_ids=("file-tdb",),
-        resource_descriptors=(
-            {
-                "type": "selected_resource",
-                "binding_schema": "ultra.selected_resource.v1",
-                "authority": "control_resource_catalog",
-                "resource_id": "file-tdb",
-                "file_id": "file-tdb",
-                "original_name": "Al-Co-W.tdb",
-                "content_type": "application/x-thermocalc-tdb",
-                "resource_kind": "document",
-                "source_type": "upload",
-                "sha256": catalog_sha256,
-                "size_bytes": 21274,
-                "metadata": {
-                    "source": "upload_store",
-                    "calphad": {
-                        "database_id": "nist-al-co-w-wang-2017",
-                        "citation": "Wang et al., CALPHAD 2017",
-                        "source": "https://vendor-user:credential-secret@example.org/private",
-                        "source_uri": "https://materialsdata.nist.gov/handle/11256/948",
-                        "license_id": "CC0-1.0",
-                        "license_identifier": "Confidential proprietary license agreement",
-                        "assessment_scope": "owner-declared Al-Co-W assessment",
-                        "assessment_pressure_limits_Pa": [101325.0, 101325.0],
-                        "validation_status": "validated",
-                        "scientific_status": "verified",
-                        "content_sha256": "f" * 64,
-                        "size_bytes": 1,
-                        "format": "forged-format",
-                        "credentials": {"token": "catalog-secret"},
-                    },
-                    "credentials": {"password": "outer-secret"},
-                },
-            },
-        ),
-    )
-
-    payload = json.loads(
-        stage_uploaded_files_for_analysis_text(context, upload_roots=(upload_root,))
-    )
-
-    assert payload["ok"] is True
-    staged = payload["staged_files"][0]
-    assert staged["file_id"] == "file-tdb"
-    assert staged["resource_id"] == "file-tdb"
-    assert staged["binding_schema"] == "ultra.selected_resource.v1"
-    assert staged["binding_authority"] == "control_resource_catalog"
-    assert staged["sha256"] == catalog_sha256
-    assert staged["size_bytes"] == 21274
-    assert staged["original_name"] == "Al-Co-W.tdb"
-    assert staged["content_type"] == "application/x-thermocalc-tdb"
-    calphad = staged["metadata"]["calphad"]
-    assert calphad["database_id"] == "nist-al-co-w-wang-2017"
-    assert calphad["citation"] == "Wang et al., CALPHAD 2017"
-    assert calphad["license_id"] == "CC0-1.0"
-    assert calphad["assessment_scope"] == "owner-declared Al-Co-W assessment"
-    assert calphad["assessment_pressure_limits_Pa"] == [101325.0, 101325.0]
-    assert calphad["declaration_authority"] == "resource_owner"
-    assert "source" not in calphad
-    assert "license_identifier" not in calphad
-    assert not {
-        "format",
-        "validation_status",
-        "scientific_status",
-        "content_sha256",
-        "size_bytes",
-        "credentials",
-    }.intersection(calphad)
-    encoded = json.dumps(payload)
-    assert "catalog-secret" not in encoded
-    assert "outer-secret" not in encoded
-    assert "credential-secret" not in encoded
-    assert "Confidential proprietary license agreement" not in encoded
-    assert "f" * 64 not in encoded
-    assert str(upload_root) not in encoded
 
 
 def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
@@ -1834,11 +1741,11 @@ def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
 
 def test_stage_uploaded_files_rejects_ids_not_selected_on_the_run(tmp_path: Path):
     upload_root = tmp_path / "uploads"
-    selected = upload_root / "file-owned__owned.tdb"
-    foreign = upload_root / "file-foreign__foreign.tdb"
+    selected = upload_root / "file-owned__owned.txt"
+    foreign = upload_root / "file-foreign__foreign.txt"
     selected.parent.mkdir(parents=True)
-    selected.write_text("ELEMENT /- ELECTRON_GAS 0 0 0 !\n")
-    foreign.write_text("$ private commercial database\n")
+    selected.write_text("owned contents\n")
+    foreign.write_text("private contents\n")
     workspace = tmp_path / "workspaces" / "run-tenant-boundary"
     context = AgentRunContext(
         assistant_id="ultra-research-agent",

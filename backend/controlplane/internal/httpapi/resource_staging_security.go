@@ -57,7 +57,6 @@ func authorizeRunFileIDs(
 func withAuthorizedSelectedResourceDescriptors(
 	_ []domain.JSONMap,
 	resources []domain.ResourceRecord,
-	principal requestPrincipal,
 ) []domain.JSONMap {
 	// Every descriptor arriving in the request body is caller-authored. Do not
 	// preserve any of them: selected-resource capabilities are reconstructed
@@ -65,27 +64,18 @@ func withAuthorizedSelectedResourceDescriptors(
 	// are added later by runcontrol from owner-scoped durable records.
 	out := make([]domain.JSONMap, 0, len(resources))
 	for _, resource := range resources {
-		governanceScope := "read_only_usage"
-		if resource.OwnerUserID == principal.UserID &&
-			(strings.TrimSpace(resource.OwnerOrgID) == "" || resource.OwnerOrgID == principal.OrgID) {
-			governanceScope = "owner_validation"
-		}
 		descriptor := domain.JSONMap{
-			"type":                     "selected_resource",
-			"binding_schema":           "ultra.selected_resource.v1",
-			"authority":                "control_resource_catalog",
-			"resource_id":              resource.ResourceID,
-			"file_id":                  resource.ResourceID,
-			"original_name":            resource.OriginalName,
-			"content_type":             resource.ContentType,
-			"resource_kind":            resource.ResourceKind,
-			"source_type":              resource.SourceType,
-			"sha256":                   resource.SHA256,
-			"size_bytes":               resource.SizeBytes,
-			"calphad_governance_scope": governanceScope,
-		}
-		if databaseFormat, ok := domain.CalphadDatabaseFormatFromName(resource.OriginalName); ok {
-			descriptor["database_format"] = databaseFormat
+			"type":           "selected_resource",
+			"binding_schema": "ultra.selected_resource.v1",
+			"authority":      "control_resource_catalog",
+			"resource_id":    resource.ResourceID,
+			"file_id":        resource.ResourceID,
+			"original_name":  resource.OriginalName,
+			"content_type":   resource.ContentType,
+			"resource_kind":  resource.ResourceKind,
+			"source_type":    resource.SourceType,
+			"sha256":         resource.SHA256,
+			"size_bytes":     resource.SizeBytes,
 		}
 		if metadata := projectRunResourceMetadata(resource.Metadata); len(metadata) > 0 {
 			descriptor["metadata"] = metadata
@@ -242,9 +232,7 @@ func trustedRunOrgID(run domain.RunRecord) string {
 // projectRunResourceMetadata is the complete model-visible metadata allowlist
 // for run resource search/resolve. Unknown keys are denied by default. In
 // particular, raw license text, credentials, download URLs, vendor terms, and
-// arbitrary nested metadata never cross the model boundary. CALPHAD fields are
-// labeled as owner declarations; owner-writable validation and nested content-
-// identity claims are omitted in favor of the catalog record's top-level hash.
+// arbitrary nested metadata never cross the model boundary.
 func projectRunResourceMetadata(metadata domain.JSONMap) domain.JSONMap {
 	if len(metadata) == 0 {
 		return nil
@@ -265,118 +253,9 @@ func projectRunResourceMetadata(metadata domain.JSONMap) domain.JSONMap {
 			out["image_header"] = projected
 		}
 	}
-	if calphad, ok := jsonMapValue(metadata["calphad"]); ok {
-		if projected := projectRunCALPHADMetadata(calphad); len(projected) > 0 {
-			out["calphad"] = projected
-		}
-	}
 	if len(out) == 0 {
 		return nil
 	}
-	return out
-}
-
-func projectRunCALPHADMetadata(metadata domain.JSONMap) domain.JSONMap {
-	out := domain.JSONMap{}
-	// These fields are sufficient to select immutable database bytes and assess
-	// their scientific/provenance scope without exposing license bodies or
-	// private commercial terms.
-	for _, field := range []struct {
-		key       string
-		maxLength int
-	}{
-		{key: "database_id", maxLength: 512},
-		{key: "database_name", maxLength: 512},
-		{key: "database_version", maxLength: 256},
-		{key: "title", maxLength: 1024},
-		{key: "citation", maxLength: 1024},
-		{key: "publication_doi", maxLength: 512},
-		{key: "source", maxLength: 1024},
-		{key: "authorized_scope", maxLength: 512},
-		{key: "assessment_scope", maxLength: 1024},
-		{key: "reference_state", maxLength: 512},
-	} {
-		if declaration, ok := safeOwnerDeclaration(metadata[field.key], field.maxLength); ok {
-			out[field.key] = declaration
-		}
-	}
-	for _, key := range []string{"license_id", "license_identifier"} {
-		if identifier, ok := safeLicenseIdentifier(metadata[key]); ok {
-			out[key] = identifier
-		}
-	}
-	copySafeScalarKeys(out, metadata, []string{"component_count", "phase_count"})
-	for _, key := range []string{"source_uri", "license_uri"} {
-		if uri, ok := safeMetadataURI(metadata[key]); ok {
-			out[key] = uri
-		}
-	}
-	copySafeStringListKeys(out, metadata, []string{
-		"authors",
-		"components",
-		"elements",
-		"phases",
-		"required_provenance_fields",
-	})
-	copySafeScalarListKeys(out, metadata, []string{
-		"tdb_temperature_limits_K",
-		"assessment_temperature_limits_K",
-	})
-	if pressureLimits, ok := normalizedCalphadAssessmentPressureLimits(
-		metadata[domain.CalphadAssessmentPressureLimitsMetadataKey],
-	); ok {
-		out[domain.CalphadAssessmentPressureLimitsMetadataKey] = []float64{
-			pressureLimits[0], pressureLimits[1],
-		}
-	}
-	if limits, ok := jsonMapValue(metadata["limits"]); ok {
-		if projected := projectRunCALPHADLimits(limits); len(projected) > 0 {
-			out["limits"] = projected
-		}
-	}
-	if len(out) > 0 {
-		// Resource metadata is owner-writable. Provenance fields are useful input
-		// declarations, but never a validation attestation. Immutable content
-		// identity is carried separately by the catalog descriptor's top-level
-		// sha256/size_bytes fields.
-		out["declaration_authority"] = "resource_owner"
-	}
-	return out
-}
-
-func normalizedCalphadAssessmentPressureLimits(value any) ([2]float64, bool) {
-	values, ok := metadataList(value)
-	if !ok || len(values) != 2 {
-		return [2]float64{}, false
-	}
-	minimum, minimumOK := calphadDescriptorFloat64(values[0])
-	maximum, maximumOK := calphadDescriptorFloat64(values[1])
-	limits := [2]float64{minimum, maximum}
-	if !minimumOK || !maximumOK || minimum < domain.CalphadMinimumPressurePa ||
-		maximum > domain.CalphadMaximumPressurePa || minimum > maximum {
-		return [2]float64{}, false
-	}
-	return limits, true
-}
-
-func projectRunCALPHADLimits(limits domain.JSONMap) domain.JSONMap {
-	out := domain.JSONMap{}
-	copySafeScalarKeys(out, limits, []string{
-		"max_source_bytes",
-		"max_file_bytes",
-		"max_result_bytes",
-		"max_components",
-		"max_phases",
-		"max_conditions",
-		"max_grid_points",
-		"temperature_min_k",
-		"temperature_max_k",
-		"pressure_min_pa",
-		"pressure_max_pa",
-		"composition_min",
-		"composition_max",
-		"total_amount_mol",
-	})
 	return out
 }
 
@@ -485,27 +364,40 @@ func safeMetadataString(value any, maxLength int) (string, bool) {
 	return text, true
 }
 
-func safeMetadataURI(value any) (string, bool) {
-	raw, ok := safeMetadataString(value, 4096)
-	if !ok {
-		return "", false
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-		return "", false
-	}
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", false
-	}
-	return parsed.String(), true
-}
-
-func safeLicenseIdentifier(value any) (string, bool) {
-	return domain.SafeCalphadLicenseIdentifier(value)
-}
-
+// safeOwnerDeclaration applies the deny-by-default projection used for
+// model-visible selected-resource metadata: control characters, credential and
+// license-terms wording, and anything but a bare https/http URL are rejected.
 func safeOwnerDeclaration(value any, maxLength int) (string, bool) {
-	return domain.SafeCalphadOwnerDeclaration(value, maxLength)
+	text, ok := value.(string)
+	if !ok || text != strings.TrimSpace(text) || text == "" || len(text) > maxLength ||
+		strings.ContainsAny(text, "\r\n\t") {
+		return "", false
+	}
+	for _, character := range text {
+		if character < 32 || character == 127 {
+			return "", false
+		}
+	}
+	lower := strings.ToLower(text)
+	for _, sensitive := range []string{
+		"password", "api key", "api_key", "access token", "bearer ", "secret",
+		"credential", "confidential", "proprietary", "non-disclosure",
+		"nondisclosure", "do not distribute", "private license", "license agreement",
+		"license text", "commercial terms", "vendor terms", "eula",
+	} {
+		if strings.Contains(lower, sensitive) {
+			return "", false
+		}
+	}
+	if strings.Contains(text, "://") || strings.HasPrefix(lower, "www.") {
+		parsed, err := url.Parse(text)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") ||
+			parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return "", false
+		}
+		return parsed.String(), true
+	}
+	return text, true
 }
 
 func safeMetadataStringList(value any) ([]string, bool) {

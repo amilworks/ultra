@@ -96,19 +96,18 @@ const (
 const maxJSONBodyBytes int64 = 16 << 20
 
 var (
-	workerRunPathPattern           = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
-	workerRunEventsPathPattern     = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
-	workerLeasePathPattern         = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
-	workerRunUserProfilePattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
-	workerEpisodicSearchPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
-	workerResourceSearchPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
-	workerResourceResolvePattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
-	workerCalphadValidationPattern = regexp.MustCompile(`^/v2/runs/[^/]+/resources/[^/]+/calphad/validations$`)
-	workerDataAgentJobPattern      = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
-	workerDataAgentLeasePattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
-	workerDataAgentStatusPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
-	workerDataAgentEventsPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
-	workerDataAgentOutputPattern   = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
+	workerRunPathPattern         = regexp.MustCompile(`^/v[12]/runs/[^/]+$`)
+	workerRunEventsPathPattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
+	workerLeasePathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
+	workerRunUserProfilePattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
+	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
+	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
+	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
+	workerDataAgentJobPattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
+	workerDataAgentLeasePattern  = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
+	workerDataAgentStatusPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
+	workerDataAgentEventsPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
+	workerDataAgentOutputPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -156,8 +155,6 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 	case r.Method == http.MethodPost && workerResourceSearchPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && workerResourceResolvePattern.MatchString(path):
-		return true
-	case r.Method == http.MethodPost && workerCalphadValidationPattern.MatchString(path):
 		return true
 	case workerLeasePathPattern.MatchString(path):
 		return true
@@ -616,7 +613,6 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/uploads/{file_id}/derive-pyramid", deps.handleDeriveUploadPyramid)
 			r.Get("/uploads/{file_id}/caption", deps.handleGetUploadCaption)
 			r.Get("/uploads/{file_id}/hdf5/dataset", deps.handleGetUploadHdf5Dataset)
-			r.Get("/uploads/{file_id}/hdf5/materials/dashboard", deps.handleGetUploadHdf5MaterialsDashboard)
 			r.Get("/uploads/{file_id}/hdf5/preview/slice", deps.handleServeUploadHdf5Slice)
 			r.Get("/uploads/{file_id}/hdf5/preview/atlas", deps.handleServeUploadHdf5Atlas)
 			r.Get("/uploads/{file_id}/hdf5/preview/scalar-volume", deps.handleGetUploadHdf5ScalarVolume)
@@ -644,10 +640,6 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/resources/{file_id}/csv/rows", deps.handleResourceCsvRows)
 			r.Get("/resources/{file_id}", deps.handleGetResource)
 			r.Patch("/resources/{file_id}", deps.handlePatchResource)
-			r.Post("/resources/{file_id}/calphad/revision", deps.handleCreateCalphadRevision)
-			r.Get("/resources/{file_id}/calphad/revision/input", deps.handleGetCalphadRevisionInput)
-			r.Get("/resources/{file_id}/calphad/ledger", deps.handleGetCalphadLedger)
-			r.Get("/resources/{file_id}/calphad/validations/{validation_id}/evidence", deps.handleGetCalphadValidationEvidence)
 			r.Delete("/resources/{file_id}", deps.handleDeleteResource)
 			r.Post("/resources/{file_id}/restore", deps.handleRestoreResource)
 			r.Get("/resources/{file_id}/events", deps.handleListResourceEvents)
@@ -697,7 +689,6 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/runs/{run_id}/episodic-search", deps.handleEpisodicSearch)
 			r.Post("/runs/{run_id}/resource-search", deps.handleRunResourceSearch)
 			r.Post("/runs/{run_id}/resource-resolve", deps.handleRunResourceResolve)
-			r.Post("/runs/{run_id}/resources/{file_id}/calphad/validations", deps.handleAppendCalphadValidation)
 			r.Post("/runs/{run_id}/lease", deps.handleAcquireRunLease)
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
@@ -3399,7 +3390,7 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		selectedResources = resources
 	}
 	req.ResourceDescriptors = withAuthorizedSelectedResourceDescriptors(
-		req.ResourceDescriptors, selectedResources, principal,
+		req.ResourceDescriptors, selectedResources,
 	)
 	runMetadata := domain.JSONMap(req.Metadata)
 	if runMetadata == nil {
@@ -11564,27 +11555,6 @@ func uploadCatalogMetadataForPath(path string, record resourceRecord) domain.JSO
 		metadata["source_run_id"] = sourceRunID
 		metadata["source_authority"] = "trusted_worker_run"
 	}
-	if isCalphadTDBUpload(record.OriginalName, record.ContentType) {
-		metadata["calphad"] = domain.JSONMap{
-			"format":            "thermo-calc-tdb",
-			"validation_status": "pending_pycalphad_validation",
-			"content_sha256":    record.SHA256,
-			"size_bytes":        float64(record.SizeBytes),
-			"scientific_status": "unverified",
-			"required_provenance_fields": []string{
-				"source",
-				"license_id",
-				"assessment_scope",
-				"reference_state",
-				"tdb_temperature_limits_K",
-				domain.CalphadAssessmentPressureLimitsMetadataKey,
-			},
-		}
-		metadata["scientific_descriptors"] = []string{
-			"CALPHAD thermodynamic database",
-			"Thermo-Calc TDB",
-		}
-	}
 	if header := uploadImageHeaderMetadataForPath(path, record); len(header) > 0 {
 		metadata["image_header"] = header
 	}
@@ -15124,9 +15094,6 @@ func contentTypeForUpload(originalName string, hint string) string {
 	if isNiftiUpload(originalName, hint) {
 		return "application/x-nifti"
 	}
-	if isCalphadTDBUpload(originalName, hint) {
-		return "application/x-thermocalc-tdb"
-	}
 	extensionType := mime.TypeByExtension(strings.ToLower(filepath.Ext(originalName)))
 	hint = strings.TrimSpace(hint)
 	if hint == "" || hint == "application/octet-stream" {
@@ -15156,8 +15123,6 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "video"
 	case isTabularUpload(originalName, contentType):
 		return "table"
-	case isCalphadTDBUpload(originalName, contentType):
-		return "document"
 	case isTextDocumentUpload(originalName, contentType):
 		return "document"
 	default:
@@ -15185,8 +15150,6 @@ func isTabularUpload(originalName string, contentType string) bool {
 func isTextDocumentUpload(originalName string, contentType string) bool {
 	normalizedType := strings.ToLower(strings.TrimSpace(contentType))
 	switch {
-	case isCalphadTDBUpload(originalName, contentType):
-		return true
 	case strings.HasPrefix(normalizedType, "text/"):
 		return true
 	case normalizedType == "application/json" || strings.HasSuffix(normalizedType, "+json"):
@@ -15206,16 +15169,6 @@ func isTextDocumentUpload(originalName string, contentType string) bool {
 		return true
 	}
 	return false
-}
-
-// isCalphadTDBUpload recognizes the plain-text Thermo-Calc TDB exchange format.
-// Scientific usability remains pending until the pinned pycalphad runtime
-// validates the immutable bytes and their explicit provenance.
-func isCalphadTDBUpload(originalName string, contentType string) bool {
-	if strings.EqualFold(strings.TrimSpace(contentType), "application/x-thermocalc-tdb") {
-		return true
-	}
-	return strings.EqualFold(filepath.Ext(strings.TrimSpace(originalName)), ".tdb")
 }
 
 func isOmeTIFFName(originalName string) bool {

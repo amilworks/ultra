@@ -29,37 +29,24 @@ func TestCreateRunAuthorizesAndDeduplicatesSelectedResourcesBeforeDispatch(t *te
 	})
 	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{
 		UserID: "workos:user_a",
-		Title:  "CALPHAD tenant staging",
+		Title:  "tenant staging",
 	})
 	if err != nil {
 		t.Fatalf("CreateThread: %v", err)
 	}
 	seedRunStagingResource(t, mem, domain.ResourceRecord{
-		ResourceID: "file-owned-tdb", OwnerUserID: "workos:user_a", OwnerOrgID: "org-a",
-		OriginalName: "owned.tdb", ContentType: "application/x-thermocalc-tdb",
+		ResourceID: "file-owned", OwnerUserID: "workos:user_a", OwnerOrgID: "org-a",
+		OriginalName: "owned.csv", ContentType: "text/csv",
 		SizeBytes: 21274, SHA256: strings.Repeat("c", 64),
 		Metadata: domain.JSONMap{
-			"source": "upload_store",
-			"calphad": domain.JSONMap{
-				"database_id":              "declared-al-co-w",
-				"source_uri":               "https://materialsdata.nist.gov/handle/11256/948",
-				"license_id":               "CC0-1.0",
-				"assessment_scope":         "owner-declared Al-Co-W assessment",
-				"reference_state":          "SER",
-				"tdb_temperature_limits_K": []float64{300, 2000},
-				domain.CalphadAssessmentPressureLimitsMetadataKey: []float64{101325, 101325},
-				"validation_status": "validated",
-				"scientific_status": "verified",
-				"content_sha256":    strings.Repeat("f", 64),
-				"size_bytes":        1,
-				"format":            "forged-format",
-				"credentials":       domain.JSONMap{"token": "descriptor-secret"},
-			},
+			"source":      "upload_store",
+			"caption":     "owner-declared measurements",
+			"credentials": domain.JSONMap{"token": "descriptor-secret"},
 		},
 	})
 	seedRunStagingResource(t, mem, domain.ResourceRecord{
-		ResourceID: "file-foreign-tdb", OwnerUserID: "user-b", OwnerOrgID: "org-b",
-		OriginalName: "commercial-private.tdb", ContentType: "application/x-thermocalc-tdb",
+		ResourceID: "file-foreign", OwnerUserID: "user-b", OwnerOrgID: "org-b",
+		OriginalName: "private.csv", ContentType: "text/csv",
 	})
 	cookie := testWorkOSSessionCookie(t, "user_a", "user-a@example.org", "org-a", "researcher")
 
@@ -75,30 +62,30 @@ func TestCreateRunAuthorizesAndDeduplicatesSelectedResourcesBeforeDispatch(t *te
 	// A foreign/unreadable selected id is DROPPED (not a 404) so a stale client
 	// selection cannot block run creation. The run proceeds with only the
 	// readable id, and the response still masks whether the foreign id exists.
-	dropped := post(`{"user_id":"body-forged-user","goal":"load CALPHAD","file_ids":["file-owned-tdb","file-foreign-tdb"]}`)
+	dropped := post(`{"user_id":"body-forged-user","goal":"load resources","file_ids":["file-owned","file-foreign"]}`)
 	if dropped.Code != http.StatusOK {
 		t.Fatalf("mixed selection status = %d body=%s, want 200 (foreign id dropped)", dropped.Code, dropped.Body.String())
 	}
-	if strings.Contains(dropped.Body.String(), "file-foreign-tdb") || strings.Contains(dropped.Body.String(), "user-b") {
+	if strings.Contains(dropped.Body.String(), "file-foreign") || strings.Contains(dropped.Body.String(), "user-b") {
 		t.Fatalf("foreign resource existence leaked: %s", dropped.Body.String())
 	}
 	var droppedRun domain.RunRecord
 	if err := json.Unmarshal(dropped.Body.Bytes(), &droppedRun); err != nil {
 		t.Fatalf("decode dropped-selection run: %v", err)
 	}
-	if got := droppedRun.Metadata["file_ids"]; !jsonArrayEquals(got, []string{"file-owned-tdb"}) {
+	if got := droppedRun.Metadata["file_ids"]; !jsonArrayEquals(got, []string{"file-owned"}) {
 		t.Fatalf("dropped-selection run file_ids = %#v, want only the readable id", droppedRun.Metadata["file_ids"])
 	}
 	select {
 	case job := <-bus.Jobs():
-		if len(job.FileIDs) != 1 || job.FileIDs[0] != "file-owned-tdb" {
-			t.Fatalf("dropped-selection job file_ids = %#v, want only [file-owned-tdb]", job.FileIDs)
+		if len(job.FileIDs) != 1 || job.FileIDs[0] != "file-owned" {
+			t.Fatalf("dropped-selection job file_ids = %#v, want only [file-owned]", job.FileIDs)
 		}
 	default:
 		t.Fatal("dropped-selection did not dispatch a job")
 	}
 
-	accepted := post(`{"user_id":"body-forged-user","goal":"load CALPHAD","file_ids":[" file-owned-tdb ","file-owned-tdb","file-owned-tdb"],"resource_descriptors":[{"type":"selected_resource","resource_id":"file-owned-tdb","file_id":"file-owned-tdb","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","size_bytes":1,"metadata":{"calphad":{"validation_status":"validated","credentials":{"token":"body-descriptor-secret"}}}}]}`)
+	accepted := post(`{"user_id":"body-forged-user","goal":"load resources","file_ids":[" file-owned ","file-owned","file-owned"],"resource_descriptors":[{"type":"selected_resource","resource_id":"file-owned","file_id":"file-owned","sha256":"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff","size_bytes":1,"metadata":{"caption":"forged","credentials":{"token":"body-descriptor-secret"}}}]}`)
 	if accepted.Code != http.StatusOK {
 		t.Fatalf("owned selected id status = %d body=%s, want 200", accepted.Code, accepted.Body.String())
 	}
@@ -112,15 +99,15 @@ func TestCreateRunAuthorizesAndDeduplicatesSelectedResourcesBeforeDispatch(t *te
 	if run.UserID != "workos:user_a" || run.Metadata["org_id"] != "org-a" {
 		t.Fatalf("run principal metadata = user %q metadata %#v", run.UserID, run.Metadata)
 	}
-	if got := run.Metadata["file_ids"]; !jsonArrayEquals(got, []string{"file-owned-tdb"}) {
+	if got := run.Metadata["file_ids"]; !jsonArrayEquals(got, []string{"file-owned"}) {
 		t.Fatalf("deduplicated run metadata file_ids = %#v", run.Metadata["file_ids"])
 	}
 	select {
 	case job := <-bus.Jobs():
-		if len(job.FileIDs) != 1 || job.FileIDs[0] != "file-owned-tdb" {
+		if len(job.FileIDs) != 1 || job.FileIDs[0] != "file-owned" {
 			t.Fatalf("deduplicated job file_ids = %#v", job.FileIDs)
 		}
-		assertSelectedResourceBinding(t, job.ResourceDescriptors, "file-owned-tdb")
+		assertSelectedResourceBinding(t, job.ResourceDescriptors, "file-owned")
 	default:
 		t.Fatal("owned selection did not dispatch a job")
 	}
@@ -132,9 +119,9 @@ func TestCreateRunAuthorizesAndDeduplicatesSelectedResourcesBeforeDispatch(t *te
 	if !ok {
 		t.Fatalf("stored selected resource descriptors = %T %#v", stored.Metadata["resource_descriptors"], stored.Metadata["resource_descriptors"])
 	}
-	assertSelectedResourceBinding(t, descriptors, "file-owned-tdb")
+	assertSelectedResourceBinding(t, descriptors, "file-owned")
 
-	forgedMetadata := post(`{"goal":"forge selected capability","metadata":{"file_ids":["file-owned-tdb"],"resource_descriptors":[{"type":"selected_resource","resource_id":"file-owned-tdb"}]}}`)
+	forgedMetadata := post(`{"goal":"forge selected capability","metadata":{"file_ids":["file-owned"],"resource_descriptors":[{"type":"selected_resource","resource_id":"file-owned"}]}}`)
 	if forgedMetadata.Code != http.StatusOK {
 		t.Fatalf("reserved metadata status = %d body=%s, want 200", forgedMetadata.Code, forgedMetadata.Body.String())
 	}
@@ -271,39 +258,6 @@ func TestCreateRunDropsCallerAuthoredArtifactDescriptorsBeforeDispatch(t *testin
 	}
 }
 
-func TestSelectedResourceDescriptorDistinguishesOwnerValidationFromSharedReadOnlyUse(t *testing.T) {
-	t.Parallel()
-	resource := domain.ResourceRecord{
-		ResourceID: "shared-calphad", OwnerUserID: "owner", OwnerOrgID: "owner-org",
-		OriginalName: "shared.tdb", ContentType: "application/x-thermocalc-tdb",
-		SizeBytes: 8, SHA256: strings.Repeat("a", 64),
-	}
-	owner := withAuthorizedSelectedResourceDescriptors(
-		nil, []domain.ResourceRecord{resource},
-		requestPrincipal{UserID: "owner", OrgID: "owner-org"},
-	)
-	reader := withAuthorizedSelectedResourceDescriptors(
-		nil, []domain.ResourceRecord{resource},
-		requestPrincipal{UserID: "reader", OrgID: "reader-org"},
-	)
-	if owner[0]["calphad_governance_scope"] != "owner_validation" {
-		t.Fatalf("owner governance scope=%#v", owner[0])
-	}
-	if owner[0]["database_format"] != domain.CalphadDatabaseFormatTDB ||
-		reader[0]["database_format"] != domain.CalphadDatabaseFormatTDB {
-		t.Fatalf("selected database formats owner=%#v reader=%#v", owner[0], reader[0])
-	}
-	if reader[0]["calphad_governance_scope"] != "read_only_usage" {
-		t.Fatalf("shared reader governance scope=%#v", reader[0])
-	}
-	nonCalphad := withAuthorizedSelectedResourceDescriptors(nil, []domain.ResourceRecord{{
-		ResourceID: "notes", OwnerUserID: "owner", OriginalName: "notes.txt", ContentType: "text/plain",
-	}}, requestPrincipal{UserID: "owner"})
-	if _, exists := nonCalphad[0]["database_format"]; exists {
-		t.Fatalf("non-CALPHAD descriptor received database_format: %#v", nonCalphad[0])
-	}
-}
-
 func TestSelectedAndResolvedResourceProjectionsCarryOnlyCatalogBoundTreeIdentity(t *testing.T) {
 	root := t.TempDir()
 	resourceID := "file-sensor-tree"
@@ -334,7 +288,6 @@ func TestSelectedAndResolvedResourceProjectionsCarryOnlyCatalogBoundTreeIdentity
 	descriptors := withAuthorizedSelectedResourceDescriptors(
 		nil,
 		[]domain.ResourceRecord{resource},
-		requestPrincipal{UserID: "owner"},
 	)
 	tree, ok := descriptors[0]["tree_identity"].(domain.JSONMap)
 	if !ok {
@@ -466,11 +419,11 @@ func TestRunResourceEndpointsIgnoreForgedOrgHeaderAndUseStampedRunOrg(t *testing
 	})
 	seedRunStagingResource(t, mem, domain.ResourceRecord{
 		ResourceID: "file-trusted-org", OwnerUserID: "user-a", OwnerOrgID: "org-trusted",
-		OriginalName: "trusted.tdb", ContentType: "application/x-thermocalc-tdb",
+		OriginalName: "trusted.csv", ContentType: "text/csv",
 	})
 	seedRunStagingResource(t, mem, domain.ResourceRecord{
 		ResourceID: "file-forged-org", OwnerUserID: "user-a", OwnerOrgID: "org-forged",
-		OriginalName: "forged-scope.tdb", ContentType: "application/x-thermocalc-tdb",
+		OriginalName: "forged-scope.csv", ContentType: "text/csv",
 	})
 	thread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "trusted org"})
 	if err != nil {
@@ -479,7 +432,7 @@ func TestRunResourceEndpointsIgnoreForgedOrgHeaderAndUseStampedRunOrg(t *testing
 	run, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
 		ThreadID: thread.ThreadID,
 		UserID:   "user-a",
-		Goal:     "resolve a CALPHAD database",
+		Goal:     "resolve a resource",
 		Metadata: domain.JSONMap{
 			"org_id": "org-trusted",
 			"principal": domain.JSONMap{
@@ -534,66 +487,39 @@ func TestRunResourceEndpointsIgnoreForgedOrgHeaderAndUseStampedRunOrg(t *testing
 	}
 }
 
-func TestRunResourceMetadataProjectionAllowsCALPHADProvenanceAndRedactsSecrets(t *testing.T) {
+// The model-visible projection is a deny-by-default allowlist: safe generic
+// keys survive, and secrets, license bodies and unknown nested objects (such as
+// the former CALPHAD provenance block) never cross the model boundary.
+func TestRunResourceMetadataProjectionRedactsSecretsAndDeniesUnknownKeys(t *testing.T) {
 	hit := runResourceHitFromRecord(domain.ResourceRecord{
-		ResourceID:   "file-calphad",
-		OriginalName: "Al-Co-W.tdb",
+		ResourceID:   "file-measurements",
+		OriginalName: "measurements.csv",
 		SizeBytes:    21274,
 		SHA256:       strings.Repeat("b", 64),
 		Metadata: domain.JSONMap{
-			"source":       "upload_store",
-			"caption":      "Al-Co-W assessed database",
-			"api_key":      "top-level-secret",
-			"license_text": "private legal terms",
-			"credentials":  domain.JSONMap{"password": "credential-secret"},
+			"source":                 "upload_store",
+			"caption":                "assessed measurements",
+			"scientific_descriptors": []string{"tabular measurements"},
+			"api_key":                "top-level-secret",
+			"license_text":           "private legal terms",
+			"credentials":            domain.JSONMap{"password": "credential-secret"},
 			"calphad": domain.JSONMap{
-				"database_id":        "nist-al-co-w-wang-2017",
-				"database_name":      "Al-Co-W assessment",
-				"database_version":   "2017",
-				"citation":           "Wang et al., CALPHAD 2017",
-				"source":             "https://vendor-user:credential-secret@example.org/private",
-				"source_uri":         "https://materialsdata.nist.gov/handle/11256/948",
-				"license_id":         "CC0-1.0",
-				"license_identifier": "Confidential proprietary license agreement",
-				"authorized_scope":   "equilibrium research",
-				"assessment_scope":   "Private license text: do not distribute",
-				"content_sha256":     strings.Repeat("a", 64),
-				"validation_status":  "validated",
-				"components":         []string{"AL", "CO", "W", "VA"},
-				"phases":             []string{"FCC_A1", "BCC_A2"},
-				domain.CalphadAssessmentPressureLimitsMetadataKey: []float64{101325, 101325},
-				"limits": domain.JSONMap{
-					"max_grid_points":   5000,
-					"temperature_min_k": 298.15,
-					"api_key":           "nested-secret",
-				},
-				"license_text":         "full forbidden license text",
-				"vendor_private_terms": "forbidden vendor terms",
-				"credentials":          domain.JSONMap{"token": "vendor-secret"},
+				"database_id": "nist-al-co-w-wang-2017",
+				"credentials": domain.JSONMap{"token": "vendor-secret"},
 			},
+			"vendor_private_terms": "forbidden vendor terms",
 		},
 	})
 
-	if hit.Metadata["source"] != "upload_store" || hit.Metadata["caption"] != "Al-Co-W assessed database" {
+	if hit.Metadata["source"] != "upload_store" || hit.Metadata["caption"] != "assessed measurements" {
 		t.Fatalf("safe generic metadata missing: %#v", hit.Metadata)
 	}
-	calphad, ok := hit.Metadata["calphad"].(domain.JSONMap)
-	if !ok {
-		t.Fatalf("safe CALPHAD projection = %#v", hit.Metadata["calphad"])
+	if _, exists := hit.Metadata["scientific_descriptors"]; !exists {
+		t.Fatalf("safe scientific_descriptors missing: %#v", hit.Metadata)
 	}
-	for _, key := range []string{"database_id", "database_name", "database_version", "citation", "source_uri", "license_id", "authorized_scope", "components", "phases", "limits", domain.CalphadAssessmentPressureLimitsMetadataKey, "declaration_authority"} {
-		if _, exists := calphad[key]; !exists {
-			t.Fatalf("safe CALPHAD key %q missing from %#v", key, calphad)
-		}
-	}
-	for _, key := range []string{"format", "content_sha256", "content_hash", "sha256", "size_bytes", "validation_status", "scientific_status", "content_status", "status"} {
-		if _, exists := calphad[key]; exists {
-			t.Fatalf("owner-writable CALPHAD trust claim %q leaked: %#v", key, calphad)
-		}
-	}
-	for _, key := range []string{"source", "license_identifier", "assessment_scope"} {
-		if _, exists := calphad[key]; exists {
-			t.Fatalf("credential/private owner declaration %q leaked: %#v", key, calphad)
+	for _, key := range []string{"calphad", "api_key", "license_text", "credentials", "vendor_private_terms"} {
+		if _, exists := hit.Metadata[key]; exists {
+			t.Fatalf("denied metadata key %q leaked: %#v", key, hit.Metadata)
 		}
 	}
 	if hit.SHA256 != strings.Repeat("b", 64) || hit.SizeBytes != 21274 {
@@ -603,17 +529,38 @@ func TestRunResourceMetadataProjectionAllowsCALPHADProvenanceAndRedactsSecrets(t
 	if err != nil {
 		t.Fatalf("marshal hit: %v", err)
 	}
-	for _, secret := range []string{"top-level-secret", "private legal terms", "credential-secret", "Confidential proprietary license agreement", "Private license text: do not distribute", "nested-secret", "full forbidden license text", "forbidden vendor terms", "vendor-secret"} {
+	for _, secret := range []string{
+		"top-level-secret", "private legal terms", "credential-secret",
+		"forbidden vendor terms", "vendor-secret", "nist-al-co-w-wang-2017",
+	} {
 		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("secret %q leaked in model projection: %s", secret, encoded)
 		}
 	}
-	limits, ok := calphad["limits"].(domain.JSONMap)
-	if !ok || limits["max_grid_points"] == nil || limits["temperature_min_k"] == nil {
-		t.Fatalf("safe CALPHAD limits missing: %#v", calphad["limits"])
+}
+
+// A source declaration that smuggles credentials or license terms is rejected
+// rather than projected.
+func TestRunResourceMetadataProjectionRejectsUnsafeOwnerDeclarations(t *testing.T) {
+	for _, unsafe := range []string{
+		"https://vendor-user:credential-secret@example.org/private",
+		"Confidential proprietary license agreement",
+		"Private license text: do not distribute",
+	} {
+		hit := runResourceHitFromRecord(domain.ResourceRecord{
+			ResourceID: "file-decl",
+			Metadata:   domain.JSONMap{"source": unsafe},
+		})
+		if got, exists := hit.Metadata["source"]; exists {
+			t.Fatalf("unsafe owner declaration %q projected as %#v", unsafe, got)
+		}
 	}
-	if _, exists := limits["api_key"]; exists {
-		t.Fatalf("nested limit secret key leaked: %#v", limits)
+	safe := runResourceHitFromRecord(domain.ResourceRecord{
+		ResourceID: "file-decl-safe",
+		Metadata:   domain.JSONMap{"source": "https://example.org/public/dataset"},
+	})
+	if safe.Metadata["source"] != "https://example.org/public/dataset" {
+		t.Fatalf("safe owner declaration dropped: %#v", safe.Metadata)
 	}
 }
 
@@ -659,12 +606,8 @@ func assertSelectedResourceBinding(t *testing.T, descriptors []domain.JSONMap, r
 		if descriptor["binding_schema"] != "ultra.selected_resource.v1" || descriptor["authority"] != "control_resource_catalog" {
 			t.Fatalf("binding authority = %#v", descriptor)
 		}
-		if descriptor["calphad_governance_scope"] != "owner_validation" {
-			t.Fatalf("CALPHAD governance scope = %#v", descriptor)
-		}
-		if descriptor["file_id"] != resourceID || descriptor["original_name"] != "owned.tdb" ||
-			descriptor["content_type"] != "application/x-thermocalc-tdb" ||
-			descriptor["database_format"] != domain.CalphadDatabaseFormatTDB {
+		if descriptor["file_id"] != resourceID || descriptor["original_name"] != "owned.csv" ||
+			descriptor["content_type"] != "text/csv" {
 			t.Fatalf("selected resource identity = %#v", descriptor)
 		}
 		if descriptor["sha256"] != strings.Repeat("c", 64) || descriptor["size_bytes"] != int64(21274) {
@@ -674,20 +617,13 @@ func assertSelectedResourceBinding(t *testing.T, descriptors []domain.JSONMap, r
 		if !ok {
 			t.Fatalf("selected resource metadata = %T %#v", descriptor["metadata"], descriptor["metadata"])
 		}
-		calphad, ok := metadata["calphad"].(domain.JSONMap)
-		if !ok {
-			t.Fatalf("selected CALPHAD metadata = %T %#v", metadata["calphad"], metadata["calphad"])
+		// The catalog row is the only metadata authority, and it is projected
+		// through the deny-by-default allowlist.
+		if metadata["source"] != "upload_store" || metadata["caption"] != "owner-declared measurements" {
+			t.Fatalf("selected resource metadata = %#v", metadata)
 		}
-		if calphad["database_id"] != "declared-al-co-w" || calphad["license_id"] != "CC0-1.0" || calphad["assessment_scope"] == nil || calphad["declaration_authority"] != "resource_owner" {
-			t.Fatalf("selected CALPHAD declarations = %#v", calphad)
-		}
-		if limits, ok := calphad[domain.CalphadAssessmentPressureLimitsMetadataKey].([]float64); !ok || len(limits) != 2 || limits[0] != 101325 || limits[1] != 101325 {
-			t.Fatalf("selected pressure declaration = %#v", calphad)
-		}
-		for _, key := range []string{"format", "content_sha256", "size_bytes", "validation_status", "scientific_status", "credentials"} {
-			if _, exists := calphad[key]; exists {
-				t.Fatalf("forged selected CALPHAD claim %q leaked: %#v", key, calphad)
-			}
+		if _, exists := metadata["credentials"]; exists {
+			t.Fatalf("catalog credentials leaked into descriptor: %#v", metadata)
 		}
 		encoded, _ := json.Marshal(descriptor)
 		if strings.Contains(string(encoded), "descriptor-secret") || strings.Contains(string(encoded), "body-descriptor-secret") || strings.Contains(string(encoded), strings.Repeat("f", 64)) {

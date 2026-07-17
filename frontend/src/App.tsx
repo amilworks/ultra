@@ -9092,60 +9092,6 @@ export function App() {
     }
   };
 
-  const useHdf5DatasetInChat = (fileId: string, datasetPaths: string[]): void => {
-    if (!activeConversation) {
-      return;
-    }
-    const uploaded = viewerUploadedFiles.find((file) => file.file_id === fileId);
-    if (!uploaded) {
-      return;
-    }
-    const bisqueLink = viewerBisqueLinksByFileId[fileId];
-    updateConversation(activeConversation.id, (conversation) => ({
-      ...conversation,
-      updatedAt: Date.now(),
-      uploadedFiles: uniqueByFileId([...conversation.uploadedFiles, uploaded]),
-      stagedUploadFileIds: uniqueFileIds([...conversation.stagedUploadFileIds, uploaded.file_id]),
-      activeSelectionContext: {
-        context_id: makeId(),
-        source: "hdf5_dashboard",
-        focused_file_ids: [uploaded.file_id],
-        resource_uris: bisqueLink?.resourceUri ? [bisqueLink.resourceUri] : [],
-        originating_message_id: null,
-        originating_user_text:
-          [...conversation.messages]
-            .reverse()
-            .find((message) => message.role === "user" && message.content.trim().length > 0)
-            ?.content?.trim() || null,
-        suggested_domain: "materials",
-        suggested_tool_names: [],
-      },
-      bisqueLinksByFileId: bisqueLink
-        ? {
-            ...conversation.bisqueLinksByFileId,
-            [uploaded.file_id]: bisqueLink,
-          }
-        : conversation.bisqueLinksByFileId,
-    }));
-    const uniquePaths = Array.from(new Set(datasetPaths.map((path) => String(path || "").trim()).filter(Boolean)));
-    const promptSeed =
-      uniquePaths.length === 1
-        ? `Please analyze the HDF5 dataset \`${uniquePaths[0]}\` from the attached file.`
-        : `Please analyze these HDF5 datasets from the attached file:\n${uniquePaths
-            .map((path) => `- \`${path}\``)
-            .join("\n")}`;
-    setActivePromptValue((current) => {
-      const trimmed = current.trim();
-      if (uniquePaths.some((path) => trimmed.includes(path))) {
-        return current;
-      }
-      return trimmed ? `${trimmed}\n\n${promptSeed}` : promptSeed;
-    });
-    setActivePanel("chat");
-    setViewerOpen(false);
-    setResourceViewerContext(null);
-  };
-
   const removeDeletedResourcesFromClientState = (fileIds: string[]): void => {
     const deletedFileIds = new Set(uniqueFileIds(fileIds));
     if (deletedFileIds.size === 0) {
@@ -11618,7 +11564,6 @@ export function App() {
                 uploadedFiles={viewerUploadedFiles}
                 bisqueLinksByFileId={viewerBisqueLinksByFileId}
                 apiClient={apiClient}
-                onUseHdf5DatasetInChat={useHdf5DatasetInChat}
               />
             </Suspense>
           ) : (
@@ -12234,7 +12179,6 @@ export function App() {
               uploadedFiles={viewerUploadedFiles}
               bisqueLinksByFileId={viewerBisqueLinksByFileId}
               apiClient={apiClient}
-              onUseHdf5DatasetInChat={useHdf5DatasetInChat}
             />
           </Suspense>
         ) : null}

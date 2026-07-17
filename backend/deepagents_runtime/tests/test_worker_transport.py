@@ -15,7 +15,6 @@ import ultra_deepagents.nats_worker as nats_worker_module
 from nats.js.api import AckPolicy
 from PIL import Image
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.evaluation_profiles import EvaluationProfileError
 from ultra_deepagents.nats_worker import (
     ControlPlaneRunLease,
     NATSDeepAgentsWorker,
@@ -33,31 +32,6 @@ from ultra_deepagents.runner import _tool_end_payload, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
 
-def test_tool_end_payload_preserves_typed_materials_result_identity() -> None:
-    result_sha256 = "a" * 64
-    validation_sha256 = "b" * 64
-    payload = _tool_end_payload(
-        {
-            "name": "materials_analyze_crystal_slip",
-            "run_id": "cp-call-1",
-            "data": {
-                "output": json.dumps(
-                    {
-                        "ok": True,
-                        "operation": "analytical_slip_geometry",
-                        "analysis_artifact": {"sha256": result_sha256},
-                        "materials_validation_artifact": {"sha256": validation_sha256},
-                    }
-                )
-            },
-        }
-    )
-
-    assert payload["tool_call_id"] == "cp-call-1"
-    assert payload["scientific_operation"] == "analytical_slip_geometry"
-    assert payload["result_artifact_sha256"] == result_sha256
-    assert payload["materials_validation_artifact_sha256"] == validation_sha256
-    assert payload["scientific_result_ok"] is True
 
 
 def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
@@ -182,18 +156,6 @@ def test_run_job_envelope_fails_closed_for_malformed_remote_mutation_scope(raw_s
     assert job.remote_mutation_intents == ()
 
 
-def test_protected_evaluation_profile_rejects_remote_mutation_scope():
-    with pytest.raises(EvaluationProfileError, match="remote_mutation_intents"):
-        RunJobEnvelope.from_dict(
-            {
-                "run_id": "run-cleanroom",
-                "thread_id": "thread-cleanroom",
-                "user_id": "evaluator",
-                "goal": "Solve the sealed materials case.",
-                "evaluation_profile": "materials_cleanroom_v1",
-                "remote_mutation_intents": ["bisque.upload"],
-            }
-        )
 
 
 class FakeStreamingAgent:
@@ -6063,29 +6025,6 @@ def test_missing_rigor_contract_kinds_gates_on_intelligence_and_goal(tmp_path: P
     assert _missing_rigor_contract_kinds(pro_context, pro_job, _attempt("")) == []
 
 
-def test_missing_rigor_contract_does_not_reprompt_typed_materials_refusal(tmp_path: Path):
-    from ultra_deepagents.runner import _missing_rigor_contract_kinds
-
-    job = RunJobEnvelope(
-        run_id="run-hcp-refusal",
-        thread_id="thread-hcp-refusal",
-        user_id="researcher-1",
-        goal=(
-            "Generate the HCP pyramidal c+a slip-system geometry without a supplied c/a. "
-            "Call materials_analyze_crystal_slip and report whether a numerical result "
-            "is scientifically supportable."
-        ),
-        messages=[],
-        workflow_hint={"id": "pro_mode"},
-    )
-    context = _context_for_job(job, tmp_path)
-    answer = _attempt(
-        "The typed tool returned invalid_crystal_plasticity_input: c_over_a must be a "
-        "finite positive number. No numerical systems were generated; the request is "
-        "scientifically incomplete."
-    )
-
-    assert _missing_rigor_contract_kinds(context, job, answer) == []
 
 
 def test_requested_artifacts_ignore_code_blocks_and_negated_plot_requests():

@@ -126,12 +126,8 @@ ULTRA_UPLOAD_ROOTS="${ULTRA_UPLOAD_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT}"
 ULTRA_RARESPOT_UPLOAD_ROOTS="${ULTRA_RARESPOT_UPLOAD_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT}"
 ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS="${ULTRA_RARESPOT_ALLOWED_INPUT_ROOTS:-$ULTRA_CONTROL_UPLOAD_ROOT:$ULTRA_CONTROL_ARTIFACT_ROOT}"
 ULTRA_DEEPAGENTS_SANDBOX_IMAGE="${ULTRA_DEEPAGENTS_SANDBOX_IMAGE:-bisque-ultra-codeexec:py311}"
-ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID="${ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID:-}"
-ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE:-ultra-materials-kinetics:py311}"
-ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="${ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID:-}"
-# Finite local defaults keep the typed CALPHAD primitive available without
-# granting an unbounded container. Operators may still explicitly disable a
-# limit with 0/empty for non-CALPHAD research runs.
+# Finite local defaults keep sandbox runs useful without granting an unbounded
+# container. Operators may still explicitly disable a limit with 0/empty.
 ULTRA_DEEPAGENTS_SANDBOX_CPUS="${ULTRA_DEEPAGENTS_SANDBOX_CPUS:-2}"
 ULTRA_DEEPAGENTS_SANDBOX_MEMORY="${ULTRA_DEEPAGENTS_SANDBOX_MEMORY:-4g}"
 ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT="${ULTRA_DEEPAGENTS_SANDBOX_PIDS_LIMIT:-512}"
@@ -140,98 +136,6 @@ ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_LIMIT_BYTES="${ULTRA_DEEPAGENTS_SANDBOX_OUTPUT_L
 if [ "$ULTRA_STACK_USE_POSTGRES" != "1" ]; then
   ULTRA_CONTROL_DATABASE_URL=""
 fi
-
-resolve_local_calphad_runtime_image() {
-  local actual configured
-
-  configured="$ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID"
-  if [ -n "$configured" ] && [[ ! "$configured" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID must be an immutable sha256:<64hex> image ID." >&2
-    exit 1
-  fi
-  if ! command -v docker >/dev/null 2>&1; then
-    log "WARNING: Docker is unavailable; typed CALPHAD tools will remain disabled"
-    return 0
-  fi
-  if ! actual="$(docker image inspect --format '{{.Id}}' "$ULTRA_DEEPAGENTS_SANDBOX_IMAGE" 2>/dev/null)"; then
-    if [ -n "$configured" ]; then
-      echo "Configured CALPHAD sandbox image is unavailable: $ULTRA_DEEPAGENTS_SANDBOX_IMAGE" >&2
-      exit 1
-    fi
-    log "WARNING: sandbox image $ULTRA_DEEPAGENTS_SANDBOX_IMAGE is unavailable; typed CALPHAD tools will remain disabled"
-    return 0
-  fi
-  if [[ ! "$actual" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "Sandbox image did not resolve to an immutable SHA-256 image ID." >&2
-    exit 1
-  fi
-  if [ -n "$configured" ] && [ "$configured" != "$actual" ]; then
-    echo "CALPHAD runtime policy mismatch: $ULTRA_DEEPAGENTS_SANDBOX_IMAGE resolves to $actual, expected $configured." >&2
-    exit 1
-  fi
-  ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID="$actual"
-  ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$actual"
-  log "Bound typed CALPHAD runtime to immutable local image $actual"
-}
-
-resolve_local_kinetics_runtime_image() {
-  local actual configured image revision title
-
-  image="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE"
-  configured="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID"
-  if [ -z "$image" ]; then
-    echo "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE must name the isolated Kawin image." >&2
-    exit 1
-  fi
-  if [ -n "$configured" ] && [[ ! "$configured" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    echo "ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID must be an immutable sha256:<64hex> image ID." >&2
-    exit 1
-  fi
-  if ! command -v docker >/dev/null 2>&1; then
-    if [ -n "$configured" ]; then
-      echo "Docker is unavailable, so the configured kinetics runtime identity cannot be verified." >&2
-      exit 1
-    fi
-    log "WARNING: Docker is unavailable; typed kinetics tools will remain disabled"
-    return 0
-  fi
-  if [ "${ULTRA_STACK_FORCE_MATERIALS_KINETICS_IMAGE_BUILD:-0}" = "1" ] \
-    || ! docker image inspect "$image" >/dev/null 2>&1; then
-    if [ "${ULTRA_STACK_BUILD_MATERIALS_KINETICS_IMAGE:-1}" != "1" ]; then
-      if [ -n "$configured" ]; then
-        echo "Configured materials kinetics image is unavailable: $image" >&2
-        exit 1
-      fi
-      log "WARNING: materials kinetics image $image is unavailable; typed kinetics tools will remain disabled"
-      return 0
-    fi
-    if [ ! -f "$ROOT/deploy/docker/materials-kinetics.Dockerfile" ]; then
-      echo "Materials kinetics Dockerfile is unavailable." >&2
-      exit 1
-    fi
-    revision="$(git -C "$ROOT" rev-parse HEAD)"
-    log "Building isolated materials kinetics runtime $image"
-    docker build --build-arg "VCS_REF=$revision" \
-      -f "$ROOT/deploy/docker/materials-kinetics.Dockerfile" -t "$image" "$ROOT"
-  fi
-  if ! actual="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)"; then
-    echo "Materials kinetics image did not resolve after build: $image" >&2
-    exit 1
-  fi
-  title="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "$image" 2>/dev/null || true)"
-  if [[ ! "$actual" =~ ^sha256:[0-9a-f]{64}$ ]] \
-    || [ "$title" != "Ultra isolated materials kinetics runtime" ]; then
-    echo "Materials kinetics image is not the qualified isolated Ultra runtime: $image" >&2
-    exit 1
-  fi
-  if [ -n "$configured" ] && [ "$configured" != "$actual" ]; then
-    echo "Kinetics runtime policy mismatch: $image resolves to $actual, expected $configured." >&2
-    exit 1
-  fi
-  ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$actual"
-  ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$actual"
-  log "Bound typed kinetics runtime to qualified immutable local image $actual"
-}
 
 wait_for_http() {
   local url="$1"
@@ -541,7 +445,6 @@ start_control() {
     ULTRA_CONTROL_SECRET_ENCRYPTION_KEY="$ULTRA_CONTROL_SECRET_ENCRYPTION_KEY" \
     ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID="$ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID" \
     ULTRA_CONTROL_WORKER_TOKEN="$ULTRA_CONTROL_WORKER_TOKEN" \
-    ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID="$ULTRA_CONTROL_CALPHAD_RUNTIME_IMAGE_ID" \
     ULTRA_CONTROL_AUTH_PROVIDER="$ULTRA_CONTROL_AUTH_PROVIDER" \
     ULTRA_CONTROL_WORKOS_CLIENT_ID="$ULTRA_CONTROL_WORKOS_CLIENT_ID" \
     ULTRA_CONTROL_WORKOS_API_KEY="$ULTRA_CONTROL_WORKOS_API_KEY" \
@@ -570,8 +473,6 @@ start_deepagents_worker() {
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID="$ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID" \
       ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$ULTRA_DEEPAGENTS_SANDBOX_IMAGE" \
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE" \
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID" \
       QWEN_VLM_ENABLED="$QWEN_VLM_ENABLED" \
       QWEN_VLM_BASE_URL="$QWEN_VLM_BASE_URL" \
       QWEN_VLM_MODEL="$QWEN_VLM_MODEL" \
@@ -628,8 +529,6 @@ start_deepagents_worker() {
       OPENAI_API_KEY="$OPENAI_API_KEY" \
       ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID="$ULTRA_DEEPAGENTS_MODEL_PROVIDER_ID" \
       ULTRA_DEEPAGENTS_SANDBOX_IMAGE="$ULTRA_DEEPAGENTS_SANDBOX_IMAGE" \
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE" \
-      ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID="$ULTRA_MATERIALS_KINETICS_RUNTIME_IMAGE_ID" \
       QWEN_VLM_ENABLED="$QWEN_VLM_ENABLED" \
       QWEN_VLM_BASE_URL="$QWEN_VLM_BASE_URL" \
       QWEN_VLM_MODEL="$QWEN_VLM_MODEL" \
@@ -707,8 +606,6 @@ start_services() {
   require_command go
   require_command pnpm
   require_command python3
-  resolve_local_calphad_runtime_image
-  resolve_local_kinetics_runtime_image
   ensure_nats
   ensure_postgres
   start_control

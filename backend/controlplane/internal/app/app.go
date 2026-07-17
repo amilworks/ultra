@@ -45,9 +45,6 @@ func New(cfg config.Config) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if cfg.Environment == "production" && strings.TrimSpace(cfg.MigrationDatabaseURL) != "" {
-		return nil, fmt.Errorf("production serving process must not receive ULTRA_CONTROL_MIGRATION_DATABASE_URL")
-	}
 	ctx := context.Background()
 	var controlStore runcontrol.Store
 	var closeFns []func()
@@ -74,12 +71,6 @@ func New(cfg config.Config) (*App, error) {
 		if err := store.VerifyPostgresSchema(ctx, pool); err != nil {
 			pool.Close()
 			return nil, err
-		}
-		if cfg.Environment == "production" && cfg.MaterialsEnabled {
-			if err := store.VerifyCalphadServingRole(ctx, pool); err != nil {
-				pool.Close()
-				return nil, err
-			}
 		}
 		closeFns = append(closeFns, pool.Close)
 		controlStore = store.NewPostgresStore(pool)
@@ -154,9 +145,6 @@ func New(cfg config.Config) (*App, error) {
 			Environment:         cfg.Environment,
 			PublicURL:           configuredPublicURL(cfg),
 			DefaultUserTimezone: cfg.DefaultUserTimezone,
-		},
-		CalphadRuntimePolicy: runcontrol.CalphadRuntimePolicyConfig{
-			RuntimeImageID: cfg.CalphadRuntimeImageID,
 		},
 	})
 	var stubWorker *worker.StubWorker
@@ -608,36 +596,9 @@ func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return fmt.Errorf("ULTRA_CONTROL_DATABASE_URL or RUN_STORE_PATH is required to migrate the control-plane Postgres schema")
 	}
-	migrationURL := strings.TrimSpace(cfg.MigrationDatabaseURL)
-	if migrationURL == "" {
-		// The dedicated migration role is only required by the materials (CALPHAD)
-		// execute-only serving model. With materials disabled the schema applies
-		// with the single serving role, exactly as before the materials work.
-		if cfg.Environment == "production" && cfg.MaterialsEnabled {
-			return fmt.Errorf("ULTRA_CONTROL_MIGRATION_DATABASE_URL is required for production migrations when ULTRA_CONTROL_MATERIALS_ENABLED=true")
-		}
-		migrationURL = cfg.DatabaseURL
-	}
-	migrationConfig := cfg
-	migrationConfig.DatabaseURL = migrationURL
-	poolConfig, err := postgresPoolConfig(migrationConfig)
+	poolConfig, err := postgresPoolConfig(cfg)
 	if err != nil {
 		return err
-	}
-	servingPoolConfig, err := postgresPoolConfig(cfg)
-	if err != nil {
-		return err
-	}
-	servingRole := strings.TrimSpace(servingPoolConfig.ConnConfig.User)
-	migrationRole := strings.TrimSpace(poolConfig.ConnConfig.User)
-	if cfg.Environment == "production" && cfg.MaterialsEnabled && (servingRole == "" || migrationRole == "" || servingRole == migrationRole) {
-		return fmt.Errorf("production Postgres serving and migration URLs must use distinct non-empty roles when ULTRA_CONTROL_MATERIALS_ENABLED=true")
-	}
-	if cfg.Environment == "production" && cfg.MaterialsEnabled &&
-		(strings.TrimSpace(servingPoolConfig.ConnConfig.Host) != strings.TrimSpace(poolConfig.ConnConfig.Host) ||
-			servingPoolConfig.ConnConfig.Port != poolConfig.ConnConfig.Port ||
-			strings.TrimSpace(servingPoolConfig.ConnConfig.Database) != strings.TrimSpace(poolConfig.ConnConfig.Database)) {
-		return fmt.Errorf("production Postgres serving and migration URLs must target the same database")
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
@@ -652,11 +613,6 @@ func MigratePostgres(ctx context.Context, cfg config.Config) error {
 	}
 	if err := store.BackfillPostgresResourceSearchIndexes(ctx, pool); err != nil {
 		return err
-	}
-	if servingRole != "" && servingRole != migrationRole {
-		if err := store.GrantPostgresServingPrivileges(ctx, pool, servingRole); err != nil {
-			return err
-		}
 	}
 	return store.VerifyPostgresSchema(ctx, pool)
 }

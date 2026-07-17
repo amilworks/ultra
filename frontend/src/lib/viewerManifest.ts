@@ -805,7 +805,7 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   const diagnosticSurface = normalizeDiagnosticSurface(viewerSource.diagnostic_surface, "none");
   const displayCapabilities = normalizeDisplayCapabilities(
     viewerSource.display_capabilities,
-    toRecord(hdf5Source.materials).detected ? ["dataset_explorer", "materials_dashboard"] : ["dataset_explorer"]
+    ["dataset_explorer"]
   );
   const deliveryMode = normalizeDeliveryMode(
     viewerSource.delivery_mode,
@@ -1033,78 +1033,6 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
         hdf5Source.selected_dataset_path == null ? null : String(hdf5Source.selected_dataset_path),
       default_dataset_path:
         hdf5Source.default_dataset_path == null ? null : String(hdf5Source.default_dataset_path),
-      materials:
-        Object.keys(toRecord(hdf5Source.materials)).length > 0
-          ? {
-              detected: Boolean(toRecord(hdf5Source.materials).detected ?? false),
-              schema:
-                toRecord(hdf5Source.materials).schema == null
-                  ? null
-                  : String(toRecord(hdf5Source.materials).schema) === "dream3d"
-                    ? "dream3d"
-                    : null,
-              capabilities: Array.isArray(toRecord(hdf5Source.materials).capabilities)
-                ? (toRecord(hdf5Source.materials).capabilities as Array<unknown>).map((item) => String(item))
-                : [],
-              roles: Object.fromEntries(
-                Object.entries(toRecord(toRecord(hdf5Source.materials).roles)).map(([key, value]) => [
-                  String(key),
-                  String(value),
-                ])
-              ),
-              phase_names: Array.isArray(toRecord(hdf5Source.materials).phase_names)
-                ? (toRecord(hdf5Source.materials).phase_names as Array<unknown>).map((item) => String(item))
-                : [],
-              phase_names_source:
-                toRecord(hdf5Source.materials).phase_names_source == null
-                  ? null
-                  : String(toRecord(hdf5Source.materials).phase_names_source),
-              phase_names_provenance:
-                toRecord(hdf5Source.materials).phase_names_provenance == null
-                  ? null
-                  : String(toRecord(hdf5Source.materials).phase_names_provenance),
-              feature_count:
-                toRecord(hdf5Source.materials).feature_count == null
-                  ? null
-                  : clampNonNegativeInt(toRecord(hdf5Source.materials).feature_count, 0),
-              grain_count:
-                toRecord(hdf5Source.materials).grain_count == null
-                  ? null
-                  : clampNonNegativeInt(toRecord(hdf5Source.materials).grain_count, 0),
-              declared_feature_tuple_count:
-                toRecord(hdf5Source.materials).declared_feature_tuple_count == null
-                  ? null
-                  : clampNonNegativeInt(
-                      toRecord(hdf5Source.materials).declared_feature_tuple_count,
-                      0
-                    ),
-              referenced_positive_feature_count:
-                toRecord(hdf5Source.materials).referenced_positive_feature_count == null
-                  ? null
-                  : clampNonNegativeInt(
-                      toRecord(hdf5Source.materials).referenced_positive_feature_count,
-                      0
-                    ),
-              feature_id_scan_complete: toBoolean(
-                toRecord(hdf5Source.materials).feature_id_scan_complete,
-                false
-              ),
-              feature_id_consistency:
-                toRecord(hdf5Source.materials).feature_id_consistency == null
-                  ? null
-                  : typeof toRecord(hdf5Source.materials).feature_id_consistency === "boolean"
-                    ? (toRecord(hdf5Source.materials).feature_id_consistency as boolean)
-                    : null,
-              feature_zero_reserved:
-                toRecord(hdf5Source.materials).feature_zero_reserved == null
-                  ? null
-                  : Boolean(toRecord(hdf5Source.materials).feature_zero_reserved),
-              recommended_view:
-                String(toRecord(hdf5Source.materials).recommended_view ?? "explorer") === "materials"
-                  ? "materials"
-                  : "explorer",
-            }
-          : null,
     },
   };
 };

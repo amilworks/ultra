@@ -84,9 +84,6 @@ export type SelectionContext = {
 
 export type RemoteMutationIntent = "bisque.upload" | "bisque.create_dataset";
 
-export type ProtectedEvaluationProfile =
-  "materials_cleanroom_v1";
-
 export type ChatRequest = {
   messages: ChatMessage[];
   uploaded_files: string[];
@@ -97,7 +94,6 @@ export type ChatRequest = {
   goal?: string | null;
   selected_tool_names?: string[];
   remote_mutation_intents?: RemoteMutationIntent[];
-  evaluation_profile?: ProtectedEvaluationProfile | null;
   knowledge_context?: KnowledgeContext | null;
   selection_context?: SelectionContext | null;
   workflow_hint?: ChatWorkflowHint | null;
@@ -1665,24 +1661,6 @@ export type Hdf5DatasetField = {
   dtype: string;
 };
 
-export type Hdf5MaterialsPayload = {
-  detected: boolean;
-  schema?: "dream3d" | null;
-  capabilities: string[];
-  roles: Record<string, string>;
-  phase_names: string[];
-  phase_names_source?: string | null;
-  phase_names_provenance?: string | null;
-  feature_count?: number | null;
-  grain_count?: number | null;
-  declared_feature_tuple_count?: number | null;
-  referenced_positive_feature_count?: number | null;
-  feature_id_scan_complete: boolean;
-  feature_id_consistency?: boolean | null;
-  feature_zero_reserved?: boolean | null;
-  recommended_view: "materials" | "explorer";
-};
-
 export type Hdf5DatasetSummary = {
   file_id: string;
   dataset_path: string;
@@ -1690,7 +1668,6 @@ export type Hdf5DatasetSummary = {
   preview_kind?: string | null;
   semantic_role?: string | null;
   units_hint?: string | null;
-  materials_domain_tags: string[];
   dtype: string;
   shape: number[];
   rank: number;
@@ -1820,67 +1797,6 @@ export type Hdf5DatasetTablePreviewResponse = {
   }>;
 };
 
-export type Hdf5MaterialsChartResponse = {
-  kind: "scatter" | "histogram" | "bar";
-  title: string;
-  description?: string | null;
-  x_key: string;
-  y_key: string;
-  data: Array<Record<string, unknown>>;
-  source_paths: string[];
-  units_hint?: string | null;
-  provenance?: string | null;
-};
-
-export type Hdf5MaterialsMapResponse = {
-  title: string;
-  description?: string | null;
-  dataset_path: string;
-  semantic_role: string;
-  preview_kind?: string | null;
-};
-
-export type Hdf5MaterialsDatasetLinkResponse = {
-  label: string;
-  dataset_path: string;
-  semantic_role: string;
-  group: string;
-};
-
-export type Hdf5MaterialsDashboardResponse = {
-  file_id: string;
-  schema: "dream3d";
-  overview: {
-    geometry?: {
-      path?: string | null;
-      dimensions?: number[] | null;
-      spacing?: number[] | null;
-      origin?: number[] | null;
-      cell_data_path?: string | null;
-      cell_data_consistent?: boolean | null;
-      complete?: boolean | null;
-    } | null;
-    spacing_note?: string | null;
-    phase_names: string[];
-    phase_names_source?: string | null;
-    phase_names_provenance?: string | null;
-    feature_count?: number | null;
-    grain_count?: number | null;
-    declared_feature_tuple_count?: number | null;
-    referenced_positive_feature_count?: number | null;
-    feature_id_scan_complete: boolean;
-    feature_id_consistency?: boolean | null;
-    feature_zero_reserved?: boolean | null;
-    capabilities: string[];
-    recommended_map_dataset_path?: string | null;
-  };
-  maps: Hdf5MaterialsMapResponse[];
-  grain_charts: Hdf5MaterialsChartResponse[];
-  orientation_charts: Hdf5MaterialsChartResponse[];
-  synthetic_stats: Hdf5MaterialsChartResponse[];
-  dataset_links: Hdf5MaterialsDatasetLinkResponse[];
-};
-
 export type UploadViewerInfo = {
   kind?: "image" | "hdf5" | "unsupported" | string;
   file_id: string;
@@ -1894,7 +1810,7 @@ export type UploadViewerInfo = {
   decodable?: boolean;
   /** Human-readable explanation shown when `decodable` is false. */
   message?: string;
-  modality?: "microscopy" | "medical" | "geospatial" | "materials" | "image" | "unknown" | string;
+  modality?: "microscopy" | "medical" | "geospatial" | "image" | "unknown" | string;
   dims_order: string;
   backend_mode?: "direct" | "pyramid" | "atlas" | "scalar" | "hdf5" | string;
   axis_sizes: {
@@ -2214,7 +2130,6 @@ export type UploadViewerInfo = {
     limitations: string[];
     selected_dataset_path?: string | null;
     default_dataset_path?: string | null;
-    materials?: Hdf5MaterialsPayload | null;
   } | null;
 };
 

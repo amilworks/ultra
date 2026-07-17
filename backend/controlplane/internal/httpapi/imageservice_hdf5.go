@@ -9,7 +9,7 @@ import (
 // HDF5 viewer proxy routes (/v2/uploads/{file_id}/hdf5/*).
 //
 // The Python image service owns all h5py work (tree walk, dataset summaries,
-// slice/atlas/scalar-volume rendering, DREAM3D dashboards); the control plane
+// slice/atlas/scalar-volume rendering); the control plane
 // is a thin authorized proxy, exactly like the sibling upload image endpoints:
 // auth + ownership are enforced here (resolveUploadServingRequest -> 404 for
 // foreign/unknown files, before the sidecar is ever reached), the resolved
@@ -25,7 +25,6 @@ import (
 // r.URL.RawQuery wholesale).
 var hdf5QueryKeys = map[string][]string{
 	"/hdf5/dataset":               {"dataset_path"},
-	"/hdf5/materials/dashboard":   nil,
 	"/hdf5/preview/slice":         {"dataset_path", "axis", "index", "component"},
 	"/hdf5/preview/atlas":         {"dataset_path", "enhancement", "fusion_method", "negative", "channels"},
 	"/hdf5/preview/scalar-volume": {"dataset_path", "channel"},
@@ -33,7 +32,7 @@ var hdf5QueryKeys = map[string][]string{
 	"/hdf5/preview/table":         {"dataset_path", "offset", "limit"},
 }
 
-// proxyUploadHdf5 is the shared skeleton for all seven HDF5 routes: not-configured
+// proxyUploadHdf5 is the shared skeleton for all six HDF5 routes: not-configured
 // guard, auth/ownership resolution, allowlisted query passthrough, then the caller's
 // chosen proxy variant (cached vs streaming). No fallback handler is passed — HDF5
 // has no legacy native path.
@@ -48,7 +47,7 @@ func (deps ServerDeps) proxyUploadHdf5(w http.ResponseWriter, r *http.Request, e
 		return
 	}
 	// file_id is echoed by the sidecar into the JSON payloads (dataset summary,
-	// dashboard, histogram, table). The frontend builds every follow-up preview
+	// histogram, table). The frontend builds every follow-up preview
 	// URL from summary.file_id (Hdf5DatasetPreview), so it must be the real id —
 	// always the server-resolved one, never client input.
 	query := url.Values{"path": {path}, "file_id": {record.FileID}}
@@ -64,13 +63,6 @@ func (deps ServerDeps) proxyUploadHdf5(w http.ResponseWriter, r *http.Request, e
 // repeatable, keyed by the source file's stat stamp + dataset_path -> main cache.
 func (deps ServerDeps) handleGetUploadHdf5Dataset(w http.ResponseWriter, r *http.Request) {
 	deps.proxyUploadHdf5(w, r, "/hdf5/dataset", deps.proxyImageServiceCached)
-}
-
-// handleGetUploadHdf5MaterialsDashboard proxies the DREAM3D materials dashboard
-// (JSON). Expensive to compute (grain stats) and fully deterministic per file ->
-// main cache.
-func (deps ServerDeps) handleGetUploadHdf5MaterialsDashboard(w http.ResponseWriter, r *http.Request) {
-	deps.proxyUploadHdf5(w, r, "/hdf5/materials/dashboard", deps.proxyImageServiceCached)
 }
 
 // handleServeUploadHdf5Slice proxies a rendered dataset slice (PNG). This is a

@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS control_resource_collections_parent_idx;

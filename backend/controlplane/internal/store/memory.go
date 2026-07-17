@@ -2614,6 +2614,12 @@ func (s *MemoryStore) SoftDeleteResourceCollectionForUser(ctx context.Context, c
 	if !ok || !collectionVisibleToOwner(collection, userID, orgID) || strings.TrimSpace(collection.Status) == "deleted" {
 		return domain.ResourceCollectionRecord{}, ErrNotFound
 	}
+	// Mirror Postgres: a folder with active subfolders must not soft-delete.
+	for _, candidate := range s.collections {
+		if candidate.ParentCollectionID == collection.CollectionID && candidate.Status == "active" {
+			return domain.ResourceCollectionRecord{}, fmt.Errorf("%w: collection has active subfolders", ErrConflict)
+		}
+	}
 	if deletedAt.IsZero() {
 		deletedAt = domain.Now()
 	}
@@ -4372,6 +4378,16 @@ func (s *MemoryStore) createResourceShareGrantLocked(input domain.CreateResource
 	if granteeUserID == "" && granteeOrgID == "" {
 		return domain.ResourceShareGrantRecord{}, ErrNotFound
 	}
+	// Idempotent share: mirror Postgres — an existing active grant for the
+	// same grantee is returned instead of duplicated.
+	for _, candidate := range s.resourceGrants {
+		if candidate.ResourceID == resourceID &&
+			candidate.Status == "active" &&
+			strings.TrimSpace(candidate.GranteeUserID) == granteeUserID &&
+			strings.TrimSpace(candidate.GranteeOrgID) == granteeOrgID {
+			return candidate, nil
+		}
+	}
 	grantID := strings.TrimSpace(input.GrantID)
 	if grantID == "" {
 		grantID = domain.NewID("resource_grant")
@@ -5081,4 +5097,57 @@ func take[T any](values []T, limit int) []T {
 		return values
 	}
 	return values[:limit]
+}
+
+func (s *MemoryStore) ListResourceCollectionShareGrantsForCollection(ctx context.Context, collectionID string, ownerUserID string, ownerOrgID string) ([]domain.ResourceCollectionShareGrantRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	collection, ok := s.collections[strings.TrimSpace(collectionID)]
+	if !ok || !collectionVisibleToOwner(collection, ownerUserID, ownerOrgID) {
+		return nil, ErrNotFound
+	}
+	grants := []domain.ResourceCollectionShareGrantRecord{}
+	for _, grant := range s.collectionGrants {
+		if grant.CollectionID == collection.CollectionID {
+			grants = append(grants, grant)
+		}
+	}
+	sort.Slice(grants, func(i, j int) bool { return grants[i].CreatedAt.After(grants[j].CreatedAt) })
+	return grants, nil
+}
+
+func (s *MemoryStore) RevokeResourceCollectionShareGrant(ctx context.Context, collectionID string, grantID string, ownerUserID string, ownerOrgID string, revokedAt time.Time) (domain.ResourceCollectionShareGrantRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	collection, ok := s.collections[strings.TrimSpace(collectionID)]
+	if !ok || !collectionVisibleToOwner(collection, ownerUserID, ownerOrgID) {
+		return domain.ResourceCollectionShareGrantRecord{}, ErrNotFound
+	}
+	grant, ok := s.collectionGrants[strings.TrimSpace(grantID)]
+	if !ok || grant.CollectionID != collection.CollectionID || grant.Status != "active" {
+		return domain.ResourceCollectionShareGrantRecord{}, ErrNotFound
+	}
+	if revokedAt.IsZero() {
+		revokedAt = domain.Now()
+	}
+	stamp := revokedAt.UTC()
+	grant.Status = "revoked"
+	grant.RevokedAt = stamp
+	grant.UpdatedAt = stamp
+	s.collectionGrants[grant.GrantID] = grant
+	// Cascade to inherited per-resource grants (mirrors Postgres).
+	for id, inherited := range s.resourceGrants {
+		if inherited.Status != "active" {
+			continue
+		}
+		if backPointer, _ := inherited.Metadata["collection_share_grant_id"].(string); backPointer == grant.GrantID {
+			inherited.Status = "revoked"
+			inherited.RevokedAt = stamp
+			inherited.UpdatedAt = stamp
+			s.resourceGrants[id] = inherited
+		}
+	}
+	return grant, nil
 }

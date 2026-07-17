@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -15159,5 +15160,396 @@ func TestV2RunResourceSearchHonorsShareGrants(t *testing.T) {
 	}
 	if len(rr.Missing) != 1 || rr.Missing[0] != "file_private_b" {
 		t.Fatalf("resolve missing = %+v, want the private id", rr.Missing)
+	}
+}
+
+func TestNestedResourceCollectionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	memoryStore := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(memoryStore, eventbus.NewMemoryBus()),
+		Store:   memoryStore,
+	})
+
+	createCollection := func(t *testing.T, user string, body string) (int, resourceCollectionResponse) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v2/resource-collections", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-User-Id", user)
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		var decoded resourceCollectionResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &decoded)
+		return rec.Code, decoded
+	}
+
+	code, parent := createCollection(t, "alice", `{"name":"experiments","collection_type":"folder"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("create parent status = %d, want 201", code)
+	}
+
+	code, child := createCollection(t, "alice",
+		fmt.Sprintf(`{"name":"run7","collection_type":"folder","parent_collection_id":%q}`, parent.Collection.CollectionID))
+	if code != http.StatusCreated {
+		t.Fatalf("create child status = %d, want 201", code)
+	}
+	if child.Collection.ParentCollectionID != parent.Collection.CollectionID {
+		t.Fatalf("child parent = %q, want %q", child.Collection.ParentCollectionID, parent.Collection.CollectionID)
+	}
+
+	// Another user must not be able to nest under alice's folder.
+	code, _ = createCollection(t, "mallory",
+		fmt.Sprintf(`{"name":"sneaky","collection_type":"folder","parent_collection_id":%q}`, parent.Collection.CollectionID))
+	if code != http.StatusNotFound {
+		t.Fatalf("cross-owner nest status = %d, want 404", code)
+	}
+
+	// Unknown parent is a 404, not a 500.
+	code, _ = createCollection(t, "alice", `{"name":"orphan","collection_type":"folder","parent_collection_id":"collection_missing"}`)
+	if code != http.StatusNotFound {
+		t.Fatalf("missing parent status = %d, want 404", code)
+	}
+
+	// Deleting a folder with an active subfolder is blocked with 409.
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resource-collections/"+parent.Collection.CollectionID, nil)
+	deleteReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusConflict {
+		t.Fatalf("delete parent with child status = %d body=%s, want 409", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	// Delete child first, then the parent succeeds.
+	deleteChildReq := httptest.NewRequest(http.MethodDelete, "/v2/resource-collections/"+child.Collection.CollectionID, nil)
+	deleteChildReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteChildReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	deleteChildRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteChildRec, deleteChildReq)
+	if deleteChildRec.Code != http.StatusOK {
+		t.Fatalf("delete child status = %d, want 200", deleteChildRec.Code)
+	}
+	deleteParentRec := httptest.NewRecorder()
+	deleteParentReq := httptest.NewRequest(http.MethodDelete, "/v2/resource-collections/"+parent.Collection.CollectionID, nil)
+	deleteParentReq.Header.Set("X-Ultra-User-Id", "alice")
+	deleteParentReq.Header.Set("X-Ultra-Org-Id", "org-a")
+	router.ServeHTTP(deleteParentRec, deleteParentReq)
+	if deleteParentRec.Code != http.StatusOK {
+		t.Fatalf("delete parent after child status = %d, want 200", deleteParentRec.Code)
+	}
+
+	// A deleted parent is invisible to the owner-scoped lookup → 404 (the
+	// handler's explicit deleted-status branch covers stores that still
+	// return deleted rows).
+	code, _ = createCollection(t, "alice",
+		fmt.Sprintf(`{"name":"late","collection_type":"folder","parent_collection_id":%q}`, parent.Collection.CollectionID))
+	if code != http.StatusNotFound && code != http.StatusConflict {
+		t.Fatalf("nest under deleted parent status = %d, want 404 or 409", code)
+	}
+}
+
+func TestDownloadResourceCollectionAsZip(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+
+	uploadFile := func(t *testing.T, name string, payload []byte) string {
+		t.Helper()
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := part.Write(payload); err != nil {
+			t.Fatalf("write multipart file: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close writer: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+		req.Header.Set("X-Ultra-User-Id", "zipper")
+		req.Header.Set("X-Ultra-Org-Id", "org-z")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upload %s status = %d body=%s", name, rec.Code, rec.Body.String())
+		}
+		var decoded struct {
+			Uploaded []struct {
+				FileID string `json:"file_id"`
+			} `json:"uploaded"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil || len(decoded.Uploaded) != 1 {
+			t.Fatalf("decode upload response: %v body=%s", err, rec.Body.String())
+		}
+		return decoded.Uploaded[0].FileID
+	}
+
+	fileA := uploadFile(t, "reading.csv", []byte("a,b\n1,2\n"))
+	fileB := uploadFile(t, "reading.csv", []byte("a,b\n3,4\n")) // same name → dedupe suffix in archive
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v2/resource-collections",
+		strings.NewReader(`{"name":"field run","collection_type":"folder"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq.Header.Set("X-Ultra-User-Id", "zipper")
+	createReq.Header.Set("X-Ultra-Org-Id", "org-z")
+	createRec := httptest.NewRecorder()
+	router.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create folder status = %d body=%s", createRec.Code, createRec.Body.String())
+	}
+	var folder resourceCollectionResponse
+	if err := json.Unmarshal(createRec.Body.Bytes(), &folder); err != nil {
+		t.Fatalf("decode folder: %v", err)
+	}
+
+	addReq := httptest.NewRequest(http.MethodPost,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/resources",
+		strings.NewReader(fmt.Sprintf(`{"resource_ids":[%q,%q]}`, fileA, fileB)))
+	addReq.Header.Set("Content-Type", "application/json")
+	addReq.Header.Set("X-Ultra-User-Id", "zipper")
+	addReq.Header.Set("X-Ultra-Org-Id", "org-z")
+	addRec := httptest.NewRecorder()
+	router.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add resources status = %d body=%s", addRec.Code, addRec.Body.String())
+	}
+
+	// Owner downloads the folder as a zip with both members, names deduped.
+	downloadReq := httptest.NewRequest(http.MethodGet,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/download", nil)
+	downloadReq.Header.Set("X-Ultra-User-Id", "zipper")
+	downloadReq.Header.Set("X-Ultra-Org-Id", "org-z")
+	downloadRec := httptest.NewRecorder()
+	router.ServeHTTP(downloadRec, downloadReq)
+	if downloadRec.Code != http.StatusOK {
+		t.Fatalf("download status = %d body=%s", downloadRec.Code, downloadRec.Body.String())
+	}
+	if contentType := downloadRec.Header().Get("Content-Type"); contentType != "application/zip" {
+		t.Fatalf("content type = %q, want application/zip", contentType)
+	}
+	if disposition := downloadRec.Header().Get("Content-Disposition"); !strings.Contains(disposition, "field run.zip") {
+		t.Fatalf("disposition = %q, want field run.zip", disposition)
+	}
+	archive, err := zip.NewReader(bytes.NewReader(downloadRec.Body.Bytes()), int64(downloadRec.Body.Len()))
+	if err != nil {
+		t.Fatalf("open zip: %v", err)
+	}
+	names := map[string][]byte{}
+	for _, entry := range archive.File {
+		reader, openErr := entry.Open()
+		if openErr != nil {
+			t.Fatalf("open entry %s: %v", entry.Name, openErr)
+		}
+		content, readErr := io.ReadAll(reader)
+		reader.Close()
+		if readErr != nil {
+			t.Fatalf("read entry %s: %v", entry.Name, readErr)
+		}
+		names[entry.Name] = content
+	}
+	if string(names["reading.csv"]) != "a,b\n1,2\n" {
+		t.Fatalf("first entry = %q, want original bytes", names["reading.csv"])
+	}
+	if string(names["reading (1).csv"]) != "a,b\n3,4\n" {
+		t.Fatalf("deduped entry = %q, want second file bytes", names["reading (1).csv"])
+	}
+
+	// Non-owner gets 404, never a zip of someone else's data.
+	foreignReq := httptest.NewRequest(http.MethodGet,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/download", nil)
+	foreignReq.Header.Set("X-Ultra-User-Id", "mallory")
+	foreignReq.Header.Set("X-Ultra-Org-Id", "org-z")
+	foreignRec := httptest.NewRecorder()
+	router.ServeHTTP(foreignRec, foreignReq)
+	if foreignRec.Code != http.StatusNotFound {
+		t.Fatalf("foreign download status = %d, want 404", foreignRec.Code)
+	}
+}
+
+func TestSharingRedesignBackend(t *testing.T) {
+	t.Parallel()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:   mem,
+	})
+	ctx := context.Background()
+
+	// Directory: two same-org users + one outsider.
+	for _, account := range []domain.CreateUserInput{
+		{UserID: "workos:alice", Email: "alice@lab.edu", DisplayName: "Alice", OrgID: "org-lab"},
+		{UserID: "workos:bob", Email: "bob@lab.edu", DisplayName: "Bob", OrgID: "org-lab"},
+		{UserID: "workos:eve", Email: "eve@other.org", DisplayName: "Eve", OrgID: "org-other"},
+	} {
+		if _, err := mem.CreateUser(ctx, account); err != nil {
+			t.Fatalf("seed user %s: %v", account.UserID, err)
+		}
+	}
+
+	// Share targets: alice sees bob and her org, never eve or herself.
+	targetsReq := httptest.NewRequest(http.MethodGet, "/v2/share-targets", nil)
+	targetsReq.Header.Set("X-Ultra-User-Id", "workos:alice")
+	targetsReq.Header.Set("X-Ultra-Org-Id", "org-lab")
+	targetsRec := httptest.NewRecorder()
+	router.ServeHTTP(targetsRec, targetsReq)
+	if targetsRec.Code != http.StatusOK {
+		t.Fatalf("share-targets status = %d body=%s", targetsRec.Code, targetsRec.Body.String())
+	}
+	body := targetsRec.Body.String()
+	for _, want := range []string{`"kind":"org"`, `"grantee_org_id":"org-lab"`, `"grantee_user_id":"workos:bob"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("share-targets body missing %s: %s", want, body)
+		}
+	}
+	for _, reject := range []string{"workos:eve", "workos:alice\""} {
+		if strings.Contains(body, reject) {
+			t.Fatalf("share-targets leaked %s: %s", reject, body)
+		}
+	}
+
+	// Seed an owned resource + folder for alice.
+	resource, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "file_share_scan",
+		OwnerUserID:  "workos:alice",
+		OwnerOrgID:   "org-lab",
+		OriginalName: "scan.tif",
+		SizeBytes:    10,
+		SHA256:       "sha-share",
+		Status:       "active",
+		SourceType:   "upload",
+	})
+	if err != nil {
+		t.Fatalf("seed resource: %v", err)
+	}
+
+	// Idempotent share: same grantee twice → one active grant.
+	shareBody := `{"grantee_user_id":"workos:bob"}`
+	for i := 0; i < 2; i++ {
+		shareReq := httptest.NewRequest(http.MethodPost, "/v2/resources/"+resource.ResourceID+"/shares", strings.NewReader(shareBody))
+		shareReq.Header.Set("Content-Type", "application/json")
+		shareReq.Header.Set("X-Ultra-User-Id", "workos:alice")
+		shareReq.Header.Set("X-Ultra-Org-Id", "org-lab")
+		shareRec := httptest.NewRecorder()
+		router.ServeHTTP(shareRec, shareReq)
+		if shareRec.Code != http.StatusOK && shareRec.Code != http.StatusCreated {
+			t.Fatalf("share #%d status = %d body=%s", i+1, shareRec.Code, shareRec.Body.String())
+		}
+	}
+	grants, err := mem.ListResourceShareGrantsForResource(ctx, domain.ListResourceShareGrantsInput{
+		ResourceID: resource.ResourceID, OwnerUserID: "workos:alice", OwnerOrgID: "org-lab", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("list grants: %v", err)
+	}
+	active := 0
+	for _, grant := range grants {
+		if grant.Status == "active" {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active grants after double share = %d, want 1 (idempotent)", active)
+	}
+
+	// Folder share → list → revoke cascades to inherited member grants.
+	createFolder := httptest.NewRequest(http.MethodPost, "/v2/resource-collections",
+		strings.NewReader(`{"name":"cohort","collection_type":"folder"}`))
+	createFolder.Header.Set("Content-Type", "application/json")
+	createFolder.Header.Set("X-Ultra-User-Id", "workos:alice")
+	createFolder.Header.Set("X-Ultra-Org-Id", "org-lab")
+	folderRec := httptest.NewRecorder()
+	router.ServeHTTP(folderRec, createFolder)
+	var folder resourceCollectionResponse
+	if err := json.Unmarshal(folderRec.Body.Bytes(), &folder); err != nil {
+		t.Fatalf("decode folder: %v", err)
+	}
+	addMember := httptest.NewRequest(http.MethodPost,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/resources",
+		strings.NewReader(fmt.Sprintf(`{"resource_ids":[%q]}`, resource.ResourceID)))
+	addMember.Header.Set("Content-Type", "application/json")
+	addMember.Header.Set("X-Ultra-User-Id", "workos:alice")
+	addMember.Header.Set("X-Ultra-Org-Id", "org-lab")
+	addRec := httptest.NewRecorder()
+	router.ServeHTTP(addRec, addMember)
+	if addRec.Code != http.StatusOK {
+		t.Fatalf("add member status = %d", addRec.Code)
+	}
+	shareFolder := httptest.NewRequest(http.MethodPost,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/shares",
+		strings.NewReader(`{"grantee_org_id":"org-lab"}`))
+	shareFolder.Header.Set("Content-Type", "application/json")
+	shareFolder.Header.Set("X-Ultra-User-Id", "workos:alice")
+	shareFolder.Header.Set("X-Ultra-Org-Id", "org-lab")
+	shareFolderRec := httptest.NewRecorder()
+	router.ServeHTTP(shareFolderRec, shareFolder)
+	if shareFolderRec.Code != http.StatusOK && shareFolderRec.Code != http.StatusCreated {
+		t.Fatalf("share folder status = %d body=%s", shareFolderRec.Code, shareFolderRec.Body.String())
+	}
+
+	listShares := httptest.NewRequest(http.MethodGet,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/shares", nil)
+	listShares.Header.Set("X-Ultra-User-Id", "workos:alice")
+	listShares.Header.Set("X-Ultra-Org-Id", "org-lab")
+	listSharesRec := httptest.NewRecorder()
+	router.ServeHTTP(listSharesRec, listShares)
+	if listSharesRec.Code != http.StatusOK {
+		t.Fatalf("list folder shares status = %d body=%s", listSharesRec.Code, listSharesRec.Body.String())
+	}
+	var folderShares struct {
+		Grants []struct {
+			GrantID string `json:"grant_id"`
+			Status  string `json:"status"`
+		} `json:"grants"`
+	}
+	if err := json.Unmarshal(listSharesRec.Body.Bytes(), &folderShares); err != nil || len(folderShares.Grants) == 0 {
+		t.Fatalf("decode folder shares: %v body=%s", err, listSharesRec.Body.String())
+	}
+
+	// Eve (other org) sees nothing.
+	foreignList := httptest.NewRequest(http.MethodGet,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/shares", nil)
+	foreignList.Header.Set("X-Ultra-User-Id", "workos:eve")
+	foreignList.Header.Set("X-Ultra-Org-Id", "org-other")
+	foreignRec := httptest.NewRecorder()
+	router.ServeHTTP(foreignRec, foreignList)
+	if foreignRec.Code != http.StatusNotFound {
+		t.Fatalf("foreign folder share list status = %d, want 404", foreignRec.Code)
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodDelete,
+		"/v2/resource-collections/"+folder.Collection.CollectionID+"/shares/"+folderShares.Grants[0].GrantID, nil)
+	revokeReq.Header.Set("X-Ultra-User-Id", "workos:alice")
+	revokeReq.Header.Set("X-Ultra-Org-Id", "org-lab")
+	revokeRec := httptest.NewRecorder()
+	router.ServeHTTP(revokeRec, revokeReq)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke folder share status = %d body=%s", revokeRec.Code, revokeRec.Body.String())
+	}
+	// Inherited org grant on the member must be revoked too (cascade).
+	grants, err = mem.ListResourceShareGrantsForResource(ctx, domain.ListResourceShareGrantsInput{
+		ResourceID: resource.ResourceID, OwnerUserID: "workos:alice", OwnerOrgID: "org-lab", Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("list grants after revoke: %v", err)
+	}
+	for _, grant := range grants {
+		if grant.Status == "active" && strings.TrimSpace(grant.GranteeOrgID) == "org-lab" && strings.TrimSpace(grant.GranteeUserID) == "" {
+			t.Fatalf("inherited org grant still active after collection revoke: %+v", grant)
+		}
 	}
 }

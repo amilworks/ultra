@@ -8,6 +8,12 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  collectDroppedFiles,
+  isOsFileDrag,
+  snapshotDropPayload,
+  summarizeDropIssues,
+} from "@/lib/dropTraversal";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -85,6 +91,8 @@ import type {
   ResourceCollectionRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
+  ResourceCollectionShareGrantRecord,
+  ShareTargetRecord,
   ResourceTextHead,
 } from "../types";
 
@@ -202,6 +210,15 @@ type ResourceBrowserProps = {
   onClearActiveCollection?: () => void;
   thumbnailUrlFor: (resource: ResourceRecord) => string;
   downloadUrlFor?: (resource: ResourceRecord) => string;
+  onSearchShareTargets?: (query: string) => Promise<ShareTargetRecord[]>;
+  onLoadCollectionShareGrants?: (
+    collection: ResourceCollectionRecord
+  ) => Promise<ResourceCollectionShareGrantRecord[]>;
+  onRevokeCollectionShareGrant?: (
+    collection: ResourceCollectionRecord,
+    grant: ResourceCollectionShareGrantRecord
+  ) => Promise<ResourceCollectionShareGrantRecord>;
+  collectionDownloadUrlFor?: (collection: ResourceCollectionRecord) => string;
   quickPeekFetch?: (fileId: string, maxBytes: number) => Promise<ResourceTextHead>;
   onPushResourceToBisque?: (resource: ResourceRecord) => Promise<void> | void;
   onPushCollectionToBisque?: (collection: ResourceCollectionRecord) => Promise<void> | void;
@@ -593,6 +610,186 @@ const shouldRequestThumbnail = (resource: ResourceRecord, failedThumbnailIds: Re
   );
 };
 
+// Share-target picker: grantees are chosen from real principals (same-org
+// people + the org itself), never typed as raw ids — a typed id that matches
+// nobody is sharing's worst silent failure. Falls back to nothing when the
+// search capability is absent; callers keep their legacy inputs in that case.
+function ShareTargetPicker({
+  idPrefix,
+  onSearch,
+  selectedLabel,
+  hasSelection,
+  disabled,
+  onPick,
+  onClear,
+}: {
+  idPrefix: string;
+  onSearch: (query: string) => Promise<ShareTargetRecord[]>;
+  selectedLabel: string;
+  hasSelection: boolean;
+  disabled?: boolean;
+  onPick: (target: ShareTargetRecord) => void;
+  onClear: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [targets, setTargets] = useState<ShareTargetRecord[]>([]);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    if (hasSelection) {
+      return;
+    }
+    let cancelled = false;
+    setSearching(true);
+    const handle = window.setTimeout(() => {
+      onSearch(query)
+        .then((results) => {
+          if (!cancelled) {
+            setTargets(results);
+            setSearching(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setTargets([]);
+            setSearching(false);
+          }
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, [query, onSearch, hasSelection]);
+
+  if (hasSelection) {
+    return (
+      <div className="resource-browser-share-picked" data-testid={`${idPrefix}-picked`}>
+        <span>{selectedLabel || "Selected"}</span>
+        <Button type="button" variant="ghost" size="sm" onClick={onClear} disabled={disabled}>
+          Change
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="resource-browser-share-picker">
+      <label htmlFor={`${idPrefix}-target`}>Share with</label>
+      <Input
+        id={`${idPrefix}-target`}
+        value={query}
+        placeholder="Search people in your organization"
+        onChange={(event) => setQuery(event.target.value)}
+        autoComplete="off"
+        disabled={disabled}
+      />
+      <div className="resource-browser-share-picker-results" role="listbox" aria-label="Share targets">
+        {searching && targets.length === 0 ? (
+          <p className="resource-browser-share-picker-empty">Searching…</p>
+        ) : null}
+        {!searching && targets.length === 0 ? (
+          <p className="resource-browser-share-picker-empty">No matches in your organization</p>
+        ) : null}
+        {targets.map((target) => (
+          <button
+            key={`${target.kind}:${target.grantee_user_id ?? ""}:${target.grantee_org_id ?? ""}`}
+            type="button"
+            role="option"
+            aria-selected="false"
+            data-share-target-kind={target.kind}
+            onClick={() => onPick(target)}
+            disabled={disabled}
+          >
+            <span className="resource-browser-share-picker-label">{target.label}</span>
+            {target.detail ? (
+              <span className="resource-browser-share-picker-detail">{target.detail}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// "People with access" for a folder: lists collection-level grants and lets
+// the owner revoke one — a single revoke cascades to every inherited member
+// grant server-side.
+function CollectionAccessList({
+  collection,
+  load,
+  revoke,
+}: {
+  collection: ResourceCollectionRecord;
+  load: (collection: ResourceCollectionRecord) => Promise<ResourceCollectionShareGrantRecord[]>;
+  revoke?: (
+    collection: ResourceCollectionRecord,
+    grant: ResourceCollectionShareGrantRecord
+  ) => Promise<ResourceCollectionShareGrantRecord>;
+}) {
+  const [grants, setGrants] = useState<ResourceCollectionShareGrantRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    load(collection)
+      .then((records) => {
+        if (!cancelled) {
+          setGrants(records.filter((grant) => grant.status === "active"));
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setGrants([]);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [collection, load, revision]);
+  const describeGrantee = (grant: ResourceCollectionShareGrantRecord): string => {
+    const user = String(grant.grantee_user_id ?? "").trim();
+    if (user === "__public__") {
+      return "Anyone on the platform";
+    }
+    if (user) {
+      return user;
+    }
+    const org = String(grant.grantee_org_id ?? "").trim();
+    return org ? `Everyone in ${org}` : "Unknown";
+  };
+  if (loading) {
+    return <p className="resource-browser-share-access-empty">Loading access…</p>;
+  }
+  return (
+    <div className="resource-browser-share-access" aria-label="People with access">
+      <p className="resource-browser-share-access-title">People with access</p>
+      {grants.length === 0 ? (
+        <p className="resource-browser-share-access-empty">Only you</p>
+      ) : (
+        grants.map((grant) => (
+          <div key={grant.grant_id} className="resource-browser-share-access-row">
+            <span>{describeGrantee(grant)}</span>
+            {revoke ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void revoke(collection, grant).then(() => setRevision((value) => value + 1));
+                }}
+              >
+                Revoke
+              </Button>
+            ) : null}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 export function ResourceBrowser({
   resources,
   resourceCollections = [],
@@ -637,6 +834,9 @@ export function ResourceBrowser({
   onDeleteSelectedResources,
   onRestoreSelectedResources,
   onRevokeResourceShareGrant,
+  onSearchShareTargets,
+  onLoadCollectionShareGrants,
+  onRevokeCollectionShareGrant,
   onCreateCollectionFromSelection,
   onAddSelectionToCollection,
   activeResourceCollection = null,
@@ -649,6 +849,7 @@ export function ResourceBrowser({
   thumbnailUrlFor,
   zScrubThumbnail,
   downloadUrlFor,
+  collectionDownloadUrlFor,
   quickPeekFetch,
   onPushResourceToBisque,
   onPushCollectionToBisque,
@@ -675,6 +876,9 @@ export function ResourceBrowser({
   const [shareGrantsError, setShareGrantsError] = useState<string | null>(null);
   const [shareGranteeUserId, setShareGranteeUserId] = useState("");
   const [shareGranteeOrgId, setShareGranteeOrgId] = useState("");
+  const [shareGranteeLabel, setShareGranteeLabel] = useState("");
+  const [bulkShareGranteeLabel, setBulkShareGranteeLabel] = useState("");
+  const [collectionShareGranteeLabel, setCollectionShareGranteeLabel] = useState("");
   const [shareSaving, setShareSaving] = useState(false);
   const [shareRevokingById, setShareRevokingById] = useState<Record<string, true>>({});
   const [bulkShareOpen, setBulkShareOpen] = useState(false);
@@ -745,6 +949,29 @@ export function ResourceBrowser({
   const tableBottomSpacerHeight = tableVirtualized
     ? Math.max(0, (cardResources.length - tableEndIndex) * RESOURCE_TABLE_ROW_HEIGHT)
     : 0;
+  // Duplicate awareness over the loaded page: identical content = same
+  // sha256 + size. Deliberately pagination-blind (a server-side count is the
+  // follow-up); empty checksums (bisque imports, bundles) never group.
+  const duplicateShaCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const resource of cardResources) {
+      const sha = String(resource.sha256 ?? "").trim().toLowerCase();
+      if (!sha || resource.status === "deleted") {
+        continue;
+      }
+      const key = `${sha}:${resource.size_bytes ?? 0}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [cardResources]);
+  const duplicateCountFor = (resource: ResourceRecord): number => {
+    const sha = String(resource.sha256 ?? "").trim().toLowerCase();
+    if (!sha) {
+      return 0;
+    }
+    return duplicateShaCounts.get(`${sha}:${resource.size_bytes ?? 0}`) ?? 0;
+  };
+
   const selectedResourcesInOrder = useMemo(
     () =>
       cardResources.filter((resource) => selectedResourceIds[resource.file_id]),
@@ -772,6 +999,23 @@ export function ResourceBrowser({
       ),
     [resourceCollections]
   );
+  // Nested browsing: the strip shows roots at the top level and children of
+  // the open folder inside it. A child whose parent is not in the loaded list
+  // (200-cap / filter scoping) surfaces at root rather than vanishing.
+  const loadedCollectionIds = useMemo(
+    () => new Set(resourceCollections.map((collection) => collection.collection_id)),
+    [resourceCollections]
+  );
+  const visibleFolderCollections = useMemo(() => {
+    const activeId = activeResourceCollection?.collection_id ?? "";
+    return availableFolderCollections.filter((collection) => {
+      const parentId = String(collection.parent_collection_id ?? "").trim();
+      if (activeId) {
+        return parentId === activeId;
+      }
+      return parentId === "" || !loadedCollectionIds.has(parentId);
+    });
+  }, [availableFolderCollections, activeResourceCollection, loadedCollectionIds]);
   const safeTotalCount = Math.max(0, Math.floor(Number(totalCount) || 0));
   const visibleCount = cardResources.length;
   const activeCollectionName = String(activeResourceCollection?.name ?? "").trim();
@@ -938,18 +1182,13 @@ export function ResourceBrowser({
     onUploadFiles?.(resumeFrom.relativePath ? files : [matchingFile], { resumeFrom });
   };
 
-  const droppedFilesFromEvent = (event: DragEvent<HTMLElement>): File[] =>
-    Array.from(event.dataTransfer.files ?? []).filter((file) => file.size >= 0);
-
   const isExternalFileDrag = (event: DragEvent<HTMLElement>): boolean => {
     if (draggedResourceId) {
       return false;
     }
-    const types = Array.from(event.dataTransfer.types ?? []);
-    if (types.includes("Files")) {
-      return true;
-    }
-    return Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file");
+    // isOsFileDrag also rejects in-page image/link drags, which carry "Files"
+    // alongside text/html or text/uri-list.
+    return isOsFileDrag(event.dataTransfer);
   };
 
   const uploadDroppedFiles = (
@@ -961,16 +1200,26 @@ export function ResourceBrowser({
     }
     event.preventDefault();
     event.stopPropagation();
-    const droppedFiles = droppedFilesFromEvent(event);
+    // Entries are only readable during the drop dispatch — snapshot before the
+    // async directory walk. Dropped folders traverse recursively and their
+    // files carry synthesized relative paths, so zarr stores bundle and plain
+    // folders get filed as folders upstream.
+    const payload = snapshotDropPayload(event.dataTransfer);
     setFileDropTargetId("");
-    if (droppedFiles.length === 0) {
-      return true;
-    }
     setUploadReselectionError(null);
-    onUploadFiles(
-      droppedFiles,
-      collection ? { uploadTargetCollection: collection } : undefined
-    );
+    void collectDroppedFiles(payload).then((dropped) => {
+      const message = summarizeDropIssues(dropped);
+      if (message) {
+        setUploadReselectionError(message);
+      }
+      if (dropped.files.length === 0) {
+        return;
+      }
+      onUploadFiles(
+        dropped.files,
+        collection ? { uploadTargetCollection: collection } : undefined
+      );
+    });
     return true;
   };
 
@@ -1156,6 +1405,7 @@ export function ResourceBrowser({
     setBulkShareOpen(false);
     setBulkShareGranteeUserId("");
     setBulkShareGranteeOrgId("");
+    setBulkShareGranteeLabel("");
     setBulkShareError(null);
   };
 
@@ -1647,6 +1897,18 @@ export function ResourceBrowser({
             Share
           </ContextMenuItem>
         ) : null}
+        {collectionDownloadUrlFor ? (
+          <ContextMenuItem asChild>
+            {/* Server streams the folder as a zip (bundles included as trees). */}
+            <a
+              href={collectionDownloadUrlFor(collection)}
+              download={`${String(collection.name ?? "").trim() || collection.collection_id}.zip`}
+            >
+              <Download data-icon="inline-start" />
+              Download as zip
+            </a>
+          </ContextMenuItem>
+        ) : null}
         {onDeleteCollection ? (
           <>
             <ContextMenuSeparator />
@@ -1702,6 +1964,7 @@ export function ResourceBrowser({
     setBulkShareOpen(false);
     setBulkShareGranteeUserId("");
     setBulkShareGranteeOrgId("");
+    setBulkShareGranteeLabel("");
     setBulkShareError(null);
   };
 
@@ -1763,6 +2026,7 @@ export function ResourceBrowser({
     setShareSheetResourceId(resource.file_id);
     setShareGranteeUserId("");
     setShareGranteeOrgId("");
+    setShareGranteeLabel("");
     setShareGrantsError(null);
     void loadShareGrantsForResource(resource);
   };
@@ -1771,6 +2035,7 @@ export function ResourceBrowser({
     setShareSheetResourceId("");
     setShareGranteeUserId("");
     setShareGranteeOrgId("");
+    setShareGranteeLabel("");
     setShareGrantsError(null);
     setShareSaving(false);
     setShareRevokingById({});
@@ -1780,6 +2045,7 @@ export function ResourceBrowser({
     setCollectionShareTarget(collection);
     setCollectionShareGranteeUserId("");
     setCollectionShareGranteeOrgId("");
+    setCollectionShareGranteeLabel("");
     setCollectionShareError(null);
     setCollectionShareSaving(false);
   };
@@ -1791,6 +2057,7 @@ export function ResourceBrowser({
     setCollectionShareTarget(null);
     setCollectionShareGranteeUserId("");
     setCollectionShareGranteeOrgId("");
+    setCollectionShareGranteeLabel("");
     setCollectionShareError(null);
   };
 
@@ -1813,6 +2080,7 @@ export function ResourceBrowser({
       setCollectionShareTarget(null);
       setCollectionShareGranteeUserId("");
       setCollectionShareGranteeOrgId("");
+    setCollectionShareGranteeLabel("");
     } catch (shareError) {
       setCollectionShareError(
         shareError instanceof Error ? shareError.message : "Unable to share this folder."
@@ -1846,6 +2114,7 @@ export function ResourceBrowser({
       });
       setShareGranteeUserId("");
       setShareGranteeOrgId("");
+    setShareGranteeLabel("");
     } catch (shareError) {
       setShareGrantsError(
         shareError instanceof Error ? shareError.message : "Unable to grant resource access."
@@ -2167,9 +2436,9 @@ export function ResourceBrowser({
               </ContextMenuContent>
             </ContextMenu>
           ) : null}
-          {!activeResourceCollection && onOpenCollection && availableFolderCollections.length > 0 ? (
+          {onOpenCollection && visibleFolderCollections.length > 0 ? (
             <div className="resource-browser-collection-strip" aria-label="Resource folders">
-              {availableFolderCollections.map((collection) => {
+              {visibleFolderCollections.map((collection) => {
                 const resourceCount = Math.max(0, Number(collection.resource_count) || 0);
                 return (
                   <ContextMenu key={collection.collection_id}>
@@ -2858,6 +3127,15 @@ export function ResourceBrowser({
                               <span>Deleted</span>
                             </div>
                           ) : null}
+                          {!isDeleted && duplicateCountFor(resource) > 1 ? (
+                            <div
+                              className="resource-browser-dup-chip"
+                              aria-label={`${displayName} has identical copies in view`}
+                              title="Identical content (same checksum and size) appears more than once in this view"
+                            >
+                              <span>Duplicate ×{duplicateCountFor(resource)}</span>
+                            </div>
+                          ) : null}
                           {resourceTags.length > 0 ? (
                             <div
                               className="resource-browser-resource-tags"
@@ -3062,6 +3340,25 @@ export function ResourceBrowser({
           </SheetHeader>
           <div className="resource-browser-share-body">
             <div className="resource-browser-share-form">
+              {onSearchShareTargets ? (
+                <ShareTargetPicker
+                  idPrefix="resource-bulk-share"
+                  onSearch={onSearchShareTargets}
+                  selectedLabel={bulkShareGranteeLabel}
+                  hasSelection={Boolean(bulkShareGranteeUserId.trim() || bulkShareGranteeOrgId.trim())}
+                  disabled={bulkShareSaving}
+                  onPick={(target) => {
+                    setBulkShareGranteeUserId(target.grantee_user_id ?? "");
+                    setBulkShareGranteeOrgId(target.grantee_org_id ?? "");
+                    setBulkShareGranteeLabel(target.label);
+                  }}
+                  onClear={() => {
+                    setBulkShareGranteeUserId("");
+                    setBulkShareGranteeOrgId("");
+                    setBulkShareGranteeLabel("");
+                  }}
+                />
+              ) : (
               <div className="resource-browser-share-grid">
                 <div>
                   <label htmlFor="resource-bulk-share-user-id">Person or user ID</label>
@@ -3084,6 +3381,7 @@ export function ResourceBrowser({
                   />
                 </div>
               </div>
+              )}
               <Button
                 type="button"
                 variant="default"
@@ -3131,6 +3429,27 @@ export function ResourceBrowser({
             </SheetHeader>
             <div className="resource-browser-share-body">
               <div className="resource-browser-share-form">
+                {onSearchShareTargets ? (
+                  <ShareTargetPicker
+                    idPrefix="resource-folder-share"
+                    onSearch={onSearchShareTargets}
+                    selectedLabel={collectionShareGranteeLabel}
+                    hasSelection={Boolean(
+                      collectionShareGranteeUserId.trim() || collectionShareGranteeOrgId.trim()
+                    )}
+                    disabled={collectionShareSaving}
+                    onPick={(target) => {
+                      setCollectionShareGranteeUserId(target.grantee_user_id ?? "");
+                      setCollectionShareGranteeOrgId(target.grantee_org_id ?? "");
+                      setCollectionShareGranteeLabel(target.label);
+                    }}
+                    onClear={() => {
+                      setCollectionShareGranteeUserId("");
+                      setCollectionShareGranteeOrgId("");
+                      setCollectionShareGranteeLabel("");
+                    }}
+                  />
+                ) : (
                 <div className="resource-browser-share-grid">
                   <div>
                     <label htmlFor="resource-folder-share-user-id">Person or user ID</label>
@@ -3155,6 +3474,14 @@ export function ResourceBrowser({
                     />
                   </div>
                 </div>
+                )}
+                {collectionShareTarget && onLoadCollectionShareGrants ? (
+                  <CollectionAccessList
+                    collection={collectionShareTarget}
+                    load={onLoadCollectionShareGrants}
+                    revoke={onRevokeCollectionShareGrant}
+                  />
+                ) : null}
                 <Button
                   type="button"
                   variant="default"
@@ -3203,6 +3530,24 @@ export function ResourceBrowser({
             </SheetHeader>
             <div className="resource-browser-share-body">
               <div className="resource-browser-share-form">
+                {onSearchShareTargets ? (
+                  <ShareTargetPicker
+                    idPrefix="resource-share"
+                    onSearch={onSearchShareTargets}
+                    selectedLabel={shareGranteeLabel}
+                    hasSelection={Boolean(shareGranteeUserId.trim() || shareGranteeOrgId.trim())}
+                    onPick={(target) => {
+                      setShareGranteeUserId(target.grantee_user_id ?? "");
+                      setShareGranteeOrgId(target.grantee_org_id ?? "");
+                      setShareGranteeLabel(target.label);
+                    }}
+                    onClear={() => {
+                      setShareGranteeUserId("");
+                      setShareGranteeOrgId("");
+                      setShareGranteeLabel("");
+                    }}
+                  />
+                ) : (
                 <div className="resource-browser-share-grid">
                   <div>
                     <label htmlFor="resource-share-user-id">Person or user ID</label>
@@ -3223,6 +3568,7 @@ export function ResourceBrowser({
                     />
                   </div>
                 </div>
+                )}
                 <Button
                   type="button"
                   variant="default"

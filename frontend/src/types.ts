@@ -836,6 +836,35 @@ export type ResourceCollectionShareGrantsCreateResponse = {
   grants: ResourceShareGrantRecord[];
 };
 
+/** One pickable share grantee: a same-org person or the org itself. */
+export type ShareTargetRecord = {
+  kind: "user" | "org" | string;
+  grantee_user_id?: string;
+  grantee_org_id?: string;
+  label: string;
+  detail?: string;
+};
+
+export type ShareTargetListResponse = {
+  targets: ShareTargetRecord[];
+};
+
+/** Collection-level grant rows (same wire shape, keyed by collection_id). */
+export type ResourceCollectionShareGrantRecord = Omit<
+  ResourceShareGrantRecord,
+  "resource_id"
+> & {
+  collection_id: string;
+};
+
+export type ResourceCollectionShareGrantListResponse = {
+  grants: ResourceCollectionShareGrantRecord[];
+};
+
+export type ResourceCollectionShareGrantRevokeResponse = {
+  grant: ResourceCollectionShareGrantRecord;
+};
+
 export type ResourceShareGrantListResponse = {
   resource_id: string;
   count: number;

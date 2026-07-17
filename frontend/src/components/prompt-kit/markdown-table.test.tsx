@@ -137,6 +137,74 @@ describe("code fences are never rewritten by table repair", () => {
   });
 });
 
+// Numeric columns right-align automatically (remarkNumericColumnAlign) so
+// units digits line up under tabular-nums; explicit delimiter markers and
+// prose columns are untouched. Alignment reaches the DOM as an inline
+// `text-align` style (react-markdown's tableCellAlignToStyle), not a class.
+describe("numeric column auto-alignment", () => {
+  const alignsOf = (container: HTMLElement, selector: "th" | "td") =>
+    Array.from(container.querySelectorAll(selector)).map(
+      (cell) => (cell as HTMLElement).style.textAlign || "left"
+    );
+
+  it("right-aligns integer and signed-delta columns, leaves label columns left", () => {
+    const md =
+      "| Class | Count | Change |\n|---|---|---|\n| `burrow` | **118** | +91 |\n| prairie_dog | 30 | -26 |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "th")).toEqual(["left", "right", "right"]);
+    expect(alignsOf(container, "td")).toEqual([
+      "left",
+      "right",
+      "right",
+      "left",
+      "right",
+      "right",
+    ]);
+  });
+
+  it("never overrides explicit delimiter alignment", () => {
+    const md = "| A | B |\n|:--|---|\n| 1 | 2 |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "td")).toEqual(["left", "right"]);
+  });
+
+  it("keeps mixed text/number columns left-aligned", () => {
+    const md = "| A | B |\n|---|---|\n| 1 | 2 |\n| note | 3 |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "td")).toEqual([
+      "left",
+      "right",
+      "left",
+      "right",
+    ]);
+  });
+
+  it("treats dash/empty/n-a cells as neutral but requires one real number", () => {
+    const md =
+      "| A | B | C |\n|---|---|---|\n| 118 | — | 1 |\n| — | n/a | 2 |\n|  | — | 3 |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "th")).toEqual(["right", "left", "right"]);
+  });
+
+  it("accepts decimals, thousands commas, percents, scientific notation", () => {
+    const md =
+      "| a | b | c | d |\n|---|---|---|---|\n| 3.14 | 1,234 | 43% | 1.2e-3 |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "td")).toEqual([
+      "right",
+      "right",
+      "right",
+      "right",
+    ]);
+  });
+
+  it("leaves unit-suffixed values and formulas as prose", () => {
+    const md = "| lat | expr |\n|---|---|\n| 137ms | $x^2$ |";
+    const { container } = render(<Markdown>{md}</Markdown>);
+    expect(alignsOf(container, "td")).toEqual(["left", "left"]);
+  });
+});
+
 describe("Markdown table repair — render matrix", () => {
   for (const c of cases) {
     it(c.name, () => {

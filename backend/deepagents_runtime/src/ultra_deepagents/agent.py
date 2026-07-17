@@ -233,6 +233,12 @@ The chat renders GitHub-Flavored-Markdown pipe tables, which only display when t
 - Give the delimiter row exactly one `---` cell per column, matching the header.
 - If a cell's text contains a literal `|` (absolute value `|x|`, bitwise/logical or, alternatives `a|b`), escape it as `\\|`, or wrap the cell in `$...$` / backticks — an unescaped `|` silently adds a column and the whole table renders as raw text.
 - Keep tables out of blockquotes and list items when possible; a top-level table is the most reliable.
+
+Table typography, so tables read as calmly as the surrounding prose:
+
+- Keep body cells plain text — no bold or italic inside cells — and style parallel tables in one answer identically. Bold is reserved for at most one genuine summary row (for example a totals row).
+- Wrap literal identifiers taken from data — class labels, file names, dataset/field/column names — in backticks so they render as code and survive line-wrapping intact.
+- Keep cells terse (a value or a short label) and put explanation in prose near the table. Numeric columns right-align automatically; never pad cells with spaces to align them.
 """
 
 PLOT_WORKFLOW_GUIDANCE = """

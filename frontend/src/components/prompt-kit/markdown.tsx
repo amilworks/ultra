@@ -146,6 +146,80 @@ export function repairTableDelimiters(block: string): string {
   return changed ? lines.join("\n") : block;
 }
 
+// --- Numeric column alignment ----------------------------------------------
+// GFM leaves a column left-aligned unless the delimiter row carries an explicit
+// `--:` marker, which models rarely emit. Left-aligned numbers defeat the
+// table's `tabular-nums`: magnitudes only compare at a glance when units digits
+// line up. Right-align any column whose body cells are all numeric (empty,
+// dash, and n/a cells are neutral), leaving explicit model-authored alignment
+// untouched.
+type MdastNode = {
+  type: string;
+  value?: string;
+  children?: MdastNode[];
+  align?: Array<string | null>;
+};
+
+// Signed integers/decimals with optional thousands commas, scientific notation,
+// or a percent suffix. Deliberately conservative: unit suffixes ("137ms"),
+// currency, and formulas stay left-aligned prose.
+const NUMERIC_CELL_PATTERN =
+  /^[+\-±]?(\d[\d,]*(\.\d+)?|\.\d+)([eE][+-]?\d+)?%?$/;
+const NEUTRAL_CELL_PATTERN = /^([-–—·]|n\/a)?$/i;
+
+function flattenMdastValue(node: MdastNode): string {
+  // Leaf values cover text and inlineCode, but also inlineMath/html — flatten
+  // those too so a `$x^2$` cell reads as "$x^2$" (non-numeric), not as empty
+  // (neutral), which would let a formula column right-align.
+  if (typeof node.value === "string") {
+    return node.value;
+  }
+  if (Array.isArray(node.children)) {
+    return node.children.map((child) => flattenMdastValue(child)).join("");
+  }
+  return "";
+}
+
+function applyNumericColumnAlignment(table: MdastNode): void {
+  const align = table.align;
+  const bodyRows = (table.children ?? []).slice(1);
+  if (!align || bodyRows.length === 0) {
+    return;
+  }
+  for (let column = 0; column < align.length; column += 1) {
+    if (align[column] != null) {
+      continue;
+    }
+    let sawNumber = false;
+    let qualifies = true;
+    for (const row of bodyRows) {
+      const cell = row.children?.[column];
+      const content = cell ? flattenMdastValue(cell).trim() : "";
+      if (NUMERIC_CELL_PATTERN.test(content)) {
+        sawNumber = true;
+      } else if (!NEUTRAL_CELL_PATTERN.test(content)) {
+        qualifies = false;
+        break;
+      }
+    }
+    if (qualifies && sawNumber) {
+      align[column] = "right";
+    }
+  }
+}
+
+export function remarkNumericColumnAlign() {
+  return (tree: MdastNode): void => {
+    const visit = (node: MdastNode): void => {
+      if (node.type === "table") {
+        applyNumericColumnAlignment(node);
+      }
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
 export function parseMarkdownIntoBlocks(markdown: string): string[] {
   try {
     // marked's lexer has no math awareness. A multi-line `$$ ... $$` display
@@ -248,13 +322,6 @@ function extractLanguage(className?: string): string {
   if (!className) return "plaintext";
   const match = className.match(/language-([\w-]+)/);
   return match ? match[1] : "plaintext";
-}
-
-function tableAlignClass(align?: string): string {
-  const normalized = String(align || "").toLowerCase();
-  if (normalized === "center") return "text-center";
-  if (normalized === "right") return "text-right";
-  return "text-left";
 }
 
 function flattenNodeText(node: ReactNode): string {
@@ -516,19 +583,18 @@ const BASE_COMPONENTS: Partial<Components> = {
       </tr>
     );
   },
-  th: function TableHeaderCellComponent({
-    className,
-    children,
-    align,
-    ...props
-  }) {
+  // Column alignment needs no handling here: react-markdown converts the GFM
+  // align attribute into an inline `text-align` style on th/td
+  // (hast-util-to-jsx-runtime's tableCellAlignToStyle), which the props spread
+  // applies and the cell-content span inherits. It is sourced from explicit
+  // `--:` delimiter markers or from remarkNumericColumnAlign.
+  th: function TableHeaderCellComponent({ className, children, ...props }) {
     const shouldConstrain = shouldConstrainTableCell(children);
     return (
       <th
         className={cn(
           "pk-table-head-cell",
           shouldConstrain && "pk-table-cell-long",
-          tableAlignClass(align),
           className
         )}
         {...props}
@@ -537,14 +603,13 @@ const BASE_COMPONENTS: Partial<Components> = {
       </th>
     );
   },
-  td: function TableCellComponent({ className, children, align, ...props }) {
+  td: function TableCellComponent({ className, children, ...props }) {
     const shouldConstrain = shouldConstrainTableCell(children);
     return (
       <td
         className={cn(
           "pk-table-cell",
           shouldConstrain && "pk-table-cell-long",
-          tableAlignClass(align),
           className
         )}
         {...props}
@@ -642,8 +707,8 @@ function MarkdownComponent({
   const remarkPlugins = useMemo<Array<unknown>>(
     () =>
       mathPlugins
-        ? [remarkGfm, remarkBreaks, mathPlugins.remarkMath]
-        : [remarkGfm, remarkBreaks],
+        ? [remarkGfm, remarkNumericColumnAlign, remarkBreaks, mathPlugins.remarkMath]
+        : [remarkGfm, remarkNumericColumnAlign, remarkBreaks],
     [mathPlugins]
   );
   const rehypePlugins = useMemo<Array<unknown>>(

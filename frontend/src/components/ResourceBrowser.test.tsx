@@ -24,6 +24,94 @@ const imageResource: ResourceRecord = {
   sync_status: "bisque_sync_succeeded",
 };
 
+describe("duplicate awareness", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "(max-width: 720px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    );
+  });
+
+  it("chips resources whose sha256+size appear more than once in view, and only those", () => {
+    const twin = (id: string, name: string): ResourceRecord => ({
+      ...imageResource,
+      file_id: id,
+      original_name: name,
+      sha256: "sha-twin",
+      size_bytes: 4242,
+      source_type: "upload",
+    });
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[twin("file_a", "copy-a.png"), twin("file_b", "copy-b.png"), fileResource]}
+      />
+    );
+    const chips = document.querySelectorAll(".resource-browser-dup-chip");
+    expect(chips).toHaveLength(2);
+    expect(chips[0].textContent).toBe("Duplicate ×2");
+  });
+
+  it("shows child folders inside an open folder and only roots at the top level", () => {
+    const rootFolder: ResourceCollectionRecord = {
+      collection_id: "collection_root",
+      name: "experiments",
+      collection_type: "folder",
+      status: "active",
+      resource_count: 0,
+      created_at: "2026-07-01T00:00:00Z",
+      updated_at: "2026-07-01T00:00:00Z",
+    } as ResourceCollectionRecord;
+    const childFolder: ResourceCollectionRecord = {
+      ...rootFolder,
+      collection_id: "collection_child",
+      name: "run7",
+      parent_collection_id: "collection_root",
+    };
+    const { rerender } = render(
+      <ResourceBrowser
+        {...baseProps}
+        resourceCollections={[rootFolder, childFolder]}
+        onOpenCollection={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Open folder experiments" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open folder run7" })).toBeNull();
+
+    rerender(
+      <ResourceBrowser
+        {...baseProps}
+        resourceCollections={[rootFolder, childFolder]}
+        activeResourceCollection={rootFolder}
+        onOpenCollection={vi.fn()}
+        onClearActiveCollection={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Open folder run7" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open folder experiments" })).toBeNull();
+  });
+
+  it("never groups resources with empty checksums", () => {
+    const blank = (id: string): ResourceRecord => ({
+      ...imageResource,
+      file_id: id,
+      sha256: "",
+    });
+    render(<ResourceBrowser {...baseProps} resources={[blank("file_x"), blank("file_y")]} />);
+    expect(document.querySelectorAll(".resource-browser-dup-chip")).toHaveLength(0);
+  });
+});
+
 const fileResource: ResourceRecord = {
   file_id: "file_volume",
   original_name: "NPH_shunt_002_70yo.nii.gz",
@@ -818,7 +906,7 @@ describe("ResourceBrowser", () => {
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
   });
 
-  it("uploads dropped desktop files into the active folder", () => {
+  it("uploads dropped desktop files into the active folder", async () => {
     const onUploadFiles = vi.fn();
     const file = new File(["nifti"], "dropped-brain.nii.gz", {
       type: "application/gzip",
@@ -839,14 +927,16 @@ describe("ResourceBrowser", () => {
     expect(dataTransfer.dropEffect).toBe("copy");
     fireEvent.drop(content as HTMLElement, { dataTransfer });
 
-    expect(onUploadFiles).toHaveBeenCalledTimes(1);
+    // Drop traversal is async (directory-entry walks); the callback fires
+    // after the snapshot resolves.
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
     expect(onUploadFiles.mock.calls[0][1]).toMatchObject({
       uploadTargetCollection: nphFolder,
     });
   });
 
-  it("uploads dropped desktop files directly into a folder tile", () => {
+  it("uploads dropped desktop files directly into a folder tile", async () => {
     const onUploadFiles = vi.fn();
     const file = new File(["table"], "dropped-table.csv", {
       type: "text/csv",
@@ -866,11 +956,75 @@ describe("ResourceBrowser", () => {
     expect(dataTransfer.dropEffect).toBe("copy");
     fireEvent.drop(folderButton, { dataTransfer });
 
-    expect(onUploadFiles).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
     expect(onUploadFiles.mock.calls[0][0]).toEqual([file]);
     expect(onUploadFiles.mock.calls[0][1]).toMatchObject({
       uploadTargetCollection: nphFolder,
     });
+  });
+
+  it("traverses a dropped directory and uploads its files with relative paths", async () => {
+    const onUploadFiles = vi.fn();
+    const fileEntry = (fullPath: string) => {
+      const entryName = fullPath.split("/").filter(Boolean).pop() ?? "";
+      return {
+        isFile: true,
+        isDirectory: false,
+        name: entryName,
+        fullPath,
+        file: (onSuccess: (file: File) => void) =>
+          onSuccess(new File(["x"], entryName, { type: "application/octet-stream" })),
+      };
+    };
+    const directoryEntry = {
+      isFile: false,
+      isDirectory: true,
+      name: "experiment_A",
+      fullPath: "/experiment_A",
+      createReader: () => {
+        let drained = false;
+        return {
+          readEntries: (
+            onSuccess: (entries: unknown[]) => void
+          ) => {
+            if (drained) {
+              onSuccess([]);
+              return;
+            }
+            drained = true;
+            onSuccess([
+              fileEntry("/experiment_A/a.tif"),
+              fileEntry("/experiment_A/.DS_Store"),
+            ]);
+          },
+        };
+      },
+    };
+    const dataTransfer = {
+      dropEffect: "none",
+      effectAllowed: "all",
+      files: [] as File[],
+      items: [
+        {
+          kind: "file",
+          type: "",
+          webkitGetAsEntry: () => directoryEntry,
+        },
+      ],
+      types: ["Files"],
+      setData: vi.fn(),
+      getData: vi.fn(() => ""),
+    };
+    const { container } = render(
+      <ResourceBrowser {...baseProps} onUploadFiles={onUploadFiles} />
+    );
+    const content = container.querySelector(".resource-browser-content");
+    fireEvent.drop(content as HTMLElement, { dataTransfer });
+
+    await waitFor(() => expect(onUploadFiles).toHaveBeenCalledTimes(1));
+    const uploadedFiles = onUploadFiles.mock.calls[0][0] as File[];
+    expect(uploadedFiles.map((file) => file.name)).toEqual(["a.tif"]);
+    expect(uploadedFiles[0].webkitRelativePath).toBe("experiment_A/a.tif");
   });
 
   it("shows verified-byte progress for resumable resource uploads", () => {
@@ -2567,5 +2721,70 @@ describe("ResourceBrowser", () => {
     });
 
     expect(onLoadMore).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("share target picker", () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn(() => ({
+        matches: false,
+        media: "(max-width: 720px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }))
+    );
+  });
+
+  it("replaces free-text grantee ids with picked targets, org row included", async () => {
+    const onSearchShareTargets = vi.fn(async () => [
+      {
+        kind: "org",
+        grantee_org_id: "org-lab",
+        label: "Everyone in your organization",
+        detail: "org-lab",
+      },
+      { kind: "user", grantee_user_id: "workos:bob", label: "Bob", detail: "bob@lab.edu" },
+    ]);
+    const onCreateResourceShareGrant = vi.fn(async () => ({
+      grant_id: "grant_1",
+      resource_id: "file_image",
+      owner_user_id: "me",
+      role: "read",
+      status: "active",
+      created_at: "2026-07-15T00:00:00Z",
+      updated_at: "2026-07-15T00:00:00Z",
+    }));
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        onSearchShareTargets={onSearchShareTargets}
+        onLoadResourceShareGrants={vi.fn(async () => [])}
+        onCreateResourceShareGrant={onCreateResourceShareGrant}
+        onRevokeResourceShareGrant={vi.fn()}
+      />
+    );
+    const card = screen.getByText("prairie-cell-image.png").closest("article");
+    fireEvent.contextMenu(card as HTMLElement);
+    fireEvent.click(await screen.findByText("Share"));
+
+    // Free-text id inputs are gone; the picker search is present.
+    expect(screen.queryByLabelText("Person or user ID")).toBeNull();
+    const search = await screen.findByPlaceholderText("Search people in your organization");
+    expect(search).toBeInTheDocument();
+
+    const orgRow = await screen.findByText("Everyone in your organization");
+    fireEvent.click(orgRow);
+    await waitFor(() =>
+      expect(screen.getByTestId("resource-share-picked")).toHaveTextContent(
+        "Everyone in your organization"
+      )
+    );
   });
 });

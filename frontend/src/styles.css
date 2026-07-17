@@ -1907,11 +1907,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
      was expanded; releases back to the pk max-height on focus. */
+  /* Lock the idle pill to exactly 3rem and center the single placeholder line
+     optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
+     font-size clamp. min = max defeats any stale autosize inline height, so the
+     pill and its text land identically every time. padding-left clears the
+     idle attach button (0.5rem inset + 2.5rem button + breathing room). */
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
-    min-height: 2.55rem;
+    min-height: 3rem;
     max-height: 3rem;
-    padding-top: 0.7rem;
-    padding-bottom: 0.7rem;
+    padding-top: calc((3rem - 1.45em) / 2);
+    padding-bottom: calc((3rem - 1.45em) / 2);
+    padding-left: 3.4rem;
   }
   .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
     margin-top: 0;
@@ -1940,12 +1946,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     padding-top: 0;
     padding-bottom: 0;
   }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-mode {
+    opacity: 1;
+  }
 }
 
 @media (min-width: 641px) and (prefers-reduced-motion: reduce) {
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions,
   .app-composer-shell .app-composer-actions-start {
+    transition: none;
+  }
+  .app-composer-shell .app-composer-idle-mode {
     transition: none;
   }
 }
@@ -2173,9 +2185,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
-  font-weight: 500;
+  /* Light display weight: the hero is an invitation, not a heading in a
+     document — at this size 300 carries fine and reads calmer. Tracking eased
+     to match (tight negative tracking crowds light strokes). */
+  font-weight: 300;
   line-height: 1.2;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.01em;
   color: var(--text-main);
 }
 
@@ -2884,6 +2899,114 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
   font-size: 0.76rem;
   font-weight: 640;
+}
+
+/* Share-target picker: one quiet search, results as plain rows. The org row
+   ("Everyone in your organization") is data with meaning, so it carries a
+   slightly stronger ink — never a color. */
+.resource-browser-share-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.resource-browser-share-picker > label {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picker-results {
+  display: flex;
+  flex-direction: column;
+  max-height: 14rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-strong);
+}
+
+.resource-browser-share-picker-results > button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.5rem 0.75rem;
+  border: 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--line) 70%, transparent);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.resource-browser-share-picker-results > button:last-child {
+  border-bottom: 0;
+}
+
+.resource-browser-share-picker-results > button:hover {
+  background: color-mix(in oklab, var(--bg-main) 60%, transparent);
+}
+
+.resource-browser-share-picker-results > button[data-share-target-kind="org"] .resource-browser-share-picker-label {
+  font-weight: 600;
+}
+
+.resource-browser-share-picker-detail {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picker-empty {
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.45rem 0.3rem 0.45rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--bg-main) 55%, transparent);
+  font-size: 0.85rem;
+}
+
+.resource-browser-share-access {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.9rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid color-mix(in oklab, var(--text-main) 14%, transparent);
+}
+
+.resource-browser-share-access-title {
+  margin: 0;
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+}
+
+.resource-browser-share-access-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.resource-browser-share-access-empty {
+  margin: 0.2rem 0 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
 .resource-browser-share-grid {
@@ -3898,6 +4021,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-width: 0;
 }
 
+/* Duplicate chip shares the quiet chip register — it is information, not an
+   alarm: identical content (sha256+size) appearing more than once in view. */
+.resource-browser-dup-chip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+  min-width: 0;
+}
+
+.resource-browser-dup-chip > span,
 .resource-browser-share-status-chips > span,
 .resource-browser-lifecycle-chip > span {
   display: inline-flex;
@@ -6363,7 +6496,150 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .app-composer-actions-end {
+  position: relative;
   margin-left: auto;
+}
+
+/* Idle-only mode echo (see App.tsx actions-end): anchored off the send button
+   so it never participates in toolbar flow — no layout shift when the row
+   expands and the real selector returns. Speaks in the placeholder's exact
+   voice (same clamp/weight/tracking/color as .app-composer-textarea +
+   --composer-placeholder) so the idle line reads as one quiet layer:
+   "Ask anything … Pro". Hidden below 641px; the phone composer keeps its own
+   behavior. */
+.app-composer-idle-mode {
+  position: absolute;
+  right: calc(100% + 1rem);
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
+     `font: inherit` out-orders that clamp, so the field actually renders at the
+     card's inherited size — inheriting here matches the real placeholder. */
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: -0.015em;
+  color: var(--composer-placeholder);
+  white-space: nowrap;
+  transition: opacity 160ms ease;
+}
+
+/* Idle-only attach button (see App.tsx card-body): the pill's left affordance,
+   anchored to the position:relative card so the collapsed toolbar's clipping
+   and fade never touch it. Unlike the decorative idle send/mode echo this one
+   IS interactive at idle — attaching is a first-class idle action — so it
+   gates with visibility (out of the a11y tree when the full toolbar owns the
+   attach affordance). Desktop-only, like the rest of the idle treatment. */
+.app-composer-idle-attach {
+  display: none;
+}
+
+@media (min-width: 641px) {
+  .app-composer-idle-attach {
+    display: inline-flex;
+    position: absolute;
+    left: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 2;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 160ms ease, visibility 0s linear 160ms;
+  }
+  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-attach {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 160ms ease;
+  }
+}
+
+/* Composer drop affordance: pk-file-upload-drag lands on the FileUpload
+   wrapper while an OS file drag is over the composer card. Ink, not color —
+   a drop target is chrome, and the strengthened border + faint ring is the
+   same voice as :focus-within, which is exactly the promise a drop makes. */
+.pk-file-upload-drag .app-composer-card {
+  border-color: color-mix(in oklab, var(--text-main) 40%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--text-main) 8%, transparent);
+}
+
+/* Chat drop overlay ("dump files anywhere"): viewport scrim + one quiet card.
+   The overlay itself is the drop target; the card ignores pointer events so
+   the drop always lands on the full surface. */
+.app-chat-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--bg-main) 62%, transparent);
+  animation: app-chat-drop-overlay-in 160ms ease;
+}
+
+@keyframes app-chat-drop-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-chat-drop-overlay {
+    animation: none;
+  }
+}
+
+.app-chat-drop-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 1.6rem 2.4rem;
+  border: 1.5px dashed color-mix(in oklab, var(--text-main) 38%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel-strong);
+  box-shadow: 0 18px 40px rgba(12, 12, 12, 0.12);
+  pointer-events: none;
+}
+
+.app-chat-drop-overlay-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.app-chat-drop-overlay-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Resources drag hint: a quiet pill that never intercepts the drop. */
+.app-resources-drop-hint {
+  position: fixed;
+  bottom: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  pointer-events: none;
+  padding: 0.55rem 1.1rem;
+  border: 1px solid color-mix(in oklab, var(--text-main) 30%, transparent);
+  border-radius: 999px;
+  background: var(--bg-panel-strong);
+  box-shadow: 0 10px 26px rgba(12, 12, 12, 0.14);
+  font-size: 0.85rem;
+  color: var(--text-main);
+  animation: app-chat-drop-overlay-in 160ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-resources-drop-hint {
+    animation: none;
+  }
 }
 
 .app-composer-icon-button,
@@ -9855,10 +10131,15 @@ details {
   scrollbar-gutter: stable;
 }
 
+/* Auto table layout (not `fixed`): columns size to content, so numeric columns
+   stay narrow and label/filename columns get the room, instead of every column
+   taking an equal 1/N slice that force-wraps long headers. Long cells cannot
+   hog a row: `.pk-table-cell-long` caps their intrinsic contribution at 72ch.
+   A table whose unbreakable content (numbers, identifiers) exceeds the wrap
+   width scrolls horizontally inside it rather than squeezing values apart. */
 .pk-table {
   width: 100%;
   min-width: 33rem;
-  table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
   font-variant-numeric: tabular-nums;
@@ -9866,7 +10147,6 @@ details {
 
 .pk-table-head-cell,
 .pk-table-cell {
-  max-width: 0;
   padding: 0.78rem 1rem;
   border-bottom: 1px solid var(--line);
   font-size: 0.87rem;
@@ -9874,32 +10154,69 @@ details {
   vertical-align: top;
 }
 
+/* Header = the app's label register (mirrors .admin-table th): smaller, muted,
+   lightly tracked — labels are chrome, data carries the ink. The boundary is a
+   single rule under the header, deliberately the strongest line in the table
+   (row/column hairlines are var(--line)). No fill and no sticky: the wrap
+   never scrolls vertically so sticky never engaged, and the tinted band was a
+   second device doing the rule's job. No uppercase — headers are often literal
+   identifiers, and recasing mutates data. */
 .pk-table-head-cell {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: color-mix(in oklab, var(--bg-main) 78%, var(--bg-panel-strong) 22%);
-  color: var(--text-main);
+  color: var(--text-muted);
+  font-size: 0.74rem;
   font-weight: 600;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.02em;
+  padding: 0.62rem 1rem 0.55rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--text-main) 20%, transparent);
+  /* Override the UA's centered th default; column alignment (numeric columns,
+     explicit GFM markers) arrives as an inline style and still wins. */
+  text-align: left;
 }
 
+/* Zebra is the sole row-tracking aid, and deliberately the only row state:
+   chat table rows are inert, and in this app hover marks actionable surfaces
+   (nav items, chips, buttons) — data at rest stays at rest. If rows ever gain
+   an action, add hover back per the motion spec behind @media (hover: hover). */
 .pk-table-body .pk-table-row:nth-child(even) .pk-table-cell {
   background: color-mix(in oklab, var(--bg-main) 60%, transparent);
-}
-
-.pk-table-body .pk-table-row:hover .pk-table-cell {
-  background: color-mix(in oklab, var(--bg-main) 72%, var(--bg-panel-strong) 28%);
 }
 
 .pk-table-body .pk-table-row:last-child .pk-table-cell {
   border-bottom: 0;
 }
 
+/* Cells hold data — identifiers, filenames, counts — not prose, so a value is
+   never mutilated at a wrap point: no dictionary hyphen inserted INTO an
+   identifier (`prairie_dog_in_burrow` → `prairie_-dog_in_burrow`) and no
+   mid-token break inside a number or filename (`100000` → `10000` / `0`).
+   Cells wrap at word boundaries only; when unbreakable content makes the table
+   wider than its wrap, the wrap scrolls horizontally instead. Genuinely long
+   cells opt back into anywhere-breaking via .pk-table-cell-long below. The
+   `:where(a, strong, em)` arm must sit AFTER the `.pk-markdown :where(...)`
+   prose rule (equal specificity) to win back inline elements it re-targets
+   inside cells. */
 .pk-table-head-cell,
 .pk-table-cell {
   word-break: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  hyphens: none;
+}
+
+.pk-table :where(a, strong, em) {
+  hyphens: none;
+}
+
+/* Inline code in a cell is an identifier (filename, class label): keep it on
+   one line — even a break at a real hyphen splits `0210-jGU3.JPG` into what
+   reads as two tokens — and let the wrap scroll instead. Outranks the global
+   .pk-inline-code anywhere-break; cells flagged .pk-table-cell-long (56+ char
+   tokens, e.g. hashes) are exempt so they can still break within their 72ch
+   measure. */
+.pk-table-cell:not(.pk-table-cell-long) .pk-inline-code,
+.pk-table-head-cell:not(.pk-table-cell-long) .pk-inline-code {
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .pk-table-head-cell + .pk-table-head-cell,
@@ -9917,7 +10234,6 @@ details {
   white-space: normal;
   overflow-wrap: anywhere;
   word-break: break-word;
-  hyphens: auto;
 }
 
 .pk-table-cell-long :where(a, span, code) {
@@ -9925,11 +10241,7 @@ details {
   word-break: break-word;
 }
 
-.pk-table-cell :where(a),
-.pk-table-head-cell :where(a) {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
+
 
 .pk-table-cell .bisque-link-wrap,
 .pk-table-head-cell .bisque-link-wrap {
@@ -10006,6 +10318,12 @@ details {
   .pk-table-cell {
     padding: 0.5rem 0.62rem;
     font-size: 0.78rem;
+  }
+  /* Keep the header's label register (smaller than body) at phone sizes too —
+     this shared rule above would otherwise snap it back to body size. */
+  .pk-table-head-cell {
+    padding: 0.45rem 0.62rem 0.4rem;
+    font-size: 0.7rem;
   }
   .pk-code-render :where(pre) {
     padding: 0.85rem 1rem 0.95rem;

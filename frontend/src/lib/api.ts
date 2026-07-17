@@ -1,3 +1,4 @@
+import { bundleRootForRelativePath } from "./pendingBundles";
 import type {
   AccountRequestPayload,
   AccountRequestResponse,
@@ -72,6 +73,9 @@ import type {
   ResourceTextHead,
   ResourceCsvRows,
   ResourceShareGrantCreateRequest,
+  ResourceCollectionShareGrantListResponse,
+  ResourceCollectionShareGrantRevokeResponse,
+  ShareTargetListResponse,
   ResourceShareGrantListResponse,
   ResourceShareGrantResponse,
   ResourceShareGrantsCreateRequest,
@@ -2424,7 +2428,14 @@ export class ApiClient {
     if (files.length === 0) {
       return { file_count: 0, uploaded: [] };
     }
-    if (files.length > 1) {
+    // Bundle finalization lives only in the multi-file session path, so a
+    // single-member zarr store (one .zattrs, a lone chunk) must route there
+    // too — the single-file path would land its bytes without ever cataloging
+    // the bundle resource.
+    const singleFileIsBundleMember =
+      files.length === 1 &&
+      Boolean(bundleRootForRelativePath(files[0].webkitRelativePath ?? ""));
+    if (files.length > 1 || singleFileIsBundleMember) {
       return this.uploadMultipleFilesWithV2Session(files, options);
     }
     const uploaded: UploadFilesResponse["uploaded"] = [];
@@ -3440,6 +3451,38 @@ export class ApiClient {
     return (await response.json()) as ResourceShareGrantsCreateResponse;
   }
 
+  // Pickable grantees: same-org people + the org itself. The reliability core
+  // of the sharing redesign — grantees are chosen, never typed as raw ids.
+  async listShareTargets(query: string): Promise<ShareTargetListResponse> {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      return this.fetchJson<ShareTargetListResponse>("/v2/share-targets", { method: "GET" });
+    }
+    return this.fetchJson<ShareTargetListResponse>(
+      `/v2/share-targets?q=${encodeURIComponent(trimmedQuery)}`,
+      { method: "GET" }
+    );
+  }
+
+  async listResourceCollectionShareGrants(
+    collectionId: string
+  ): Promise<ResourceCollectionShareGrantListResponse> {
+    return this.fetchJson<ResourceCollectionShareGrantListResponse>(
+      `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/shares`,
+      { method: "GET" }
+    );
+  }
+
+  async revokeResourceCollectionShareGrant(
+    collectionId: string,
+    grantId: string
+  ): Promise<ResourceCollectionShareGrantRevokeResponse> {
+    return this.fetchJson<ResourceCollectionShareGrantRevokeResponse>(
+      `/v2/resource-collections/${encodeURIComponent(collectionId.trim())}/shares/${encodeURIComponent(grantId.trim())}`,
+      { method: "DELETE" }
+    );
+  }
+
   async createResourceCollectionShareGrants(
     collectionId: string,
     request: ResourceShareGrantCreateRequest
@@ -4048,6 +4091,11 @@ export class ApiClient {
   resourceDownloadUrl(fileId: string): string {
     const safeFileId = encodeURIComponent(fileId);
     return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/download`);
+  }
+
+  resourceCollectionDownloadUrl(collectionId: string): string {
+    const safeCollectionId = encodeURIComponent(collectionId);
+    return buildUrl(this.baseUrl, `/v2/resource-collections/${safeCollectionId}/download`);
   }
 
   // resourceTextHead fetches a bounded, UTF-8-safe window of a text/data resource

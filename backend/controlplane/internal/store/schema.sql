@@ -596,6 +596,7 @@ CREATE INDEX IF NOT EXISTS control_resource_share_grants_grantee_user_idx ON con
 CREATE INDEX IF NOT EXISTS control_resource_share_grants_grantee_org_idx ON control_resource_share_grants(grantee_org_id, status);
 CREATE INDEX IF NOT EXISTS control_resource_collections_owner_type_idx ON control_resource_collections(owner_user_id, owner_org_id, collection_type, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_resource_collections_project_idx ON control_resource_collections(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resource_collections_parent_idx ON control_resource_collections(parent_collection_id, status);
 CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_collection_status_idx ON control_resource_collection_share_grants(collection_id, status);
 CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_grantee_user_idx ON control_resource_collection_share_grants(grantee_user_id, status);
 CREATE INDEX IF NOT EXISTS control_resource_collection_share_grants_grantee_org_idx ON control_resource_collection_share_grants(grantee_org_id, status);

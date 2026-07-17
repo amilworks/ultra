@@ -543,6 +543,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/V2ResourceCollectionResponse"
   /v2/resource-collections/{collection_id}/shares:
+    get:
+      operationId: listV2ResourceCollectionShareGrants
+      description: Owner-only list of a collection's share grants.
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Collection share grants
+        "404":
+          description: Collection not found for this owner
     post:
       operationId: createV2ResourceCollectionShareGrants
       parameters:
@@ -563,6 +576,83 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceCollectionShareGrantsCreateResponse"
+  /v2/share-targets:
+    get:
+      operationId: listV2ShareTargets
+      description: >-
+        Pickable share grantees for the calling user: people in their own
+        organization plus the organization itself as a single "everyone"
+        target. Never a deployment-wide directory.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Share targets matching the query
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string, enum: [user, org] }
+                        grantee_user_id: { type: string }
+                        grantee_org_id: { type: string }
+                        label: { type: string }
+                        detail: { type: string }
+  /v2/resource-collections/{collection_id}/shares/{grant_id}:
+    delete:
+      operationId: revokeV2ResourceCollectionShareGrant
+      description: >-
+        Revoke a collection-level share grant; inherited per-resource grants
+        cascade in the same operation.
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: grant_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: The revoked collection share grant
+        "404":
+          description: Grant or collection not found for this owner
+  /v2/resource-collections/{collection_id}/download:
+    get:
+      operationId: downloadV2ResourceCollection
+      description: >-
+        Stream the collection's member resources as a zip archive. Best-effort:
+        unreadable members are skipped and reported in a SKIPPED.txt entry;
+        bundle resources are included as directory trees. Direct members only —
+        child folders are separate collections.
+      parameters:
+        - name: collection_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Zip archive of the collection's member resources
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: Attachment filename (collection name + .zip)
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Collection not found or not visible to the caller
   /v2/resource-collections/{collection_id}/resources:
     post:
       operationId: addV2ResourceCollectionResources

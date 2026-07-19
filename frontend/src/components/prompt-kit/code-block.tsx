@@ -327,7 +327,7 @@ function CodeBlockCode({
               title={languageMeta.copyLabel}
               onClick={onCopy}
               className={cn(
-                "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--line)] bg-[color-mix(in_oklab,var(--bg-panel-strong)_84%,var(--bg-main)_16%)] px-3 text-[12px] font-medium text-[var(--text-muted)] transition-all duration-200 hover:border-[color-mix(in_oklab,var(--text-main)_18%,var(--line))] hover:bg-[color-mix(in_oklab,var(--bg-panel-strong)_94%,var(--bg-main)_6%)] hover:text-[var(--text-main)]",
+                "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--line)] bg-[color-mix(in_oklab,var(--bg-panel-strong)_84%,var(--bg-main)_16%)] px-3 text-[12px] font-medium text-[var(--text-muted)] transition-colors duration-150 hover:border-[color-mix(in_oklab,var(--text-main)_18%,var(--line))] hover:bg-[color-mix(in_oklab,var(--bg-panel-strong)_94%,var(--bg-main)_6%)] hover:text-[var(--text-main)]",
                 isCopied &&
                   "border-emerald-500/25 bg-emerald-500/10 text-emerald-600 hover:border-emerald-500/30 hover:bg-emerald-500/15 dark:text-emerald-400"
               )}

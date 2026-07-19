@@ -1,3 +1,5 @@
+import { isDirectoryBundleName } from "./specialFormats";
+
 // Group composer pending uploads so a folder-picked directory format (OME-Zarr) shows as
 // ONE chip instead of dozens of member-file chips. A directory bundle = files whose
 // webkitRelativePath top segment is a directory special format (mirrors the backend
@@ -12,9 +14,15 @@ export type PendingUploadLike = {
 };
 
 export type PendingUploadGroup = {
-  /** Display name: the bundle root dir for a bundle, else the file name. */
+  /** Display name: the bundle/folder root dir for a group, else the file name. */
   name: string;
   isBundle: boolean;
+  /** True for a plain (non-bundle) folder grouped for display only — its files
+      still upload individually; the chip just stops a 500-file folder from
+      becoming 500 chips. */
+  isFolder?: boolean;
+  /** Number of member files in a folder/bundle group. */
+  fileCount?: number;
   /** Indices into the original files array this group represents (for removal). */
   indices: number[];
   totalBytes: number;
@@ -24,7 +32,7 @@ export type PendingUploadGroup = {
 // `.ome.zarr` ends with `.zarr`, so a single suffix check covers both registry extensions.
 export const bundleRootForRelativePath = (relativePath: string | undefined): string | null => {
   const top = (relativePath ?? "").split("/")[0] ?? "";
-  return top.length > 0 && top.toLowerCase().endsWith(".zarr") ? top : null;
+  return top.length > 0 && isDirectoryBundleName(top) ? top : null;
 };
 
 export const groupPendingUploads = (files: readonly PendingUploadLike[]): PendingUploadGroup[] => {
@@ -37,10 +45,35 @@ export const groupPendingUploads = (files: readonly PendingUploadLike[]): Pendin
       if (existing) {
         existing.indices.push(index);
         existing.totalBytes += file.size;
+        existing.fileCount = (existing.fileCount ?? 1) + 1;
         return;
       }
-      const group: PendingUploadGroup = { name: root, isBundle: true, indices: [index], totalBytes: file.size };
+      const group: PendingUploadGroup = { name: root, isBundle: true, fileCount: 1, indices: [index], totalBytes: file.size };
       byRoot.set(root, group);
+      groups.push(group);
+      return;
+    }
+    const folderRoot = (file.webkitRelativePath ?? "").includes("/")
+      ? ((file.webkitRelativePath ?? "").split("/")[0] ?? "")
+      : "";
+    if (folderRoot) {
+      const key = `folder:${folderRoot}`;
+      const existing = byRoot.get(key);
+      if (existing) {
+        existing.indices.push(index);
+        existing.totalBytes += file.size;
+        existing.fileCount = (existing.fileCount ?? 1) + 1;
+        return;
+      }
+      const group: PendingUploadGroup = {
+        name: folderRoot,
+        isBundle: false,
+        isFolder: true,
+        fileCount: 1,
+        indices: [index],
+        totalBytes: file.size,
+      };
+      byRoot.set(key, group);
       groups.push(group);
       return;
     }

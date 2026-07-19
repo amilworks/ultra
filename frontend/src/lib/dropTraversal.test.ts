@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   collectDroppedFiles,
+  normalizePickedFiles,
   isOsFileDrag,
   MAX_DROPPED_FILES,
   type DirectoryEntryLike,
@@ -248,5 +249,73 @@ describe("isOsFileDrag", () => {
     expect(isOsFileDrag({ types: ["Files", "text/html", "text/uri-list"] })).toBe(false);
     expect(isOsFileDrag({ types: ["text/plain"] })).toBe(false);
     expect(isOsFileDrag(null)).toBe(false);
+  });
+});
+
+describe("normalizePickedFiles (picker parity with the drop path)", () => {
+  const picked = (relativePath: string, name?: string): File => {
+    const fileName = name ?? relativePath.split("/").pop() ?? "file";
+    const file = new File(["x"], fileName, { type: "application/octet-stream" });
+    Object.defineProperty(file, "webkitRelativePath", {
+      value: relativePath,
+      configurable: true,
+    });
+    return file;
+  };
+
+  it("re-roots a zarr picked via its PARENT folder (the exploding-store bug)", () => {
+    const result = normalizePickedFiles([
+      picked("parent/scan.ome.zarr/.zattrs"),
+      picked("parent/scan.ome.zarr/0/0.0"),
+      picked("parent/notes.txt"),
+    ]);
+    expect(result.files.map((file) => file.webkitRelativePath)).toEqual([
+      "scan.ome.zarr/.zattrs",
+      "scan.ome.zarr/0/0.0",
+      "parent/notes.txt",
+    ]);
+  });
+
+  it("keeps a directly-picked zarr rooted at itself", () => {
+    const result = normalizePickedFiles([picked("scan.zarr/.zgroup")]);
+    expect(result.files[0].webkitRelativePath).toBe("scan.zarr/.zgroup");
+  });
+
+  it("strips OS junk from picked folders, counting it", () => {
+    const result = normalizePickedFiles([
+      picked("store.zarr/.DS_Store", ".DS_Store"),
+      picked("store.zarr/.zattrs"),
+      picked("store.zarr/._shadow", "._shadow"),
+    ]);
+    expect(result.files.map((file) => file.name)).toEqual([".zattrs"]);
+    expect(result.skippedJunkCount).toBe(2);
+  });
+
+  it("reports an all-junk selection instead of a silent no-op", () => {
+    const result = normalizePickedFiles([picked("empty/.DS_Store", ".DS_Store")]);
+    expect(result.files).toEqual([]);
+    expect(result.issues).toContainEqual({ kind: "empty-directory", name: "empty" });
+  });
+
+  it("withholds a bundle the cap truncated, like the drop walk", () => {
+    const loose = Array.from({ length: MAX_DROPPED_FILES - 5 }, (_, index) =>
+      picked(`bulk/f${index}.bin`, `f${index}.bin`)
+    );
+    const store = Array.from({ length: 20 }, (_, index) =>
+      picked(`big.zarr/chunk_${index}`, `chunk_${index}`)
+    );
+    const result = normalizePickedFiles([...loose, ...store]);
+    expect(
+      result.files.some((file) => (file.webkitRelativePath ?? "").startsWith("big.zarr/"))
+    ).toBe(false);
+    expect(result.issues).toContainEqual({ kind: "truncated-bundle", name: "big.zarr" });
+  });
+
+  it("passes plain file-picker selections through untouched", () => {
+    const plain = new File(["x"], "photo.png", { type: "image/png" });
+    const result = normalizePickedFiles([plain]);
+    expect(result.files).toEqual([plain]);
+    expect(result.topLevelDirectories).toEqual([]);
+    expect(result.issues).toEqual([]);
   });
 });

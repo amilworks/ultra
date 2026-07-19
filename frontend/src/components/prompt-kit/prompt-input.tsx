@@ -99,17 +99,27 @@ export const PromptInputTextarea = React.forwardRef<
     node.style.height = `${Math.max(44, nextHeight)}px`;
   }, [controlledValue, disableAutosize, maxHeight]);
 
+  // Stable merged ref: an inline `ref={(node) => …}` gets a new identity every
+  // render, so React would detach+reattach it (null → node) on every keystroke,
+  // re-invoking any forwarded callback ref each time. Memoizing keyed on the
+  // forwarded ref means a callback ref (e.g. one that binds a ResizeObserver)
+  // only fires on real mount/unmount.
+  const setTextareaRef = React.useCallback(
+    (node: HTMLTextAreaElement | null) => {
+      textareaRef.current = node;
+      if (typeof forwardedRef === "function") {
+        forwardedRef(node);
+      } else if (forwardedRef) {
+        forwardedRef.current = node;
+      }
+    },
+    [forwardedRef]
+  );
+
   return (
     <textarea
       {...props}
-      ref={(node) => {
-        textareaRef.current = node;
-        if (typeof forwardedRef === "function") {
-          forwardedRef(node);
-        } else if (forwardedRef) {
-          forwardedRef.current = node;
-        }
-      }}
+      ref={setTextareaRef}
       value={controlledValue}
       className={cn("pk-prompt-input-textarea", className)}
       disabled={context?.isLoading || context?.disabled || props.disabled}

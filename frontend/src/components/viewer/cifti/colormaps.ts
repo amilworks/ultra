@@ -59,6 +59,18 @@ export const prettyStructure = (name: string): string =>
     .toLowerCase()
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
+/**
+ * Compact structure name for the narrow carpet gutter: hemisphere → L/R and the
+ * few long anatomical terms abbreviated, so "Diencephalon Ventral Left" fits as
+ * "Dienceph Vent L" without truncating. The full name still shows on hover.
+ */
+export const shortStructure = (name: string): string =>
+  prettyStructure(name)
+    .replace(/\bDiencephalon\b/g, "Dienceph")
+    .replace(/\bVentral\b/g, "Vent")
+    .replace(/\bLeft\b/g, "L")
+    .replace(/\bRight\b/g, "R");
+
 /** Decode a base64 payload into a Uint8Array (uint8 matrix). */
 export const decodeBase64Bytes = (b64: string): Uint8Array => {
   const bin = atob(b64);

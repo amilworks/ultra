@@ -158,6 +158,13 @@
   overflow: hidden;
 }
 .cifti-canvas {
+  /* Absolutely positioned inside the relative .cifti-stage so the canvas fills
+     the stage WITHOUT its ResizeObserver-set intrinsic height (height attr =
+     rect.height x dpr) feeding back into the flex min-content and ballooning the
+     stage taller each layout pass. The stage height is then driven purely by
+     flex:1 (viewport minus header/toolbar/readout), so it always fits. */
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;

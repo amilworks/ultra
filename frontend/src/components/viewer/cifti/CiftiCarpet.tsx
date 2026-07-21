@@ -8,6 +8,7 @@ import {
   decodeBase64Bytes,
   prettyStructure,
   sampleColor,
+  shortStructure,
 } from "./colormaps";
 
 type Props = {
@@ -76,35 +77,73 @@ export function CiftiCarpet({ carpet }: Props) {
     ctx.imageSmoothingEnabled = view.f1 - view.f0 > R.w;
     ctx.drawImage(off, view.f0, 0, view.f1 - view.f0, rows, R.x, R.y, R.w, R.h);
 
-    // Structure separators.
-    for (const s of structures) {
-      if (s.start > 0) {
-        const y0 = R.y + (s.start / rows) * R.h;
+    // Structure band geometry. In a full-brain CIFTI the two cortices fill ~65%
+    // of the rows, so the ~19 subcortical structures collapse into a thin strip
+    // whose labels would otherwise stack into an unreadable pile.
+    const centers = structures.map((s) => R.y + ((s.start + s.end) / 2 / rows) * R.h);
+    const bandH = structures.map((s) => ((s.end - s.start) / rows) * R.h);
+
+    // Separators: skip ones that would smear together in the subcortical strip.
+    let lastSep = -Infinity;
+    for (let i = 0; i < structures.length; i++) {
+      const y0 = R.y + (structures[i].start / rows) * R.h;
+      if (structures[i].start > 0 && y0 - lastSep >= 3) {
         ctx.strokeStyle = bg;
         ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(R.x, y0);
         ctx.lineTo(R.x + R.w, y0);
         ctx.stroke();
+        lastSep = y0;
       }
     }
-    // Gutter labels (clipped so they never spill onto the heatmap).
+
+    // Declutter labels: push each to a minimum spacing (forward pass) and pull
+    // back up if the run overflows the plot (reverse pass). A short tick marks
+    // each structure's true row position; the full name shows on hover.
+    const LABEL_H = 13;
+    const labelY = centers.slice();
+    for (let i = 1; i < labelY.length; i++) {
+      if (labelY[i] - labelY[i - 1] < LABEL_H) labelY[i] = labelY[i - 1] + LABEL_H;
+    }
+    const bottom = R.y + R.h;
+    if (labelY.length && labelY[labelY.length - 1] > bottom) {
+      labelY[labelY.length - 1] = bottom;
+      for (let i = labelY.length - 2; i >= 0; i--) {
+        if (labelY[i + 1] - labelY[i] < LABEL_H) labelY[i] = labelY[i + 1] - LABEL_H;
+      }
+    }
+
     ctx.save();
     ctx.beginPath();
-    ctx.rect(0, 0, R.x - 8, h);
+    ctx.rect(0, 0, R.x - 2, h);
     ctx.clip();
     ctx.textBaseline = "middle";
-    ctx.textAlign = "right";
-    for (const s of structures) {
-      const y0 = R.y + (s.start / rows) * R.h;
-      const y1 = R.y + (s.end / rows) * R.h;
+    for (let i = 0; i < structures.length; i++) {
+      const cy = centers[i];
+      const ly = labelY[i];
+      // Tick at the true band position (drawn when the label had to move).
+      if (Math.abs(ly - cy) > 1.5) {
+        ctx.strokeStyle = line;
+        ctx.globalAlpha = 0.45;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(R.x - 4, cy);
+        ctx.lineTo(R.x, cy);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      ctx.textAlign = "right";
       ctx.fillStyle = ink;
       ctx.font = '600 11px "Inter", system-ui, sans-serif';
-      ctx.fillText(prettyStructure(s.name), R.x - 12, (y0 + y1) / 2);
-      const count = Math.round(((s.end - s.start) / rows) * sourceRows);
-      ctx.fillStyle = muted;
-      ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
-      ctx.fillText("~" + count.toLocaleString(), R.x - 12, (y0 + y1) / 2 + 15);
+      const twoLine = bandH[i] >= 30 && Math.abs(ly - cy) <= 1.5;
+      ctx.fillText(shortStructure(structures[i].name), R.x - 10, twoLine ? ly - 6 : ly);
+      if (twoLine) {
+        const count = Math.round(((structures[i].end - structures[i].start) / rows) * sourceRows);
+        ctx.fillStyle = muted;
+        ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+        ctx.fillText("~" + count.toLocaleString(), R.x - 10, ly + 7);
+      }
     }
     ctx.restore();
 

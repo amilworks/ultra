@@ -1,0 +1,54 @@
+name: 🐛 Bug report
+description: Report a defect or regression in BisQue Ultra
+title: "[bug]: "
+labels: ["type: fix"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill out the sections below so we can reproduce and fix it quickly.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, and what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps (and the data / file type) needed to trigger it.
+      placeholder: |
+        1. Upload a …
+        2. Open the … viewer
+        3. See …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the system is affected? (A maintainer will apply the matching `area:` label.)
+      options:
+        - frontend (web app)
+        - control-plane (Go backend)
+        - worker (deepagents runtime)
+        - viewer (Lens / imaging)
+        - data services (image / ngff / storage)
+        - infra (docker / CI / deploy)
+        - agents (skills / prompts)
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Git SHA, branch, or deploy where you saw this.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Relevant console output, control-plane logs, or screenshots. (Automatically formatted — no backticks needed.)
+      render: shell

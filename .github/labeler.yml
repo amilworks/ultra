@@ -1,0 +1,61 @@
+# Auto-labeling by changed path — consumed by .github/workflows/labeler.yml
+# (actions/labeler v5 syntax). A PR may match several rules; that's intended
+# (e.g. a viewer change gets `area: viewer` AND `area: frontend`).
+
+"area: frontend":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "frontend/**"
+
+"area: control-plane":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/controlplane/**"
+          - "backend/contracts/**"
+          - "backend/shared/**"
+
+"area: worker":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/deepagents_runtime/**"
+
+"area: viewer":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "frontend/src/components/viewer/**"
+          - "frontend/src/components/**Viewer**"
+          - "backend/controlplane/internal/httpapi/*cifti*"
+          - "backend/controlplane/internal/httpapi/*nifti*"
+          - "backend/controlplane/internal/httpapi/imageservice*"
+          - "backend/deepagents_runtime/src/ultra_deepagents/imaging/**"
+
+"area: data":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/deepagents_runtime/src/ultra_deepagents/ngff*"
+          - "backend/deepagents_runtime/src/ultra_deepagents/ngff/**"
+          - "backend/deepagents_runtime/src/ultra_deepagents/image_service*.py"
+          - "services/**"
+
+"area: agents":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "backend/deepagents_runtime/skills/**"
+          - "backend/deepagents_runtime/src/ultra_deepagents/agent*.py"
+
+"area: infra":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - "docker-compose*.yml"
+          - "Makefile"
+          - "deploy/**"
+          - "scripts/**"
+          - "**/Dockerfile*"
+          - ".dockerignore"
+
+"type: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "docs/**"

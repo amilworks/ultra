@@ -101,7 +101,11 @@ import {
 import { buildBisqueThumbnailUrl } from "./lib/bisquePreview";
 import { remoteMutationIntentsForUserText } from "./lib/bisqueMutationIntent";
 import { formatBytes, formatTokens } from "./lib/format";
-import { thumbnailScrubAxis } from "./lib/thumbnailScrubAxis";
+import {
+  thumbnailScrubConfig,
+  thumbnailScrubSliceRequest,
+  type ThumbnailScrubConfig,
+} from "./lib/thumbnailScrubAxis";
 import {
   buildBisqueNavLinks,
   inferBisqueRootFromUrl,
@@ -335,10 +339,10 @@ type BisqueResourceCountsState = {
   counts: BisqueResourceCounts | null;
 };
 
-// Per-file scrub axis for gallery thumbnails. loadZCount (async, on first hover)
-// resolves the axis from viewerinfo and records it here so the synchronous slice-URL
-// builder can request the same axis — Z for a focal stack, T for a Z-less time-series.
-const THUMBNAIL_SCRUB_AXIS = new Map<string, "z" | "t">();
+// Viewerinfo is resolved lazily on first hover. Keep its complete display contract
+// per file so every synchronous scrub URL preserves the authoritative composite,
+// LUT palette, fixed time/depth, and selected scrub axis.
+const THUMBNAIL_SCRUB_CONFIG = new Map<string, ThumbnailScrubConfig>();
 
 const readAuthErrorFromLocation = (): string | null => {
   if (typeof window === "undefined") {
@@ -11689,25 +11693,23 @@ export function App() {
                 zScrubThumbnail={{
                   // Gallery scrub is a transient thumbnail (never measured), so request
                   // bounded-resolution frames: the backend serves a small pyramid level
-                  // for large planes, keeping rapid scrub snappy. The scrub axis is Z for
-                  // a focal stack, else T for a Z-less time-series (e.g. a 61-frame movie)
-                  // — loadZCount records it per file so this builder requests the same one.
+                  // for large planes, keeping rapid scrub snappy. The metadata resolved
+                  // by loadZCount also keeps multichannel frames visually consistent with
+                  // the static resource thumbnail instead of falling back to channel zero.
                   sliceUrlFor: (fileId: string, index: number) => {
-                    const scrubAxis = THUMBNAIL_SCRUB_AXIS.get(fileId) ?? "z";
-                    return apiClient.uploadSliceUrl(fileId, {
-                      // axis is the SLICE ORIENTATION (xy-plane); the scrub varies the
-                      // depth (z) or time (t) index into that plane.
-                      axis: "z",
-                      z: scrubAxis === "z" ? index : undefined,
-                      t: scrubAxis === "t" ? index : undefined,
-                      fullResolution: false,
-                    });
+                    const config = THUMBNAIL_SCRUB_CONFIG.get(fileId);
+                    return apiClient.uploadSliceUrl(
+                      fileId,
+                      config
+                        ? thumbnailScrubSliceRequest(config, index)
+                        : { axis: "z", z: index, fullResolution: false }
+                    );
                   },
                   loadZCount: (fileId: string) =>
                     apiClient.getUploadViewer(fileId).then((info) => {
-                      const { axis, count } = thumbnailScrubAxis(info.axis_sizes);
-                      THUMBNAIL_SCRUB_AXIS.set(fileId, axis);
-                      return count;
+                      const config = thumbnailScrubConfig(info);
+                      THUMBNAIL_SCRUB_CONFIG.set(fileId, config);
+                      return config.count;
                     }),
                 }}
                 downloadUrlFor={(resource: ResourceRecord) =>

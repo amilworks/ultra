@@ -1037,10 +1037,64 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   };
 };
 
+const normalizeCiftiViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
+  const fileId = String(source.file_id ?? "");
+  const seg = encodeURIComponent(fileId);
+  const urls = toRecord(source.service_urls);
+  const rows = clampNonNegativeInt(source.rows, 0);
+  const cols = clampNonNegativeInt(source.cols, 0);
+  const views = (Array.isArray(source.views) ? source.views : [])
+    .map((v) => String(v))
+    .filter((v) => v === "carpet" || v === "connectivity");
+  const structures = (Array.isArray(source.structures) ? source.structures : [])
+    .map((s) => toRecord(s))
+    .map((s) => ({ name: String(s.name ?? ""), count: clampNonNegativeInt(s.count, 0) }));
+  const colAxis = toRecord(source.column_axis);
+  // Reuse the generic builder for a type-complete metadata/viewer skeleton, then
+  // stamp the CIFTI identity + payload on top. The matrix shape rides in axis_sizes
+  // (Y=rows/grayordinates, X=cols) so downstream size reads stay sane.
+  const base = normalizeUploadViewerInfo({
+    kind: "image",
+    file_id: fileId,
+    original_name: String(source.original_name ?? "resource"),
+    decodable: true,
+    axis_sizes: { T: 1, C: 1, Z: 1, Y: rows, X: cols },
+  });
+  return {
+    ...base,
+    kind: "cifti",
+    modality: "connectivity",
+    is_volume: false,
+    is_timeseries: colAxis.role === "series",
+    message: typeof source.message === "string" ? source.message : undefined,
+    cifti: {
+      cifti_type: String(source.cifti_type ?? "connectivity"),
+      views: views.length > 0 ? views : ["carpet"],
+      rows,
+      cols,
+      structures,
+      column_axis: {
+        role: colAxis.role == null ? undefined : String(colAxis.role),
+        size: colAxis.size == null ? undefined : clampNonNegativeInt(colAxis.size, 0),
+        step: colAxis.step == null ? undefined : Number(colAxis.step),
+        unit: colAxis.unit == null ? undefined : String(colAxis.unit),
+      },
+      service_urls: {
+        carpet: String(urls.carpet ?? `/v2/uploads/${seg}/cifti/carpet`),
+        connectivity: String(urls.connectivity ?? `/v2/uploads/${seg}/cifti/connectivity`),
+        download: String(urls.download ?? `/v2/resources/${seg}/download`),
+      },
+    },
+  };
+};
+
 export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
   const source = toRecord(raw);
   if (String(source.kind ?? "").trim().toLowerCase() === "hdf5") {
     return normalizeHdf5ViewerInfo(source);
+  }
+  if (String(source.kind ?? "").trim().toLowerCase() === "cifti") {
+    return normalizeCiftiViewerInfo(source);
   }
   const metadataSource = toRecord(source.metadata);
   const viewerSource = toRecord(source.viewer);

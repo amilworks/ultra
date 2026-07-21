@@ -1,7 +1,23 @@
 import http from "node:http";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const port = Number(process.env.MOCK_API_PORT || "8000");
+
+// Real CIFTI payloads dumped from the Go endpoints (set ULTRA_CIFTI_DUMP_DIR), so
+// the CIFTI viewer renders against backend-shaped data in the browser harness.
+const ciftiDumpDir = process.env.ULTRA_CIFTI_DUMP_DIR || "";
+const loadCiftiDump = (name) => {
+  if (!ciftiDumpDir) return null;
+  try {
+    return JSON.parse(readFileSync(`${ciftiDumpDir}/${name}`, "utf8"));
+  } catch {
+    return null;
+  }
+};
+const ciftiCarpetDump = loadCiftiDump("carpet.json");
+const ciftiConnDump = loadCiftiDump("connectivity.json");
+const ciftiPconnDump = loadCiftiDump("pconn_connectivity.json");
 const guestCookieName = "bisque_ultra_session";
 const bisqueRoot = "https://bisque2.ece.ucsb.edu";
 
@@ -92,6 +108,36 @@ const datasetSnapshotEventFixture = {
   },
 };
 const resourceFixtures = [
+  {
+    file_id: "file_cifti_dtseries",
+    original_name: "rfMRI_REST1_LR_Atlas_hp2000_clean.dtseries.nii",
+    content_type: "application/octet-stream",
+    size_bytes: 438_000_000,
+    sha256: "sha-cifti-dtseries",
+    source_type: "upload",
+    resource_kind: "file",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["fMRI"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  },
+  {
+    file_id: "file_cifti_pconn",
+    original_name: "parcels_Glasser.pconn.nii",
+    content_type: "application/octet-stream",
+    size_bytes: 260_000,
+    sha256: "sha-cifti-pconn",
+    source_type: "upload",
+    resource_kind: "file",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["connectivity"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  },
   {
     file_id: "file_csv_demo",
     original_name: "survey_2026.csv",
@@ -963,6 +1009,52 @@ const mockUploadViewerInfo = (resource) => {
     },
   };
 };
+// Detect the CIFTI fixtures by filename, mirroring the backend's extension route.
+const ciftiFixtureKind = (resource) => {
+  const name = String(resource.original_name || "").toLowerCase();
+  if (name.endsWith(".dtseries.nii")) return "timeseries";
+  if (name.endsWith(".pconn.nii") || name.endsWith(".dconn.nii")) return "connectivity";
+  return null;
+};
+
+// The kind:"cifti" descriptor, matching the Go writeCiftiViewer response shape so
+// the frontend normalizer + viewer render against backend-faithful metadata.
+const mockCiftiViewerInfo = (resource, kind) => {
+  const seg = encodeURIComponent(resource.file_id);
+  const timeseries = kind === "timeseries";
+  return {
+    kind: "cifti",
+    decodable: true,
+    file_id: resource.file_id,
+    original_name: resource.original_name,
+    format: "cifti",
+    modality: "connectivity",
+    cifti_type: timeseries ? "dense timeseries" : "parcellated connectivity",
+    views: timeseries ? ["carpet", "connectivity"] : ["connectivity"],
+    rows: timeseries ? 2240 : 100,
+    cols: timeseries ? 300 : 100,
+    structures: timeseries
+      ? [
+          { name: "Cortex Left", count: 1000 },
+          { name: "Cortex Right", count: 1000 },
+          { name: "Thalamus Left", count: 120 },
+          { name: "Hippocampus Right", count: 120 },
+        ]
+      : [],
+    column_axis: timeseries
+      ? { role: "series", size: 300, step: 0.72, unit: "s" }
+      : { role: "parcels", size: 100 },
+    service_urls: {
+      carpet: `/v2/uploads/${seg}/cifti/carpet`,
+      connectivity: `/v2/uploads/${seg}/cifti/connectivity`,
+      download: `/v2/resources/${seg}/download`,
+    },
+    message:
+      "CIFTI-2 — brain data on grayordinates (cortical-surface vertices + subcortical voxels). " +
+      "Shown as its data matrix; the anatomical surface render needs Connectome Workbench.",
+  };
+};
+
 const allResources = () => [...createdUploadResources, ...resourceFixtures];
 const resourcesMatchingQuery = (queryInput = {}) => {
   const status = String(queryInput.status || "active").trim().toLowerCase() || "active";
@@ -1548,7 +1640,37 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 404, { error: "not found" });
       return;
     }
+    const ciftiKind = ciftiFixtureKind(resource);
+    if (ciftiKind) {
+      sendJson(response, 200, mockCiftiViewerInfo(resource, ciftiKind));
+      return;
+    }
     sendJson(response, 200, mockUploadViewerInfo(resource));
+    return;
+  }
+
+  const ciftiCarpetMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/cifti\/carpet$/);
+  if (request.method === "GET" && ciftiCarpetMatch) {
+    if (!ciftiCarpetDump) {
+      sendJson(response, 503, { error: "cifti carpet dump not loaded (set ULTRA_CIFTI_DUMP_DIR)" });
+      return;
+    }
+    sendJson(response, 200, ciftiCarpetDump);
+    return;
+  }
+
+  const ciftiConnMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/cifti\/connectivity$/);
+  if (request.method === "GET" && ciftiConnMatch) {
+    const resourceId = decodeURIComponent(ciftiConnMatch[1] || "").trim();
+    const resource = allResources().map(resourceWithLifecycle).find(
+      (fixture) => fixture.file_id === resourceId
+    );
+    const dump = ciftiFixtureKind(resource || {}) === "connectivity" ? ciftiPconnDump : ciftiConnDump;
+    if (!dump) {
+      sendJson(response, 503, { error: "cifti connectivity dump not loaded (set ULTRA_CIFTI_DUMP_DIR)" });
+      return;
+    }
+    sendJson(response, 200, dump);
     return;
   }
 

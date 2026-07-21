@@ -5,6 +5,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiClient, UploadPausedError } from "./api";
 
+const scalarIdentityHeaders = (
+  width: string,
+  height: string,
+  depth: string,
+  channel = "0",
+  time = "0"
+) => ({
+  "x-volume-channel": channel,
+  "x-volume-time": time,
+  "x-volume-source-width": width,
+  "x-volume-source-height": height,
+  "x-volume-source-depth": depth,
+  "x-volume-downsample-x": "1",
+  "x-volume-downsample-y": "1",
+  "x-volume-downsample-z": "1",
+  "x-volume-preview-policy": "exact-v1",
+});
+
 describe("ApiClient browser auth hardening", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -190,6 +208,9 @@ describe("ApiClient HDF5 viewer endpoints", () => {
           "x-volume-bytes-per-voxel": "1",
           "x-volume-raw-min": "1",
           "x-volume-raw-max": "4",
+          "x-volume-scl-slope": "1",
+          "x-volume-scl-inter": "0",
+          ...scalarIdentityHeaders("2", "1", "2", "1"),
         },
       })
     );
@@ -215,7 +236,17 @@ describe("ApiClient HDF5 viewer endpoints", () => {
       bytesPerVoxel: 1,
       rawMin: 1,
       rawMax: 4,
-      channel: null,
+      channel: 1,
+      time: 0,
+      sourceWidth: 2,
+      sourceHeight: 1,
+      sourceDepth: 2,
+      downsampleX: 1,
+      downsampleY: 1,
+      downsampleZ: 1,
+      previewPolicy: "exact-v1",
+      sclSlope: 1,
+      sclInter: 0,
     });
     expect(volume.data.byteLength).toBe(4);
   });
@@ -260,6 +291,188 @@ describe("ApiClient HDF5 viewer endpoints", () => {
       expect(value.includes("/v1/")).toBe(false);
       expect(value.startsWith("https://ultra.example.org/v2/uploads/file-123/hdf5/")).toBe(true);
     });
+  });
+});
+
+describe("ApiClient scalar volume envelopes", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("reads intensity rescale and preview provenance headers", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint16Array([1024, 1104]).buffer, {
+        status: 200,
+        headers: {
+          "x-volume-width": "2",
+          "x-volume-height": "1",
+          "x-volume-depth": "1",
+          "x-volume-dtype": "uint16",
+          "x-volume-bytes-per-voxel": "2",
+          "x-volume-raw-min": "0",
+          "x-volume-raw-max": "4095",
+          "x-volume-scl-slope": "1",
+          "x-volume-scl-inter": "-1024",
+          "x-volume-channel": "3",
+          "x-volume-time": "1",
+          "x-volume-source-width": "4",
+          "x-volume-source-height": "1",
+          "x-volume-source-depth": "1",
+          "x-volume-downsample-x": "2",
+          "x-volume-downsample-y": "1",
+          "x-volume-downsample-z": "1",
+          "x-volume-preview-policy": "auto-v1",
+        },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const volume = await client.getUploadScalarVolume("file-123");
+
+    expect(volume).toMatchObject({
+      width: 2,
+      height: 1,
+      depth: 1,
+      sclSlope: 1,
+      sclInter: -1024,
+      channel: 3,
+      time: 1,
+      sourceWidth: 4,
+      sourceHeight: 1,
+      sourceDepth: 1,
+      downsampleX: 2,
+      downsampleY: 1,
+      downsampleZ: 1,
+      previewPolicy: "auto-v1",
+    });
+  });
+
+  it.each([
+    "x-volume-channel",
+    "x-volume-time",
+    "x-volume-source-width",
+    "x-volume-source-height",
+    "x-volume-source-depth",
+    "x-volume-downsample-x",
+    "x-volume-downsample-y",
+    "x-volume-downsample-z",
+    "x-volume-preview-policy",
+  ])("rejects envelopes missing mandatory identity header %s", async (missingHeader) => {
+    const headers: Record<string, string> = {
+      "x-volume-width": "1",
+      "x-volume-height": "1",
+      "x-volume-depth": "1",
+      "x-volume-dtype": "uint8",
+      "x-volume-bytes-per-voxel": "1",
+      "x-volume-raw-min": "0",
+      "x-volume-raw-max": "1",
+      "x-volume-scl-slope": "1",
+      "x-volume-scl-inter": "0",
+      ...scalarIdentityHeaders("1", "1", "1"),
+    };
+    delete headers[missingHeader];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1]), { status: 200, headers }))
+    );
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(client.getUploadScalarVolume("file-123")).rejects.toMatchObject({ status: 502 });
+  });
+
+  it.each([
+    ["upload time", (client: ApiClient, value: number) => client.getUploadScalarVolume("file-123", { t: value })],
+    ["upload channel", (client: ApiClient, value: number) => client.getUploadScalarVolume("file-123", { channel: value })],
+    [
+      "hdf5 channel",
+      (client: ApiClient, value: number) =>
+        client.getHdf5ScalarVolume("file-123", { datasetPath: "/volume", channel: value }),
+    ],
+  ])("rejects invalid %s indices before issuing a request", async (_name, load) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    for (const value of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN]) {
+      await expect(load(client, value)).rejects.toThrow(/non-negative safe integer/i);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["upload", (client: ApiClient, signal: AbortSignal) => client.getUploadScalarVolume("file-123", { signal })],
+    [
+      "hdf5",
+      (client: ApiClient, signal: AbortSignal) =>
+        client.getHdf5ScalarVolume("file-123", { datasetPath: "/volume", signal }),
+    ],
+  ])("preserves caller AbortError for %s scalar loads", async (_kind, load) => {
+    const fetchMock = vi.fn(
+      (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("caller cancelled", "AbortError"));
+          });
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const controller = new AbortController();
+
+    const pending = load(client, controller.signal);
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("rejects hostile geometry before reading or allocating the response body", async () => {
+    const arrayBuffer = vi.fn(async () => new ArrayBuffer(0));
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({
+        "x-volume-width": "32767",
+        "x-volume-height": "32767",
+        "x-volume-depth": "1",
+        "x-volume-dtype": "uint16",
+        "x-volume-bytes-per-voxel": "2",
+        "x-volume-raw-min": "0",
+        "x-volume-raw-max": "4095",
+        "x-volume-scl-slope": "1",
+        "x-volume-scl-inter": "-1024",
+        ...scalarIdentityHeaders("32767", "32767", "1"),
+      }),
+      arrayBuffer,
+    } as unknown as Response;
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(client.getUploadScalarVolume("file-123")).rejects.toMatchObject({ status: 502 });
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a payload whose dtype, byte width, or body length disagree", async () => {
+    const response = new Response(new Uint8Array([1, 2, 3]).buffer, {
+      status: 200,
+      headers: {
+        "x-volume-width": "2",
+        "x-volume-height": "1",
+        "x-volume-depth": "1",
+        "x-volume-dtype": "uint16",
+        "x-volume-bytes-per-voxel": "2",
+        "x-volume-raw-min": "0",
+        "x-volume-raw-max": "2",
+        "x-volume-scl-slope": "1",
+        "x-volume-scl-inter": "0",
+        ...scalarIdentityHeaders("2", "1", "1"),
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => response));
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(client.getUploadScalarVolume("file-123")).rejects.toMatchObject({ status: 502 });
   });
 });
 

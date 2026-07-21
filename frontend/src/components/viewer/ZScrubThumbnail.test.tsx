@@ -71,6 +71,62 @@ describe("ZScrubThumbnail", () => {
     await waitFor(() => expect(img).toHaveAttribute("data-z", "0"));
   });
 
+  it("applies the pointer's entry plane after the lazy z count resolves", async () => {
+    let resolveZCount: (count: number) => void = () => undefined;
+    const loadZCount = vi.fn(
+      () => new Promise<number>((resolve) => {
+        resolveZCount = resolve;
+      }),
+    );
+    render(
+      <ZScrubThumbnail
+        fileId="f1"
+        alt="cells"
+        staticThumbnailUrl="/thumb/f1"
+        sliceUrlFor={sliceUrlFor}
+        loadZCount={loadZCount}
+        prefetch={vi.fn()}
+      />,
+    );
+    const img = screen.getByAltText("cells");
+    vi.spyOn(img, "getBoundingClientRect").mockReturnValue({
+      top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect);
+
+    // A real pointer enters once and can stop moving while viewer metadata is
+    // still loading. The resolved stack must honor that original position.
+    fireEvent.mouseEnter(img, { clientY: 75 });
+    resolveZCount(10);
+
+    await waitFor(() => expect(img).toHaveAttribute("src", "/slice?z=7"));
+    expect(img).toHaveAttribute("data-z", "7");
+  });
+
+  it("reapplies the entry plane when returning with a cached z count", async () => {
+    render(
+      <ZScrubThumbnail
+        fileId="f1"
+        alt="cells"
+        staticThumbnailUrl="/thumb/f1"
+        sliceUrlFor={sliceUrlFor}
+        loadZCount={vi.fn().mockResolvedValue(10)}
+        prefetch={vi.fn()}
+      />,
+    );
+    const img = screen.getByAltText("cells");
+    vi.spyOn(img, "getBoundingClientRect").mockReturnValue({
+      top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100, x: 0, y: 0, toJSON: () => ({}),
+    } as DOMRect);
+
+    fireEvent.mouseEnter(img, { clientY: 75 });
+    await waitFor(() => expect(img).toHaveAttribute("src", "/slice?z=7"));
+    fireEvent.mouseLeave(img);
+    expect(img).toHaveAttribute("src", "/thumb/f1");
+
+    fireEvent.mouseEnter(img, { clientY: 25 });
+    await waitFor(() => expect(img).toHaveAttribute("src", "/slice?z=2"));
+  });
+
   it("does not scrub a flat (single-plane) image", async () => {
     const loadZCount = vi.fn().mockResolvedValue(1);
     render(

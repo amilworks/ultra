@@ -93,10 +93,6 @@ export function ZScrubThumbnail({
     }
   }, [zCount, loadZCount, fileId]);
 
-  const handleMouseEnter = useCallback(() => {
-    void ensureZCount();
-  }, [ensureZCount]);
-
   // Current plane mirrored in a ref so the move/wheel handlers read it without a
   // stale closure and without putting side effects inside a state updater.
   const zRef = useRef(0);
@@ -105,6 +101,9 @@ export function ZScrubThumbnail({
   // request per pixel and floods the (small, serialized) image-service pool.
   const pendingZRef = useRef<{ z: number; count: number } | null>(null);
   const rafRef = useRef<number | null>(null);
+  const hoveredRef = useRef(false);
+  const activeScrubRef = useRef(false);
+  const pointerPositionRef = useRef<{ offsetY: number; height: number } | null>(null);
 
   const handleMouseLeave = useCallback(() => {
     if (rafRef.current !== null) {
@@ -112,6 +111,9 @@ export function ZScrubThumbnail({
       rafRef.current = null;
     }
     pendingZRef.current = null;
+    hoveredRef.current = false;
+    activeScrubRef.current = false;
+    pointerPositionRef.current = null;
     cancelPendingPrefetchesLazily();
     zRef.current = 0;
     setZ(0);
@@ -120,9 +122,10 @@ export function ZScrubThumbnail({
 
   const applyZ = useCallback(
     (next: number, count: number) => {
-      if (next === zRef.current) {
+      if (activeScrubRef.current && next === zRef.current) {
         return;
       }
+      activeScrubRef.current = true;
       zRef.current = next;
       setZ(next);
       setSrc(sliceUrlFor(next));
@@ -150,6 +153,38 @@ export function ZScrubThumbnail({
     [flushScheduledZ],
   );
 
+  const rememberPointerPosition = useCallback((event: MouseEvent<HTMLImageElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    pointerPositionRef.current = {
+      offsetY: event.clientY - rect.top,
+      height: rect.height,
+    };
+  }, []);
+
+  const handleMouseEnter = useCallback(
+    (event: MouseEvent<HTMLImageElement>) => {
+      hoveredRef.current = true;
+      rememberPointerPosition(event);
+      const pointer = pointerPositionRef.current;
+      if (pointer && zCount !== null && isScrubbable(zCount)) {
+        scheduleZ(zFromPointerY(pointer.offsetY, pointer.height, zCount), zCount);
+      }
+      void ensureZCount();
+    },
+    [ensureZCount, rememberPointerPosition, scheduleZ, zCount],
+  );
+
+  // Mouse entry and viewerinfo resolution are two independent events. Re-apply
+  // the last pointer position when the plane count arrives so a user does not
+  // need to leave and re-enter (or keep moving) to begin scrubbing.
+  useEffect(() => {
+    const pointer = pointerPositionRef.current;
+    if (!hoveredRef.current || !pointer || zCount === null || !isScrubbable(zCount)) {
+      return;
+    }
+    scheduleZ(zFromPointerY(pointer.offsetY, pointer.height, zCount), zCount);
+  }, [zCount, scheduleZ]);
+
   // Cancel any pending frame on unmount so the callback never fires after teardown.
   useEffect(() => {
     return () => {
@@ -162,14 +197,17 @@ export function ZScrubThumbnail({
 
   const handleMouseMove = useCallback(
     (event: MouseEvent<HTMLImageElement>) => {
+      rememberPointerPosition(event);
       const count = zCount ?? 0;
       if (!isScrubbable(count)) {
         return;
       }
-      const rect = event.currentTarget.getBoundingClientRect();
-      scheduleZ(zFromPointerY(event.clientY - rect.top, rect.height, count), count);
+      const pointer = pointerPositionRef.current;
+      if (pointer) {
+        scheduleZ(zFromPointerY(pointer.offsetY, pointer.height, count), count);
+      }
     },
-    [zCount, scheduleZ],
+    [zCount, scheduleZ, rememberPointerPosition],
   );
 
   const handleWheel = useCallback(

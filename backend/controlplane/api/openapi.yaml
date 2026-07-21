@@ -1289,24 +1289,70 @@ paths:
       operationId: getUploadScalarVolume
       parameters:
         - $ref: "#/components/parameters/FileID"
+        - name: t
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          schema: { type: integer, minimum: 0 }
       responses:
         "200":
           description: Upload scalar volume payload
           headers:
             x-volume-width:
+              required: true
               schema: { type: integer }
             x-volume-height:
+              required: true
               schema: { type: integer }
             x-volume-depth:
+              required: true
               schema: { type: integer }
             x-volume-dtype:
+              required: true
               schema: { type: string }
             x-volume-bytes-per-voxel:
+              required: true
               schema: { type: integer }
             x-volume-raw-min:
+              required: true
               schema: { type: number }
             x-volume-raw-max:
+              required: true
               schema: { type: number }
+            x-volume-scl-slope:
+              required: true
+              schema: { type: number }
+            x-volume-scl-inter:
+              required: true
+              schema: { type: number }
+            x-volume-channel:
+              required: true
+              schema: { type: integer, minimum: 0 }
+            x-volume-time:
+              required: true
+              schema: { type: integer, minimum: 0 }
+            x-volume-source-width:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-source-height:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-source-depth:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-x:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-y:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-z:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-preview-policy:
+              required: true
+              schema: { type: string, minLength: 1 }
           content:
             application/octet-stream:
               schema:
@@ -1556,21 +1602,59 @@ paths:
           description: Raw little-endian voxel buffer (x-fastest ordering) for the HDF5 dataset preview volume.
           headers:
             x-volume-width:
+              required: true
               schema: { type: integer }
             x-volume-height:
+              required: true
               schema: { type: integer }
             x-volume-depth:
+              required: true
               schema: { type: integer }
             x-volume-dtype:
+              required: true
               schema: { type: string }
             x-volume-bytes-per-voxel:
+              required: true
               schema: { type: integer }
             x-volume-raw-min:
+              required: true
               schema: { type: number }
             x-volume-raw-max:
+              required: true
               schema: { type: number }
             x-volume-channel:
-              schema: { type: integer }
+              required: true
+              schema: { type: integer, minimum: 0 }
+            x-volume-time:
+              required: true
+              schema: { type: integer, minimum: 0 }
+            x-volume-scl-slope:
+              required: true
+              schema: { type: number }
+            x-volume-scl-inter:
+              required: true
+              schema: { type: number }
+            x-volume-source-width:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-source-height:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-source-depth:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-x:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-y:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-downsample-z:
+              required: true
+              schema: { type: integer, minimum: 1 }
+            x-volume-preview-policy:
+              required: true
+              schema: { type: string, minLength: 1 }
           content:
             application/octet-stream:
               schema:

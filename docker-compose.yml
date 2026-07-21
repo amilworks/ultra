@@ -1,18 +1,31 @@
-# BisQue Ultra — local all-in-one stack.
+# BisQue Ultra — local PRODUCTION-PARITY stack (`make up`).
 #
 #   docker compose up --build
 #
-# Brings up: Postgres, NATS (JetStream), the libbioimage image service + its
-# convert worker, the Go control plane, the Deep Agents worker, and the frontend.
-# Talks to a model server you run on the HOST (Ollama or vLLM) — by default
-# http://host.docker.internal:11434/v1 with model `gpt-oss:20b`.
+# This file deliberately mirrors the deployed production topology, so a local run
+# is evidence about a production rollout. It brings up every service production
+# runs: Postgres, NATS (JetStream, token-authed), the libbioimage image service +
+# its convert worker, the NGFF service, the Go control plane, MULTIPLE Deep Agents
+# workers sharing one NATS durable, and the built SPA served by an edge that
+# mirrors the production reverse proxy (same-origin API, same security headers,
+# same cache contract).
 #
+# Parity settings that matter (change them and you are no longer testing prod):
+#   ENVIRONMENT=production   — config.Validate() returns early otherwise, so the
+#                              entire production requirement block goes untested.
+#   worker replicas = 2      — exercises competing consumers / lease redelivery.
+#   NATS token auth          — production requires a token.
+#
+# Deliberate, documented differences from production (everything else should
+# match): dev auth instead of WorkOS (opt in with ULTRA_AUTH_PROVIDER=workos),
+# plain http instead of TLS+HSTS, and one host instead of the multi-node fleet.
+#
+# Talks to any OpenAI-compatible model server you run on the HOST (Ollama or
+# vLLM) — by default http://host.docker.internal:11434/v1 with `gpt-oss:20b`.
 # Override the model (and a few ports) without touching the app's .env via shell
 # vars or an --env-file, e.g.:
 #   ULTRA_MODEL_NAME=qwen2.5:14b-instruct docker compose up --build
 #   docker compose --env-file .env.docker up --build
-#
-# Auth defaults to "dev" (a local username/password form — no WorkOS/cloud).
 
 services:
   postgres:
@@ -51,7 +64,11 @@ services:
     image: nats:2.10-alpine
     # -sd persists JetStream to a named volume so durable run/job state survives
     # `docker compose down` (without a store dir + volume it is lost on restart).
-    command: ["-js", "-sd", "/data", "-m", "8222"]
+    # --auth mirrors production, where NATS requires a token. Clients MUST use the
+    # userinfo form `nats://<token>@host` (NO colon) — the `nats://:<token>@host`
+    # form sends the token as an empty-user PASSWORD and token auth rejects it.
+    command:
+      ["-js", "-sd", "/data", "-m", "8222", "--auth", "${ULTRA_NATS_TOKEN:-local-dev-nats-token}"]
     volumes:
       - ultra-nats:/data
     healthcheck:
@@ -98,7 +115,7 @@ services:
     command: ["python", "-m", "ultra_deepagents.image_convert_worker"]
     mem_limit: ${ULTRA_IMAGE_CONVERT_MEM_LIMIT:-12g}
     environment:
-      ULTRA_CONTROL_NATS_URL: nats://nats:4222
+      ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
       ULTRA_CONTROL_NATS_IMAGE_JOBS_SUBJECT: ultra.data_agent.jobs
       ULTRA_CONTROL_NATS_IMAGE_WORKER_DURABLE: ultra-image-convert-worker
     volumes:
@@ -107,6 +124,14 @@ services:
       nats:
         condition: service_healthy
       image-service:
+        condition: service_started
+      # MUST start after the control plane. The control plane owns
+      # ultra.data_agent.jobs as a subject of its ULTRA_RUNS stream
+      # (ULTRA_CONTROL_NATS_DATA_AGENT_JOBS_SUBJECT); if this worker wins the race
+      # it creates its own stream claiming that subject and the control plane then
+      # dies with "nats: subjects overlap with an existing stream". Production is
+      # never exposed to that race because the control plane is long-lived.
+      control-plane:
         condition: service_started
 
   # OME-Zarr (NGFF) native serving — a stateless sibling to image-service, purpose-built
@@ -159,9 +184,23 @@ services:
       context: backend/controlplane
     image: ultra-control:local
     environment:
+      # Run the SAME code path production runs. config.Validate() returns early
+      # unless ENVIRONMENT=production (config.go), so with anything else the whole
+      # production requirement block — durable backends, auth provider — is NEVER
+      # exercised locally. Keeping this at `production` is the single
+      # highest-value parity setting in this file.
+      ENVIRONMENT: ${ULTRA_ENVIRONMENT:-production}
+      # Production refuses dev auth outright; this is the one explicit, documented
+      # relaxation so the local inner loop keeps a username/password form. Set
+      # ULTRA_AUTH_PROVIDER=workos (plus the WorkOS vars below) to run prod's real
+      # auth path before a rollout.
+      ULTRA_CONTROL_ALLOW_DEV_AUTH_IN_PRODUCTION: ${ULTRA_ALLOW_DEV_AUTH:-true}
       ULTRA_CONTROL_HTTP_ADDR: 0.0.0.0:8000
-      ULTRA_CONTROL_DATABASE_URL: postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable
-      ULTRA_CONTROL_NATS_URL: nats://nats:4222
+      # Defaults to the stack's own Postgres. Override to reuse an existing,
+      # already-migrated database (e.g. the native dev stack's Postgres on the
+      # host) via ULTRA_DATABASE_URL.
+      ULTRA_CONTROL_DATABASE_URL: ${ULTRA_DATABASE_URL:-postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable}
+      ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
       ULTRA_CONTROL_UPLOAD_ROOT: /data/uploads
       # Artifacts live on a host-bind shared with the worker's code-exec sandbox
       # (see ULTRA_DATA_DIR note in the worker service).
@@ -175,12 +214,33 @@ services:
       ULTRA_CONTROL_VLM_API_KEY: "${ULTRA_CONTROL_VLM_API_KEY:-}"
       ULTRA_CONTROL_NGFF_SERVICE_URL: ${ULTRA_CONTROL_NGFF_SERVICE_URL:-http://ngff-service:8091}
       ULTRA_CONTROL_AUTH_PROVIDER: ${ULTRA_AUTH_PROVIDER:-dev}
-      ULTRA_CONTROL_DEV_ADMIN_ENABLED: "true"
+      ULTRA_CONTROL_DEV_ADMIN_ENABLED: ${ULTRA_DEV_ADMIN_ENABLED:-true}
+      # Bootstrap admin allowlist — same mechanism production uses to grant the
+      # admin console (the session role is recomputed from this on every session
+      # read; comma-separated, case-insensitive).
+      ULTRA_CONTROL_ADMIN_EMAILS: ${ULTRA_ADMIN_EMAILS:-}
       ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
       ULTRA_CONTROL_BISQUE_ROOT_URL: ${ULTRA_BISQUE_ROOT_URL:-}
+      # Required by production validation whenever a BisQue root is configured
+      # (linked BisQue credentials are AES-256-GCM sealed with it). Local-only
+      # key; production uses its own from the deployment environment.
+      ULTRA_CONTROL_SECRET_ENCRYPTION_KEY: ${ULTRA_SECRET_ENCRYPTION_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LWRvLW5vdC1zaGlwISE=}
+      ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID: ${ULTRA_SECRET_ENCRYPTION_KEY_ID:-local-dev-key}
+      # WorkOS opt-in (ULTRA_AUTH_PROVIDER=workos). Redirect URIs point at the
+      # edge origin, not the control plane, because the SPA and API are
+      # same-origin here exactly as they are behind the production edge.
+      ULTRA_CONTROL_WORKOS_CLIENT_ID: ${ULTRA_WORKOS_CLIENT_ID:-}
+      ULTRA_CONTROL_WORKOS_API_KEY: ${ULTRA_WORKOS_API_KEY:-}
+      ULTRA_CONTROL_WORKOS_COOKIE_PASSWORD: ${ULTRA_WORKOS_COOKIE_PASSWORD:-}
+      ULTRA_CONTROL_WORKOS_REDIRECT_URI: ${ULTRA_WORKOS_REDIRECT_URI:-http://localhost:${FRONTEND_PORT:-5174}/v2/auth/workos/callback}
+      ULTRA_CONTROL_WORKOS_POST_LOGIN_REDIRECT_URI: ${ULTRA_WORKOS_POST_LOGIN_REDIRECT_URI:-http://localhost:${FRONTEND_PORT:-5174}/}
+      ULTRA_CONTROL_WORKOS_LOGOUT_REDIRECT_URI: ${ULTRA_WORKOS_LOGOUT_REDIRECT_URI:-http://localhost:${FRONTEND_PORT:-5174}/}
+      ULTRA_CONTROL_WORKOS_COOKIE_SECURE: ${ULTRA_WORKOS_COOKIE_SECURE:-false}
     volumes:
       - ultra-uploads:/data/uploads
       - ${ULTRA_DATA_DIR:-/tmp/ultra-data}:${ULTRA_DATA_DIR:-/tmp/ultra-data}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # reach a HOST Postgres via ULTRA_DATABASE_URL
     ports:
       - "${CONTROL_PORT:-8000}:8000"
     depends_on:
@@ -207,9 +267,9 @@ services:
       OPENAI_API_KEY: ${ULTRA_MODEL_API_KEY:-EMPTY}
       ULTRA_CONTROL_BASE_URL: http://control-plane:8000
       ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
-      ULTRA_CONTROL_NATS_URL: nats://nats:4222
-      ULTRA_NATS_URL: nats://nats:4222
-      ULTRA_CONTROL_DATABASE_URL: postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable
+      ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
+      ULTRA_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
+      ULTRA_CONTROL_DATABASE_URL: ${ULTRA_DATABASE_URL:-postgres://postgres:postgres@postgres:5432/bisque_ultra?sslmode=disable}
       ULTRA_CONTROL_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
       ULTRA_ARTIFACT_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/artifacts
       ULTRA_UPLOAD_ROOTS: /data/uploads
@@ -250,6 +310,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway" # reach a HOST Ollama/vLLM on Linux
+    # Production runs MULTIPLE workers sharing one NATS durable (a queue group),
+    # so run more than one here too: it is the only way local exercises the real
+    # distribution semantics — competing consumers, run leases, redelivery to a
+    # second worker — instead of a single-consumer happy path.
+    deploy:
+      replicas: ${ULTRA_WORKER_REPLICAS:-2}
     depends_on:
       nats:
         condition: service_healthy

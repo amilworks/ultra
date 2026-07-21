@@ -11,6 +11,7 @@ import {
 import {
   collectDroppedFiles,
   isOsFileDrag,
+  normalizePickedFiles,
   snapshotDropPayload,
   summarizeDropIssues,
 } from "@/lib/dropTraversal";
@@ -1167,8 +1168,15 @@ export function ResourceBrowser({
       return;
     }
     if (!resumeFrom) {
-      setUploadReselectionError(null);
-      onUploadFiles?.(files);
+      // Same funnel as drops: junk filtering, nested-zarr re-rooting, cap
+      // with truncated-bundle withholding. Resume-reselects skip it — they
+      // must match the interrupted upload's recorded paths byte for byte.
+      const normalized = normalizePickedFiles(files);
+      const message = summarizeDropIssues(normalized);
+      setUploadReselectionError(message);
+      if (normalized.files.length > 0) {
+        onUploadFiles?.(normalized.files);
+      }
       return;
     }
     const matchingFile = files.find((file) => fileMatchesUploadProgress(file, resumeFrom)) ?? null;

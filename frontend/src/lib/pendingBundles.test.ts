@@ -53,3 +53,25 @@ describe("groupPendingUploads", () => {
     expect(groups[1].indices).toEqual([1]);
   });
 });
+
+describe("plain folder grouping (display-only)", () => {
+  it("groups a generic folder's files into one folder chip", () => {
+    const groups = groupPendingUploads([
+      { name: "a.csv", size: 10, webkitRelativePath: "exp/a.csv" },
+      { name: "b.csv", size: 20, webkitRelativePath: "exp/b.csv" },
+      { name: "loose.txt", size: 5 },
+    ]);
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toMatchObject({ name: "exp", isFolder: true, isBundle: false, fileCount: 2, totalBytes: 30 });
+    expect(groups[1]).toMatchObject({ name: "loose.txt", isBundle: false });
+    expect(groups[0].indices).toEqual([0, 1]);
+  });
+
+  it("keeps zarr groups as bundles, never folder chips", () => {
+    const groups = groupPendingUploads([
+      { name: ".zattrs", size: 1, webkitRelativePath: "scan.zarr/.zattrs" },
+    ]);
+    expect(groups[0].isBundle).toBe(true);
+    expect(groups[0].isFolder).toBeFalsy();
+  });
+});

@@ -15,8 +15,7 @@ import {
   ChatContainerRoot,
   ChatContainerScrollAnchor,
   FileUpload,
-  FileUploadTrigger,
-  FileUploadFolderTrigger,
+  useFileUploadContext,
   Loader,
   Message,
   MessageAction,
@@ -266,6 +265,7 @@ import {
   Copy,
   Database,
   FolderOpen,
+  FileUp,
   FolderUp,
   ImageIcon,
   Images,
@@ -1891,7 +1891,7 @@ const ConversationMessageRow = memo(
                   variant="ghost"
                   size="icon-sm"
                   className={cn(
-                    "rounded-full transition-all duration-200",
+                    "rounded-full transition-colors duration-150",
                     isCopied &&
                       "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 dark:text-emerald-400"
                   )}
@@ -2086,7 +2086,7 @@ const ConversationMessageRow = memo(
                 variant="ghost"
                 size="icon-sm"
                 className={cn(
-                  "rounded-full transition-all duration-200",
+                  "rounded-full transition-colors duration-150",
                   isCopied &&
                     "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 dark:text-emerald-400"
                 )}
@@ -4787,6 +4787,74 @@ const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null
   };
 };
 
+function ComposerAttachMenu({
+  disabled,
+  variant = "toolbar",
+  onCloseAutoFocus,
+}: {
+  disabled: boolean;
+  variant?: "toolbar" | "idle";
+  onCloseAutoFocus?: (event: Event) => void;
+}) {
+  const { openFilePicker, openFolderPicker, allowDirectories } = useFileUploadContext();
+  // The idle variant is the slim pill's left affordance. It stays a real tab
+  // stop (attach is a primary action and, while slim, the toolbar's + is
+  // visibility:hidden — so this is the only keyboard path to it); its slim CSS
+  // gates it out of the tab order + a11y tree when the toolbar + takes over.
+  // mousedown preventDefault only stops a MOUSE click from blurring the caret;
+  // it also skips the tooltip wrapper, since the pill is calm chrome.
+  const trigger = (
+    <DropdownMenuTrigger asChild>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-label="Attach files or a folder"
+        data-testid={variant === "idle" ? "composer-idle-attach-menu" : "composer-attach-menu"}
+        onMouseDown={variant === "idle" ? (event) => event.preventDefault() : undefined}
+        className={
+          variant === "idle"
+            ? "app-composer-idle-attach app-composer-icon-button size-10 rounded-full"
+            : "app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
+        }
+        disabled={disabled}
+      >
+        <Plus size={18} />
+      </Button>
+    </DropdownMenuTrigger>
+  );
+  return (
+    <DropdownMenu>
+      {variant === "idle" ? trigger : <PromptInputAction tooltip="Attach">{trigger}</PromptInputAction>}
+      <DropdownMenuContent
+        align="start"
+        sideOffset={8}
+        className="app-composer-attach-menu"
+        onCloseAutoFocus={onCloseAutoFocus}
+      >
+        <DropdownMenuItem onSelect={() => openFilePicker()}>
+          <FileUp data-icon="inline-start" aria-hidden="true" />
+          <div className="app-composer-attach-menu-item">
+            <span>Files</span>
+            <span className="app-composer-attach-menu-detail">Images, tables, documents</span>
+          </div>
+        </DropdownMenuItem>
+        {allowDirectories ? (
+          <DropdownMenuItem onSelect={() => openFolderPicker()}>
+            <FolderUp data-icon="inline-start" aria-hidden="true" />
+            <div className="app-composer-attach-menu-item">
+              <span>Folder</span>
+              <span className="app-composer-attach-menu-detail">
+                OME-Zarr uploads as one dataset
+              </span>
+            </div>
+          </DropdownMenuItem>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 export function App() {
   const apiBaseUrl = DEFAULT_API_BASE_URL;
   const [themePreference, setThemePreference] = useLocalStorageState<ThemePreference>(
@@ -7269,6 +7337,105 @@ export function App() {
     )
       ? composerDraftsByConversationId[activeConversation.id] ?? ""
       : activeConversation?.prompt ?? "";
+
+  // Slim-composer threshold: the pill holds one calm line while the prompt
+  // fits; the moment content wraps (or a newline arrives) it expands, and it
+  // settles back when the prompt shortens. Measured with a hidden mirror
+  // element — the textarea's own scrollHeight is floored by whichever
+  // geometry state it is currently in, which would ratchet the composer open.
+  const [composerPromptOverflows, setComposerPromptOverflows] = useState(false);
+  const composerMirrorRef = useRef<HTMLDivElement | null>(null);
+  const composerResizeObserverRef = useRef<ResizeObserver | null>(null);
+  const measureComposerOverflow = useCallback((prompt: string) => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      setComposerPromptOverflows(false);
+      return;
+    }
+    if (prompt.includes("\n")) {
+      setComposerPromptOverflows(true);
+      return;
+    }
+    if (prompt.trim() === "") {
+      setComposerPromptOverflows(false);
+      return;
+    }
+    let mirror = composerMirrorRef.current;
+    if (!mirror) {
+      mirror = document.createElement("div");
+      mirror.setAttribute("aria-hidden", "true");
+      mirror.style.position = "absolute";
+      mirror.style.visibility = "hidden";
+      mirror.style.pointerEvents = "none";
+      mirror.style.whiteSpace = "pre-wrap";
+      mirror.style.top = "-9999px";
+      document.body.appendChild(mirror);
+      composerMirrorRef.current = mirror;
+    }
+    const computed = window.getComputedStyle(textarea);
+    // Always measure against the SLIM content width, never the live padding.
+    // Padding-left/right differ between slim and expanded, so measuring against
+    // the current state would feed the decision back into its own geometry and
+    // oscillate at the 1↔2-line boundary. The slim insets come from the shared
+    // --composer-slim-pad-* vars (styles.css) so CSS and JS can't drift, and
+    // clientWidth (content+padding) stays ~constant across states.
+    const rootFontSize =
+      Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16;
+    const toPx = (value: string, fallbackPx: number) => {
+      const trimmed = value.trim();
+      const parsed = Number.parseFloat(trimmed);
+      if (!Number.isFinite(parsed)) {
+        return fallbackPx;
+      }
+      return trimmed.endsWith("rem") ? parsed * rootFontSize : parsed;
+    };
+    const slimPadLeft = toPx(computed.getPropertyValue("--composer-slim-pad-left"), 3.4 * rootFontSize);
+    const slimPadRight = toPx(computed.getPropertyValue("--composer-slim-pad-right"), 7.5 * rootFontSize);
+    mirror.style.width = `${Math.max(0, textarea.clientWidth - slimPadLeft - slimPadRight)}px`;
+    mirror.style.font = computed.font;
+    mirror.style.letterSpacing = computed.letterSpacing;
+    mirror.style.lineHeight = computed.lineHeight;
+    mirror.style.wordBreak = computed.wordBreak;
+    mirror.style.overflowWrap = computed.overflowWrap;
+    mirror.textContent = prompt;
+    const lineHeight = Number.parseFloat(computed.lineHeight) || 22;
+    setComposerPromptOverflows(mirror.offsetHeight / lineHeight >= 1.9);
+  }, []);
+  useEffect(() => {
+    measureComposerOverflow(activePrompt);
+  }, [activePrompt, measureComposerOverflow]);
+  // Callback ref for the composer textarea: keeps composerTextareaRef in sync AND
+  // (re)binds a ResizeObserver to the live node. Width changes (viewport resize,
+  // sidebar collapse, side panel) move where a single line wraps; without a
+  // re-measure the slim decision goes stale and slim's max-height:3rem clamp
+  // would clip the now-wrapped second line until the next keystroke. A callback
+  // ref binds exactly when the node mounts — a mount-time effect could run
+  // before the textarea exists and, with stable deps, never re-subscribe.
+  const attachComposerTextarea = useCallback(
+    (node: HTMLTextAreaElement | null) => {
+      composerTextareaRef.current = node;
+      composerResizeObserverRef.current?.disconnect();
+      composerResizeObserverRef.current = null;
+      if (node && typeof ResizeObserver !== "undefined") {
+        const observer = new ResizeObserver(() => {
+          // Live textarea value, never a stale prompt closure.
+          measureComposerOverflow(composerTextareaRef.current?.value ?? "");
+        });
+        observer.observe(node);
+        composerResizeObserverRef.current = observer;
+      }
+    },
+    [measureComposerOverflow]
+  );
+  useEffect(() => {
+    return () => {
+      composerResizeObserverRef.current?.disconnect();
+      composerResizeObserverRef.current = null;
+      composerMirrorRef.current?.remove();
+      composerMirrorRef.current = null;
+    };
+  }, []);
+
   const activePendingFiles = activeConversation?.pendingFiles ?? EMPTY_FILES;
   const activeAvailableUploadedFiles =
     activeConversation?.uploadedFiles ?? EMPTY_UPLOADED_FILES;
@@ -7491,12 +7658,15 @@ export function App() {
     // `*.zarr` top segment) into ONE chip — the backend commits them as one bundle resource.
     return groupPendingUploads(activePendingFiles).map((group) => {
       const firstFile = activePendingFiles[group.indices[0]];
+      const isGrouped = group.isBundle || Boolean(group.isFolder);
       const canPreviewInBrowser =
-        !group.isBundle && firstFile ? supportsBrowserPreview(firstFile.name, firstFile.type) : false;
+        !isGrouped && firstFile ? supportsBrowserPreview(firstFile.name, firstFile.type) : false;
       return {
-        key: group.isBundle ? `bundle:${group.name}` : `${group.name}-${group.totalBytes}-${group.indices[0]}`,
+        key: isGrouped
+          ? `${group.isBundle ? "bundle" : "folder"}:${group.name}`
+          : `${group.name}-${group.totalBytes}-${group.indices[0]}`,
         name: group.name,
-        sizeLabel: group.isBundle
+        sizeLabel: isGrouped
           ? `${group.indices.length} files · ${formatBytes(group.totalBytes)}`
           : formatBytes(group.totalBytes),
         canPreviewInBrowser,
@@ -9344,7 +9514,26 @@ export function App() {
         newlyUploadedFiles: [],
       };
     }
-    const response = await apiClient.uploadFiles(pendingFilesSnapshot);
+    // Bundle (zarr) and plain files upload in SEPARATE sessions: a
+    // bundle-bearing session's client response carries only bundle records
+    // (api.ts uploadMultipleFilesWithV2Session), which would silently drop the
+    // plain files' records — and with them, the files themselves — from the
+    // run. Same split the Resources upload path uses.
+    const bundleFiles = pendingFilesSnapshot.filter((file) =>
+      Boolean(bundleRootForRelativePath(file.webkitRelativePath ?? ""))
+    );
+    const plainFiles = pendingFilesSnapshot.filter(
+      (file) => !bundleRootForRelativePath(file.webkitRelativePath ?? "")
+    );
+    let uploadedRecords: UploadedFileRecord[];
+    if (bundleFiles.length > 0 && plainFiles.length > 0) {
+      const bundleResponse = await apiClient.uploadFiles(bundleFiles);
+      const plainResponse = await apiClient.uploadFiles(plainFiles);
+      uploadedRecords = [...bundleResponse.uploaded, ...plainResponse.uploaded];
+    } else {
+      uploadedRecords = (await apiClient.uploadFiles(pendingFilesSnapshot)).uploaded;
+    }
+    const response = { uploaded: uploadedRecords };
     const merged = uniqueByFileId([...existingUploadedFiles, ...response.uploaded]);
     updateConversation(conversationId, (conversation) => {
       const retainedFailures: Record<string, true> = {};
@@ -11616,6 +11805,16 @@ export function App() {
             data-composer-compact={
               isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
             }
+            data-composer-slim={
+              activeConversationHydrated &&
+              !activeSending &&
+              !composerPromptOverflows &&
+              !hasComposerAttachedFiles &&
+              !slashMenuOpen &&
+              !composerResourcePickerOpen
+                ? "true"
+                : undefined
+            }
             data-composer-idle={
               activeConversationHydrated &&
               !activeSending &&
@@ -11686,28 +11885,22 @@ export function App() {
                     </Suspense>
                   ) : null}
                   <div className="app-composer-card-body">
-                    {/* Idle-only attach affordance: the toolbar's + collapses
+                    {/* Slim-only attach affordance: the toolbar's + collapses
                         away inside actions-start (whose opacity fade would
-                        swallow any child), so the idle pill gets its own
+                        swallow any child), so the slim pill gets its own
                         trigger anchored to the card, like the idle mode echo.
-                        Pointer-only on purpose: preventDefault on mousedown
-                        keeps the click from focusing it (focus would expand
-                        the composer and hide this button mid-click), and
-                        keyboard users reach attach via the expanded toolbar. */}
-                    <FileUploadTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        tabIndex={-1}
-                        aria-label="Attach files"
-                        onMouseDown={(event) => event.preventDefault()}
-                        className="app-composer-idle-attach app-composer-icon-button size-10 rounded-full"
-                        disabled={!activeConversationHydrated}
-                      >
-                        <Plus size={18} />
-                      </Button>
-                    </FileUploadTrigger>
+                        Same Files/Folder menu as the toolbar + — one glyph,
+                        one behavior. Keyboard-reachable (it IS the attach path
+                        while slim); mousedown preventDefault only stops a mouse
+                        click from blurring the caret. */}
+                    <ComposerAttachMenu
+                      variant="idle"
+                      disabled={!activeConversationHydrated}
+                      onCloseAutoFocus={(event) => {
+                        event.preventDefault();
+                        composerTextareaRef.current?.focus();
+                      }}
+                    />
                     {activeSending ? (
                       <div className="composer-running">
                         <Loader
@@ -11721,7 +11914,7 @@ export function App() {
                       </div>
                     ) : null}
                     <PromptInputTextarea
-                      ref={composerTextareaRef}
+                      ref={attachComposerTextarea}
                       placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
                       className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
@@ -11997,34 +12190,18 @@ export function App() {
                       className="app-composer-actions"
                     >
                       <div className="app-composer-actions-start">
-                        <PromptInputAction tooltip="Attach files">
-                          <FileUploadTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label="Attach files"
-                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
-                              disabled={!activeConversationHydrated}
-                            >
-                              <Plus size={18} />
-                            </Button>
-                          </FileUploadTrigger>
-                        </PromptInputAction>
-                        <PromptInputAction tooltip="Attach folder (OME-Zarr)">
-                          <FileUploadFolderTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              aria-label="Attach folder"
-                              className="app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
-                              disabled={!activeConversationHydrated}
-                            >
-                              <FolderUp size={18} />
-                            </Button>
-                          </FileUploadFolderTrigger>
-                        </PromptInputAction>
+                        {/* ONE attach affordance: the browser forces two
+                            hidden inputs (webkitdirectory is exclusive), but
+                            the user sees a single + — format intelligence
+                            (zarr re-rooting, junk, caps) lives in the shared
+                            funnel, not in which button was pressed. */}
+                        <ComposerAttachMenu
+                          disabled={!activeConversationHydrated}
+                          onCloseAutoFocus={(event) => {
+                            event.preventDefault();
+                            composerTextareaRef.current?.focus();
+                          }}
+                        />
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
@@ -12078,13 +12255,65 @@ export function App() {
                         </DropdownMenu>
                       </div>
                       <div className="app-composer-actions-end">
-                        {/* Idle-only echo of the intelligence mode (the real
-                            selector collapses away with actions-start). A quiet
-                            label, not a control: no chevron, no pointer events —
-                            focusing the pill restores the actual selector. */}
-                        <span className="app-composer-idle-mode" aria-hidden="true">
-                          {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                        </span>
+                        {/* The slim pill's mode control: a REAL button —
+                            with the pill staying slim while typing, this is
+                            the only VISIBLE mode selector (the toolbar one is
+                            visibility:hidden while slim), so it must be
+                            keyboard-reachable: it is a normal tab stop and its
+                            slim CSS gates it out of the tab order + a11y tree
+                            when the toolbar selector takes over. mousedown
+                            preventDefault keeps a MOUSE click from blurring the
+                            textarea; keyboard focus is unaffected. */}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button
+                              type="button"
+                              className="app-composer-idle-mode"
+                              data-testid="composer-slim-intelligence-trigger"
+                              aria-label={`Intelligence: ${
+                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                              }`}
+                              onMouseDown={(event) => event.preventDefault()}
+                            >
+                              {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="end"
+                            sideOffset={8}
+                            className="app-composer-intelligence-menu"
+                            onCloseAutoFocus={(event) => {
+                              event.preventDefault();
+                              composerTextareaRef.current?.focus();
+                            }}
+                          >
+                            <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
+                            <DropdownMenuGroup>
+                              <DropdownMenuItem
+                                data-active={
+                                  activeComposerIntelligenceMode === "high" ? "true" : undefined
+                                }
+                                onClick={() => handleSelectComposerIntelligenceMode("high")}
+                              >
+                                <span>High</span>
+                                {activeComposerIntelligenceMode === "high" ? (
+                                  <Check data-icon="inline-end" aria-hidden="true" />
+                                ) : null}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                data-active={
+                                  activeComposerIntelligenceMode === "pro" ? "true" : undefined
+                                }
+                                onClick={() => handleSelectComposerIntelligenceMode("pro")}
+                              >
+                                <span>Pro</span>
+                                {activeComposerIntelligenceMode === "pro" ? (
+                                  <Check data-icon="inline-end" aria-hidden="true" />
+                                ) : null}
+                              </DropdownMenuItem>
+                            </DropdownMenuGroup>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                         {activeSending ? (
                           <Button
                             size="icon"

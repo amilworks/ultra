@@ -5,6 +5,7 @@ import { Slot } from "radix-ui";
 import {
   collectDroppedFiles,
   isOsFileDrag,
+  normalizePickedFiles,
   snapshotDropPayload,
   type DropCollection,
 } from "@/lib/dropTraversal";
@@ -18,7 +19,7 @@ type FileUploadContextValue = {
 
 const FileUploadContext = React.createContext<FileUploadContextValue | null>(null);
 
-function useFileUploadContext(): FileUploadContextValue {
+export function useFileUploadContext(): FileUploadContextValue {
   const context = React.useContext(FileUploadContext);
   if (!context) {
     throw new Error("File upload components must be used inside FileUpload.");
@@ -69,14 +70,23 @@ export function FileUpload({
     }
   }, [allowDirectories]);
 
+  // Picker selections flow through the SAME funnel as drops: junk filtering,
+  // nested-bundle re-rooting, caps, and issue reporting. One affordance, one
+  // set of guarantees — the intelligence lives here, not in which button the
+  // user happened to press.
   const addFiles = React.useCallback(
     (fileList: FileList | null) => {
       const files = Array.from(fileList ?? []);
-      if (files.length > 0) {
-        onFilesAdded(files);
+      if (files.length === 0) {
+        return;
       }
+      const collection = normalizePickedFiles(files);
+      if (collection.files.length > 0) {
+        onFilesAdded(collection.files);
+      }
+      onDropCollected?.(collection);
     },
-    [onFilesAdded]
+    [onFilesAdded, onDropCollected]
   );
 
   return (

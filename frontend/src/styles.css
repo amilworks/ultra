@@ -1877,12 +1877,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
-/* Desktop/tablet: quiet the composer when it is empty and unfocused so an idle
-   prompt box stops reserving ~148px of the screen. The full, spacious typing
-   geometry (78px textarea, generous padding, the complete action row) and the
-   full elevation all return the instant the field is focused, holds text, holds
-   an attachment, or a run is in flight — driven by data-composer-idle on the
-   shell plus native :focus-within. Reuses the exact collapse tokens proven in
+/* Desktop/tablet: the composer stays a slim single line while the prompt
+   FITS one line — focusing alone no longer expands it. It grows smoothly the
+   moment content wraps (or a newline/attachment/run arrives) and shrinks back
+   when the prompt gets short again — driven by data-composer-slim on the
+   shell, measured from the textarea's scroll height. data-composer-idle
+   (empty + not busy) still exists for the purely decorative empty-state bits. Reuses the exact collapse tokens proven in
    the phone-only block above; mobile keeps its own scroll-away behavior. */
 @media (min-width: 641px) {
   .app-composer-shell .app-composer-textarea {
@@ -1911,52 +1911,65 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
      font-size clamp. min = max defeats any stale autosize inline height, so the
      pill and its text land identically every time. padding-left clears the
-     idle attach button (0.5rem inset + 2.5rem button + breathing room). */
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-textarea {
+     idle attach button; padding-right reserves the floating Pro/High + send.
+     Both come from the shared --composer-slim-pad-* vars the JS mirror reads. */
+  .app-composer-shell[data-composer-slim="true"] .app-composer-textarea {
     min-height: 3rem;
     max-height: 3rem;
     padding-top: calc((3rem - 1.45em) / 2);
     padding-bottom: calc((3rem - 1.45em) / 2);
-    padding-left: 3.4rem;
+    padding-left: var(--composer-slim-pad-left);
+    padding-right: var(--composer-slim-pad-right);
   }
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-actions {
     margin-top: 0;
     padding-top: 0;
     padding-bottom: 0;
   }
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-start {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-start {
     max-height: 0;
     opacity: 0;
     pointer-events: none;
+    /* visibility flips INSTANTLY (no delay): it removes the real toolbar attach +
+       intelligence from the tab order and a11y tree, and the slim replacements
+       reveal instantly too, so exactly one set is ever exposed. A delayed hide
+       would leave both sets in the a11y tree for the transition window. */
+    visibility: hidden;
+    transition: max-height 220ms ease, opacity 160ms ease;
   }
   /* keep the submit affordance on the idle line to balance the placeholder; it
      floats inline at the right and rejoins the toolbar in flow on focus. */
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-actions-end {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-end {
     position: absolute;
     right: 1rem;
     top: 50%;
     transform: translateY(-50%);
     margin: 0;
-    pointer-events: none;
     z-index: 2;
   }
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-card {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-card {
     border-color: color-mix(in oklab, var(--line) 70%, transparent);
     box-shadow: var(--composer-shell-shadow-rest);
     padding-top: 0;
     padding-bottom: 0;
   }
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-mode {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
     opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity 160ms ease;
+  }
+  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode:hover {
+    color: var(--text-main);
   }
 }
 
 @media (min-width: 641px) and (prefers-reduced-motion: reduce) {
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions,
-  .app-composer-shell .app-composer-actions-start {
-    transition: none;
-  }
+  .app-composer-shell .app-composer-actions-start,
+  .app-composer-shell .app-composer-card,
+  .app-composer-shell .app-composer-idle-attach,
   .app-composer-shell .app-composer-idle-mode {
     transition: none;
   }
@@ -6471,6 +6484,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
   letter-spacing: -0.015em;
+  /* Slim horizontal insets, defined here (unconditionally) so the JS overflow
+     mirror can read the SAME values it measures against — see the composer
+     measurement effect in App.tsx. Left clears the floating + attach; right
+     reserves room for the floating Pro/High label and send, so a long single
+     line wraps (and the pill expands) before it could slide under them. */
+  --composer-slim-pad-left: 3.4rem;
+  --composer-slim-pad-right: 7.5rem;
 }
 
 .app-composer-textarea::placeholder {
@@ -6513,7 +6533,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   top: 50%;
   transform: translateY(-50%);
   opacity: 0;
+  /* visibility (not just opacity) so the button leaves the tab order AND the
+     a11y tree when the expanded toolbar owns the real intelligence selector —
+     otherwise screen readers announce two identical mode controls. Revealed
+     with the slim state below. */
+  visibility: hidden;
   pointer-events: none;
+  border: 0;
+  background: none;
+  padding: 0.35rem 0.45rem;
+  margin: -0.35rem -0.45rem;
+  border-radius: 999px;
+  cursor: pointer;
   /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
      `font: inherit` out-orders that clamp, so the field actually renders at the
      card's inherited size — inheriting here matches the real placeholder. */
@@ -6522,7 +6553,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   letter-spacing: -0.015em;
   color: var(--composer-placeholder);
   white-space: nowrap;
+  /* visibility flips instantly (no hide-delay) so it leaves the a11y tree the
+     moment the toolbar's real selector takes over — see the actions-start note.
+     Only opacity animates; the fade-out is cut, which is imperceptible on this
+     small chrome and buys the "exactly one control" invariant. */
   transition: opacity 160ms ease;
+}
+
+.app-composer-idle-mode:focus-visible {
+  outline: 2px solid var(--ring, currentColor);
+  outline-offset: 2px;
+  color: var(--text-main);
 }
 
 /* Idle-only attach button (see App.tsx card-body): the pill's left affordance,
@@ -6544,13 +6585,32 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     transform: translateY(-50%);
     z-index: 2;
     opacity: 0;
+    /* instant visibility hide (no delay), matching idle-mode/actions-start, so
+       exactly one attach control is in the tab order + a11y tree at any moment. */
     visibility: hidden;
-    transition: opacity 160ms ease, visibility 0s linear 160ms;
+    transition: opacity 160ms ease;
   }
-  .app-composer-shell[data-composer-idle="true"]:not(:focus-within) .app-composer-idle-attach {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach {
     opacity: 1;
     visibility: visible;
+    /* re-arm clicks: the collapsed toolbar (its DOM parent) is pointer-events:
+       none, and pointer-events inherits — without this the pill's + is inert. */
+    pointer-events: auto;
     transition: opacity 160ms ease;
+  }
+}
+
+/* Reduced-motion for the slim reveal: the earlier reduced-motion block (in the
+   min-width:641 group above) is out-specified by the slim rules (attribute
+   selector adds a class-weight), so kill their transitions here — placed AFTER
+   the slim rules so equal specificity resolves in this block's favor.
+   actions-start is included because its slim rule declares its own (0,3,0)
+   transition that likewise out-specifies the earlier override. */
+@media (min-width: 641px) and (prefers-reduced-motion: reduce) {
+  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-start,
+  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach,
+  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
+    transition: none;
   }
 }
 
@@ -11579,4 +11639,50 @@ details {
   .training-disclosure-chevron {
     transition: none;
   }
+}
+
+/* Single attach menu: one +, two quiet choices. The detail line carries the
+   format intelligence ("OME-Zarr uploads as one dataset") so the user never
+   has to know which hidden input the browser requires. */
+.app-composer-attach-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.app-composer-attach-menu-detail {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------------------------
+   Snappy hover convention: interactive chrome answers the pointer ~instantly
+   and releases calmly. The duration declared in the :hover/:active state
+   governs the ENTER transition; the base rule's 140-160ms still eases the
+   exit. Unlayered, so this also outranks Tailwind duration utilities (the
+   shadcn button fleet included). Color/background/transform-lift hovers all
+   read as immediate at 60ms; menus stay intentionally instant (their items
+   carry no transitions at all). */
+button:hover,
+[role="button"]:hover,
+a:hover,
+summary:hover,
+.resource-browser-card:hover,
+.chat-artifact-card:hover,
+.chat-document-chip:hover,
+.chat-document-report-download:hover,
+.upload-flight-chip:hover,
+.token-heatmap-cell:hover,
+.token-heatmap-mode:hover,
+.figure-lightbox-thumb:hover,
+.viewer-channel-chip:hover,
+.blank-chat-usage-strip:hover,
+.resource-quick-peek-trigger:hover,
+.viewer-chrome-fade:hover {
+  transition-duration: 60ms;
+}
+
+button:active,
+[role="button"]:active {
+  transition-duration: 40ms;
 }

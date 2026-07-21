@@ -1,3 +1,5 @@
+import { firstBundleSegmentIndex, isDirectoryBundleName } from "./specialFormats";
+
 // Drag-and-drop directory traversal for upload drops.
 //
 // Browsers expose dropped directories only through the (webkit-prefixed but
@@ -154,8 +156,8 @@ const readAllDirectoryEntries = async (
 const relativePathForEntry = (entry: EntryLike, pathBase: number): string =>
   entry.fullPath.slice(pathBase).replace(/^\/+/, "");
 
-const isZarrDirectoryName = (name: string): boolean =>
-  name.toLowerCase().endsWith(".zarr");
+// Directory-bundle roots come from the shared special-format registry.
+const isZarrDirectoryName = isDirectoryBundleName;
 
 const defineRelativePath = (file: File, relativePath: string): File => {
   try {
@@ -361,4 +363,82 @@ export function summarizeDropIssues(collection: DropCollection): string | null {
     }
   }
   return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/**
+ * Normalize PICKER-selected files into the same hardened shape as drops —
+ * this is what makes one attach affordance safe for every input: the browser
+ * can't unify the pickers (a webkitdirectory input selects only directories),
+ * but the funnel behind them is one code path.
+ *
+ * - OS junk is stripped (never inside-picker feedback, so it is counted).
+ * - A directory bundle nested below the picked root is RE-ROOTED at the
+ *   bundle segment, exactly like the drop walk: picking a zarr's parent must
+ *   not explode the store into loose per-chunk resources.
+ * - The file cap mirrors the drop semantics: keep the first MAX_DROPPED_FILES,
+ *   and withhold any bundle the cap truncated — a partial store must not
+ *   upload.
+ * - An empty selection (or one that was all junk) is reported, not swallowed.
+ */
+export function normalizePickedFiles(files: readonly File[]): DropCollection {
+  const collection: DropCollection = {
+    files: [],
+    topLevelDirectories: [],
+    skippedJunkCount: 0,
+    issues: [],
+  };
+  const seenTopDirectories = new Set<string>();
+  const truncatedBundleRoots = new Set<string>();
+  let capped = false;
+
+  for (const file of files) {
+    const nativePath = file.webkitRelativePath ?? "";
+    // Record the picked folder before any skip: even an all-junk folder
+    // should be reportable by name.
+    const nativeTop = nativePath.includes("/") ? nativePath.split("/")[0] : "";
+    if (nativeTop && !seenTopDirectories.has(nativeTop)) {
+      seenTopDirectories.add(nativeTop);
+      collection.topLevelDirectories.push(nativeTop);
+    }
+    if (isJunkFileName(file.name)) {
+      collection.skippedJunkCount += 1;
+      continue;
+    }
+    let relativePath = nativePath;
+    const bundleIndex = relativePath ? firstBundleSegmentIndex(relativePath) : -1;
+    if (bundleIndex > 0) {
+      relativePath = relativePath.split("/").slice(bundleIndex).join("/");
+    }
+    const topSegment = relativePath.includes("/") ? relativePath.split("/")[0] : "";
+    if (collection.files.length >= MAX_DROPPED_FILES) {
+      if (!capped) {
+        capped = true;
+        collection.issues.push({ kind: "too-many-files", limit: MAX_DROPPED_FILES });
+      }
+      if (topSegment && isDirectoryBundleName(topSegment)) {
+        truncatedBundleRoots.add(topSegment);
+      }
+      continue;
+    }
+    collection.files.push(
+      relativePath !== nativePath ? defineRelativePath(file, relativePath) : file
+    );
+  }
+
+  if (truncatedBundleRoots.size > 0) {
+    collection.files = collection.files.filter((file) => {
+      const topSegment = (file.webkitRelativePath ?? "").split("/")[0] ?? "";
+      return !truncatedBundleRoots.has(topSegment);
+    });
+    for (const name of truncatedBundleRoots) {
+      collection.issues.push({ kind: "truncated-bundle", name });
+    }
+  }
+  if (files.length > 0 && collection.files.length === 0 && collection.issues.length === 0) {
+    collection.issues.push({
+      kind: "empty-directory",
+      name: collection.topLevelDirectories[0] ?? "selection",
+    });
+  }
+  return collection;
 }

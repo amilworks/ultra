@@ -11,15 +11,76 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from PIL import Image  # noqa: E402
 import ultra_deepagents.imaging.atlas as atlas_mod  # noqa: E402
+from PIL import Image  # noqa: E402
 from ultra_deepagents.imaging.atlas import (  # noqa: E402
     assemble_atlas,
     assemble_scalar_volume,
+    build_scalar_volume_dict,
     compose_atlas_png,
+    plan_scalar_preview,
+    validate_scalar_plan,
 )
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+
+def test_scalar_preflight_accepts_reference_440_by_440_by_30_volume():
+    assert validate_scalar_plan(
+        {
+            "width": 440,
+            "height": 440,
+            "depth": 30,
+            "dtype": "float32",
+            "bytes_per_voxel": 4,
+        }
+    ) == 440 * 440 * 30 * 4
+
+
+def test_preview_policy_uses_power_of_two_spacing_aware_factors_without_allocating():
+    plan = plan_scalar_preview(924, 624, 80, spacing=(0.1083333333333, 0.1083333333333, 0.29))
+    assert plan == {
+        "width": 462,
+        "height": 312,
+        "depth": 80,
+        "source_width": 924,
+        "source_height": 624,
+        "source_depth": 80,
+        "downsample_x": 2,
+        "downsample_y": 2,
+        "downsample_z": 1,
+        "preview_policy": "auto-v1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("dtype", "bytes_per_voxel"),
+    [("uint8", 1), ("uint16", 2), ("int16", 2), ("float32", 4)],
+)
+def test_scalar_assembly_supports_canonical_native_dtypes(dtype, bytes_per_voxel):
+    planes = [np.arange(12, dtype=dtype).reshape(3, 4), np.arange(12, 24, dtype=dtype).reshape(3, 4)]
+    plan = {
+        "width": 4,
+        "height": 3,
+        "depth": 2,
+        "dtype": dtype,
+        "bytes_per_voxel": bytes_per_voxel,
+        "channel": 2,
+        "t": 3,
+        "source_width": 4,
+        "source_height": 3,
+        "source_depth": 2,
+        "downsample_x": 1,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "auto-v1",
+    }
+
+    volume = build_scalar_volume_dict(planes, 2, plan)
+
+    assert volume["dtype"] == dtype
+    assert volume["t"] == 3
+    assert volume["data"] == np.stack(planes).astype(np.dtype(dtype).newbyteorder("<")).tobytes(order="C")
 
 
 class FakeParallelRunner:
@@ -84,7 +145,16 @@ def test_bulk_read_reserves_a_worker_for_interactive(monkeypatch):
 
         async def call(self, method, path, **kw):
             if method == "scalar_plan":
-                return {"depth": 60, "channel": 0, "t": 0, "pages": None}
+                return {
+                    "width": 2,
+                    "height": 2,
+                    "depth": 60,
+                    "dtype": "float32",
+                    "bytes_per_voxel": 4,
+                    "channel": 0,
+                    "t": 0,
+                    "pages": 0,
+                }
             if method == "scalar_planes":
                 self.active += 1
                 self.peak = max(self.peak, self.active)
@@ -98,6 +168,36 @@ def test_bulk_read_reserves_a_worker_for_interactive(monkeypatch):
     # 6 workers, reserve 1 → at most 5 concurrent bulk reads; one worker stays free.
     assert runner.peak == 5, f"bulk peak concurrency {runner.peak} should be workers - reserve (5)"
     assert atlas_mod._interactive_reserve() == 1
+
+
+def test_parallel_scalar_preflight_rejects_oversize_before_plane_reads():
+    class OversizeRunner:
+        workers = 4
+
+        def __init__(self) -> None:
+            self.plane_reads = 0
+
+        async def call(self, method, path, **kw):
+            if method == "scalar_plan":
+                return {
+                    "width": 16_384,
+                    "height": 16_384,
+                    "depth": 1,
+                    "dtype": "float32",
+                    "bytes_per_voxel": 4,
+                    "channel": 0,
+                    "t": 0,
+                    "pages": 0,
+                }
+            if method == "scalar_planes":
+                self.plane_reads += 1
+                raise AssertionError("oversize plan must not dispatch plane reads")
+            raise AssertionError(f"unexpected method {method}")
+
+    runner = OversizeRunner()
+    with pytest.raises(ValueError, match="exceeding"):
+        asyncio.run(assemble_scalar_volume(runner, "oversize.nii"))
+    assert runner.plane_reads == 0
 
 
 def test_compose_atlas_png_row_major_layout():

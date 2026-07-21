@@ -212,7 +212,234 @@ export type ScalarVolumePayload = {
   bytesPerVoxel: number;
   rawMin: number;
   rawMax: number;
-  channel: number | null;
+  channel: number;
+  time: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  sourceDepth: number;
+  downsampleX: number;
+  downsampleY: number;
+  downsampleZ: number;
+  previewPolicy: string;
+  /** NIfTI physical intensity = sclSlope * stored code + sclInter. */
+  sclSlope: number;
+  sclInter: number;
+};
+
+const MAX_SCALAR_VOLUME_BYTES = 256 * 1024 * 1024;
+const MAX_SCALAR_VOLUME_WORKING_SET_BYTES = 256 * 1024 * 1024;
+const SCALAR_HALF_FLOAT_BYTES_PER_VOXEL = 2;
+const SCALAR_DTYPE_BYTES: Readonly<Record<string, number>> = {
+  uint8: 1,
+  uint16: 2,
+  int16: 2,
+  float32: 4,
+};
+
+const invalidScalarVolumeResponse = (message: string): ApiError =>
+  new ApiError(`Invalid scalar volume response: ${message}`, 502, null);
+
+const requiredScalarHeaderNumber = (response: Response, header: string): number => {
+  const raw = response.headers.get(header);
+  if (raw == null || raw.trim() === "") {
+    throw invalidScalarVolumeResponse(`missing ${header}`);
+  }
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    throw invalidScalarVolumeResponse(`non-finite ${header}`);
+  }
+  return value;
+};
+
+const requiredScalarHeaderInteger = (response: Response, header: string): number => {
+  const value = requiredScalarHeaderNumber(response, header);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw invalidScalarVolumeResponse(`invalid ${header}`);
+  }
+  return value;
+};
+
+const requiredScalarHeaderIndex = (response: Response, header: string): number => {
+  const value = requiredScalarHeaderNumber(response, header);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw invalidScalarVolumeResponse(`invalid ${header}`);
+  }
+  return value;
+};
+
+export const requireNonNegativeSafeInteger = (value: unknown, field: string): number => {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${field} must be a non-negative safe integer.`);
+  }
+  return value;
+};
+
+const throwIfAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }
+};
+
+const readExactScalarVolumeBody = async (
+  response: Response,
+  expectedLength: number,
+  signal?: AbortSignal
+): Promise<ArrayBuffer> => {
+  throwIfAborted(signal);
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw invalidScalarVolumeResponse("streaming response body is unavailable");
+  }
+  const output = new Uint8Array(expectedLength);
+  let offset = 0;
+  const readWithAbort = (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    throwIfAborted(signal);
+    if (!signal) {
+      return reader.read();
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        void reader.cancel(signal.reason).catch(() => undefined);
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      reader.read().then(resolve, reject).finally(() => {
+        signal.removeEventListener("abort", onAbort);
+      });
+    });
+  };
+  try {
+    while (true) {
+      const { done, value } = await readWithAbort();
+      throwIfAborted(signal);
+      if (done) {
+        break;
+      }
+      if (!value) {
+        continue;
+      }
+      if (offset + value.byteLength > expectedLength) {
+        throw invalidScalarVolumeResponse("body exceeds geometry length");
+      }
+      output.set(value, offset);
+      offset += value.byteLength;
+    }
+  } catch (error) {
+    void reader.cancel().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+  if (offset !== expectedLength) {
+    throw invalidScalarVolumeResponse(`body length ${offset} does not match geometry ${expectedLength}`);
+  }
+  return output.buffer;
+};
+
+const parseScalarVolumeResponse = async (
+  response: Response,
+  signal?: AbortSignal
+): Promise<ScalarVolumePayload> => {
+  throwIfAborted(signal);
+  const width = requiredScalarHeaderInteger(response, "x-volume-width");
+  const height = requiredScalarHeaderInteger(response, "x-volume-height");
+  const depth = requiredScalarHeaderInteger(response, "x-volume-depth");
+  const dtype = String(response.headers.get("x-volume-dtype") ?? "").trim().toLowerCase();
+  const bytesPerVoxel = requiredScalarHeaderInteger(response, "x-volume-bytes-per-voxel");
+  const expectedBytesPerVoxel = SCALAR_DTYPE_BYTES[dtype];
+  if (expectedBytesPerVoxel == null || bytesPerVoxel !== expectedBytesPerVoxel) {
+    throw invalidScalarVolumeResponse(`unsupported dtype/byte width ${dtype || "missing"}/${bytesPerVoxel}`);
+  }
+  const rawMin = requiredScalarHeaderNumber(response, "x-volume-raw-min");
+  const rawMax = requiredScalarHeaderNumber(response, "x-volume-raw-max");
+  if (rawMax < rawMin) {
+    throw invalidScalarVolumeResponse("raw extrema are not ordered");
+  }
+  const sclSlope = requiredScalarHeaderNumber(response, "x-volume-scl-slope");
+  const sclInter = requiredScalarHeaderNumber(response, "x-volume-scl-inter");
+  if (sclSlope === 0) {
+    throw invalidScalarVolumeResponse("zero x-volume-scl-slope");
+  }
+  const physicalMin = rawMin * sclSlope + sclInter;
+  const physicalMax = rawMax * sclSlope + sclInter;
+  if (!Number.isFinite(physicalMin) || !Number.isFinite(physicalMax)) {
+    throw invalidScalarVolumeResponse("non-finite physical intensity transform");
+  }
+  const channel = requiredScalarHeaderIndex(response, "x-volume-channel");
+  const time = requiredScalarHeaderIndex(response, "x-volume-time");
+  const sourceWidth = requiredScalarHeaderInteger(response, "x-volume-source-width");
+  const sourceHeight = requiredScalarHeaderInteger(response, "x-volume-source-height");
+  const sourceDepth = requiredScalarHeaderInteger(response, "x-volume-source-depth");
+  const downsampleX = requiredScalarHeaderInteger(response, "x-volume-downsample-x");
+  const downsampleY = requiredScalarHeaderInteger(response, "x-volume-downsample-y");
+  const downsampleZ = requiredScalarHeaderInteger(response, "x-volume-downsample-z");
+  const previewPolicy = String(response.headers.get("x-volume-preview-policy") ?? "").trim();
+  if (!previewPolicy) {
+    throw invalidScalarVolumeResponse("invalid x-volume-preview-policy");
+  }
+  const previewAxes = [
+    ["x", sourceWidth, downsampleX, width],
+    ["y", sourceHeight, downsampleY, height],
+    ["z", sourceDepth, downsampleZ, depth],
+  ] as const;
+  for (const [axis, sourceSize, factor, deliveredSize] of previewAxes) {
+    if (Math.ceil(sourceSize / factor) !== deliveredSize) {
+      throw invalidScalarVolumeResponse(`inconsistent ${axis}-axis preview provenance`);
+    }
+  }
+  const voxelCount = width * height * depth;
+  const expectedLength = voxelCount * bytesPerVoxel;
+  const stagingLength = voxelCount * SCALAR_HALF_FLOAT_BYTES_PER_VOXEL;
+  const workingSetLength = expectedLength + stagingLength;
+  if (
+    !Number.isSafeInteger(voxelCount) ||
+    !Number.isSafeInteger(expectedLength) ||
+    !Number.isSafeInteger(stagingLength) ||
+    !Number.isSafeInteger(workingSetLength) ||
+    expectedLength <= 0
+  ) {
+    throw invalidScalarVolumeResponse("geometry overflows safe integer bounds");
+  }
+  if (expectedLength > MAX_SCALAR_VOLUME_BYTES) {
+    throw invalidScalarVolumeResponse(
+      `payload ${expectedLength} bytes exceeds the ${MAX_SCALAR_VOLUME_BYTES} byte preview limit`
+    );
+  }
+  if (workingSetLength > MAX_SCALAR_VOLUME_WORKING_SET_BYTES) {
+    throw invalidScalarVolumeResponse(
+      `wire plus R16F staging requires ${workingSetLength} bytes, exceeding the ${MAX_SCALAR_VOLUME_WORKING_SET_BYTES} byte working-set limit`
+    );
+  }
+  const declaredLengthRaw = response.headers.get("content-length");
+  if (declaredLengthRaw != null && declaredLengthRaw.trim() !== "") {
+    const declaredLength = Number(declaredLengthRaw);
+    if (!Number.isSafeInteger(declaredLength) || declaredLength !== expectedLength) {
+      throw invalidScalarVolumeResponse("content-length does not match geometry");
+    }
+  }
+  const data = await readExactScalarVolumeBody(response, expectedLength, signal);
+  throwIfAborted(signal);
+  return {
+    data,
+    width,
+    height,
+    depth,
+    dtype,
+    bytesPerVoxel,
+    rawMin,
+    rawMax,
+    sclSlope,
+    sclInter,
+    channel,
+    time,
+    sourceWidth,
+    sourceHeight,
+    sourceDepth,
+    downsampleX,
+    downsampleY,
+    downsampleZ,
+    previewPolicy,
+  };
 };
 
 let viewerManifestModulePromise: Promise<typeof ViewerManifest> | null = null;
@@ -4310,17 +4537,17 @@ export class ApiClient {
 
   async getUploadScalarVolume(
     fileId: string,
-    config?: { t?: number | null; channel?: number | null }
+    config?: { t?: number | null; channel?: number | null; signal?: AbortSignal }
   ): Promise<ScalarVolumePayload> {
     const safeFileId = encodeURIComponent(fileId);
     const params: Record<string, string> = {};
-    if (typeof config?.t === "number" && Number.isFinite(config.t)) {
-      params.t = String(Math.max(0, Math.floor(config.t)));
+    if (config?.t != null) {
+      params.t = String(requireNonNegativeSafeInteger(config.t, "time index"));
     }
-    if (typeof config?.channel === "number" && Number.isFinite(config.channel)) {
-      params.channel = String(Math.max(0, Math.floor(config.channel)));
+    if (config?.channel != null) {
+      params.channel = String(requireNonNegativeSafeInteger(config.channel, "channel index"));
     }
-    const response = await this.fetchWithTimeout(
+    return this.fetchScalarVolumeWithTimeout(
       buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scalar-volume`, params),
       {
         method: "GET",
@@ -4329,27 +4556,11 @@ export class ApiClient {
         // Volume payloads are tens of MB; skip the HTTP disk cache so we neither
         // bloat it nor fail the fetch on a cache-write error for large responses.
         cache: "no-store",
+        signal: config?.signal,
       },
       120000, // generous: a large volume read is legitimately slow; only a true hang trips it
       "Volume request",
     );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return {
-      data: await response.arrayBuffer(),
-      width: Number(response.headers.get("x-volume-width") ?? 0),
-      height: Number(response.headers.get("x-volume-height") ?? 0),
-      depth: Number(response.headers.get("x-volume-depth") ?? 0),
-      dtype: String(response.headers.get("x-volume-dtype") ?? "uint16"),
-      bytesPerVoxel: Number(response.headers.get("x-volume-bytes-per-voxel") ?? 2),
-      rawMin: Number(response.headers.get("x-volume-raw-min") ?? 0),
-      rawMax: Number(response.headers.get("x-volume-raw-max") ?? 1),
-      channel:
-        response.headers.get("x-volume-channel") == null
-          ? null
-          : Number(response.headers.get("x-volume-channel")),
-    };
   }
 
   uploadTileUrl(
@@ -4464,16 +4675,68 @@ export class ApiClient {
     label: string,
   ): Promise<Response> {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    const callerSignal = init.signal;
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+      abortFromCaller();
+    } else {
+      callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+    const timeoutId = window.setTimeout(() => {
+      if (!controller.signal.aborted) {
+        timedOut = true;
+        controller.abort();
+      }
+    }, timeoutMs);
     try {
       return await fetch(url, { ...init, signal: controller.signal });
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (timedOut && error instanceof DOMException && error.name === "AbortError") {
         throw new ApiError(`${label} timed out`, 504, null);
       }
       throw error;
     } finally {
       window.clearTimeout(timeoutId);
+      callerSignal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  private async fetchScalarVolumeWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number,
+    label: string
+  ): Promise<ScalarVolumePayload> {
+    const controller = new AbortController();
+    const callerSignal = init.signal;
+    let timedOut = false;
+    const abortFromCaller = () => controller.abort(callerSignal?.reason);
+    if (callerSignal?.aborted) {
+      abortFromCaller();
+    } else {
+      callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+    const timeoutId = window.setTimeout(() => {
+      if (!controller.signal.aborted) {
+        timedOut = true;
+        controller.abort();
+      }
+    }, timeoutMs);
+    try {
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      if (!response.ok) {
+        return parseError(response);
+      }
+      return await parseScalarVolumeResponse(response, controller.signal);
+    } catch (error) {
+      if (timedOut && error instanceof DOMException && error.name === "AbortError") {
+        throw new ApiError(`${label} timed out`, 504, null);
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+      callerSignal?.removeEventListener("abort", abortFromCaller);
     }
   }
 
@@ -4584,40 +4847,27 @@ export class ApiClient {
 
   async getHdf5ScalarVolume(
     fileId: string,
-    config: { datasetPath: string; channel?: number | null }
+    config: { datasetPath: string; channel?: number | null; signal?: AbortSignal }
   ): Promise<ScalarVolumePayload> {
     const safeFileId = encodeURIComponent(fileId);
     const params: Record<string, string> = {
       dataset_path: config.datasetPath,
     };
-    if (typeof config.channel === "number" && Number.isFinite(config.channel)) {
-      params.channel = String(Math.max(0, Math.floor(config.channel)));
+    if (config.channel != null) {
+      params.channel = String(requireNonNegativeSafeInteger(config.channel, "channel index"));
     }
-    const response = await fetch(
+    return this.fetchScalarVolumeWithTimeout(
       buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/scalar-volume`, params),
       {
         method: "GET",
         headers: this.headers(),
         credentials: "include",
-      }
+        cache: "no-store",
+        signal: config.signal,
+      },
+      120000,
+      "HDF5 volume request",
     );
-    if (!response.ok) {
-      return parseError(response);
-    }
-    return {
-      data: await response.arrayBuffer(),
-      width: Number(response.headers.get("x-volume-width") ?? 0),
-      height: Number(response.headers.get("x-volume-height") ?? 0),
-      depth: Number(response.headers.get("x-volume-depth") ?? 0),
-      dtype: String(response.headers.get("x-volume-dtype") ?? "uint16"),
-      bytesPerVoxel: Number(response.headers.get("x-volume-bytes-per-voxel") ?? 2),
-      rawMin: Number(response.headers.get("x-volume-raw-min") ?? 0),
-      rawMax: Number(response.headers.get("x-volume-raw-max") ?? 1),
-      channel:
-        response.headers.get("x-volume-channel") == null
-          ? null
-          : Number(response.headers.get("x-volume-channel")),
-    };
   }
 
   async getHdf5DatasetHistogram(

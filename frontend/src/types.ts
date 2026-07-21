@@ -1924,6 +1924,11 @@ export type UploadViewerInfo = {
       y?: number | null;
       x?: number | null;
     } | null;
+    spacing_units?: {
+      z?: string | null;
+      y?: string | null;
+      x?: string | null;
+    } | null;
     scene?: string | null;
     scene_count: number;
     /** Tiled-mosaic acquisition (multi-field stage scan). Null/absent for a normal

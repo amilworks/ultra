@@ -8027,6 +8027,22 @@ details {
   pointer-events: none;
 }
 
+.viewer-volume-load-progress {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 4;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(8, 11, 17, 0.74);
+  color: rgba(255, 255, 255, 0.78);
+  font-size: 11px;
+  line-height: 1;
+  pointer-events: none;
+}
+
 .viewer-volume-orientation-triad-fallback {
   top: 12px;
   bottom: auto;

@@ -1,5 +1,7 @@
 import type { ScalarVolumePayload } from "@/lib/api";
 
+import { resolveScalarStoredWindow } from "./scalarVolume";
+
 /**
  * Client-side slice extraction from a loaded scalar volume.
  *
@@ -13,7 +15,8 @@ import type { ScalarVolumePayload } from "@/lib/api";
  *     axis "z" (axial):    x = col,        y = row,        z = sliceIndex
  *     axis "y" (coronal):  x = col,        y = sliceIndex, z = row
  *     axis "x" (sagittal): x = sliceIndex, y = col,        z = row
- *   normalized = clamp((value - windowLow) / (windowHigh - windowLow), 0, 1)
+ *   physical   = sclSlope * storedValue + sclInter
+ *   normalized = clamp((physical - windowLow) / (windowHigh - windowLow), 0, 1)
  *   pixel      = round(normalized * 255)          (then 255 - pixel if inverted)
  *
  * There are NO axis flips in the backend, so row 0 is the lower y/z and col 0 the
@@ -27,7 +30,7 @@ export type ScalarSliceAxis = "x" | "y" | "z";
 export type ScalarSliceRequest = {
   axis: ScalarSliceAxis;
   sliceIndex: number;
-  /** Window bounds in raw voxel units (center - width/2 and center + width/2). */
+  /** Window bounds in physical intensity units (center - width/2 and center + width/2). */
   windowLow: number;
   windowHigh: number;
   invert?: boolean;
@@ -38,6 +41,8 @@ export type ScalarSliceImage = {
   height: number;
   data: Uint8ClampedArray;
 };
+
+const MAX_SCALAR_SLICE_PIXELS = 16 * 1024 * 1024;
 
 const safeDim = (value: number): number => Math.max(1, Math.floor(Number(value) || 1));
 
@@ -99,12 +104,22 @@ export const extractScalarSlice = (
   const byteLength = payload.data.byteLength;
 
   const { width, height } = scalarSliceDimensions(payload, request.axis);
+  const pixelCount = width * height;
+  if (!Number.isSafeInteger(pixelCount) || pixelCount <= 0 || pixelCount > MAX_SCALAR_SLICE_PIXELS) {
+    throw new RangeError(`Scalar slice pixel count exceeds the ${MAX_SCALAR_SLICE_PIXELS} pixel limit.`);
+  }
   const axisExtent = scalarSliceAxisExtent(payload, request.axis);
   const sliceIndex = Math.max(0, Math.min(axisExtent - 1, Math.floor(Number(request.sliceIndex) || 0)));
-  const span = Math.max(1e-6, request.windowHigh - request.windowLow);
-  const invert = Boolean(request.invert);
+  const storedWindow = resolveScalarStoredWindow(
+    payload,
+    request.windowLow,
+    request.windowHigh,
+    request.invert
+  );
+  const span = Math.max(1e-6, storedWindow.high - storedWindow.low);
+  const invert = storedWindow.invert;
 
-  const data = new Uint8ClampedArray(width * height * 4);
+  const data = new Uint8ClampedArray(pixelCount * 4);
   for (let row = 0; row < height; row += 1) {
     for (let col = 0; col < width; col += 1) {
       let x: number;
@@ -133,7 +148,7 @@ export const extractScalarSlice = (
         }
       }
 
-      let normalized = (value - request.windowLow) / span;
+      let normalized = (value - storedWindow.low) / span;
       if (normalized < 0) {
         normalized = 0;
       } else if (normalized > 1) {

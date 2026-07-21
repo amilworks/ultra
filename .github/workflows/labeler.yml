@@ -1,0 +1,23 @@
+name: Labeler
+
+# Auto-applies `area:` / `type: docs` labels from changed paths (see
+# .github/labeler.yml). Uses pull_request_target so it also works on PRs from
+# forks — this is safe here because actions/labeler never checks out or runs
+# the PR's code; it only reads the changed-file list via the API.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    name: Auto-label by path
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          # Only add labels; never strip labels applied by hand.
+          sync-labels: false

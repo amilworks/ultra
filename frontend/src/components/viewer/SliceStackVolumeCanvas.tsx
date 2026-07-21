@@ -5,7 +5,21 @@ import { TrackballControls } from "three/examples/jsm/controls/TrackballControls
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 
-import { computeScalarVolumeAutoContrast, scalarVolumePayloadToHalfFloat } from "./scalarVolume";
+import {
+  MAX_ACTIVE_SCALAR_VOLUME_GPU_BYTES,
+  MAX_PREPARED_SCALAR_VOLUME_CACHE_BYTES,
+  PreparedScalarVolumeResidencyManager,
+  prepareScalarVolume,
+  preparedScalarVolumeByteLength,
+  resolveScalarVolumeWindow,
+  type PreparedScalarVolume,
+  type PreparedScalarVolumeLease,
+  type PreparedScalarVolumeReservation,
+  scalarVolumeApiNamespace,
+  scalarVolumeIdentityKey,
+  scalarVolumeSourceIdentity,
+  validateScalarVolumeIdentity,
+} from "./scalarVolume";
 import { getPlaneDescriptor } from "./shared";
 import { computePhysicalVolumeGeometry } from "./volumeGeometry";
 import {
@@ -68,7 +82,7 @@ export {
 
 type ScalarVolumeSource = {
   kind: "scalar";
-  loadScalarVolume: () => Promise<ScalarVolumePayload>;
+  loadScalarVolume: (signal?: AbortSignal) => Promise<ScalarVolumePayload>;
   fallbackImageUrl: string;
   axisSizes: UploadViewerInfo["axis_sizes"];
   plane: NonNullable<UploadViewerInfo["viewer"]["default_plane"]>;
@@ -94,7 +108,7 @@ type MultichannelVolumeSource = {
   // Enabled channel indices, in render order. The renderer loads one R16F volume
   // per index and fuses them; changing this set reloads (cached so no re-fetch).
   channelIndices: number[];
-  loadChannel: (channel: number) => Promise<ScalarVolumePayload>;
+  loadChannel: (channel: number, signal?: AbortSignal) => Promise<ScalarVolumePayload>;
   fallbackImageUrl: string;
   axisSizes: UploadViewerInfo["axis_sizes"];
   plane: NonNullable<UploadViewerInfo["viewer"]["default_plane"]>;
@@ -114,6 +128,17 @@ type SliceStackVolumeCanvasProps = {
   className?: string;
   displayState?: UploadViewerInfo["display_defaults"] | null;
   volumeSource?: ScalarVolumeSource | AtlasVolumeSource | MultichannelVolumeSource;
+  categoricalMode?: CategoricalVolumeMode;
+  volumeCutaway?: boolean;
+  featureMask?: boolean;
+  cameraPersistenceKey?: string;
+};
+
+export type CategoricalVolumeMode = "surface" | "xray";
+
+export type AtlasVolumeRenderMode = {
+  id: CategoricalVolumeMode;
+  shaderValue: 0 | 1;
 };
 
 /**
@@ -150,25 +175,14 @@ type MultichannelRenderConfig = {
   gammaScale: number;
   brightness: number;
   densityScale: number;
+  lightingEnabled: boolean;
+  lightingStrength: number;
 };
 
-// Bounded cache of decoded per-channel volume payloads, keyed file:channel:time,
-// so toggling a channel (which rebuilds the renderer) reuses already-fetched
-// channels instead of re-downloading ~184 MB each. Capped to the max simultaneous
-// channels; the default view loads a single channel.
-const channelVolumeCache = new Map<string, ScalarVolumePayload>();
-const channelVolumeCacheKey = (fileId: string, channel: number, t: number) => `${fileId}:${channel}:${t}`;
-const rememberChannelVolume = (key: string, payload: ScalarVolumePayload): void => {
-  channelVolumeCache.delete(key);
-  channelVolumeCache.set(key, payload);
-  while (channelVolumeCache.size > MAX_VOLUME_CHANNELS) {
-    const oldest = channelVolumeCache.keys().next().value as string | undefined;
-    if (oldest === undefined) {
-      break;
-    }
-    channelVolumeCache.delete(oldest);
-  }
-};
+// Cache only prepared R16F data and its render metadata. Raw response buffers are
+// intentionally not retained, so they become collectible after conversion.
+const scalarVolumeResidency = new PreparedScalarVolumeResidencyManager();
+const SCALAR_PREVIEW_POLICY = "auto-v1";
 
 type MultichannelUniformSet = {
   uChannelCount: { value: number };
@@ -179,6 +193,8 @@ type MultichannelUniformSet = {
   uGammaScale: { value: number };
   uBrightness: { value: number };
   uDensityScale: { value: number };
+  uLightingEnabled: { value: boolean };
+  uLightingStrength: { value: number };
 };
 
 // Push per-channel color/window/invert + gamma into the live uniforms WITHOUT
@@ -207,9 +223,13 @@ const applyMultichannelChannelUniforms = (
   uniforms.uGammaScale.value = config.gammaScale;
   uniforms.uBrightness.value = config.brightness;
   uniforms.uDensityScale.value = config.densityScale;
+  uniforms.uLightingEnabled.value = config.lightingEnabled;
+  uniforms.uLightingStrength.value = config.lightingStrength;
 };
 
 export const MAX_STEPS = 512;
+export const MAX_CATEGORICAL_SURFACE_STEPS = 768;
+export const CATEGORICAL_SURFACE_TIE_EPSILON = 1e-7;
 const MIN_INTERACTIVE_STEPS = 32;
 const SAMPLE_RAMP_FACTOR = 1.5;
 const DEFAULT_VOLUME_CLEAR = 0x07090d;
@@ -227,6 +247,157 @@ const DEFAULT_VOLUME_CAMERA_SAFE_INSETS = {
   bottom: 0.22,
   left: 0.06,
 } as const;
+
+type VolumeGrid = { width: number; height: number; depth: number };
+type VolumeSpacing = { x: number; y: number; z: number };
+
+export const resolveStrictVolumeIndex = (
+  value: number,
+  count: number,
+  field: "channel" | "time" | "z"
+): number => {
+  if (!Number.isSafeInteger(value) || value < 0 || value >= count) {
+    throw new RangeError(`${field} index ${String(value)} is out of range for ${field.toUpperCase()}=${count}.`);
+  }
+  return value;
+};
+
+export const validateVolumeTextureGrid = (grid: VolumeGrid, max3DTextureSize: number): void => {
+  const dimensions = [grid.width, grid.height, grid.depth];
+  if (dimensions.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new RangeError("Delivered volume texture grid must contain positive safe integers.");
+  }
+  const largestDimension = Math.max(...dimensions);
+  if (
+    Number.isFinite(max3DTextureSize) &&
+    max3DTextureSize > 0 &&
+    largestDimension > max3DTextureSize
+  ) {
+    throw new RangeError(
+      `Delivered volume exceeds this browser's 3D texture limit (${largestDimension} > ${max3DTextureSize}).`
+    );
+  }
+};
+
+export const computeDeliveredVoxelSpacing = ({
+  sourceGrid,
+  sourceSpacing,
+  deliveredGrid,
+}: {
+  sourceGrid: VolumeGrid;
+  sourceSpacing: VolumeSpacing;
+  deliveredGrid: VolumeGrid;
+}): VolumeSpacing => {
+  validateVolumeTextureGrid(sourceGrid, 0);
+  validateVolumeTextureGrid(deliveredGrid, 0);
+  const spacing = [sourceSpacing.x, sourceSpacing.y, sourceSpacing.z];
+  if (spacing.some((value) => !Number.isFinite(value) || value <= 0)) {
+    throw new RangeError("Source voxel spacing must be finite and positive.");
+  }
+  return {
+    x: (sourceGrid.width * sourceSpacing.x) / deliveredGrid.width,
+    y: (sourceGrid.height * sourceSpacing.y) / deliveredGrid.height,
+    z: (sourceGrid.depth * sourceSpacing.z) / deliveredGrid.depth,
+  };
+};
+
+export const computeVolumeVoxelStep = (grid: VolumeGrid): VolumeSpacing => {
+  validateVolumeTextureGrid(grid, 0);
+  return {
+    x: 1 / grid.width,
+    y: 1 / grid.height,
+    z: 1 / grid.depth,
+  };
+};
+
+export const validateSelectedChannelPreparedBudget = (
+  firstPreparedBytes: number,
+  selectedChannelCount: number,
+  maxBytes = MAX_PREPARED_SCALAR_VOLUME_CACHE_BYTES
+): void => {
+  if (
+    !Number.isSafeInteger(firstPreparedBytes) ||
+    firstPreparedBytes <= 0 ||
+    !Number.isSafeInteger(selectedChannelCount) ||
+    selectedChannelCount <= 0
+  ) {
+    throw new RangeError("Selected channel prepared-byte budget requires positive safe integers.");
+  }
+  const aggregateBytes = firstPreparedBytes * selectedChannelCount;
+  if (!Number.isSafeInteger(aggregateBytes) || aggregateBytes > maxBytes) {
+    throw new RangeError(
+      `Selected channel previews require ${aggregateBytes} prepared bytes, exceeding the ${maxBytes} byte aggregate limit.`
+    );
+  }
+};
+
+export const validateActiveScalarGpuBudget = (
+  predictedTextureBytes: number,
+  selectedChannelCount: number,
+  maxBytes = MAX_ACTIVE_SCALAR_VOLUME_GPU_BYTES
+): void => {
+  if (
+    !Number.isSafeInteger(predictedTextureBytes) ||
+    predictedTextureBytes <= 0 ||
+    !Number.isSafeInteger(selectedChannelCount) ||
+    selectedChannelCount <= 0
+  ) {
+    throw new RangeError("Active scalar GPU budget requires positive safe integers.");
+  }
+  const activeBytes = predictedTextureBytes * selectedChannelCount;
+  if (!Number.isSafeInteger(activeBytes) || activeBytes > maxBytes) {
+    throw new RangeError(
+      `Selected scalar textures require ${activeBytes} active GPU bytes, exceeding the ${maxBytes} byte GPU limit.`
+    );
+  }
+};
+
+export const MAX_ATLAS_DECODE_WORKING_SET_BYTES = 256 * 1024 * 1024;
+
+export const validateAtlasDecodeWorkingSet = (geometry: {
+  atlasWidth: number;
+  atlasHeight: number;
+  sliceWidth: number;
+  sliceHeight: number;
+  sliceCount: number;
+  columns: number;
+  rows: number;
+}): { atlasBytes: number; volumeBytes: number; totalBytes: number } => {
+  const dimensions = Object.entries(geometry);
+  if (dimensions.some(([, value]) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new RangeError("Atlas decode dimensions must be positive safe integers.");
+  }
+  const atlasPixels = geometry.atlasWidth * geometry.atlasHeight;
+  const volumeVoxels = geometry.sliceWidth * geometry.sliceHeight * geometry.sliceCount;
+  const slotCount = geometry.columns * geometry.rows;
+  const atlasBytes = atlasPixels * 4;
+  const volumeBytes = volumeVoxels * 4;
+  const totalBytes = atlasBytes + volumeBytes;
+  if (
+    !Number.isSafeInteger(atlasPixels) ||
+    !Number.isSafeInteger(volumeVoxels) ||
+    !Number.isSafeInteger(slotCount) ||
+    !Number.isSafeInteger(atlasBytes) ||
+    !Number.isSafeInteger(volumeBytes) ||
+    !Number.isSafeInteger(totalBytes)
+  ) {
+    throw new RangeError("Atlas decode geometry overflows safe integer bounds.");
+  }
+  const requiredRows = Math.ceil(geometry.sliceCount / geometry.columns);
+  if (
+    geometry.sliceCount > slotCount ||
+    geometry.sliceWidth * geometry.columns > geometry.atlasWidth ||
+    geometry.sliceHeight * requiredRows > geometry.atlasHeight
+  ) {
+    throw new RangeError("Atlas decode geometry does not fit within the delivered atlas.");
+  }
+  if (totalBytes > MAX_ATLAS_DECODE_WORKING_SET_BYTES) {
+    throw new RangeError(
+      `Atlas decode requires ${totalBytes} bytes, exceeding the ${MAX_ATLAS_DECODE_WORKING_SET_BYTES} byte working-set limit.`
+    );
+  }
+  return { atlasBytes, volumeBytes, totalBytes };
+};
 
 type VolumeCamera = THREE.PerspectiveCamera | THREE.OrthographicCamera;
 
@@ -250,7 +421,7 @@ export type VolumeCameraFit = {
 
 type VolumeVector = { x: number; y: number; z: number };
 
-type VolumeClipBounds = {
+export type VolumeClipBounds = {
   min: VolumeVector;
   max: VolumeVector;
 };
@@ -288,6 +459,34 @@ export type VolumeInteriorCameraFrame = {
   lookDistance: number;
 };
 
+export const volumeCameraSnapshotKey = ({
+  persistenceKey,
+  cameraModeId,
+  viewPresetId,
+  interiorFrame,
+}: {
+  persistenceKey?: string;
+  cameraModeId: string;
+  viewPresetId: string;
+  interiorFrame: VolumeInteriorCameraFrame | null;
+}): string | null => {
+  if (!persistenceKey) {
+    return null;
+  }
+  const interiorIdentity = interiorFrame
+    ? [
+        interiorFrame.position.x,
+        interiorFrame.position.y,
+        interiorFrame.position.z,
+        interiorFrame.target.x,
+        interiorFrame.target.y,
+        interiorFrame.target.z,
+        interiorFrame.lookDistance,
+      ].join(",")
+    : "overview";
+  return `${persistenceKey}:${cameraModeId}:${viewPresetId}:${interiorIdentity}`;
+};
+
 export type VolumeSampleBudget = {
   interactiveSteps: number;
   settledSteps: number;
@@ -296,17 +495,34 @@ export type VolumeSampleBudget = {
 
 export function computeVolumeSampleBudget({
   sourceKind,
+  volumeWidth,
+  volumeHeight,
   volumeDepth,
   projectionMode,
 }: {
-  sourceKind: ScalarVolumeSource["kind"] | AtlasVolumeSource["kind"];
+  sourceKind: ScalarVolumeSource["kind"] | AtlasVolumeSource["kind"] | MultichannelVolumeSource["kind"];
+  volumeWidth?: number;
+  volumeHeight?: number;
   volumeDepth: number;
   projectionMode: "mip" | "composite";
 }): VolumeSampleBudget {
   const safeDepth = Math.max(1, Math.floor(Number(volumeDepth) || 1));
-  const floor = sourceKind === "scalar" ? 128 : 96;
-  const projectionMultiplier = projectionMode === "mip" ? 2 : 2;
-  const settledSteps = Math.max(floor, Math.min(MAX_STEPS, safeDepth * projectionMultiplier));
+  const floor = sourceKind === "atlas" ? 96 : 128;
+  // A scalar ray can cross intervals on all three axes. Budget from the full
+  // delivery grid (bounded by MAX_STEPS), not only Z: shallow thick-slice CTs
+  // still have long in-plane rays. Atlas keeps its established depth budget.
+  const safeWidth = Math.max(1, Math.floor(Number(volumeWidth) || safeDepth));
+  const safeHeight = Math.max(1, Math.floor(Number(volumeHeight) || safeDepth));
+  const semanticGridCrossings = safeWidth + safeHeight + safeDepth;
+  const atlasProjectionMultiplier: Record<"mip" | "composite", number> = {
+    mip: 2,
+    composite: 2,
+  };
+  const atlasDepthBudget = safeDepth * atlasProjectionMultiplier[projectionMode];
+  const settledSteps = Math.max(
+    floor,
+    Math.min(MAX_STEPS, sourceKind === "atlas" ? atlasDepthBudget : semanticGridCrossings)
+  );
   const interactiveSteps = Math.max(
     MIN_INTERACTIVE_STEPS,
     Math.min(settledSteps, Math.round(settledSteps / 8))
@@ -380,6 +596,24 @@ export function shouldShowVolumeContextEdges({
   interiorInspectionActive: boolean;
 }): boolean {
   return cueVisible && !interiorInspectionActive;
+}
+
+export function resolveScalarOpacityPolicy({
+  renderPolicy,
+  modality,
+}: {
+  renderPolicy: string;
+  modality: string;
+}): { edgeStrength: number; interiorOpacity: number } {
+  if (renderPolicy !== "scalar") {
+    return { edgeStrength: 0, interiorOpacity: 1 };
+  }
+  if (modality === "medical") {
+    // A medical transfer function must remain monotonic in the windowed scalar;
+    // gradients may light anatomy, but must not manufacture opacity shells.
+    return { edgeStrength: 0, interiorOpacity: 1 };
+  }
+  return { edgeStrength: 3.5, interiorOpacity: 0.5 };
 }
 
 export function computeVolumeInteriorCameraFrame({
@@ -456,6 +690,21 @@ export function resolveVolumeProjectionMode({
   return normalizedModality === "microscopy" ? "mip" : "composite";
 }
 
+export function resolveAtlasVolumeRenderMode({
+  renderPolicy,
+  categoricalMode,
+}: {
+  renderPolicy?: string;
+  categoricalMode?: CategoricalVolumeMode;
+}): AtlasVolumeRenderMode {
+  if (String(renderPolicy ?? "").trim().toLowerCase() !== "categorical") {
+    return { id: "xray", shaderValue: 0 };
+  }
+  return categoricalMode === "xray"
+    ? { id: "xray", shaderValue: 0 }
+    : { id: "surface", shaderValue: 1 };
+}
+
 const VERTEX_SHADER = `
   varying vec3 vPosition;
 
@@ -473,6 +722,9 @@ const ATLAS_FRAGMENT_SHADER = `
   uniform sampler3D uData;
   uniform int uSteps;
   uniform float uDensity;
+  uniform int uAtlasRenderMode;
+  uniform bool uFeatureMask;
+  uniform vec3 uGridSize;
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
   uniform vec3 uCameraPositionLocal;
@@ -525,11 +777,71 @@ const ATLAS_FRAGMENT_SHADER = `
       discard;
     }
 
-    vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
+    float entryT = min(tFar, max(tNear, 0.0) + 0.0000001);
+    vec3 front = rayOrigin + rayDir * entryT;
     vec3 back = rayOrigin + rayDir * tFar;
     vec3 stepVector = (back - front) / float(steps);
     vec3 location = front + vec3(0.5);
     vec3 delta = stepVector;
+
+    // Categorical Surface mode is an opaque first-hit renderer. Nearest-filtered
+    // texel-center samples are returned intact, while voxel DDA visits every
+    // intersected cell exactly once. Label 0 is encoded as black and remains empty.
+    if (uAtlasRenderMode == 1) {
+      vec3 gridSize = max(uGridSize, vec3(1.0));
+      ivec3 voxel = ivec3(clamp(floor((front + vec3(0.5)) * gridSize), vec3(0.0), gridSize - vec3(1.0)));
+      ivec3 voxelStep = ivec3(sign(rayDir));
+      vec3 nextBoundary = (vec3(voxel) + step(vec3(0.0), rayDir)) / gridSize - vec3(0.5);
+      vec3 nextCrossing = vec3(1.0e30);
+      vec3 crossingDelta = vec3(1.0e30);
+      if (abs(rayDir.x) > 0.000000001) {
+        nextCrossing.x = (nextBoundary.x - rayOrigin.x) / rayDir.x;
+        crossingDelta.x = 1.0 / (gridSize.x * abs(rayDir.x));
+      }
+      if (abs(rayDir.y) > 0.000000001) {
+        nextCrossing.y = (nextBoundary.y - rayOrigin.y) / rayDir.y;
+        crossingDelta.y = 1.0 / (gridSize.y * abs(rayDir.y));
+      }
+      if (abs(rayDir.z) > 0.000000001) {
+        nextCrossing.z = (nextBoundary.z - rayOrigin.z) / rayDir.z;
+        crossingDelta.z = 1.0 / (gridSize.z * abs(rayDir.z));
+      }
+      for (int iter = 0; iter < ${MAX_CATEGORICAL_SURFACE_STEPS}; iter++) {
+        vec3 texelCenter = (vec3(voxel) + vec3(0.5)) / gridSize;
+        vec4 sampleColor = texture(uData, texelCenter);
+        bool occupied = uFeatureMask
+          ? sampleColor.a > 0.0
+          : max(max(sampleColor.r, sampleColor.g), sampleColor.b) > 0.0;
+        if (occupied) {
+          gl_FragColor = vec4(sampleColor.rgb, 1.0);
+          return;
+        }
+        float crossing = min(nextCrossing.x, min(nextCrossing.y, nextCrossing.z));
+        if (crossing > tFar) {
+          break;
+        }
+        float tieTolerance = max(
+          ${CATEGORICAL_SURFACE_TIE_EPSILON},
+          abs(crossing) * ${CATEGORICAL_SURFACE_TIE_EPSILON}
+        );
+        if (abs(nextCrossing.x - crossing) <= tieTolerance) {
+          voxel.x += voxelStep.x;
+          nextCrossing.x += crossingDelta.x;
+        }
+        if (abs(nextCrossing.y - crossing) <= tieTolerance) {
+          voxel.y += voxelStep.y;
+          nextCrossing.y += crossingDelta.y;
+        }
+        if (abs(nextCrossing.z - crossing) <= tieTolerance) {
+          voxel.z += voxelStep.z;
+          nextCrossing.z += crossingDelta.z;
+        }
+        if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, ivec3(gridSize)))) {
+          break;
+        }
+      }
+      discard;
+    }
 
     vec4 accum = vec4(0.0);
     for (int iter = 0; iter < ${MAX_STEPS}; iter++) {
@@ -537,7 +849,10 @@ const ATLAS_FRAGMENT_SHADER = `
         break;
       }
       vec4 sampleColor = texture(uData, clamp(location, vec3(0.0), vec3(1.0)));
-      float alpha = alphaFromOpacity(max(max(sampleColor.r, sampleColor.g), sampleColor.b), length(delta));
+      float occupancy = uFeatureMask
+        ? sampleColor.a
+        : max(max(sampleColor.r, sampleColor.g), sampleColor.b);
+      float alpha = alphaFromOpacity(occupancy, length(delta));
       sampleColor.a = alpha;
       accum.rgb += (1.0 - accum.a) * sampleColor.rgb * sampleColor.a;
       accum.a += (1.0 - accum.a) * sampleColor.a;
@@ -569,6 +884,7 @@ const SCALAR_FRAGMENT_SHADER = `
   uniform float uDensityScale;
   uniform bool uLightingEnabled;
   uniform float uLightingStrength;
+  uniform vec3 uGridSize;
   uniform vec3 uVoxelStep;
   uniform vec3 uVolumeScale;   // per-axis world EXTENT ratio (box dimensions)
   uniform vec3 uVoxelSpacing;  // per-axis voxel SPACING ratio (mm), max-normalized
@@ -577,6 +893,7 @@ const SCALAR_FRAGMENT_SHADER = `
   uniform int uProjectionMode;
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
+  uniform bool uCutawayActive;
   uniform vec3 uCameraPositionLocal;
   uniform vec3 uCameraDirectionLocal;
   uniform bool uOrthographicCamera;
@@ -669,6 +986,12 @@ const SCALAR_FRAGMENT_SHADER = `
     return 1.0 - pow(1.0 - baseAlpha, stepScale);
   }
 
+  float stableRayJitter() {
+    // Stable interleaved-gradient noise breaks coherent sampling bands without
+    // temporal shimmer. It is screen-space only; no time-varying uniform.
+    return fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  }
+
   // Central-difference gradient of the windowed signal. Components are spaced one
   // voxel apart on each axis, so this is the local rate of change that marks a
   // tissue interface (e.g. the CSF<->parenchyma wall of a ventricle).
@@ -687,7 +1010,8 @@ const SCALAR_FRAGMENT_SHADER = `
   // become opaque surfaces. This is what makes the ventricle walls and other
   // internal boundaries visible when looking around inside the volume.
   float structuredOpacity(float opacityValue, vec3 gradient) {
-    float edge = clamp(length(gradient) * uEdgeStrength, 0.0, 1.0);
+    vec3 physicalGradient = gradient / max(vec3(0.06), uVoxelSpacing);
+    float edge = clamp(length(physicalGradient) * uEdgeStrength, 0.0, 1.0);
     return opacityValue * mix(uInteriorOpacity, 1.0, edge);
   }
 
@@ -709,8 +1033,8 @@ const SCALAR_FRAGMENT_SHADER = `
     vec3 normal = normalize(worldGradient);
     vec3 lightDir = normalize(vec3(-0.45, 0.55, 0.72));
     vec3 viewDir = uOrthographicCamera
-      ? -normalize(uCameraDirectionLocal)
-      : normalize(uCameraPositionLocal - (location - vec3(0.5)));
+      ? -normalize(uCameraDirectionLocal * uVolumeScale)
+      : normalize((uCameraPositionLocal - (location - vec3(0.5))) * uVolumeScale);
     vec3 halfDir = normalize(lightDir + viewDir);
     float diffuse = max(dot(normal, lightDir), dot(-normal, lightDir));
     float specular = pow(max(dot(normal, halfDir), max(dot(-normal, halfDir), 0.0)), 22.0);
@@ -735,16 +1059,27 @@ const SCALAR_FRAGMENT_SHADER = `
       discard;
     }
 
-    int steps = min(uSteps, ${MAX_STEPS});
+    vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
+    vec3 back = rayOrigin + rayDir * tFar;
+    // The Z cut surface participates in ray order: emit the exact voxel-center
+    // sample only when it is the ray's first clip-box intersection. Rays entering
+    // through a retained side march that anatomy normally, and cameras behind the
+    // cut enter through z-min, so the slice can never paint through the volume.
+    if (uCutawayActive && rayDir.z < 0.0 && abs(front.z - boxMax.z) <= 0.0001) {
+      float cutValue = sampleWindowed(front + vec3(0.5));
+      gl_FragColor = vec4(scalarColor(cutValue), 1.0);
+      return;
+    }
+    float rayIntervals = dot(abs(back - front) * uGridSize, vec3(1.0));
+    int rayStepLimit = max(1, int(ceil(rayIntervals)));
+    int steps = min(min(uSteps, ${MAX_STEPS}), rayStepLimit);
     if (steps < 1) {
       discard;
     }
 
-    vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
-    vec3 back = rayOrigin + rayDir * tFar;
     vec3 stepVector = (back - front) / float(steps);
-    vec3 location = front + vec3(0.5);
     vec3 delta = stepVector;
+    vec3 location = front + vec3(0.5) + delta * stableRayJitter();
 
     vec4 accum = vec4(0.0);
     float maxValue = 0.0;
@@ -760,6 +1095,10 @@ const SCALAR_FRAGMENT_SHADER = `
           maxValue = sampleValue;
           maxLocation = location;
         }
+        location += delta;
+        continue;
+      }
+      if (opacityValue <= 0.0) {
         location += delta;
         continue;
       }
@@ -796,106 +1135,10 @@ const SCALAR_FRAGMENT_SHADER = `
   }
 `;
 
-// High-resolution cut face for the Z-cursor cutaway. A flat quad placed at the
-// cut depth samples the SAME R16F volume texture as the ray-marcher, but as a
-// single crisp cross-section (one texel-accurate sample per fragment) instead of
-// an accumulated volumetric average. This is what makes the exposed interior
-// read at full slice resolution as the user scrubs through Z, while the clipped
-// volume behind it still provides 3D context.
-const CUTFACE_VERTEX_SHADER = `
-  varying vec2 vCutUv;
-
-  void main() {
-    // PlaneGeometry local position spans [-0.5, 0.5]; the volume's texcoord is
-    // (localPosition + 0.5), so uv maps 1:1 onto the volume's X/Y sampling.
-    vCutUv = position.xy + 0.5;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  }
-`;
-
-const CUTFACE_FRAGMENT_SHADER = `
-  precision highp float;
-  precision highp sampler3D;
-
-  uniform sampler3D uData;
-  uniform float uCutZ;
-  uniform float uWindowLow;
-  uniform float uWindowHigh;
-  uniform bool uInvert;
-  uniform int uColorMap;
-
-  varying vec2 vCutUv;
-
-  vec3 ramp5(float value, vec3 c0, vec3 c1, vec3 c2, vec3 c3, vec3 c4) {
-    float v = clamp(value, 0.0, 1.0);
-    if (v < 0.25) {
-      return mix(c0, c1, v / 0.25);
-    }
-    if (v < 0.5) {
-      return mix(c1, c2, (v - 0.25) / 0.25);
-    }
-    if (v < 0.75) {
-      return mix(c2, c3, (v - 0.5) / 0.25);
-    }
-    return mix(c3, c4, (v - 0.75) / 0.25);
-  }
-
-  vec3 scalarColor(float value) {
-    if (uColorMap == 1) {
-      return ramp5(
-        value,
-        vec3(0.267, 0.004, 0.329),
-        vec3(0.204, 0.286, 0.561),
-        vec3(0.129, 0.568, 0.551),
-        vec3(0.369, 0.789, 0.383),
-        vec3(0.993, 0.906, 0.145)
-      );
-    }
-    if (uColorMap == 2) {
-      return ramp5(
-        value,
-        vec3(0.000, 0.000, 0.016),
-        vec3(0.322, 0.071, 0.486),
-        vec3(0.714, 0.216, 0.475),
-        vec3(0.984, 0.537, 0.384),
-        vec3(0.988, 0.992, 0.749)
-      );
-    }
-    if (uColorMap == 3) {
-      return ramp5(
-        value,
-        vec3(0.000, 0.000, 0.016),
-        vec3(0.341, 0.063, 0.431),
-        vec3(0.737, 0.216, 0.329),
-        vec3(0.976, 0.557, 0.035),
-        vec3(0.988, 1.000, 0.643)
-      );
-    }
-    return vec3(value);
-  }
-
-  void main() {
-    vec3 location = vec3(
-      clamp(vCutUv.x, 0.0, 1.0),
-      clamp(vCutUv.y, 0.0, 1.0),
-      clamp(uCutZ, 0.0, 1.0)
-    );
-    float raw = texture(uData, location).r;
-    float normalized = clamp(
-      (raw - uWindowLow) / max(0.000001, uWindowHigh - uWindowLow),
-      0.0,
-      1.0
-    );
-    if (uInvert) {
-      normalized = 1.0 - normalized;
-    }
-    gl_FragColor = vec4(scalarColor(normalized), 1.0);
-  }
-`;
-
 // Max simultaneously-rendered channels. WebGL2 guarantees >= 16 fragment texture
 // units; fluorescence is typically 2-5 channels, 8 covers spectral with headroom
-// for the cut-face. Enabling beyond this caps to the first MAX_CHANNELS.
+// for the cut face. Larger selections fail explicitly instead of silently dropping
+// scientific channels.
 const MAX_VOLUME_CHANNELS = 8;
 
 // Multichannel fluorescence volume shader. Adapted from the scalar ray-march and
@@ -932,6 +1175,8 @@ const MULTICHANNEL_FRAGMENT_SHADER = `
   uniform int uProjectionMode;
   uniform vec3 uClipMin;
   uniform vec3 uClipMax;
+  uniform bool uCutawayActive;
+  uniform vec3 uGridSize;
   uniform vec3 uCameraPositionLocal;
   uniform vec3 uCameraDirectionLocal;
   uniform bool uOrthographicCamera;
@@ -1025,8 +1270,8 @@ const MULTICHANNEL_FRAGMENT_SHADER = `
     vec3 normal = normalize(worldGradient);
     vec3 lightDir = normalize(vec3(-0.45, 0.55, 0.72));
     vec3 viewDir = uOrthographicCamera
-      ? -normalize(uCameraDirectionLocal)
-      : normalize(uCameraPositionLocal - (location - vec3(0.5)));
+      ? -normalize(uCameraDirectionLocal * uVolumeScale)
+      : normalize((uCameraPositionLocal - (location - vec3(0.5))) * uVolumeScale);
     vec3 halfDir = normalize(lightDir + viewDir);
     float diffuse = max(dot(normal, lightDir), dot(-normal, lightDir));
     float specular = pow(max(dot(normal, halfDir), max(dot(-normal, halfDir), 0.0)), 24.0);
@@ -1058,12 +1303,22 @@ const MULTICHANNEL_FRAGMENT_SHADER = `
     if (!intersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar)) {
       discard;
     }
-    int steps = min(uSteps, ${MAX_STEPS});
-    if (steps < 1 || uChannelCount < 1) {
+    if (uChannelCount < 1) {
       discard;
     }
     vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
     vec3 back = rayOrigin + rayDir * tFar;
+    if (uCutawayActive && rayDir.z < 0.0 && abs(front.z - boxMax.z) <= 0.0001) {
+      vec4 cutValue = fuseVoxel(front + vec3(0.5));
+      gl_FragColor = vec4(applyTone(cutValue.rgb), 1.0);
+      return;
+    }
+    float rayIntervals = dot(abs(back - front) * uGridSize, vec3(1.0));
+    int rayStepLimit = max(1, int(ceil(rayIntervals)));
+    int steps = min(min(uSteps, ${MAX_STEPS}), rayStepLimit);
+    if (steps < 1) {
+      discard;
+    }
     vec3 delta = (back - front) / float(steps);
     vec3 location = front + vec3(0.5);
     // Dither the ray start by a per-pixel fraction of one step. Coherent (un-jittered)
@@ -1103,7 +1358,10 @@ const MULTICHANNEL_FRAGMENT_SHADER = `
         location += delta;
         continue;
       }
-      vec3 lit = applyLighting(location, fused.rgb, densityGradient(location));
+      vec3 lit = fused.rgb;
+      if (uLightingEnabled && uLightingStrength > 0.0) {
+        lit = applyLighting(location, fused.rgb, densityGradient(location));
+      }
       float alpha = alphaFromOpacity(opacity, stepLen);
       accum.rgb += (1.0 - accum.a) * lit * alpha;
       accum.a += (1.0 - accum.a) * alpha;
@@ -1138,38 +1396,112 @@ const MULTICHANNEL_FRAGMENT_SHADER = `
   }
 `;
 
-const atlasToVolumeTexture = async (
+const throwIfVolumeLoadAborted = (signal?: AbortSignal): void => {
+  if (signal?.aborted) {
+    throw new DOMException("Volume load aborted", "AbortError");
+  }
+};
+
+type DecodedAtlasImage = CanvasImageSource & {
+  width: number;
+  height: number;
+  close?: () => void;
+};
+
+const loadAtlasImage = async (atlasUrl: string, signal?: AbortSignal): Promise<DecodedAtlasImage> => {
+  throwIfVolumeLoadAborted(signal);
+  const response = await fetch(atlasUrl, { credentials: "include", signal });
+  if (!response.ok) {
+    throw new Error(`Atlas image failed to load (${response.status})`);
+  }
+  const blob = await response.blob();
+  throwIfVolumeLoadAborted(signal);
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(blob);
+    if (signal?.aborted) {
+      bitmap.close();
+      throwIfVolumeLoadAborted(signal);
+    }
+    return bitmap;
+  }
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const image = new window.Image();
+    const finish = () => {
+      signal?.removeEventListener("abort", onAbort);
+      URL.revokeObjectURL(objectUrl);
+    };
+    const onAbort = () => {
+      image.src = "";
+      finish();
+      reject(new DOMException("Volume load aborted", "AbortError"));
+    };
+    image.decoding = "async";
+    image.onload = () => {
+      finish();
+      resolve(image);
+    };
+    image.onerror = () => {
+      finish();
+      reject(new Error("Atlas image failed to decode"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    image.src = objectUrl;
+  });
+};
+
+export const atlasToVolumeTexture = async (
   atlasUrl: string,
   atlasScheme: NonNullable<UploadViewerInfo["viewer"]["atlas_scheme"]>,
-  texturePolicy: "linear" | "nearest"
+  texturePolicy: "linear" | "nearest",
+  signal?: AbortSignal
 ): Promise<THREE.Data3DTexture> => {
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const element = new window.Image();
-    element.decoding = "async";
-    element.onload = () => resolve(element);
-    element.onerror = () => reject(new Error("Atlas image failed to load"));
-    element.src = atlasUrl;
-  });
-
-  const atlasWidth = Math.max(1, image.naturalWidth || atlasScheme.atlas_width);
-  const atlasHeight = Math.max(1, image.naturalHeight || atlasScheme.atlas_height);
-  const sliceWidth = Math.max(1, atlasScheme.slice_width);
-  const sliceHeight = Math.max(1, atlasScheme.slice_height);
-  const sliceCount = Math.max(1, atlasScheme.slice_count);
-  const columns = Math.max(1, atlasScheme.columns);
+  const image = await loadAtlasImage(atlasUrl, signal);
+  throwIfVolumeLoadAborted(signal);
+  const atlasWidth = image.width || atlasScheme.atlas_width;
+  const atlasHeight = image.height || atlasScheme.atlas_height;
+  const sliceWidth = atlasScheme.slice_width;
+  const sliceHeight = atlasScheme.slice_height;
+  const sliceCount = atlasScheme.slice_count;
+  const columns = atlasScheme.columns;
+  try {
+    validateAtlasDecodeWorkingSet({
+      atlasWidth,
+      atlasHeight,
+      sliceWidth,
+      sliceHeight,
+      sliceCount,
+      columns,
+      rows: atlasScheme.rows,
+    });
+  } catch (error) {
+    image.close?.();
+    throw error;
+  }
 
   const canvas = document.createElement("canvas");
   canvas.width = atlasWidth;
   canvas.height = atlasHeight;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) {
+    image.close?.();
     throw new Error("2D canvas unavailable for atlas decoding");
   }
-  context.drawImage(image, 0, 0, atlasWidth, atlasHeight);
+  try {
+    context.drawImage(image, 0, 0, atlasWidth, atlasHeight);
+  } finally {
+    image.close?.();
+  }
+  throwIfVolumeLoadAborted(signal);
   const atlasData = context.getImageData(0, 0, atlasWidth, atlasHeight).data;
+  throwIfVolumeLoadAborted(signal);
   const volumeData = new Uint8Array(sliceWidth * sliceHeight * sliceCount * 4);
 
   for (let sliceIndex = 0; sliceIndex < sliceCount; sliceIndex += 1) {
+    if (sliceIndex > 0 && sliceIndex % 8 === 0) {
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      throwIfVolumeLoadAborted(signal);
+    }
     const column = sliceIndex % columns;
     const row = Math.floor(sliceIndex / columns);
     const srcX = column * sliceWidth;
@@ -1182,6 +1514,7 @@ const atlasToVolumeTexture = async (
     }
   }
 
+  throwIfVolumeLoadAborted(signal);
   const texture = new THREE.Data3DTexture(volumeData, sliceWidth, sliceHeight, sliceCount);
   texture.format = THREE.RGBAFormat;
   texture.type = THREE.UnsignedByteType;
@@ -1193,18 +1526,16 @@ const atlasToVolumeTexture = async (
   return texture;
 };
 
-const scalarToVolumeTexture = async (
-  payload: ScalarVolumePayload,
+const preparedScalarToVolumeTexture = (
+  prepared: PreparedScalarVolume,
   texturePolicy: "linear" | "nearest"
-): Promise<THREE.Data3DTexture> => {
-  const width = Math.max(1, payload.width);
-  const height = Math.max(1, payload.height);
-  const depth = Math.max(1, payload.depth);
-  // Upload as normalized 16-bit half-float (R16F) instead of 8-bit so the brain's
-  // narrow soft-tissue band keeps real contrast. R16F supports hardware linear
-  // filtering natively in WebGL2, so window/level stays a cheap GPU uniform.
-  const textureData = scalarVolumePayloadToHalfFloat(payload);
-  const texture = new THREE.Data3DTexture(textureData, width, height, depth);
+): THREE.Data3DTexture => {
+  const texture = new THREE.Data3DTexture(
+    prepared.textureData,
+    prepared.width,
+    prepared.height,
+    prepared.depth
+  );
   texture.format = THREE.RedFormat;
   texture.type = THREE.HalfFloatType;
   texture.unpackAlignment = 2;
@@ -1213,38 +1544,6 @@ const scalarToVolumeTexture = async (
   texture.magFilter = texturePolicy === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
   texture.needsUpdate = true;
   return texture;
-};
-
-const parseWindowEnhancement = (
-  enhancement: string | undefined,
-  rawMin: number,
-  rawMax: number
-): { low: number; high: number } => {
-  const safeEnhancement = String(enhancement || "").trim();
-  if (safeEnhancement.startsWith("hounsfield:")) {
-    const parts = safeEnhancement.split(":");
-    const center = Number(parts[1]);
-    const width = Number(parts[2]);
-    if (Number.isFinite(center) && Number.isFinite(width) && width > 0) {
-      return {
-        low: center - width / 2,
-        high: center + width / 2,
-      };
-    }
-  }
-  return { low: rawMin, high: rawMax > rawMin ? rawMax : rawMin + 1 };
-};
-
-const normalizeWindowRange = (
-  enhancement: string | undefined,
-  rawMin: number,
-  rawMax: number
-): { low: number; high: number } => {
-  const { low, high } = parseWindowEnhancement(enhancement, rawMin, rawMax);
-  const range = Math.max(1e-6, rawMax - rawMin);
-  const lowNorm = Math.max(0, Math.min(1, (low - rawMin) / range));
-  const highNorm = Math.max(lowNorm + 1e-4, Math.min(1, (high - rawMin) / range));
-  return { low: lowNorm, high: highNorm };
 };
 
 export function computeVolumeCameraFit({
@@ -1425,6 +1724,31 @@ const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
   if (typeof spatial === "string" && spatial.trim()) {
     return spatial.trim();
   }
+  const pixelUnit = viewerInfo?.phys?.pixel_units?.[0];
+  if (
+    typeof pixelUnit === "string" &&
+    !["", "px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(
+      pixelUnit.trim().toLowerCase()
+    )
+  ) {
+    return pixelUnit.trim();
+  }
+  const spacingUnits = viewerInfo?.metadata.spacing_units;
+  const spacingUnitValues = [spacingUnits?.x, spacingUnits?.y, spacingUnits?.z]
+    .map((unit) => String(unit ?? "").trim())
+    .filter(
+      (unit) =>
+        unit !== "" &&
+        !["px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(
+          unit.toLowerCase()
+        )
+    );
+  if (
+    spacingUnitValues.length > 0 &&
+    new Set(spacingUnitValues.map((unit) => unit.toLowerCase())).size === 1
+  ) {
+    return spacingUnitValues[0] as string;
+  }
   return viewerInfo?.metadata.physical_spacing ? "vox" : "units";
 };
 
@@ -1439,10 +1763,14 @@ export function SliceStackVolumeCanvas({
   className,
   displayState,
   volumeSource,
+  categoricalMode,
+  volumeCutaway,
+  featureMask = false,
+  cameraPersistenceKey,
 }: SliceStackVolumeCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
-  const requestRenderRef = useRef<(() => void) | null>(null);
+  const requestInteractiveRenderRef = useRef<(() => void) | null>(null);
   const scalarUniformsRef = useRef<{
     uWindowLow: { value: number };
     uWindowHigh: { value: number };
@@ -1456,7 +1784,9 @@ export function SliceStackVolumeCanvas({
   const clipUniformsRef = useRef<{
     uClipMin: { value: THREE.Vector3 };
     uClipMax: { value: THREE.Vector3 };
+    uCutawayActive?: { value: boolean };
   } | null>(null);
+  const atlasRenderModeUniformRef = useRef<{ value: number } | null>(null);
   const scalarRenderConfigRef = useRef({
     enhancement: undefined as string | undefined,
     negative: false,
@@ -1471,9 +1801,17 @@ export function SliceStackVolumeCanvas({
     camera: VolumeCamera;
     controls: TrackballControls;
   } | null>(null);
+  const cameraSnapshotRef = useRef<{
+    key: string;
+    position: THREE.Vector3;
+    target: THREE.Vector3;
+    up: THREE.Vector3;
+    zoom: number;
+  } | null>(null);
   const sliceCursorPlanesRef = useRef<SliceCursorPlanes | null>(null);
-  const cutFaceRef = useRef<{ mesh: THREE.Mesh; material: THREE.ShaderMaterial } | null>(null);
-  const scalarRangeRef = useRef<{ rawMin: number; rawMax: number } | null>(null);
+  const scalarRangeRef = useRef<
+    Pick<ScalarVolumePayload, "rawMin" | "rawMax" | "sclSlope" | "sclInter"> | null
+  >(null);
   // Live multichannel uniforms (the THREE uniform objects) so per-channel
   // color/window + gamma update without rebuilding the renderer.
   const multichannelUniformsRef = useRef<MultichannelUniformSet | null>(null);
@@ -1482,7 +1820,12 @@ export function SliceStackVolumeCanvas({
   // from each loaded volume; used as the default window when the user has not set
   // a manual one, so the background maps to zero opacity (no fog).
   const channelAutoWindowsRef = useRef<Map<number, { low: number; high: number }>>(new Map());
-  const [renderError, setRenderError] = useState<string | null>(null);
+  const [renderFailure, setRenderFailure] = useState<{
+    sourceKey: string;
+    message: string;
+  } | null>(null);
+  const [retryGeneration, setRetryGeneration] = useState(0);
+  const [channelLoadProgress, setChannelLoadProgress] = useState<{ loaded: number; total: number } | null>(null);
 
   const plane = useMemo(
     () =>
@@ -1491,7 +1834,7 @@ export function SliceStackVolumeCanvas({
         viewerInfo as UploadViewerInfo,
         "z"
       ),
-    [viewerInfo, volumeSource]
+    [viewerInfo, volumeSource?.plane]
   );
   const axisSizes = useMemo(
     () => volumeSource?.axisSizes ?? viewerInfo?.axis_sizes ?? DEFAULT_VOLUME_AXIS_SIZES,
@@ -1529,37 +1872,70 @@ export function SliceStackVolumeCanvas({
     [normalizedScale.x, normalizedScale.y, normalizedScale.z]
   );
 
-  const scalarChannel = useMemo(() => {
-    const explicitVolumeChannel = displayState?.volume_channel;
-    if (typeof explicitVolumeChannel === "number" && Number.isFinite(explicitVolumeChannel)) {
-      return Math.max(0, Math.floor(explicitVolumeChannel));
-    }
-    const selected = displayState?.channels ?? [];
-    if (Array.isArray(selected) && selected.length === 1 && Number.isFinite(selected[0])) {
-      return Math.max(0, Math.floor(selected[0] ?? 0));
-    }
-    if (viewerInfo) {
-      if (viewerInfo.axis_sizes.C <= 1) {
-        return 0;
+  const displayChannels = displayState?.channels;
+  const explicitVolumeChannel = displayState?.volume_channel;
+  const viewerSelectedChannel = viewerInfo?.selected_indices.C;
+  const viewerSelectedTime = viewerInfo?.selected_indices.T;
+  const volumeSelection = useMemo(() => {
+    try {
+      if (!Number.isSafeInteger(axisSizes.C) || axisSizes.C <= 0) {
+        throw new RangeError("Manifest channel count must be a positive safe integer.");
       }
-      return Math.max(0, Math.floor(viewerInfo.selected_indices.C ?? 0));
+      if (!Number.isSafeInteger(axisSizes.T) || axisSizes.T <= 0) {
+        throw new RangeError("Manifest time count must be a positive safe integer.");
+      }
+      const requestedTime = resolveStrictVolumeIndex(
+        tIndex ?? viewerSelectedTime ?? 0,
+        axisSizes.T,
+        "time"
+      );
+      let requestedChannel: number;
+      if (explicitVolumeChannel != null) {
+        requestedChannel = resolveStrictVolumeIndex(
+          explicitVolumeChannel,
+          axisSizes.C,
+          "channel"
+        );
+      } else if (Array.isArray(displayChannels) && displayChannels.length === 1) {
+        requestedChannel = resolveStrictVolumeIndex(
+          displayChannels[0] as number,
+          axisSizes.C,
+          "channel"
+        );
+      } else {
+        requestedChannel = resolveStrictVolumeIndex(
+          viewerSelectedChannel ?? 0,
+          axisSizes.C,
+          "channel"
+        );
+      }
+      const rawChannels = Array.isArray(displayChannels) && displayChannels.length > 0
+        ? displayChannels
+        : [requestedChannel];
+      const enabledChannels = rawChannels.map((value) =>
+        resolveStrictVolumeIndex(value, axisSizes.C, "channel")
+      );
+      if (new Set(enabledChannels).size !== enabledChannels.length) {
+        throw new RangeError("Duplicate channel indices are not allowed for volume rendering.");
+      }
+      return {
+        requestedTime,
+        scalarChannel: requestedChannel,
+        enabledChannels,
+        error: null as string | null,
+      };
+    } catch (error) {
+      return {
+        requestedTime: 0,
+        scalarChannel: null,
+        enabledChannels: [] as number[],
+        error: error instanceof Error ? error.message : "Invalid volume selection.",
+      };
     }
-    return null;
-  }, [displayState?.channels, displayState?.volume_channel, viewerInfo]);
-
-  // The set of channels the multichannel volume composites: the user's enabled
-  // channels (display_defaults.channels), de-duped, capped, defaulting to the
-  // single scalar channel. Changing this set reloads the per-channel textures.
-  const enabledVolumeChannels = useMemo(() => {
-    const raw = Array.isArray(displayState?.channels) ? displayState.channels : [];
-    const cleaned = raw
-      .filter((value) => Number.isFinite(value))
-      .map((value) => Math.max(0, Math.floor(Number(value))))
-      .filter((value, index, list) => list.indexOf(value) === index)
-      .sort((a, b) => a - b)
-      .slice(0, MAX_VOLUME_CHANNELS);
-    return cleaned.length > 0 ? cleaned : [Math.max(0, scalarChannel ?? 0)];
-  }, [displayState, scalarChannel]);
+  }, [axisSizes.C, axisSizes.T, displayChannels, explicitVolumeChannel, tIndex, viewerSelectedChannel, viewerSelectedTime]);
+  const scalarChannel = volumeSelection.scalarChannel;
+  const enabledVolumeChannels = volumeSelection.enabledChannels;
+  const requestedTime = volumeSelection.requestedTime;
 
   // Any NON-MEDICAL 3D volume (single- or multi-channel microscopy / scientific
   // scalar) renders through the full-res per-channel quality path — auto-contrast
@@ -1577,7 +1953,8 @@ export function SliceStackVolumeCanvas({
   );
 
   const atlasUrl = useMemo(() => {
-    if (!apiClient || !fileId) {
+    const atlasServiceUrl = viewerInfo?.viewer.service_urls?.atlas ?? viewerInfo?.service_urls?.atlas;
+    if (!apiClient || !fileId || !atlasServiceUrl || volumeSelection.error) {
       return "";
     }
     return apiClient.uploadAtlasUrl(fileId, {
@@ -1586,7 +1963,7 @@ export function SliceStackVolumeCanvas({
       negative: displayState?.negative,
       channels: displayState?.channels,
       channelColors: displayState?.channel_colors,
-      t: tIndex,
+      t: requestedTime,
     });
   }, [
     apiClient,
@@ -1596,54 +1973,86 @@ export function SliceStackVolumeCanvas({
     displayState?.fusion_method,
     displayState?.negative,
     fileId,
-    tIndex,
+    requestedTime,
+    viewerInfo?.service_urls?.atlas,
+    viewerInfo?.viewer.service_urls?.atlas,
+    volumeSelection.error,
   ]);
 
-  const resolvedSource = useMemo(() => {
-    if (volumeSource) {
-      return volumeSource;
-    }
+  const nativeScalarSource = useMemo<ScalarVolumeSource | null>(() => {
     if (
       viewerInfo?.viewer.volume_mode === "scalar" &&
+      Boolean(viewerInfo?.viewer.service_urls?.scalar_volume ?? viewerInfo?.service_urls?.scalar_volume) &&
       apiClient &&
-      fileId
+      fileId &&
+      scalarChannel != null &&
+      !volumeSelection.error
     ) {
       return {
         kind: "scalar" as const,
-        loadScalarVolume: () =>
-          apiClient.getUploadScalarVolume(fileId, {
-            t: tIndex,
+        loadScalarVolume: async (signal?: AbortSignal) => {
+          const requestedChannel = scalarChannel;
+          const payload = await apiClient.getUploadScalarVolume(fileId, {
+            t: requestedTime,
             channel: scalarChannel,
-          }),
+            signal,
+          });
+          validateScalarVolumeIdentity(payload, {
+            channel: requestedChannel,
+            time: requestedTime,
+            sourceGrid: { width: axisSizes.X, height: axisSizes.Y, depth: axisSizes.Z },
+            policy: payload.previewPolicy,
+          });
+          return payload;
+        },
         fallbackImageUrl: "",
         axisSizes,
         plane,
         physicalSpacing: spacing,
       };
     }
+    return null;
+  }, [apiClient, axisSizes, fileId, plane, requestedTime, scalarChannel, spacing, viewerInfo?.service_urls?.scalar_volume, viewerInfo?.viewer.service_urls?.scalar_volume, viewerInfo?.viewer.volume_mode, volumeSelection.error]);
+
+  const nativeMultichannelSource = useMemo<MultichannelVolumeSource | null>(() => {
     // Multichannel fluorescence z-stack: composite the enabled channels' full-res
     // volumes in-shader (vole-core-style fuse-then-raymarch). Takes priority over
     // the server-fused atlas fallback. Identity changes when the enabled set or
     // time changes (reload); per-channel color/window are applied incrementally.
-    if (isPerChannelVolume && apiClient && fileId) {
+    if (
+      isPerChannelVolume &&
+      apiClient &&
+      fileId &&
+      enabledVolumeChannels.length > 0 &&
+      !volumeSelection.error
+    ) {
       return {
         kind: "multichannel" as const,
         channelIndices: enabledVolumeChannels,
-        loadChannel: (channel: number) => apiClient.getUploadScalarVolume(fileId, { t: tIndex, channel }),
+        loadChannel: (channel: number, signal?: AbortSignal) =>
+          apiClient.getUploadScalarVolume(fileId, { t: requestedTime, channel, signal }),
         fallbackImageUrl: "",
         axisSizes,
         plane,
         physicalSpacing: spacing,
       };
     }
-    if (!apiClient || !fileId || !viewerInfo?.viewer.atlas_scheme) {
+    return null;
+  }, [apiClient, axisSizes, enabledVolumeChannels, fileId, isPerChannelVolume, plane, requestedTime, spacing, volumeSelection.error]);
+
+  const atlasScheme = viewerInfo?.viewer.atlas_scheme;
+  const nativeAtlasSource = useMemo<AtlasVolumeSource | null>(() => {
+    const hasAtlasAuthority = Boolean(
+      viewerInfo?.viewer.service_urls?.atlas ?? viewerInfo?.service_urls?.atlas
+    );
+    if (!apiClient || !fileId || !atlasScheme || !hasAtlasAuthority || !atlasUrl || volumeSelection.error) {
       return null;
     }
     return {
       kind: "atlas" as const,
       atlasUrl,
       fallbackImageUrl: "",
-      atlasScheme: viewerInfo.viewer.atlas_scheme,
+      atlasScheme,
       axisSizes,
       plane,
       physicalSpacing: spacing,
@@ -1652,28 +2061,58 @@ export function SliceStackVolumeCanvas({
     apiClient,
     atlasUrl,
     axisSizes,
-    enabledVolumeChannels,
-    isPerChannelVolume,
     fileId,
     plane,
-    scalarChannel,
     spacing,
-    tIndex,
-    viewerInfo,
-    volumeSource,
+    atlasScheme,
+    viewerInfo?.service_urls?.atlas,
+    viewerInfo?.viewer.service_urls?.atlas,
+    volumeSelection.error,
   ]);
+  const resolvedSource = volumeSource ?? nativeScalarSource ?? nativeMultichannelSource ?? nativeAtlasSource;
+  const scalarServiceUrl = String(
+    viewerInfo?.viewer.service_urls?.scalar_volume ?? viewerInfo?.service_urls?.scalar_volume ?? ""
+  );
+  const volumeApiNamespace = useMemo(
+    () => scalarVolumeApiNamespace(apiClient as object | undefined, scalarServiceUrl),
+    [apiClient, scalarServiceUrl]
+  );
+  const volumeSourceIdentity = scalarVolumeSourceIdentity({
+    fileId: fileId ?? viewerInfo?.file_id ?? "external",
+    sha256: viewerInfo?.metadata.sha256,
+    sizeBytes: viewerInfo?.metadata.size_bytes,
+    dtype: viewerInfo?.metadata.array_dtype,
+    sourceGrid: { width: axisSizes.X, height: axisSizes.Y, depth: axisSizes.Z },
+  });
+  const renderSourceKey = JSON.stringify({
+    kind: resolvedSource?.kind ?? "none",
+    api: volumeApiNamespace,
+    file: fileId ?? viewerInfo?.file_id ?? "external",
+    source: volumeSourceIdentity,
+    time: requestedTime,
+    channels:
+      resolvedSource?.kind === "multichannel"
+        ? resolvedSource.channelIndices
+        : scalarChannel == null
+          ? []
+          : [scalarChannel],
+    atlas: resolvedSource?.kind === "atlas" ? resolvedSource.atlasUrl : "",
+  });
+  const renderError = renderFailure?.sourceKey === renderSourceKey ? renderFailure.message : null;
+  const activeRenderError = volumeSelection.error ?? renderError;
 
   const fallbackImageUrl = useMemo(() => {
     if (volumeSource?.fallbackImageUrl) {
       return volumeSource.fallbackImageUrl;
     }
-    if (!apiClient || !fileId) {
+    const sliceServiceUrl = viewerInfo?.viewer.service_urls?.slice ?? viewerInfo?.service_urls?.slice;
+    if (!apiClient || !fileId || !sliceServiceUrl || volumeSelection.error) {
       return "";
     }
     return apiClient.uploadSliceUrl(fileId, {
       axis: "z",
       z: zIndex,
-      t: tIndex,
+      t: requestedTime,
       enhancement: displayState?.enhancement,
       fusionMethod: displayState?.fusion_method,
       negative: displayState?.negative,
@@ -1688,18 +2127,23 @@ export function SliceStackVolumeCanvas({
     displayState?.fusion_method,
     displayState?.negative,
     fileId,
-    tIndex,
+    requestedTime,
     volumeSource,
+    volumeSelection.error,
+    viewerInfo?.service_urls?.slice,
+    viewerInfo?.viewer.service_urls?.slice,
     zIndex,
   ]);
 
   const renderPolicy = resolvedSource?.renderPolicy ?? viewerInfo?.viewer.render_policy ?? "scalar";
+  const atlasRenderMode = resolveAtlasVolumeRenderMode({ renderPolicy, categoricalMode });
+  const atlasRenderModeValueRef = useRef<number>(atlasRenderMode.shaderValue);
   const orientationCue = resolveVolumeOrientationCue(viewerInfo?.viewer.orientation);
   const modality = String(viewerInfo?.modality ?? "").trim().toLowerCase();
   // Z-cursor cutaway: the volume is cut at the live Z slice so the interior is
   // exposed with the camera kept in overview. The cut position is derived from
   // the slice cursor, so scrubbing Z sweeps the cut through the volume.
-  const cutawayActive = Boolean(displayState?.volume_cutaway);
+  const cutawayActive = volumeCutaway ?? Boolean(displayState?.volume_cutaway);
   const cutawayZ = useMemo(() => resolveVolumeCutawayCutZ(zIndex, axisSizes.Z), [axisSizes.Z, zIndex]);
   // Manual box clip only (the legacy "Advanced cutaway" sliders). The Z-cursor
   // cutaway is applied separately via `effectiveClipBounds` so scrubbing Z does
@@ -1751,7 +2195,6 @@ export function SliceStackVolumeCanvas({
   // the dedicated cut-face effect keep these in sync after creation.
   const effectiveClipBoundsRef = useRef(effectiveClipBounds);
   const cutawayActiveRef = useRef(cutawayActive);
-  const cutawayZRef = useRef(cutawayZ);
   // 3D ray-projection. `volume_projection` is the dedicated control (decoupled from
   // the 2D `fusion_method`); when the user has set it, it wins. Otherwise pick a
   // per-source default: multichannel fluorescence z-stacks are dense and space-
@@ -1867,12 +2310,14 @@ export function SliceStackVolumeCanvas({
       volumeViewPreset,
     ]
   );
+  const cameraSnapshotKey = volumeCameraSnapshotKey({
+    persistenceKey: cameraPersistenceKey,
+    cameraModeId: volumeCameraMode.id,
+    viewPresetId: volumeViewPreset.id,
+    interiorFrame: volumeInteriorCameraFrame,
+  });
   const scalarVoxelStep = useMemo(
-    () => ({
-      x: 1 / Math.max(1, axisSizes.X - 1),
-      y: 1 / Math.max(1, axisSizes.Y - 1),
-      z: 1 / Math.max(1, axisSizes.Z - 1),
-    }),
+    () => computeVolumeVoxelStep({ width: axisSizes.X, height: axisSizes.Y, depth: axisSizes.Z }),
     [axisSizes.X, axisSizes.Y, axisSizes.Z]
   );
   const clearColor =
@@ -1895,13 +2340,9 @@ export function SliceStackVolumeCanvas({
           ? 0.5
           : 0.34
       : 0.22;
-  // Boundary-emphasis transfer function (composite scalar volumes only). A higher
-  // edge strength + lower interior opacity reveals internal tissue interfaces such
-  // as ventricle walls; medical data leans harder on this than generic scalars.
-  const volumeEdgeStrength =
-    renderPolicy === "scalar" ? (modality === "medical" ? 7.0 : 3.5) : 0.0;
-  const volumeInteriorOpacity =
-    renderPolicy === "scalar" ? (modality === "medical" ? 0.14 : 0.5) : 1.0;
+  const scalarOpacityPolicy = resolveScalarOpacityPolicy({ renderPolicy, modality });
+  const volumeEdgeStrength = scalarOpacityPolicy.edgeStrength;
+  const volumeInteriorOpacity = scalarOpacityPolicy.interiorOpacity;
   const texturePolicy: "linear" | "nearest" =
     resolvedSource?.texturePolicy === "nearest" || resolvedSource?.texturePolicy === "linear"
       ? resolvedSource.texturePolicy
@@ -1910,17 +2351,13 @@ export function SliceStackVolumeCanvas({
         : renderPolicy === "categorical" || renderPolicy === "analysis"
         ? "nearest"
         : "linear";
-  const sampleBudget = useMemo(
-    () =>
-      computeVolumeSampleBudget({
-        // Multichannel ray-marches R16F 3D textures like the scalar path, so it
-        // shares the scalar (higher) sample budget rather than the atlas one.
-        sourceKind: resolvedSource?.kind === "atlas" ? "atlas" : "scalar",
-        volumeDepth,
-        projectionMode,
-      }),
-    [projectionMode, resolvedSource?.kind, volumeDepth]
-  );
+  const sampleBudget = computeVolumeSampleBudget({
+    sourceKind: resolvedSource?.kind ?? "atlas",
+    volumeWidth: axisSizes.X,
+    volumeHeight: axisSizes.Y,
+    volumeDepth,
+    projectionMode,
+  });
   const scalarRenderConfig = useMemo(
     () => ({
       enhancement: displayState?.enhancement,
@@ -1945,8 +2382,16 @@ export function SliceStackVolumeCanvas({
   useEffect(() => {
     effectiveClipBoundsRef.current = effectiveClipBounds;
     cutawayActiveRef.current = cutawayActive;
-    cutawayZRef.current = cutawayZ;
   }, [effectiveClipBounds, cutawayActive, cutawayZ]);
+
+  useEffect(() => {
+    atlasRenderModeValueRef.current = atlasRenderMode.shaderValue;
+    if (!atlasRenderModeUniformRef.current) {
+      return;
+    }
+    atlasRenderModeUniformRef.current.value = atlasRenderMode.shaderValue;
+    requestInteractiveRenderRef.current?.();
+  }, [atlasRenderMode.shaderValue]);
 
   useEffect(() => {
     scalarRenderConfigRef.current = scalarRenderConfig;
@@ -1979,8 +2424,10 @@ export function SliceStackVolumeCanvas({
       })(),
       brightness: 1,
       densityScale: scalarTransfer.densityScale,
+      lightingEnabled: scalarLighting.enabled,
+      lightingStrength: scalarLighting.strength,
     }),
-    [enabledVolumeChannels, displayState, viewerInfo?.phys?.channel_colors, scalarTransfer.densityScale]
+    [enabledVolumeChannels, displayState, viewerInfo?.phys?.channel_colors, scalarLighting.enabled, scalarLighting.strength, scalarTransfer.densityScale]
   );
 
   // Keep the latest config in a ref (read at renderer-creation) and push
@@ -1992,7 +2439,7 @@ export function SliceStackVolumeCanvas({
       return;
     }
     applyMultichannelChannelUniforms(uniforms, multichannelRenderConfig, channelAutoWindowsRef.current);
-    requestRenderRef.current?.();
+    requestInteractiveRenderRef.current?.();
   }, [multichannelRenderConfig]);
 
   useEffect(() => {
@@ -2005,30 +2452,20 @@ export function SliceStackVolumeCanvas({
     if (!scalarRange || !scalarUniforms) {
       return;
     }
-    const normalizedWindow = normalizeWindowRange(
+    const normalizedWindow = resolveScalarVolumeWindow(
+      scalarRange,
       scalarRenderConfig.enhancement,
-      scalarRange.rawMin,
-      scalarRange.rawMax
+      scalarRenderConfig.negative
     );
     scalarUniforms.uWindowLow.value = normalizedWindow.low;
     scalarUniforms.uWindowHigh.value = normalizedWindow.high;
-    scalarUniforms.uInvert.value = scalarRenderConfig.negative;
+    scalarUniforms.uInvert.value = normalizedWindow.invert;
     scalarUniforms.uColorMap.value = scalarRenderConfig.colorMapShaderValue;
     scalarUniforms.uSignalFloor.value = scalarRenderConfig.signalFloor;
     scalarUniforms.uDensityScale.value = scalarRenderConfig.densityScale;
     scalarUniforms.uLightingEnabled.value = scalarRenderConfig.lightingEnabled;
     scalarUniforms.uLightingStrength.value = scalarRenderConfig.lightingStrength;
-    // Keep the cutaway cut face on the same window/level + colormap + invert as
-    // the volume so the exposed cross-section reads identically to the body.
-    const cutFace = cutFaceRef.current;
-    if (cutFace) {
-      const cutUniforms = cutFace.material.uniforms as Record<string, { value: number | boolean }>;
-      cutUniforms.uWindowLow.value = normalizedWindow.low;
-      cutUniforms.uWindowHigh.value = normalizedWindow.high;
-      cutUniforms.uInvert.value = scalarRenderConfig.negative;
-      cutUniforms.uColorMap.value = scalarRenderConfig.colorMapShaderValue;
-    }
-    requestRenderRef.current?.();
+    requestInteractiveRenderRef.current?.();
   }, [scalarRenderConfig]);
 
   useEffect(() => {
@@ -2046,23 +2483,11 @@ export function SliceStackVolumeCanvas({
       effectiveClipBounds.max.y,
       effectiveClipBounds.max.z
     );
-    requestRenderRef.current?.();
-  }, [effectiveClipBounds]);
-
-  // Drive the high-resolution cut face: toggle visibility with the cutaway, and
-  // slide + re-sample it as the user scrubs Z so the exposed cross-section
-  // tracks the live slice cursor.
-  useEffect(() => {
-    const cutFace = cutFaceRef.current;
-    if (!cutFace) {
-      return;
+    if (clipUniforms.uCutawayActive) {
+      clipUniforms.uCutawayActive.value = cutawayActive;
     }
-    cutFace.mesh.visible = cutawayActive;
-    cutFace.mesh.scale.set(normalizedScale.x, normalizedScale.y, 1);
-    cutFace.mesh.position.set(0, 0, (cutawayZ - 0.5) * normalizedScale.z);
-    (cutFace.material.uniforms.uCutZ as { value: number }).value = cutawayZ;
-    requestRenderRef.current?.();
-  }, [cutawayActive, cutawayZ, normalizedScale.x, normalizedScale.y, normalizedScale.z]);
+    requestInteractiveRenderRef.current?.();
+  }, [cutawayActive, effectiveClipBounds]);
 
   useEffect(() => {
     const rig = cameraRigRef.current;
@@ -2079,34 +2504,68 @@ export function SliceStackVolumeCanvas({
       aspect: width / height,
       interiorFrame: volumeInteriorCameraFrame,
     });
-    requestRenderRef.current?.();
+    requestInteractiveRenderRef.current?.();
   }, [volumeInteriorCameraFrame, volumeRadius, volumeViewPreset]);
 
   useEffect(() => {
     const container = containerRef.current;
     const canvasHost = canvasHostRef.current;
-    if (!container || !canvasHost || !resolvedSource) {
+    if (!container || !canvasHost || !resolvedSource || activeRenderError) {
       return;
     }
 
     let disposed = false;
+    const volumeLoadController = new AbortController();
+    const rendererSampleBudget: VolumeSampleBudget = {
+      interactiveSteps: sampleBudget.interactiveSteps,
+      settledSteps: sampleBudget.settledSteps,
+      rampFactor: sampleBudget.rampFactor,
+    };
     let renderer: THREE.WebGLRenderer;
-    const commitRenderError = (message: string | null) => {
+    const commitRenderError = (message: string) => {
       window.setTimeout(() => {
         if (!disposed) {
-          setRenderError(message);
+          setRenderFailure({ sourceKey: renderSourceKey, message });
         }
       }, 0);
     };
+    if (
+      resolvedSource.kind === "multichannel" &&
+      (resolvedSource.channelIndices.length < 1 ||
+        resolvedSource.channelIndices.length > MAX_VOLUME_CHANNELS)
+    ) {
+      commitRenderError(
+        resolvedSource.channelIndices.length < 1
+          ? "At least one channel is required for multichannel volume rendering"
+          : `Selected channel count ${resolvedSource.channelIndices.length} exceeds the 8-channel shader limit`
+      );
+      return () => {
+        disposed = true;
+        volumeLoadController.abort();
+      };
+    }
+    if (resolvedSource.kind === "multichannel") {
+      try {
+        const strictChannels = resolvedSource.channelIndices.map((channel) =>
+          resolveStrictVolumeIndex(channel, resolvedSource.axisSizes.C, "channel")
+        );
+        if (new Set(strictChannels).size !== strictChannels.length) {
+          throw new RangeError("Duplicate channel indices are not allowed for volume rendering.");
+        }
+      } catch (error) {
+        commitRenderError(error instanceof Error ? error.message : "Invalid volume channel selection");
+        return () => {
+          disposed = true;
+          volumeLoadController.abort();
+        };
+      }
+    }
     try {
       renderer = new THREE.WebGLRenderer({
         antialias: true,
         alpha: true,
         powerPreference: "high-performance",
       });
-      if (renderError) {
-        commitRenderError(null);
-      }
     } catch (error) {
       commitRenderError(error instanceof Error ? error.message : "WebGL unavailable");
       return () => {
@@ -2127,19 +2586,23 @@ export function SliceStackVolumeCanvas({
         ? (gl as WebGL2RenderingContext).getParameter(WebGL2RenderingContext.MAX_3D_TEXTURE_SIZE)
         : 0
     );
-    const largestDimension = Math.max(
-      Number(resolvedSource.axisSizes.X ?? 1),
-      Number(resolvedSource.axisSizes.Y ?? 1),
-      Number(resolvedSource.axisSizes.Z ?? 1)
-    );
-    if (Number.isFinite(max3DTextureSize) && max3DTextureSize > 0 && largestDimension > max3DTextureSize) {
-      renderer.dispose();
-      commitRenderError(
-        `Volume exceeds this browser's 3D texture limit (${largestDimension} > ${max3DTextureSize}).`
-      );
-      return () => {
-        disposed = true;
-      };
+    if (resolvedSource.kind === "atlas") {
+      try {
+        validateVolumeTextureGrid(
+          {
+            width: resolvedSource.atlasScheme.slice_width,
+            height: resolvedSource.atlasScheme.slice_height,
+            depth: resolvedSource.atlasScheme.slice_count,
+          },
+          max3DTextureSize
+        );
+      } catch (error) {
+        renderer.dispose();
+        commitRenderError(error instanceof Error ? error.message : "Invalid atlas delivery grid");
+        return () => {
+          disposed = true;
+        };
+      }
     }
 
     renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -2172,6 +2635,16 @@ export function SliceStackVolumeCanvas({
       aspect: initialWidth / initialHeight,
       interiorFrame: volumeInteriorCameraFrame,
     });
+    const snapshot = cameraSnapshotRef.current;
+    if (cameraSnapshotKey && snapshot?.key === cameraSnapshotKey) {
+      camera.position.copy(snapshot.position);
+      camera.up.copy(snapshot.up);
+      camera.zoom = snapshot.zoom;
+      camera.updateProjectionMatrix();
+      controls.target.copy(snapshot.target);
+      controls.update();
+      cameraSnapshotRef.current = null;
+    }
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
     // Seed the clip uniforms with the cutaway-aware clip so the first frame is
@@ -2184,7 +2657,7 @@ export function SliceStackVolumeCanvas({
         ? new THREE.ShaderMaterial({
             uniforms: {
               uData: { value: null },
-              uSteps: { value: sampleBudget.interactiveSteps },
+              uSteps: { value: rendererSampleBudget.interactiveSteps },
               uDensity: { value: density },
               uWindowLow: { value: 0.0 },
               uWindowHigh: { value: 1.0 },
@@ -2194,6 +2667,9 @@ export function SliceStackVolumeCanvas({
               uDensityScale: { value: scalarRenderConfigRef.current.densityScale },
               uLightingEnabled: { value: scalarRenderConfigRef.current.lightingEnabled },
               uLightingStrength: { value: scalarRenderConfigRef.current.lightingStrength },
+              uGridSize: {
+                value: new THREE.Vector3(axisSizes.X, axisSizes.Y, axisSizes.Z),
+              },
               uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
               uVolumeScale: { value: new THREE.Vector3(normalizedScale.x, normalizedScale.y, normalizedScale.z) },
               uVoxelSpacing: { value: new THREE.Vector3(voxelSpacingRatio.x, voxelSpacingRatio.y, voxelSpacingRatio.z) },
@@ -2202,6 +2678,7 @@ export function SliceStackVolumeCanvas({
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
               uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
               uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
+              uCutawayActive: { value: cutawayActiveRef.current },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
               uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
               uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
@@ -2237,13 +2714,15 @@ export function SliceStackVolumeCanvas({
                 }),
               },
               uChanInvert: { value: Array.from({ length: MAX_VOLUME_CHANNELS }, (_v, i) => mcConfig?.channels[i]?.invert ?? false) },
-              uSteps: { value: sampleBudget.interactiveSteps },
+              uSteps: { value: rendererSampleBudget.interactiveSteps },
               uDensity: { value: density },
               uDensityScale: { value: mcConfig?.densityScale ?? scalarRenderConfigRef.current.densityScale },
               uVolumeScale: { value: new THREE.Vector3(normalizedScale.x, normalizedScale.y, normalizedScale.z) },
               uProjectionMode: { value: projectionMode === "mip" ? 1 : 0 },
               uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
               uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
+              uCutawayActive: { value: cutawayActiveRef.current },
+              uGridSize: { value: new THREE.Vector3(axisSizes.X, axisSizes.Y, axisSizes.Z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
               uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
               uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
@@ -2252,8 +2731,8 @@ export function SliceStackVolumeCanvas({
               uGammaScale: { value: mcConfig?.gammaScale ?? 1 },
               uBrightness: { value: mcConfig?.brightness ?? 1 },
               uSignalFloor: { value: 0.08 },
-              uLightingEnabled: { value: true },
-              uLightingStrength: { value: 0.55 },
+              uLightingEnabled: { value: mcConfig?.lightingEnabled ?? false },
+              uLightingStrength: { value: mcConfig?.lightingStrength ?? 0.65 },
               uVoxelStep: { value: new THREE.Vector3(scalarVoxelStep.x, scalarVoxelStep.y, scalarVoxelStep.z) },
               uVoxelSpacing: { value: new THREE.Vector3(voxelSpacingRatio.x, voxelSpacingRatio.y, voxelSpacingRatio.z) },
             },
@@ -2266,8 +2745,17 @@ export function SliceStackVolumeCanvas({
         : new THREE.ShaderMaterial({
             uniforms: {
               uData: { value: null },
-              uSteps: { value: sampleBudget.interactiveSteps },
+              uSteps: { value: rendererSampleBudget.interactiveSteps },
               uDensity: { value: density },
+              uAtlasRenderMode: { value: atlasRenderModeValueRef.current },
+              uFeatureMask: { value: featureMask },
+              uGridSize: {
+                value: new THREE.Vector3(
+                  resolvedSource.atlasScheme.slice_width,
+                  resolvedSource.atlasScheme.slice_height,
+                  resolvedSource.atlasScheme.slice_count
+                ),
+              },
               uClipMin: { value: new THREE.Vector3(initialClip.min.x, initialClip.min.y, initialClip.min.z) },
               uClipMax: { value: new THREE.Vector3(initialClip.max.x, initialClip.max.y, initialClip.max.z) },
               uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
@@ -2376,57 +2864,17 @@ export function SliceStackVolumeCanvas({
     sliceCursorPlanesRef.current = sliceCursorPlanes;
     scene.add(sliceCursorPlanes.x, sliceCursorPlanes.y, sliceCursorPlanes.z);
 
-    // High-resolution cut face for the Z-cursor cutaway (scalar volumes only).
-    // It samples the same R16F texture as the ray-marcher but renders a single
-    // crisp cross-section at the cut depth. Drawn opaque and on top (depthTest
-    // off, like the cursor planes) so the exposed interior reads at full slice
-    // resolution; the clipped volume behind it supplies 3D context.
-    let cutFaceGeometry: THREE.PlaneGeometry | null = null;
-    let cutFaceMaterial: THREE.ShaderMaterial | null = null;
-    if (resolvedSource.kind === "scalar") {
-      const initialCutZ = cutawayZRef.current;
-      cutFaceGeometry = new THREE.PlaneGeometry(1, 1);
-      cutFaceMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          uData: { value: null },
-          uCutZ: { value: initialCutZ },
-          uWindowLow: { value: 0.0 },
-          uWindowHigh: { value: 1.0 },
-          uInvert: { value: scalarRenderConfigRef.current.negative },
-          uColorMap: { value: scalarRenderConfigRef.current.colorMapShaderValue },
-        },
-        vertexShader: CUTFACE_VERTEX_SHADER,
-        fragmentShader: CUTFACE_FRAGMENT_SHADER,
-        side: THREE.DoubleSide,
-        // transparent:true so the cut face joins the SAME render bucket as the
-        // translucent volume + cursor planes. THREE always draws the whole opaque
-        // bucket before the transparent bucket and renderOrder only sorts within a
-        // bucket — so an opaque cut face would be painted FIRST and then hazed over
-        // by the volume and tinted by the cursor planes. In the transparent bucket
-        // with the highest renderOrder it draws LAST; its fragments output alpha=1,
-        // so it still fully occludes (src*1 + dst*0 = src) within its footprint.
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-      });
-      const cutFaceMesh = new THREE.Mesh(cutFaceGeometry, cutFaceMaterial);
-      // Above the volume (0), context edges (2), clip edges (3), cursor planes (4).
-      cutFaceMesh.renderOrder = 6;
-      cutFaceMesh.scale.set(normalizedScale.x, normalizedScale.y, 1);
-      cutFaceMesh.position.set(0, 0, (initialCutZ - 0.5) * normalizedScale.z);
-      cutFaceMesh.visible = cutawayActiveRef.current;
-      cutFaceRef.current = { mesh: cutFaceMesh, material: cutFaceMaterial };
-      scene.add(cutFaceMesh);
-    }
-
     scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 
     const volumeUniforms = material.uniforms as Record<string, { value: THREE.Vector3 | number | boolean | null }>;
     const cameraPositionUniform = volumeUniforms.uCameraPositionLocal as { value: THREE.Vector3 };
     const cameraDirectionUniform = volumeUniforms.uCameraDirectionLocal as { value: THREE.Vector3 };
     const stepsUniform = (material.uniforms as Record<string, { value: number }>).uSteps;
-    let currentSteps = sampleBudget.interactiveSteps;
+    let currentSteps = rendererSampleBudget.interactiveSteps;
     let lastInteractionAt = window.performance.now();
+    let interactionActive = false;
+    let animationFrame = 0;
+    let rampTimer = 0;
     const setSamplingSteps = (steps: number) => {
       const nextSteps = Math.max(1, Math.floor(steps));
       if (nextSteps === currentSteps) {
@@ -2435,16 +2883,19 @@ export function SliceStackVolumeCanvas({
       currentSteps = nextSteps;
       stepsUniform.value = nextSteps;
     };
-    const resetInteractiveSampling = () => {
-      lastInteractionAt = window.performance.now();
-      setSamplingSteps(sampleBudget.interactiveSteps);
+    const updateDeliveredSampleBudget = (grid: VolumeGrid) => {
+      const deliveredBudget = computeVolumeSampleBudget({
+        sourceKind: resolvedSource.kind,
+        volumeWidth: grid.width,
+        volumeHeight: grid.height,
+        volumeDepth: grid.depth,
+        projectionMode,
+      });
+      rendererSampleBudget.interactiveSteps = deliveredBudget.interactiveSteps;
+      rendererSampleBudget.settledSteps = deliveredBudget.settledSteps;
+      rendererSampleBudget.rampFactor = deliveredBudget.rampFactor;
+      setSamplingSteps(deliveredBudget.interactiveSteps);
     };
-    const markInteractionSettled = () => {
-      lastInteractionAt = window.performance.now();
-    };
-    controls.addEventListener("start", resetInteractiveSampling);
-    controls.addEventListener("change", resetInteractiveSampling);
-    controls.addEventListener("end", markInteractionSettled);
 
     const cameraWorldDirection = new THREE.Vector3();
     const cameraWorldPoint = new THREE.Vector3();
@@ -2461,17 +2912,84 @@ export function SliceStackVolumeCanvas({
       cameraDirectionUniform.value.copy(cameraDirectionLocal);
       renderer.render(scene, camera);
     };
-    requestRenderRef.current = render;
+    const renderFrame = () => {
+      animationFrame = 0;
+      if (disposed) {
+        return;
+      }
+      controls.update();
+      if (
+        window.performance.now() - lastInteractionAt >= 120 &&
+        currentSteps < rendererSampleBudget.settledSteps
+      ) {
+        setSamplingSteps(advanceProgressiveVolumeSteps(currentSteps, rendererSampleBudget));
+      }
+      render();
+      if (interactionActive) {
+        scheduleRender();
+      } else {
+        scheduleProgressiveRamp();
+      }
+    };
+    const scheduleRender = () => {
+      if (disposed || animationFrame) {
+        return;
+      }
+      animationFrame = window.requestAnimationFrame(renderFrame);
+    };
+    const scheduleProgressiveRamp = () => {
+      if (rampTimer) {
+        window.clearTimeout(rampTimer);
+        rampTimer = 0;
+      }
+      if (disposed || currentSteps >= rendererSampleBudget.settledSteps) {
+        return;
+      }
+      const elapsed = window.performance.now() - lastInteractionAt;
+      if (elapsed >= 120) {
+        scheduleRender();
+        return;
+      }
+      rampTimer = window.setTimeout(() => {
+        rampTimer = 0;
+        scheduleRender();
+      }, Math.max(1, 120 - elapsed));
+    };
+    const resetInteractiveSampling = () => {
+      lastInteractionAt = window.performance.now();
+      setSamplingSteps(rendererSampleBudget.interactiveSteps);
+      scheduleRender();
+      scheduleProgressiveRamp();
+    };
+    const beginInteraction = () => {
+      interactionActive = true;
+      resetInteractiveSampling();
+    };
+    const markInteractionSettled = () => {
+      interactionActive = false;
+      lastInteractionAt = window.performance.now();
+      scheduleRender();
+      scheduleProgressiveRamp();
+    };
+    controls.addEventListener("start", beginInteraction);
+    controls.addEventListener("change", resetInteractiveSampling);
+    controls.addEventListener("end", markInteractionSettled);
+    requestInteractiveRenderRef.current = resetInteractiveSampling;
     clipUniformsRef.current = {
       uClipMin: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMin,
       uClipMax: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMax,
+      uCutawayActive: (material.uniforms as Record<string, { value: boolean }>).uCutawayActive,
     };
     if (resolvedSource.kind === "multichannel") {
       // Point the incremental config effect at this material's live uniforms.
       multichannelUniformsRef.current = material.uniforms as unknown as MultichannelUniformSet;
+    } else if (resolvedSource.kind === "atlas") {
+      atlasRenderModeUniformRef.current = (
+        material.uniforms as Record<string, { value: number }>
+      ).uAtlasRenderMode;
     }
 
-    const resize = () => {
+    const resize = ({ resetQuality = false }: { resetQuality?: boolean } = {}) => {
       const width = Math.max(1, container.clientWidth || 1);
       const height = Math.max(1, container.clientHeight || 1);
       renderer.setSize(width, height, false);
@@ -2495,101 +3013,315 @@ export function SliceStackVolumeCanvas({
       }
       camera.lookAt(controls.target);
       controls.handleResize();
-      render();
+      if (resetQuality) {
+        resetInteractiveSampling();
+      } else {
+        scheduleRender();
+      }
     };
 
-    const observer = new ResizeObserver(() => resize());
+    const observer = new ResizeObserver(() => resize({ resetQuality: true }));
     observer.observe(container);
 
     let texture3D: THREE.Data3DTexture | null = null;
     const channelTextures: THREE.Data3DTexture[] = [];
-    let animationFrame = 0;
-    const animate = () => {
-      if (disposed) {
-        return;
-      }
-      controls.update();
-      if (window.performance.now() - lastInteractionAt > 120 && currentSteps < sampleBudget.settledSteps) {
-        setSamplingSteps(advanceProgressiveVolumeSteps(currentSteps, sampleBudget));
-      }
-      render();
-      animationFrame = window.requestAnimationFrame(animate);
-    };
+    const preparedResidencyLeases: PreparedScalarVolumeLease[] = [];
+    let preparedResidencyReservation: PreparedScalarVolumeReservation | null = null;
 
     if (resolvedSource.kind === "multichannel") {
-      // Load each enabled channel's full-res volume (cached so a channel toggle
-      // reuses already-fetched channels), upload as its own R16F 3D texture, bind
-      // to uChan0..N, then publish uChannelCount last so the shader only ever reads
-      // bound slots. Per-channel color/window/gamma come from the config.
       const samplerNames = ["uChan0", "uChan1", "uChan2", "uChan3", "uChan4", "uChan5", "uChan6", "uChan7"];
-      const channelIndices = resolvedSource.channelIndices.slice(0, MAX_VOLUME_CHANNELS);
+      const channelIndices = resolvedSource.channelIndices;
       const multichannelSource = resolvedSource;
-      const loadOne = async (channel: number): Promise<ScalarVolumePayload> => {
-        const key = channelVolumeCacheKey(fileId ?? "", channel, tIndex ?? 0);
-        const cached = channelVolumeCache.get(key);
-        if (cached) {
-          return cached;
-        }
-        const payload = await multichannelSource.loadChannel(channel);
-        rememberChannelVolume(key, payload);
+      const expectedSourceGrid = {
+        width: Math.max(1, multichannelSource.axisSizes.X),
+        height: Math.max(1, multichannelSource.axisSizes.Y),
+        depth: Math.max(1, multichannelSource.axisSizes.Z),
+      };
+      const channelKeys = channelIndices.map((channel) =>
+        scalarVolumeIdentityKey({
+          apiNamespace: volumeApiNamespace,
+          fileId: fileId ?? viewerInfo?.file_id ?? "external",
+          sourceIdentity: volumeSourceIdentity,
+          sourceGrid: expectedSourceGrid,
+          channel,
+          time: requestedTime,
+          channelCount: multichannelSource.axisSizes.C,
+          timeCount: multichannelSource.axisSizes.T,
+          policy: SCALAR_PREVIEW_POLICY,
+        })
+      );
+      const loadPayload = async (channel: number): Promise<ScalarVolumePayload> => {
+        const payload = await multichannelSource.loadChannel(channel, volumeLoadController.signal);
+        throwIfVolumeLoadAborted(volumeLoadController.signal);
+        validateScalarVolumeIdentity(payload, {
+          channel,
+          time: requestedTime,
+          sourceGrid: expectedSourceGrid,
+          policy: SCALAR_PREVIEW_POLICY,
+        });
+        validateVolumeTextureGrid(payload, max3DTextureSize);
         return payload;
       };
-      void Promise.all(
-        channelIndices.map(async (channel, slot) => {
-          const payload = await loadOne(channel);
-          // ImageJ-style auto-contrast from the actual data so background is
-          // transparent (used as the default window when no manual one is set).
-          channelAutoWindowsRef.current.set(channel, computeScalarVolumeAutoContrast(payload));
-          const texture = await scalarToVolumeTexture(payload, texturePolicy);
-          return { slot, texture };
-        })
-      )
-        .then((loaded) => {
-          if (disposed) {
-            loaded.forEach(({ texture }) => texture.dispose());
-            return;
-          }
-          const uniforms = material.uniforms as Record<string, { value: unknown }>;
-          loaded
-            .sort((a, b) => a.slot - b.slot)
-            .forEach(({ slot, texture }) => {
-              if (typeof renderer.initTexture === "function") {
-                renderer.initTexture(texture);
-              }
-              channelTextures[slot] = texture;
-              uniforms[samplerNames[slot]].value = texture;
+      void (async () => {
+        const candidates: Array<{
+          channel: number;
+          key: string;
+          prepared: PreparedScalarVolume;
+          publish: boolean;
+        }> = [];
+        if (!disposed) {
+          setChannelLoadProgress({ loaded: 0, total: channelIndices.length });
+        }
+        const firstChannel = channelIndices[0] as number;
+        const firstKey = channelKeys[0] as string;
+        const firstCached = scalarVolumeResidency.get(firstKey);
+        const firstPayload = firstCached ? null : await loadPayload(firstChannel);
+        throwIfVolumeLoadAborted(volumeLoadController.signal);
+        const firstGeometry = firstCached ?? (firstPayload as ScalarVolumePayload);
+        if (firstCached) {
+          validateScalarVolumeIdentity(firstCached, {
+            channel: firstChannel,
+            time: requestedTime,
+            sourceGrid: expectedSourceGrid,
+            policy: SCALAR_PREVIEW_POLICY,
+          });
+          validateVolumeTextureGrid(firstCached, max3DTextureSize);
+        }
+        const predictedPreparedBytes = preparedScalarVolumeByteLength(firstGeometry);
+        validateSelectedChannelPreparedBudget(
+          predictedPreparedBytes,
+          channelIndices.length
+        );
+        validateActiveScalarGpuBudget(predictedPreparedBytes, channelIndices.length);
+        preparedResidencyReservation = scalarVolumeResidency.reserve(
+          channelKeys,
+          predictedPreparedBytes
+        );
+        const deliveredGrid: [number, number, number] = [
+          firstGeometry.width,
+          firstGeometry.height,
+          firstGeometry.depth,
+        ];
+        updateDeliveredSampleBudget({
+          width: deliveredGrid[0],
+          height: deliveredGrid[1],
+          depth: deliveredGrid[2],
+        });
+
+        for (let slot = 0; slot < channelIndices.length; slot += 1) {
+          const channel = channelIndices[slot] as number;
+          const key = channelKeys[slot] as string;
+          const cachedLease = scalarVolumeResidency.acquire(key);
+          if (cachedLease) {
+            validateScalarVolumeIdentity(cachedLease.value, {
+              channel,
+              time: requestedTime,
+              sourceGrid: expectedSourceGrid,
+              policy: SCALAR_PREVIEW_POLICY,
             });
-          const config = multichannelRenderConfigRef.current;
-          if (config) {
-            applyMultichannelChannelUniforms(
-              material.uniforms as unknown as MultichannelUniformSet,
-              config,
-              channelAutoWindowsRef.current
+            validateVolumeTextureGrid(cachedLease.value, max3DTextureSize);
+            if (cachedLease.value.textureData.byteLength !== predictedPreparedBytes) {
+              cachedLease.release();
+              throw new RangeError("Scalar volume channel previews have inconsistent byte sizes.");
+            }
+            const cachedGrid = [
+              cachedLease.value.width,
+              cachedLease.value.height,
+              cachedLease.value.depth,
+            ];
+            if (cachedGrid.some((value, axis) => value !== deliveredGrid[axis])) {
+              cachedLease.release();
+              throw new RangeError("Scalar volume channel previews have inconsistent delivered grids.");
+            }
+            preparedResidencyLeases.push(cachedLease);
+            candidates.push({ channel, key, prepared: cachedLease.value, publish: false });
+            setChannelLoadProgress({ loaded: slot + 1, total: channelIndices.length });
+            continue;
+          }
+          const payload = slot === 0 && firstPayload ? firstPayload : await loadPayload(channel);
+          throwIfVolumeLoadAborted(volumeLoadController.signal);
+          const payloadBytes = preparedScalarVolumeByteLength(payload);
+          const nextGrid = [payload.width, payload.height, payload.depth];
+          if (
+            payloadBytes !== predictedPreparedBytes ||
+            nextGrid.some((value, axis) => value !== deliveredGrid[axis])
+          ) {
+            throw new RangeError(
+              "Scalar volume channel previews have inconsistent delivered grids or byte sizes."
             );
           }
-          (uniforms.uChannelCount as { value: number }).value = channelTextures.filter(Boolean).length;
-          material.needsUpdate = true;
-          resize();
-        })
+          const prepared = await prepareScalarVolume(payload, volumeLoadController.signal);
+          throwIfVolumeLoadAborted(volumeLoadController.signal);
+          if (prepared.textureData.byteLength !== predictedPreparedBytes) {
+            throw new RangeError("Scalar volume conversion did not honor its prepared-byte reservation.");
+          }
+          candidates.push({ channel, key, prepared, publish: true });
+          setChannelLoadProgress({ loaded: slot + 1, total: channelIndices.length });
+        }
+
+        throwIfVolumeLoadAborted(volumeLoadController.signal);
+        for (const candidate of candidates) {
+          if (candidate.publish) {
+            const lease = scalarVolumeResidency.publishAndAcquire(
+              preparedResidencyReservation,
+              candidate.key,
+              candidate.prepared
+            );
+            candidate.prepared = lease.value;
+            preparedResidencyLeases.push(lease);
+          }
+        }
+        preparedResidencyReservation.release();
+        preparedResidencyReservation = null;
+
+        const localAutoWindows = new Map<number, { low: number; high: number }>();
+        for (const candidate of candidates) {
+          localAutoWindows.set(candidate.channel, candidate.prepared.autoWindow);
+          const texture = preparedScalarToVolumeTexture(candidate.prepared, texturePolicy);
+          channelTextures.push(texture);
+          if (typeof renderer.initTexture === "function") {
+            renderer.initTexture(texture);
+          }
+        }
+        throwIfVolumeLoadAborted(volumeLoadController.signal);
+
+        const finalGrid = deliveredGrid;
+        const deliveredSpacing = computeDeliveredVoxelSpacing({
+          sourceGrid: expectedSourceGrid,
+          sourceSpacing: physicalGeometry.voxelSpacing,
+          deliveredGrid: { width: finalGrid[0], height: finalGrid[1], depth: finalGrid[2] },
+        });
+        const maxSpacing = Math.max(
+          deliveredSpacing.x,
+          deliveredSpacing.y,
+          deliveredSpacing.z,
+          1e-9
+        );
+        const uniforms = material.uniforms as Record<string, { value: unknown }>;
+        const deliveredVoxelStep = computeVolumeVoxelStep({
+          width: finalGrid[0],
+          height: finalGrid[1],
+          depth: finalGrid[2],
+        });
+        candidates.forEach((candidate, slot) => {
+          uniforms[samplerNames[slot]].value = channelTextures[slot];
+        });
+        (uniforms.uGridSize as { value: THREE.Vector3 }).value.set(...finalGrid);
+        (uniforms.uVoxelStep as { value: THREE.Vector3 }).value.set(
+          deliveredVoxelStep.x,
+          deliveredVoxelStep.y,
+          deliveredVoxelStep.z
+        );
+        (uniforms.uVoxelSpacing as { value: THREE.Vector3 }).value.set(
+          deliveredSpacing.x / maxSpacing,
+          deliveredSpacing.y / maxSpacing,
+          deliveredSpacing.z / maxSpacing
+        );
+        channelAutoWindowsRef.current = localAutoWindows;
+        const config = multichannelRenderConfigRef.current;
+        if (config) {
+          applyMultichannelChannelUniforms(
+            material.uniforms as unknown as MultichannelUniformSet,
+            config,
+            channelAutoWindowsRef.current
+          );
+        }
+        (uniforms.uChannelCount as { value: number }).value = candidates.length;
+        material.needsUpdate = true;
+        resize({ resetQuality: true });
+        if (!disposed) {
+          setChannelLoadProgress(null);
+        }
+      })()
         .catch((error: unknown) => {
-          if (disposed) {
+          preparedResidencyReservation?.release();
+          preparedResidencyReservation = null;
+          preparedResidencyLeases.splice(0).forEach((lease) => lease.release());
+          if (disposed || (error instanceof DOMException && error.name === "AbortError")) {
             return;
           }
-          setRenderError(error instanceof Error ? error.message : "Volume channels failed to load");
+          setChannelLoadProgress(null);
+          setRenderFailure({
+            sourceKey: renderSourceKey,
+            message: error instanceof Error ? error.message : "Volume channels failed to load",
+          });
         });
     } else {
       const loadPromise =
       resolvedSource.kind === "scalar"
-        ? resolvedSource.loadScalarVolume().then(async (payload) => {
-            const texture = await scalarToVolumeTexture(payload, texturePolicy);
-            scalarRangeRef.current = { rawMin: payload.rawMin, rawMax: payload.rawMax };
-            const latestScalarRenderConfig = scalarRenderConfigRef.current;
-            const normalizedWindow = normalizeWindowRange(
-              latestScalarRenderConfig.enhancement,
-              payload.rawMin,
-              payload.rawMax
+        ? resolvedSource.loadScalarVolume(volumeLoadController.signal).then(async (payload) => {
+            throwIfVolumeLoadAborted(volumeLoadController.signal);
+            validateVolumeTextureGrid(payload, max3DTextureSize);
+            const sourceGrid = {
+              width: resolvedSource.axisSizes.X,
+              height: resolvedSource.axisSizes.Y,
+              depth: resolvedSource.axisSizes.Z,
+            };
+            if (scalarChannel != null) {
+              validateScalarVolumeIdentity(payload, {
+                channel: scalarChannel,
+                time: requestedTime,
+                sourceGrid,
+                policy: payload.previewPolicy,
+              });
+            }
+            const predictedPreparedBytes = preparedScalarVolumeByteLength(payload);
+            validateSelectedChannelPreparedBudget(predictedPreparedBytes, 1);
+            validateActiveScalarGpuBudget(predictedPreparedBytes, 1);
+            updateDeliveredSampleBudget({
+              width: payload.width,
+              height: payload.height,
+              depth: payload.depth,
+            });
+            const preparedKey = scalarVolumeIdentityKey({
+              apiNamespace: volumeApiNamespace,
+              fileId: fileId ?? viewerInfo?.file_id ?? "external",
+              sourceIdentity: volumeSourceIdentity,
+              sourceGrid,
+              channel: payload.channel,
+              time: payload.time,
+              channelCount: resolvedSource.axisSizes.C,
+              timeCount: resolvedSource.axisSizes.T,
+              policy: payload.previewPolicy,
+            });
+            preparedResidencyReservation = scalarVolumeResidency.reserve(
+              [preparedKey],
+              predictedPreparedBytes
             );
-            scalarUniformsRef.current = {
+            let preparedLease = scalarVolumeResidency.acquire(preparedKey);
+            if (preparedLease) {
+              validateScalarVolumeIdentity(preparedLease.value, {
+                channel: payload.channel,
+                time: payload.time,
+                sourceGrid,
+                policy: payload.previewPolicy,
+              });
+              if (preparedLease.value.textureData.byteLength !== predictedPreparedBytes) {
+                preparedLease.release();
+                throw new RangeError("Cached scalar volume byte size does not match its identity.");
+              }
+            } else {
+              const prepared = await prepareScalarVolume(payload, volumeLoadController.signal);
+              throwIfVolumeLoadAborted(volumeLoadController.signal);
+              preparedLease = scalarVolumeResidency.publishAndAcquire(
+                preparedResidencyReservation,
+                preparedKey,
+                prepared
+              );
+            }
+            preparedResidencyLeases.push(preparedLease);
+            preparedResidencyReservation.release();
+            preparedResidencyReservation = null;
+            const prepared = preparedLease.value;
+            const texture = preparedScalarToVolumeTexture(prepared, texturePolicy);
+            throwIfVolumeLoadAborted(volumeLoadController.signal);
+            const latestScalarRenderConfig = scalarRenderConfigRef.current;
+            const normalizedWindow = resolveScalarVolumeWindow(
+              prepared,
+              latestScalarRenderConfig.enhancement,
+              latestScalarRenderConfig.negative
+            );
+            const nextScalarUniforms = {
               uWindowLow: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowLow as { value: number },
               uWindowHigh: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowHigh as { value: number },
               uInvert: (material.uniforms as Record<string, { value: number | boolean | null }>).uInvert as { value: boolean },
@@ -2599,28 +3331,77 @@ export function SliceStackVolumeCanvas({
               uLightingEnabled: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingEnabled as { value: boolean },
               uLightingStrength: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingStrength as { value: number },
             };
-            scalarUniformsRef.current.uWindowLow.value = normalizedWindow.low;
-            scalarUniformsRef.current.uWindowHigh.value = normalizedWindow.high;
-            scalarUniformsRef.current.uInvert.value = latestScalarRenderConfig.negative;
-            scalarUniformsRef.current.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
-            scalarUniformsRef.current.uSignalFloor.value = latestScalarRenderConfig.signalFloor;
-            scalarUniformsRef.current.uDensityScale.value = latestScalarRenderConfig.densityScale;
-            scalarUniformsRef.current.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
-            scalarUniformsRef.current.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
-            if (cutFaceMaterial) {
-              const cutUniforms = cutFaceMaterial.uniforms as Record<string, { value: number | boolean }>;
-              cutUniforms.uWindowLow.value = normalizedWindow.low;
-              cutUniforms.uWindowHigh.value = normalizedWindow.high;
-              cutUniforms.uInvert.value = latestScalarRenderConfig.negative;
-              cutUniforms.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
-            }
+            nextScalarUniforms.uWindowLow.value = normalizedWindow.low;
+            nextScalarUniforms.uWindowHigh.value = normalizedWindow.high;
+            nextScalarUniforms.uInvert.value = normalizedWindow.invert;
+            nextScalarUniforms.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
+            nextScalarUniforms.uSignalFloor.value = latestScalarRenderConfig.signalFloor;
+            nextScalarUniforms.uDensityScale.value = latestScalarRenderConfig.densityScale;
+            nextScalarUniforms.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
+            nextScalarUniforms.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
+            const scalarMaterialUniforms = material.uniforms as Record<
+              string,
+              { value: THREE.Vector3 }
+            >;
+            scalarMaterialUniforms.uGridSize.value.set(
+              prepared.width,
+              prepared.height,
+              prepared.depth
+            );
+            const deliveredVoxelStep = computeVolumeVoxelStep({
+              width: prepared.width,
+              height: prepared.height,
+              depth: prepared.depth,
+            });
+            scalarMaterialUniforms.uVoxelStep.value.set(
+              deliveredVoxelStep.x,
+              deliveredVoxelStep.y,
+              deliveredVoxelStep.z
+            );
+            const deliveredSpacing = computeDeliveredVoxelSpacing({
+              sourceGrid: {
+                width: resolvedSource.axisSizes.X,
+                height: resolvedSource.axisSizes.Y,
+                depth: resolvedSource.axisSizes.Z,
+              },
+              sourceSpacing: physicalGeometry.voxelSpacing,
+              deliveredGrid: {
+                width: prepared.width,
+                height: prepared.height,
+                depth: prepared.depth,
+              },
+            });
+            const maxSpacing = Math.max(
+              deliveredSpacing.x,
+              deliveredSpacing.y,
+              deliveredSpacing.z,
+              1e-9
+            );
+            scalarMaterialUniforms.uVoxelSpacing.value.set(
+              deliveredSpacing.x / maxSpacing,
+              deliveredSpacing.y / maxSpacing,
+              deliveredSpacing.z / maxSpacing
+            );
+            throwIfVolumeLoadAborted(volumeLoadController.signal);
+            scalarRangeRef.current = {
+              rawMin: prepared.rawMin,
+              rawMax: prepared.rawMax,
+              sclSlope: prepared.sclSlope,
+              sclInter: prepared.sclInter,
+            };
+            scalarUniformsRef.current = nextScalarUniforms;
             return texture;
           })
-        : atlasToVolumeTexture(resolvedSource.atlasUrl, resolvedSource.atlasScheme, texturePolicy);
+        : atlasToVolumeTexture(
+            resolvedSource.atlasUrl,
+            resolvedSource.atlasScheme,
+            texturePolicy,
+            volumeLoadController.signal
+          );
 
     void loadPromise
       .then((decodedTexture) => {
-        if (disposed) {
+        if (disposed || volumeLoadController.signal.aborted) {
           decodedTexture.dispose();
           return;
         }
@@ -2630,38 +3411,56 @@ export function SliceStackVolumeCanvas({
         }
         material.uniforms.uData.value = decodedTexture;
         material.needsUpdate = true;
-        if (cutFaceMaterial) {
-          cutFaceMaterial.uniforms.uData.value = decodedTexture;
-          cutFaceMaterial.needsUpdate = true;
-        }
-        resize();
+        resize({ resetQuality: true });
       })
       .catch((error: unknown) => {
-        if (disposed) {
+        preparedResidencyReservation?.release();
+        preparedResidencyReservation = null;
+        preparedResidencyLeases.splice(0).forEach((lease) => lease.release());
+        if (disposed || (error instanceof DOMException && error.name === "AbortError")) {
           return;
         }
-        setRenderError(error instanceof Error ? error.message : "Volume data failed to load");
+        setRenderFailure({
+          sourceKey: renderSourceKey,
+          message: error instanceof Error ? error.message : "Volume data failed to load",
+        });
       });
     }
 
-    resize();
-    animate();
+    resize({ resetQuality: true });
+    scheduleRender();
 
     return () => {
       disposed = true;
-      requestRenderRef.current = null;
+      volumeLoadController.abort();
+      preparedResidencyReservation?.release();
+      preparedResidencyReservation = null;
+      preparedResidencyLeases.splice(0).forEach((lease) => lease.release());
+      cameraSnapshotRef.current = cameraSnapshotKey
+        ? {
+            key: cameraSnapshotKey,
+            position: camera.position.clone(),
+            target: controls.target.clone(),
+            up: camera.up.clone(),
+            zoom: camera.zoom,
+          }
+        : null;
+      requestInteractiveRenderRef.current = null;
       scalarUniformsRef.current = null;
       multichannelUniformsRef.current = null;
       clipUniformsRef.current = null;
+      atlasRenderModeUniformRef.current = null;
       cameraRigRef.current = null;
       sliceCursorPlanesRef.current = null;
-      cutFaceRef.current = null;
       scalarRangeRef.current = null;
       observer.disconnect();
       if (animationFrame) {
         window.cancelAnimationFrame(animationFrame);
       }
-      controls.removeEventListener("start", resetInteractiveSampling);
+      if (rampTimer) {
+        window.clearTimeout(rampTimer);
+      }
+      controls.removeEventListener("start", beginInteraction);
       controls.removeEventListener("change", resetInteractiveSampling);
       controls.removeEventListener("end", markInteractionSettled);
       controls.dispose();
@@ -2674,8 +3473,6 @@ export function SliceStackVolumeCanvas({
       sliceCursorPlanes.x.material.dispose();
       sliceCursorPlanes.y.material.dispose();
       sliceCursorPlanes.z.material.dispose();
-      cutFaceGeometry?.dispose();
-      cutFaceMaterial?.dispose();
       material.dispose();
       texture3D?.dispose();
       channelTextures.forEach((texture) => texture?.dispose());
@@ -2683,7 +3480,7 @@ export function SliceStackVolumeCanvas({
       renderer.domElement.parentNode?.removeChild(renderer.domElement);
     };
   }, [
-    renderError,
+    activeRenderError,
     resolvedSource,
     texturePolicy,
     clearColor,
@@ -2692,7 +3489,13 @@ export function SliceStackVolumeCanvas({
     volumeInteriorOpacity,
     projectionMode,
     renderPolicy,
-    sampleBudget,
+    featureMask,
+    sampleBudget.interactiveSteps,
+    sampleBudget.rampFactor,
+    sampleBudget.settledSteps,
+    axisSizes.X,
+    axisSizes.Y,
+    axisSizes.Z,
     scalarVoxelStep.x,
     scalarVoxelStep.y,
     scalarVoxelStep.z,
@@ -2710,16 +3513,27 @@ export function SliceStackVolumeCanvas({
     volumeDepth,
     volumeRadius,
     volumeCameraMode,
+    cameraSnapshotKey,
     volumeViewPreset,
     volumeInteriorCameraFrame,
     volumeInteriorInspectionActive,
     physicalGeometry.worldDepth,
     physicalGeometry.worldHeight,
     physicalGeometry.worldWidth,
+    physicalGeometry.voxelSpacing.x,
+    physicalGeometry.voxelSpacing.y,
+    physicalGeometry.voxelSpacing.z,
+    physicalGeometry.voxelSpacing,
     volumeClipCue.active,
     fileId,
-    tIndex,
+    requestedTime,
+    scalarChannel,
+    volumeApiNamespace,
+    volumeSourceIdentity,
+    viewerInfo?.file_id,
     isPerChannelVolume,
+    retryGeneration,
+    renderSourceKey,
   ]);
 
   useEffect(() => {
@@ -2737,7 +3551,7 @@ export function SliceStackVolumeCanvas({
         cutawayActive: cutawayActive || isPerChannelVolume,
       }),
     });
-    requestRenderRef.current?.();
+    requestInteractiveRenderRef.current?.();
   }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive, isPerChannelVolume]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
@@ -2858,7 +3672,7 @@ export function SliceStackVolumeCanvas({
     ) : null;
 
   if (
-    renderError ||
+    activeRenderError ||
     !resolvedSource ||
     (resolvedSource.kind === "atlas" && !resolvedSource.atlasScheme)
   ) {
@@ -2871,6 +3685,7 @@ export function SliceStackVolumeCanvas({
         data-viewer-renderer="fallback"
         data-viewer-render-policy={renderPolicy}
         data-viewer-texture-policy={texturePolicy}
+        data-viewer-atlas-render-mode={resolvedSource?.kind === "atlas" ? atlasRenderMode.id : undefined}
         data-viewer-projection-mode={projectionMode}
         data-viewer-scalar-colormap={scalarColorMap.id}
         data-viewer-scalar-colormap-label={scalarColorMap.label}
@@ -2948,21 +3763,35 @@ export function SliceStackVolumeCanvas({
         data-viewer-physical-anisotropic={physicalGeometry.isAnisotropic ? "true" : "false"}
         data-viewer-progressive-sampling="true"
         data-viewer-sample-steps-interactive={String(sampleBudget.interactiveSteps)}
-        data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
-      >
-        <div className="viewer-image-fallback" style={{ aspectRatio: `${Math.max(1e-6, plane.aspect_ratio)}` }}>
-          <img src={fallbackImageUrl} alt="Volume fallback preview" className="viewer-image-fallback-media" />
-        </div>
+         data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
+       >
+         <div className="viewer-image-fallback" style={{ aspectRatio: `${Math.max(1e-6, plane.aspect_ratio)}` }}>
+           {fallbackImageUrl ? (
+             <img src={fallbackImageUrl} alt="Volume fallback preview" className="viewer-image-fallback-media" />
+           ) : null}
+         </div>
         {renderVolumeOrientationOverlay("fallback")}
         {renderVolumeAxisCue()}
         {renderVolumeSliceCursorCue()}
         {renderVolumeClipCue()}
         {renderVolumeScaleBar()}
         <p className="viewer-fallback-note">
-          {renderError
-            ? `${backendLabel === "scalar" ? "Scalar" : "Atlas"} volume viewer unavailable: ${renderError}. Showing a representative slice preview instead.`
+          {activeRenderError
+            ? `${backendLabel === "scalar" ? "Scalar" : "Atlas"} volume viewer unavailable: ${activeRenderError}. Showing a representative slice preview instead.`
             : "Volume viewer unavailable. Showing a representative slice preview instead."}
         </p>
+        {renderError && !volumeSelection.error ? (
+          <button
+            type="button"
+            className="viewer-fallback-retry"
+            onClick={() => {
+              setRenderFailure(null);
+              setRetryGeneration((generation) => generation + 1);
+            }}
+          >
+            Retry volume
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -2976,6 +3805,7 @@ export function SliceStackVolumeCanvas({
       data-viewer-aspect={plane.aspect_ratio.toFixed(4)}
       data-viewer-render-policy={renderPolicy}
       data-viewer-texture-policy={texturePolicy}
+      data-viewer-atlas-render-mode={resolvedSource.kind === "atlas" ? atlasRenderMode.id : undefined}
       data-viewer-projection-mode={projectionMode}
       data-viewer-scalar-colormap={scalarColorMap.id}
       data-viewer-scalar-colormap-label={scalarColorMap.label}
@@ -2998,6 +3828,7 @@ export function SliceStackVolumeCanvas({
         shouldShowVolumeSliceCursorPlanes({
           cueVisible: sliceCursorCue.visible,
           interiorInspectionActive: volumeInteriorInspectionActive,
+          cutawayActive: cutawayActive || isPerChannelVolume,
         })
           ? "true"
           : "false"
@@ -3055,6 +3886,11 @@ export function SliceStackVolumeCanvas({
       data-viewer-sample-steps-settled={String(sampleBudget.settledSteps)}
     >
       <div ref={canvasHostRef} className="viewer-webgl-canvas-host" aria-hidden="true" />
+      {channelLoadProgress ? (
+        <span className="viewer-volume-load-progress" role="status" aria-live="polite">
+          Loading channels {channelLoadProgress.loaded}/{channelLoadProgress.total}
+        </span>
+      ) : null}
       {renderVolumeOrientationOverlay()}
       {renderVolumeAxisCue()}
       {renderVolumeSliceCursorCue()}

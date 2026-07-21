@@ -6,13 +6,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   advanceProgressiveVolumeSteps,
+  atlasToVolumeTexture,
+  MAX_CATEGORICAL_SURFACE_STEPS,
   computeVolumeInteriorCameraFrame,
   computePhysicalVolumeGeometry,
   computeVolumeCameraFit,
   computeVolumeSampleBudget,
+  computeDeliveredVoxelSpacing,
+  computeVolumeVoxelStep,
   isVolumeInteriorInspectionActive,
   shouldShowVolumeContextEdges,
   shouldShowVolumeSliceCursorPlanes,
+  resolveScalarOpacityPolicy,
   resolveScalarVolumeColorMap,
   resolveScalarVolumeLighting,
   resolveScalarVolumeTransferFunction,
@@ -22,19 +27,101 @@ import {
   resolveVolumeViewPreset,
   resolveVolumeAxisCue,
   resolveVolumeScaleBar,
+  resolveStrictVolumeIndex,
   resolveVolumeProjectionMode,
+  resolveAtlasVolumeRenderMode,
   resolveVolumeCutawayCutZ,
   resolveVolumeCutawayClip,
   resolveVolumeOrientationCue,
   scalarVolumePayloadValueAt,
   scalarVolumePayloadToTextureBytes,
   scalarVolumePayloadToHalfFloat,
+  validateSelectedChannelPreparedBudget,
+  validateActiveScalarGpuBudget,
+  validateAtlasDecodeWorkingSet,
+  validateVolumeTextureGrid,
+  volumeCameraSnapshotKey,
 } from "./SliceStackVolumeCanvas";
+
+describe("volume delivery authority", () => {
+  it("checks the delivered texture grid, not the native source axes", () => {
+    expect(() =>
+      validateVolumeTextureGrid({ width: 512, height: 347, depth: 80 }, 512)
+    ).not.toThrow();
+    expect(() =>
+      validateVolumeTextureGrid({ width: 513, height: 347, depth: 80 }, 512)
+    ).toThrow(/delivered.*texture limit/i);
+  });
+
+  it("derives effective voxel spacing from invariant physical extent", () => {
+    expect(
+      computeDeliveredVoxelSpacing({
+        sourceGrid: { width: 924, height: 624, depth: 80 },
+        sourceSpacing: { x: 0.1, y: 0.2, z: 0.5 },
+        deliveredGrid: { width: 462, height: 312, depth: 80 },
+      })
+    ).toEqual({ x: 0.2, y: 0.4, z: 0.5 });
+  });
+
+  it("uses reciprocal delivered voxel counts for central-difference steps", () => {
+    expect(computeVolumeVoxelStep({ width: 1, height: 3, depth: 257 })).toEqual({
+      x: 1,
+      y: 1 / 3,
+      z: 1 / 257,
+    });
+    expect(computeVolumeVoxelStep({ width: 257, height: 1, depth: 3 }).x).toBe(1 / 257);
+  });
+
+  it("rejects fractional, negative, unsafe, and out-of-range semantic indices", () => {
+    expect(resolveStrictVolumeIndex(1, 2, "time")).toBe(1);
+    for (const value of [-1, 2, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => resolveStrictVolumeIndex(value, 2, "time")).toThrow(/time index/i);
+    }
+  });
+
+  it("reserves the full selected-channel budget from the first prepared probe", () => {
+    const bytes = 24 * 1024 * 1024;
+    expect(() => validateSelectedChannelPreparedBudget(bytes, 5)).not.toThrow();
+    expect(() => validateSelectedChannelPreparedBudget(bytes, 6)).toThrow(/aggregate limit/i);
+  });
+
+  it("enforces the active GPU selection independently from prepared residency", () => {
+    expect(() => validateActiveScalarGpuBudget(32 * 1024 * 1024, 4)).not.toThrow();
+    expect(() => validateActiveScalarGpuBudget(32 * 1024 * 1024, 5)).toThrow(/GPU limit/i);
+  });
+
+  it("admits an exact 256 MiB atlas decode working set and rejects one byte-grid step over", () => {
+    expect(
+      validateAtlasDecodeWorkingSet({
+        atlasWidth: 4096,
+        atlasHeight: 8192,
+        sliceWidth: 4096,
+        sliceHeight: 4096,
+        sliceCount: 2,
+        columns: 1,
+        rows: 2,
+      }).totalBytes
+    ).toBe(256 * 1024 * 1024);
+    expect(() =>
+      validateAtlasDecodeWorkingSet({
+        atlasWidth: 4097,
+        atlasHeight: 8192,
+        sliceWidth: 4097,
+        sliceHeight: 4096,
+        sliceCount: 2,
+        columns: 1,
+        rows: 2,
+      })
+    ).toThrow(/working-set limit/i);
+  });
+});
 
 describe("volume sampling budget", () => {
   it("starts scalar volumes at interactive quality and ramps toward a settled budget", () => {
     const budget = computeVolumeSampleBudget({
       sourceKind: "scalar",
+      volumeWidth: 256,
+      volumeHeight: 256,
       volumeDepth: 256,
       projectionMode: "mip",
     });
@@ -43,6 +130,32 @@ describe("volume sampling budget", () => {
     expect(budget.interactiveSteps).toBe(64);
     expect(advanceProgressiveVolumeSteps(budget.interactiveSteps, budget)).toBe(96);
     expect(advanceProgressiveVolumeSteps(480, budget)).toBe(512);
+  });
+
+  it("uses the full scalar grid diagonal instead of only the shallow slice count", () => {
+    const budget = computeVolumeSampleBudget({
+      sourceKind: "scalar",
+      volumeWidth: 440,
+      volumeHeight: 440,
+      volumeDepth: 30,
+      projectionMode: "composite",
+    });
+
+    expect(budget.settledSteps).toBe(512);
+    expect(budget.interactiveSteps).toBe(64);
+  });
+
+  it("uses the full multichannel grid diagonal instead of only the shallow slice count", () => {
+    const budget = computeVolumeSampleBudget({
+      sourceKind: "multichannel",
+      volumeWidth: 440,
+      volumeHeight: 440,
+      volumeDepth: 30,
+      projectionMode: "composite",
+    });
+
+    expect(budget.settledSteps).toBe(512);
+    expect(budget.interactiveSteps).toBe(64);
   });
 
   it("keeps atlas volumes cheaper while preserving a high-quality settled pass", () => {
@@ -83,6 +196,144 @@ describe("volume projection mode", () => {
         modality: "microscopy",
       })
     ).toBe("mip");
+  });
+});
+
+describe("categorical atlas render mode", () => {
+  it("covers the maximum bounded 256-cubed delivery-grid crossing count", () => {
+    expect(256 + 256 + 256).toBeLessThanOrEqual(MAX_CATEGORICAL_SURFACE_STEPS);
+  });
+  it("defaults categorical atlases to Surface while leaving non-categorical atlas compositing unchanged", () => {
+    expect(resolveAtlasVolumeRenderMode({ renderPolicy: "categorical" })).toEqual({
+      id: "surface",
+      shaderValue: 1,
+    });
+    expect(
+      resolveAtlasVolumeRenderMode({ renderPolicy: "categorical", categoricalMode: "xray" })
+    ).toEqual({ id: "xray", shaderValue: 0 });
+    expect(
+      resolveAtlasVolumeRenderMode({ renderPolicy: "display", categoricalMode: "surface" })
+    ).toEqual({ id: "xray", shaderValue: 0 });
+  });
+
+  it("uses a raw first non-background hit for Surface and preserves legacy raw-color X-ray compositing", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+    const surfaceBranch = source.indexOf("if (uAtlasRenderMode == 1)");
+    const accumulation = source.indexOf("vec4 accum = vec4(0.0);", surfaceBranch);
+
+    expect(source).toContain("uniform int uAtlasRenderMode;");
+    expect(source).not.toContain("vec3 srgbToLinear(vec3 color)");
+    expect(source).toContain("gl_FragColor = vec4(sampleColor.rgb, 1.0);");
+    expect(surfaceBranch).toBeGreaterThan(-1);
+    expect(accumulation).toBeGreaterThan(surfaceBranch);
+    expect(source.slice(surfaceBranch, accumulation)).toContain("return;");
+    expect(source.slice(surfaceBranch, accumulation)).not.toContain("accum.rgb");
+    expect(source.slice(accumulation)).toContain("sampleColor.a = alpha;");
+    expect(source.slice(accumulation)).toContain(
+      "accum.rgb += (1.0 - accum.a) * sampleColor.rgb * sampleColor.a;"
+    );
+    expect(source.slice(accumulation)).toContain(
+      "accum.a += (1.0 - accum.a) * sampleColor.a;"
+    );
+  });
+
+  it("uses bounded texel-center voxel DDA for categorical Surface rendering", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+    expect(source).toContain("vec3 texelCenter = (vec3(voxel) + vec3(0.5)) / gridSize;");
+    expect(source).toContain(`for (int iter = 0; iter < \${MAX_CATEGORICAL_SURFACE_STEPS}; iter++)`);
+    expect(source).toContain("abs(nextCrossing.x - crossing) <= tieTolerance");
+    expect(source).not.toContain("texture(uData, clamp(location, vec3(0.0), vec3(1.0)));\n        bool occupied");
+  });
+
+  it("cancels a stale atlas load before fetch, canvas decode, or volume allocation", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      atlasToVolumeTexture(
+        "/stale-atlas.png",
+        {
+          slice_count: 2,
+          columns: 2,
+          rows: 1,
+          slice_width: 2,
+          slice_height: 2,
+          atlas_width: 4,
+          atlas_height: 2,
+          downsample: 1,
+          format: "png",
+        },
+        "nearest",
+        controller.signal
+      )
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("validates atlas memory before canvas readback or decoded-volume allocation", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+    const atlasDecode = source.slice(source.indexOf("export const atlasToVolumeTexture"));
+    expect(atlasDecode.indexOf("validateAtlasDecodeWorkingSet({")).toBeLessThan(
+      atlasDecode.indexOf('document.createElement("canvas")')
+    );
+    expect(atlasDecode.indexOf("validateAtlasDecodeWorkingSet({")).toBeLessThan(
+      atlasDecode.indexOf("context.getImageData(")
+    );
+    expect(atlasDecode.indexOf("validateAtlasDecodeWorkingSet({")).toBeLessThan(
+      atlasDecode.indexOf("new Uint8Array(sliceWidth * sliceHeight * sliceCount * 4)")
+    );
+  });
+
+  it("aborts stale atlas work and snapshots camera state across same-volume refreshes", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+    expect(source).toContain("fetch(atlasUrl, { credentials: \"include\", signal })");
+    expect(source).toContain("volumeLoadController.abort();");
+    expect(source.indexOf("throwIfVolumeLoadAborted(signal);\n  const volumeData")).toBeGreaterThan(-1);
+    expect(source).toContain("cameraSnapshotRef.current = cameraSnapshotKey");
+    expect(source).toContain("camera.position.copy(snapshot.position);");
+  });
+});
+
+describe("volume camera snapshot scope", () => {
+  const overview = {
+    persistenceKey: "file-a:/Data/FeatureIds",
+    cameraModeId: "perspective",
+    viewPresetId: "iso",
+    interiorFrame: null,
+  };
+
+  it("requires an explicit persistence key and distinguishes file and preset", () => {
+    expect(volumeCameraSnapshotKey({ ...overview, persistenceKey: undefined })).toBeNull();
+    expect(volumeCameraSnapshotKey(overview)).toBe(volumeCameraSnapshotKey({ ...overview }));
+    expect(volumeCameraSnapshotKey(overview)).not.toBe(
+      volumeCameraSnapshotKey({ ...overview, persistenceKey: "file-b:/Data/FeatureIds" })
+    );
+    expect(volumeCameraSnapshotKey(overview)).not.toBe(
+      volumeCameraSnapshotKey({ ...overview, viewPresetId: "xy" })
+    );
+  });
+
+  it("distinguishes overview and intentional interior camera frames", () => {
+    expect(volumeCameraSnapshotKey(overview)).not.toBe(
+      volumeCameraSnapshotKey({
+        ...overview,
+        interiorFrame: {
+          position: { x: 0.1, y: 0.2, z: 0.3 },
+          target: { x: 0.4, y: 0.5, z: 0.6 },
+          lookDistance: 0.7,
+        },
+      })
+    );
   });
 });
 
@@ -257,6 +508,20 @@ describe("volume Z-cursor cutaway", () => {
       max: { x: 1, y: 1, z: 0.45 },
     });
   });
+
+});
+
+describe("scalar opacity policy", () => {
+  it("keeps medical composite opacity monotonic instead of manufacturing gradient shells", () => {
+    expect(resolveScalarOpacityPolicy({ renderPolicy: "scalar", modality: "medical" })).toEqual({
+      edgeStrength: 0,
+      interiorOpacity: 1,
+    });
+    expect(resolveScalarOpacityPolicy({ renderPolicy: "scalar", modality: "microscopy" })).toEqual({
+      edgeStrength: 3.5,
+      interiorOpacity: 0.5,
+    });
+  });
 });
 
 describe("scalar volume color maps", () => {
@@ -335,8 +600,10 @@ describe("scalar volume depth lighting", () => {
     );
 
     expect(source).toContain("vec3 viewDir = uOrthographicCamera");
-    expect(source).toContain("? -normalize(uCameraDirectionLocal)");
-    expect(source).toContain(": normalize(uCameraPositionLocal - (location - vec3(0.5)))");
+    expect(source).toContain("? -normalize(uCameraDirectionLocal * uVolumeScale)");
+    expect(source).toContain(
+      ": normalize((uCameraPositionLocal - (location - vec3(0.5))) * uVolumeScale)"
+    );
   });
 
   it("uses step-length corrected opacity so interior raymarching does not become a flat wall", () => {
@@ -352,6 +619,19 @@ describe("scalar volume depth lighting", () => {
 });
 
 describe("physical volume geometry", () => {
+  it("keeps the bounded 512-cubed preview physically cubic", () => {
+    const geometry = computePhysicalVolumeGeometry({
+      planePixelSize: { width: 256, height: 256 },
+      volumeDepth: 128,
+      physicalSpacing: { x: 1, y: 1, z: 2 },
+    });
+
+    expect(geometry.worldWidth).toBe(256);
+    expect(geometry.worldHeight).toBe(256);
+    expect(geometry.worldDepth).toBe(256);
+    expect(geometry.normalizedScale).toEqual({ x: 1, y: 1, z: 1 });
+  });
+
   it("normalizes anisotropic voxel spacing into a physically faithful render scale", () => {
     const geometry = computePhysicalVolumeGeometry({
       planePixelSize: { width: 64, height: 32 },
@@ -535,6 +815,8 @@ describe("scalar volume texture conversion", () => {
           rawMin: 10,
           rawMax: 80,
           channel: 0,
+          sclSlope: 1,
+          sclInter: 0,
         },
         { x: 1, y: 0, z: 1 }
       )
@@ -553,6 +835,8 @@ describe("scalar volume texture conversion", () => {
       rawMin: 1,
       rawMax: 4,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     };
 
     expect(scalarVolumePayloadValueAt(payload, { x: -1, y: 0, z: 0 })).toBeNull();
@@ -571,6 +855,8 @@ describe("scalar volume texture conversion", () => {
       rawMin: 10,
       rawMax: 120,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     });
 
     expect(Array.from(textureBytes)).toEqual([0, 128, 255]);
@@ -588,6 +874,8 @@ describe("scalar volume texture conversion", () => {
       rawMin: -1024,
       rawMax: 1024,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     };
 
     expect(scalarVolumePayloadValueAt(payload, { x: 0, y: 0, z: 0 })).toBe(-1024);
@@ -606,6 +894,8 @@ describe("scalar volume texture conversion", () => {
       rawMin: -1.5,
       rawMax: 2.5,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     };
 
     expect(scalarVolumePayloadValueAt(payload, { x: 1, y: 0, z: 0 })).toBe(0.5);
@@ -626,6 +916,8 @@ describe("scalar volume half-float precision", () => {
       rawMin: 10,
       rawMax: 120,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     });
 
     // 0.0 -> 0x0000, 0.5 -> 0x3800, 1.0 -> 0x3c00
@@ -646,6 +938,8 @@ describe("scalar volume half-float precision", () => {
       rawMin: 0,
       rawMax: 4096,
       channel: 0,
+      sclSlope: 1,
+      sclInter: 0,
     };
 
     const bytes = scalarVolumePayloadToTextureBytes(payload);
@@ -665,15 +959,119 @@ describe("scalar volume boundary-emphasis transfer function", () => {
   );
 
   it("uploads medical scalar volumes as 16-bit half-float to preserve soft-tissue contrast", () => {
-    expect(source).toContain("scalarVolumePayloadToHalfFloat(payload)");
+    expect(source).toContain("prepareScalarVolume(payload, volumeLoadController.signal)");
     expect(source).toContain("texture.type = THREE.HalfFloatType;");
   });
 
-  it("modulates opacity by local gradient so tissue interfaces become visible surfaces", () => {
+  it("retains spacing-aware boundary emphasis only for generic scalar volumes", () => {
     expect(source).toContain("vec3 scalarGradient(vec3 location)");
     expect(source).toContain("float structuredOpacity(float opacityValue, vec3 gradient)");
     expect(source).toContain("mix(uInteriorOpacity, 1.0, edge)");
+    expect(source).toContain("gradient / max(vec3(0.06), uVoxelSpacing)");
     expect(source).toContain("float opacity = structuredOpacity(opacityValue, gradient);");
+  });
+
+  it("uses the full grid to cap each scalar ray and stable screen-space jitter", () => {
+    expect(source).toContain("uniform vec3 uGridSize;");
+    expect(source).toContain("dot(abs(back - front) * uGridSize, vec3(1.0))");
+    expect(source).toContain("gl_FragCoord.xy");
+    expect(source).toContain("float stableRayJitter() ");
+    expect(source).not.toContain("uTime");
+  });
+
+  it("skips gradient and lighting reads when transfer opacity is zero", () => {
+    const opacitySample = source.indexOf("float opacityValue = sampleOpacity(sampleValue);");
+    const zeroOpacityFastPath = source.indexOf("if (opacityValue <= 0.0)", opacitySample);
+    const gradientSample = source.indexOf("vec3 gradient = scalarGradient(location);", opacitySample);
+
+    expect(opacitySample).toBeGreaterThan(-1);
+    expect(zeroOpacityFastPath).toBeGreaterThan(opacitySample);
+    expect(gradientSample).toBeGreaterThan(zeroOpacityFastPath);
+  });
+
+  it("integrates the cut surface into scalar ray order instead of painting an overlay plane", () => {
+    const cutSurface = source.indexOf(
+      "if (uCutawayActive && rayDir.z < 0.0 && abs(front.z - boxMax.z) <= 0.0001)"
+    );
+    const rayIntervals = source.indexOf("float rayIntervals =", cutSurface);
+
+    expect(cutSurface).toBeGreaterThan(-1);
+    expect(rayIntervals).toBeGreaterThan(cutSurface);
+    expect(source.slice(cutSurface, rayIntervals)).toContain(
+      "float cutValue = sampleWindowed(front + vec3(0.5));"
+    );
+    expect(source).toContain("uCutawayActive: { value: cutawayActiveRef.current }");
+    expect(source).not.toContain("CUTFACE_FRAGMENT_SHADER");
+    expect(source).not.toContain("cutFaceMaterial");
+  });
+
+  it("gives multichannel cutaways the same first-face ray ordering as scalar volumes", () => {
+    const shaderStart = source.indexOf("const MULTICHANNEL_FRAGMENT_SHADER");
+    const cutSurface = source.indexOf(
+      "if (uCutawayActive && rayDir.z < 0.0 && abs(front.z - boxMax.z) <= 0.0001)",
+      shaderStart
+    );
+    const rayIntervals = source.indexOf("float rayIntervals =", cutSurface);
+
+    expect(cutSurface).toBeGreaterThan(shaderStart);
+    expect(rayIntervals).toBeGreaterThan(cutSurface);
+    expect(source.slice(cutSurface, rayIntervals)).toContain("vec4 cutValue = fuseVoxel");
+    expect(source).toContain("uCutawayActive: { value: cutawayActiveRef.current }");
+  });
+
+  it("loads multichannel previews sequentially and binds only after transactional validation", () => {
+    expect(source).not.toContain("Promise.allSettled(");
+    expect(source).toContain("validateSelectedChannelPreparedBudget(");
+    expect(source).toContain("for (let slot = 0; slot < channelIndices.length; slot += 1)");
+    expect(source).toContain("for (const candidate of candidates)");
+    expect(source).toContain("uChannelCount as { value: number }).value = candidates.length");
+    expect(source).not.toContain("uChannelCount as { value: number }).value = slot + 1");
+    expect(source).toContain("Loading channels {channelLoadProgress.loaded}/{channelLoadProgress.total}");
+    expect(source).toContain("exceeds the 8-channel shader limit");
+  });
+
+  it("keeps multichannel cut, MIP, and transparent samples ahead of gradient lighting", () => {
+    const shaderStart = source.indexOf("const MULTICHANNEL_FRAGMENT_SHADER");
+    const loopStart = source.indexOf("for (int iter = 0; iter <", shaderStart);
+    const mipBranch = source.indexOf("if (uProjectionMode == 1)", loopStart);
+    const fuse = source.indexOf("vec4 fused = fuseVoxel(location);", loopStart);
+    const transparentBranch = source.indexOf("if (opacity <= 0.0)", fuse);
+    const gradient = source.indexOf("densityGradient(location)", fuse);
+    const lightingGate = source.indexOf(
+      "if (uLightingEnabled && uLightingStrength > 0.0)",
+      fuse
+    );
+
+    expect(mipBranch).toBeGreaterThan(loopStart);
+    expect(fuse).toBeGreaterThan(mipBranch);
+    expect(transparentBranch).toBeGreaterThan(fuse);
+    expect(lightingGate).toBeGreaterThan(transparentBranch);
+    expect(gradient).toBeGreaterThan(lightingGate);
+    expect(source).toContain("uLightingEnabled: { value: mcConfig?.lightingEnabled ?? false }");
+  });
+
+  it("uses a demand-driven render scheduler rather than an unconditional idle loop", () => {
+    expect(source).toContain("const scheduleRender = () =>");
+    expect(source).toContain("const renderFrame = () =>");
+    expect(source).toContain("if (interactionActive)");
+    expect(source).toContain('controls.addEventListener("start", beginInteraction)');
+    expect(source).not.toContain("requestAnimationFrame(animate)");
+    expect(source).not.toContain("animate();");
+  });
+
+  it("resets/coalesces live uniform and resize renders at interactive quality before settling", () => {
+    expect(source).toContain("requestInteractiveRenderRef.current?.();");
+    expect(source).toContain("requestInteractiveRenderRef.current = resetInteractiveSampling;");
+    expect(source).toContain("const resetInteractiveSampling = () =>");
+    expect(source).toContain("setSamplingSteps(rendererSampleBudget.interactiveSteps);");
+    expect(source).toContain("resize({ resetQuality: true })");
+  });
+
+  it("threads one generation AbortSignal through scalar fetch and half-float conversion", () => {
+    expect(source).toContain("resolvedSource.loadScalarVolume(volumeLoadController.signal)");
+    expect(source).toContain("prepareScalarVolume(payload, volumeLoadController.signal)");
+    expect(source).toContain("multichannelSource.loadChannel(channel, volumeLoadController.signal)");
+    expect(source).toContain("throwIfVolumeLoadAborted(volumeLoadController.signal)");
   });
 
   it("corrects the shading normal by voxel spacing, not full-axis extent", () => {

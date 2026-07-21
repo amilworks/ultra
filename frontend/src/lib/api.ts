@@ -243,6 +243,39 @@ const buildUrl = (
   return url.toString();
 };
 
+/**
+ * Add a composite channel selection to an image-service request.
+ *
+ * Viewer display state stores colors as a source-channel-indexed palette, while
+ * the image-service contract requires one color per selected channel in exactly
+ * the same order as `channels`. Projecting at this shared request boundary keeps
+ * display, slice, and atlas URLs consistent and prevents cardinality mismatches.
+ */
+const applyImageChannelSelection = (
+  params: Record<string, string>,
+  channels?: number[],
+  channelPalette?: string[]
+): void => {
+  const selectedChannels = Array.isArray(channels)
+    ? channels
+        .filter((value) => Number.isFinite(value))
+        .map((value) => Math.max(0, Math.floor(value)))
+    : [];
+  if (selectedChannels.length === 0) {
+    return;
+  }
+  params.channels = selectedChannels.map(String).join(",");
+
+  if (!Array.isArray(channelPalette) || channelPalette.length === 0) {
+    return;
+  }
+  const normalizedPalette = channelPalette.map((value) => String(value || "").trim());
+  const selectedColors = selectedChannels.map((channel) => normalizedPalette[channel] ?? "");
+  if (selectedColors.every(Boolean)) {
+    params.channel_colors = selectedColors.join(",");
+  }
+};
+
 const hexDigest = (digest: ArrayBuffer): string =>
   Array.from(new Uint8Array(digest))
     .map((byte) => byte.toString(16).padStart(2, "0"))
@@ -4188,6 +4221,7 @@ export class ApiClient {
       negative?: boolean;
       gamma?: number | null;
       channels?: number[];
+      /** Source-channel-indexed color palette. */
       channelColors?: string[];
       cacheKey?: string;
     }
@@ -4207,18 +4241,7 @@ export class ApiClient {
     if (typeof config?.gamma === "number" && Number.isFinite(config.gamma) && config.gamma > 0) {
       params.gamma = String(config.gamma);
     }
-    if (Array.isArray(config?.channels) && config.channels.length > 0) {
-      params.channels = config.channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => String(Math.max(0, Math.floor(value))))
-        .join(",");
-    }
-    if (Array.isArray(config?.channelColors) && config.channelColors.length > 0) {
-      params.channel_colors = config.channelColors
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-        .join(",");
-    }
+    applyImageChannelSelection(params, config?.channels, config?.channelColors);
     const cacheKey = String(config?.cacheKey ?? "").trim();
     if (cacheKey) {
       params.cache_key = cacheKey;
@@ -4239,6 +4262,7 @@ export class ApiClient {
       fusionMethod?: string;
       negative?: boolean;
       channels?: number[];
+      /** Source-channel-indexed color palette. */
       channelColors?: string[];
       fullResolution?: boolean;
       cacheKey?: string;
@@ -4273,18 +4297,7 @@ export class ApiClient {
     if (typeof indices?.negative === "boolean") {
       params.negative = indices.negative ? "true" : "false";
     }
-    if (Array.isArray(indices?.channels) && indices.channels.length > 0) {
-      params.channels = indices.channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => String(Math.max(0, Math.floor(value))))
-        .join(",");
-    }
-    if (Array.isArray(indices?.channelColors) && indices.channelColors.length > 0) {
-      params.channel_colors = indices.channelColors
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-        .join(",");
-    }
+    applyImageChannelSelection(params, indices?.channels, indices?.channelColors);
     if (typeof indices?.fullResolution === "boolean") {
       params.full_resolution = indices.fullResolution ? "true" : "false";
     }
@@ -4388,6 +4401,7 @@ export class ApiClient {
       fusionMethod?: string;
       negative?: boolean;
       channels?: number[];
+      /** Source-channel-indexed color palette. */
       channelColors?: string[];
       t?: number | null;
     }
@@ -4403,18 +4417,7 @@ export class ApiClient {
     if (typeof config?.negative === "boolean") {
       params.negative = config.negative ? "true" : "false";
     }
-    if (Array.isArray(config?.channels) && config.channels.length > 0) {
-      params.channels = config.channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => String(Math.max(0, Math.floor(value))))
-        .join(",");
-    }
-    if (Array.isArray(config?.channelColors) && config.channelColors.length > 0) {
-      params.channel_colors = config.channelColors
-        .map((value) => String(value || "").trim())
-        .filter(Boolean)
-        .join(",");
-    }
+    applyImageChannelSelection(params, config?.channels, config?.channelColors);
     if (typeof config?.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
     }

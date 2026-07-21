@@ -69,12 +69,51 @@ describe("ApiClient browser auth hardening", () => {
         negative: true,
         gamma: 1.2,
         channels: [1],
-        channelColors: ["#00ff00"],
+        channelColors: ["#ff0000", "#00ff00"],
         cacheKey: "windowed-v2:abc123",
       })
     ).toBe(
       "https://ultra.example.org/v2/uploads/file-123/display?enhancement=hounsfield%3A1001.500%3A1.000&negative=true&gamma=1.2&channels=1&channel_colors=%2300ff00&cache_key=windowed-v2%3Aabc123"
     );
+  });
+
+  it("projects source-channel colors into selected order for image-service URLs", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const channels = [1, 3, 5];
+    const channelColors = [
+      "#1e90ff",
+      "#00ff66",
+      "#ff3b3b",
+      "#ff00ff",
+      "#ffd400",
+      "#00e5ff",
+      "#1e90ff",
+    ];
+    const urls = [
+      client.uploadDisplayUrl("file-123", undefined, { channels, channelColors }),
+      client.uploadSliceUrl("file-123", { axis: "z", z: 40, channels, channelColors }),
+      client.uploadAtlasUrl("file-123", { channels, channelColors }),
+    ];
+
+    urls.forEach((value) => {
+      const parsed = new URL(value);
+      expect(parsed.searchParams.get("channels")).toBe("1,3,5");
+      expect(parsed.searchParams.get("channel_colors")).toBe("#00ff66,#ff00ff,#00e5ff");
+    });
+  });
+
+  it("omits an incomplete color projection instead of sending invalid cardinality", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const parsed = new URL(
+      client.uploadSliceUrl("file-123", {
+        axis: "z",
+        channels: [1, 3],
+        channelColors: ["#ff0000", "#00ff00"],
+      })
+    );
+
+    expect(parsed.searchParams.get("channels")).toBe("1,3");
+    expect(parsed.searchParams.has("channel_colors")).toBe(false);
   });
 
   it("builds scientific upload viewer URLs through the V2 upload API", () => {

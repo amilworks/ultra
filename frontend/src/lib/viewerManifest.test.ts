@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { thumbnailScrubAxis } from "./thumbnailScrubAxis";
+import {
+  thumbnailScrubAxis,
+  thumbnailScrubConfig,
+  thumbnailScrubSliceRequest,
+} from "./thumbnailScrubAxis";
 import { normalizeUploadViewerInfo } from "./viewerManifest";
 
 describe("thumbnailScrubAxis", () => {
@@ -20,6 +24,61 @@ describe("thumbnailScrubAxis", () => {
   it("tolerates missing or invalid axis sizes", () => {
     expect(thumbnailScrubAxis(null)).toEqual({ axis: "z", count: 1 });
     expect(thumbnailScrubAxis({ Z: 0, T: 0 } as never)).toEqual({ axis: "z", count: 1 });
+  });
+
+  it("keeps multichannel display metadata on every scrubbed z slice", () => {
+    const channelColors = [
+      "#1e90ff",
+      "#00ff66",
+      "#ff3b3b",
+      "#ff00ff",
+      "#ffd400",
+      "#00e5ff",
+      "#1e90ff",
+    ];
+    const config = thumbnailScrubConfig({
+      axis_sizes: { T: 1, C: 7, Z: 80, Y: 624, X: 924 },
+      selected_indices: { T: 0, C: 1, Z: 40 },
+      display_defaults: {
+        enhancement: "d",
+        negative: false,
+        rotate: 0,
+        fusion_method: "m",
+        channel_mode: "composite",
+        channels: [1, 3, 5],
+        channel_colors: channelColors,
+        time_index: 0,
+        z_index: 40,
+      },
+      phys: {
+        channel_colors: channelColors.map((hex, index) => ({
+          index,
+          hex,
+          rgb: [255, 255, 255],
+        })),
+      },
+    });
+
+    expect(config).toMatchObject({
+      axis: "z",
+      count: 80,
+      channels: [1, 3, 5],
+      channelColors,
+      timeIndex: 0,
+      zIndex: 40,
+    });
+    expect(thumbnailScrubSliceRequest(config, 63)).toEqual({
+      axis: "z",
+      z: 63,
+      t: 0,
+      enhancement: "d",
+      fusionMethod: "m",
+      negative: false,
+      channels: [1, 3, 5],
+      channelColors,
+      fullResolution: false,
+      cacheKey: "metadata-zscrub-v1",
+    });
   });
 });
 

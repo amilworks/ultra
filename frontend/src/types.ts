@@ -1797,8 +1797,26 @@ export type Hdf5DatasetTablePreviewResponse = {
   }>;
 };
 
+export type CiftiStructure = {
+  name: string;
+  count: number;
+};
+
+export type CiftiViewerData = {
+  /** Human label, e.g. "dense timeseries", "parcellated connectivity". */
+  cifti_type: string;
+  /** Which views apply to this file: "carpet" and/or "connectivity". */
+  views: ("carpet" | "connectivity" | string)[];
+  /** Brain-location rows and the second-axis columns of the data matrix. */
+  rows: number;
+  cols: number;
+  structures: CiftiStructure[];
+  column_axis: { role?: string; size?: number; step?: number; unit?: string };
+  service_urls: { carpet?: string; connectivity?: string; download?: string };
+};
+
 export type UploadViewerInfo = {
-  kind?: "image" | "hdf5" | "unsupported" | string;
+  kind?: "image" | "hdf5" | "cifti" | "unsupported" | string;
   file_id: string;
   original_name: string;
   /**
@@ -2136,6 +2154,33 @@ export type UploadViewerInfo = {
     selected_dataset_path?: string | null;
     default_dataset_path?: string | null;
   } | null;
+  /** Present for kind:"cifti" — drives the grayordinate carpet + connectivity views. */
+  cifti?: CiftiViewerData | null;
+};
+
+export type CiftiCarpetResponse = {
+  rows: number;
+  cols: number;
+  clip_z: number;
+  source_rows: number;
+  structures: { name: string; start: number; end: number }[];
+  column_axis: { role?: string; size?: number; sampled?: number; step?: number; unit?: string };
+  cifti_type?: string;
+  /** base64 uint8, rows*cols, row-major; z-score maps 0..255 -> -clip_z..+clip_z. */
+  data: string;
+};
+
+export type CiftiConnectivityResponse = {
+  n: number;
+  min: number;
+  max: number;
+  dtype: string;
+  /** true when correlation was computed from a timeseries; false = stored matrix. */
+  computed: boolean;
+  labels?: string[];
+  cifti_type?: string;
+  /** base64 little-endian float32, n*n, row-major. */
+  data: string;
 };
 
 export type UploadViewerHistogramResponse = {

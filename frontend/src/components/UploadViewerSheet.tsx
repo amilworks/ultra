@@ -34,6 +34,12 @@ const LazyHdf5ViewerShell = lazy(() =>
   }))
 );
 
+const LazyCiftiViewerShell = lazy(() =>
+  import("./viewer/cifti/CiftiViewerShell").then((module) => ({
+    default: module.CiftiViewerShell,
+  }))
+);
+
 const LazyTextResourceViewer = lazy(() =>
   import("./viewer/TextResourceViewer").then((module) => ({
     default: module.TextResourceViewer,
@@ -506,6 +512,7 @@ export function UploadViewerWorkspace({
     : "2d";
   const selectedDisplayState = selectedFileId ? viewerDisplayById[selectedFileId] ?? null : null;
   const isHdf5Viewer = selectedViewerInfo?.kind === "hdf5";
+  const isCiftiViewer = selectedViewerInfo?.kind === "cifti";
   const selectedDatasetPath = selectedFileId ? viewerHdf5SelectedDatasetById[selectedFileId] ?? null : null;
   const selectedDatasetSummaryKey =
     selectedFileId && selectedDatasetPath ? `${selectedFileId}:${selectedDatasetPath}` : null;
@@ -740,6 +747,12 @@ export function UploadViewerWorkspace({
                     }
                     selectedDatasetSummary={selectedDatasetSummary}
                     cacheDatasetSummary={cacheDatasetSummary}
+                  />
+                ) : isCiftiViewer ? (
+                  <LazyCiftiViewerShell
+                    key={selectedViewerInfo.file_id}
+                    viewerInfo={selectedViewerInfo}
+                    apiClient={apiClient}
                   />
                 ) : (
                   <LazyImageViewerShell

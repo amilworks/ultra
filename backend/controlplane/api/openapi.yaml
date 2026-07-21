@@ -1491,6 +1491,108 @@ paths:
                 required: [error]
                 properties:
                   error: { type: string }
+  /v2/uploads/{file_id}/cifti/carpet:
+    get:
+      operationId: getUploadCiftiCarpet
+      description: >-
+        Carpet plot (grayplot) of a CIFTI-2 grayordinate matrix: rows are
+        grayordinates grouped by brain structure, columns are the second matrix
+        axis (time for a dense timeseries). Values are z-scored per row and
+        clipped, then packed as base64 uint8 for the viewer to colour.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: max_rows
+          in: query
+          description: Maximum grayordinate rows to sample (strided). Clamped by the control plane.
+          schema: { type: integer, minimum: 16, maximum: 1200, default: 1200 }
+        - name: max_cols
+          in: query
+          description: Maximum columns to sample (strided). Clamped by the control plane.
+          schema: { type: integer, minimum: 8, maximum: 1200, default: 1200 }
+      responses:
+        "200":
+          description: CIFTI carpet payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cifti_type, rows, cols, source_rows, clip_z, data, structures]
+                properties:
+                  cifti_type: { type: string, example: dense timeseries }
+                  rows: { type: integer, description: Sampled row count of the returned image }
+                  cols: { type: integer, description: Sampled column count of the returned image }
+                  source_rows: { type: integer, description: True grayordinate count before sampling }
+                  clip_z: { type: number, description: Per-row z-score clip magnitude }
+                  data: { type: string, format: byte, description: Base64 row-major uint8 image (rows x cols) }
+                  column_axis:
+                    type: object
+                    properties:
+                      role: { type: string, example: series }
+                      size: { type: integer }
+                      sampled: { type: integer }
+                      step: { type: number }
+                      unit: { type: string, example: s }
+                  structures:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, start, end]
+                      properties:
+                        name: { type: string }
+                        start: { type: integer }
+                        end: { type: integer }
+        "415":
+          description: Resource is not a CIFTI file or could not be read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+  /v2/uploads/{file_id}/cifti/connectivity:
+    get:
+      operationId: getUploadCiftiConnectivity
+      description: >-
+        Functional-connectivity matrix for a CIFTI-2 file: an N x N symmetric
+        correlation matrix. For a parcellated/dense connectivity file this is
+        the stored matrix; for a dense timeseries it is computed from
+        downsampled node signals. Values are packed as base64 float32.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: nodes
+          in: query
+          description: Maximum node count for a computed matrix (strided downsample). Clamped by the control plane.
+          schema: { type: integer, minimum: 8, maximum: 240, default: 240 }
+      responses:
+        "200":
+          description: CIFTI connectivity payload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [cifti_type, n, computed, dtype, min, max, data]
+                properties:
+                  cifti_type: { type: string, example: parcellated connectivity }
+                  n: { type: integer, description: Node count (matrix is n x n) }
+                  computed: { type: boolean, description: True when derived from a timeseries, false when stored }
+                  dtype: { type: string, example: float32 }
+                  min: { type: number }
+                  max: { type: number }
+                  data: { type: string, format: byte, description: Base64 row-major float32 matrix (n x n) }
+                  labels:
+                    type: array
+                    description: Per-node structure/parcel label for axis banding.
+                    items: { type: string }
+        "415":
+          description: Resource is not a CIFTI file or could not be read
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
   /v2/uploads/{file_id}/hdf5/dataset:
     get:
       operationId: getUploadHdf5Dataset

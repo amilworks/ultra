@@ -99,6 +99,8 @@ describe("mock API resource search", () => {
     const port = await startMockApi();
 
     await expect(resourceNamesForQuery(port, "*.nii")).resolves.toEqual([
+      "parcels_Glasser.pconn.nii",
+      "rfMRI_REST1_LR_Atlas_hp2000_clean.dtseries.nii",
       "subject-a-nph-under70.nii.gz",
       "subject-b-nph-under70.nii.gz",
     ]);

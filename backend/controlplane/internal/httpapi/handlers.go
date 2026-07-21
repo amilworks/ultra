@@ -607,6 +607,8 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/display", deps.handleServeUpload)
 			r.Get("/uploads/{file_id}/slice", deps.handleServeUploadSliceService)
 			r.Get("/uploads/{file_id}/scalar-volume", deps.handleGetUploadScalarVolumeService)
+			r.Get("/uploads/{file_id}/cifti/carpet", deps.handleGetUploadCiftiCarpet)
+			r.Get("/uploads/{file_id}/cifti/connectivity", deps.handleGetUploadCiftiConnectivity)
 			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleServeUploadTiles)
 			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
 			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
@@ -8196,6 +8198,13 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 }
 
 func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record resourceRecord, path string) {
+	// CIFTI (.dtseries.nii et al.) is a NIfTI-2 container whose data is a
+	// grayordinate/parcel matrix, not a spatial volume. Route it to the CIFTI
+	// viewer (carpet + connectivity) instead of the slice loader. See cifti.go.
+	if info, ok := niftiCiftiPeek(path, record.OriginalName); ok {
+		deps.writeCiftiViewer(w, record, info, path)
+		return
+	}
 	volume, err := loadNiftiScalarVolume(path)
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err)
@@ -13601,9 +13610,15 @@ func parseNiftiGeometry(header []byte) (niftiGeometry, error) {
 	if len(header) < niftiHeaderReadSize {
 		return niftiGeometry{}, errors.New("NIfTI file is too small")
 	}
-	order, err := niftiByteOrder(header)
+	order, version, err := niftiHeaderVersion(header)
 	if err != nil {
 		return niftiGeometry{}, err
+	}
+	if version == 2 {
+		// NIfTI-2 is a distinct binary layout (64-bit dims/floats, magic at
+		// offset 4); its parser produces the same niftiGeometry so the rest of
+		// the pipeline is unchanged. See nifti2.go.
+		return parseNifti2Geometry(order, header)
 	}
 	magic := string(header[344:348])
 	if magic != "n+1\x00" && magic != "ni1\x00" {
@@ -13690,8 +13705,8 @@ func readNiftiHeaderGeometry(path string) (niftiGeometry, error) {
 		}()
 		reader = gzipReader
 	}
-	header := make([]byte, niftiHeaderReadSize)
-	if _, err := io.ReadFull(reader, header); err != nil {
+	header, _, err := readNiftiHeaderBytes(reader)
+	if err != nil {
 		return niftiGeometry{}, err
 	}
 	return parseNiftiGeometry(header)
@@ -13999,8 +14014,8 @@ func readNiftiSlabRandomAccess(path string, timeIndex, channelIndex int) (niftiG
 		return niftiGeometry{}, nil, err
 	}
 	defer func() { _ = f.Close() }()
-	header := make([]byte, niftiHeaderReadSize)
-	if _, err := io.ReadFull(f, header); err != nil {
+	header, _, err := readNiftiHeaderBytes(f)
+	if err != nil {
 		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI header: %w", err)
 	}
 	geom, err := parseNiftiGeometry(header)
@@ -14036,8 +14051,8 @@ func readNiftiSlabStreaming(path string, timeIndex, channelIndex int) (niftiGeom
 		return niftiGeometry{}, nil, err
 	}
 	defer func() { _ = zr.Close() }()
-	header := make([]byte, niftiHeaderReadSize)
-	if _, err := io.ReadFull(zr, header); err != nil {
+	header, headerConsumed, err := readNiftiHeaderBytes(zr)
+	if err != nil {
 		return niftiGeometry{}, nil, fmt.Errorf("read NIfTI header: %w", err)
 	}
 	geom, err := parseNiftiGeometry(header)
@@ -14049,7 +14064,9 @@ func readNiftiSlabStreaming(path string, timeIndex, channelIndex int) (niftiGeom
 		return niftiGeometry{}, nil, err
 	}
 	offset := geom.volumeOffset(clampNiftiIndex(timeIndex, geom.timeCount), clampNiftiIndex(channelIndex, geom.channelCount))
-	skip := offset - int64(niftiHeaderReadSize)
+	// Skip from the number of header bytes actually consumed (352 for NIfTI-1,
+	// 544 for NIfTI-2) to the voxel payload.
+	skip := offset - int64(headerConsumed)
 	if skip < 0 {
 		return niftiGeometry{}, nil, fmt.Errorf("invalid NIfTI voxel offset %d", offset)
 	}

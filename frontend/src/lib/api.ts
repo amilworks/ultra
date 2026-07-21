@@ -93,6 +93,8 @@ import type {
   TrainingModelsResponse,
   UploadViewerHistogramResponse,
   UploadViewerInfo,
+  CiftiCarpetResponse,
+  CiftiConnectivityResponse,
   UploadChunkResponse,
   UploadedFileRecord,
   UploadFilesResponse,
@@ -4757,6 +4759,30 @@ export class ApiClient {
     }
     const { normalizeUploadViewerInfo } = await loadViewerManifestModule();
     return normalizeUploadViewerInfo(await response.json());
+  }
+
+  // CIFTI grayordinate views: a bounded, downsampled carpet (grayordinate × time)
+  // and an N×N connectivity matrix. Both return small payloads regardless of the
+  // (often ~400MB) source, so the default JSON path with a generous timeout is fine.
+  async getCiftiCarpet(fileId: string, options: { maxRows?: number; maxCols?: number } = {}): Promise<CiftiCarpetResponse> {
+    const params: Record<string, string> = {};
+    if (options.maxRows) params.max_rows = String(Math.floor(options.maxRows));
+    if (options.maxCols) params.max_cols = String(Math.floor(options.maxCols));
+    return this.fetchJson<CiftiCarpetResponse>(
+      `/v2/uploads/${encodeURIComponent(fileId)}/cifti/carpet`,
+      {},
+      params
+    );
+  }
+
+  async getCiftiConnectivity(fileId: string, options: { nodes?: number } = {}): Promise<CiftiConnectivityResponse> {
+    const params: Record<string, string> = {};
+    if (options.nodes) params.nodes = String(Math.floor(options.nodes));
+    return this.fetchJson<CiftiConnectivityResponse>(
+      `/v2/uploads/${encodeURIComponent(fileId)}/cifti/connectivity`,
+      {},
+      params
+    );
   }
 
   async getHdf5DatasetSummary(fileId: string, datasetPath: string): Promise<Hdf5DatasetSummary> {

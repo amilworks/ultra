@@ -18,10 +18,10 @@ help: ## Show this help message
 # over the native *-control-stack / dev-stack targets, which run Go/Python/Vite on
 # the host. Uses .env.docker if present, else .env.docker.example.
 
-up: ## Start the full stack in Docker, building if needed (canonical local stack)
+up: ## Start the production-parity stack in Docker (mirrors the deployed topology)
 	docker compose --env-file $(COMPOSE_ENV_FILE) up --build
 
-up-detached: ## Start the full Docker stack in the background
+up-detached: ## Start the production-parity stack in the background
 	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d
 
 down: ## Stop the Docker stack (keeps data volumes: Postgres, uploads, JetStream)
@@ -36,7 +36,7 @@ logs: ## Tail logs from the Docker stack (CTRL-C to stop tailing)
 ps: ## Show status of the Docker stack
 	docker compose ps
 
-scale-workers: ## Run N agent workers as a NATS queue group, e.g. make scale-workers N=3
+scale-workers: ## Run N agent workers as a NATS queue group, e.g. make scale-workers N=3 (default 2 = prod-like)
 	docker compose --env-file $(COMPOSE_ENV_FILE) up --build -d --scale worker=$(or $(N),2)
 
 install: ## Install production dependencies
@@ -66,7 +66,7 @@ stop-dev: ## Stop production-like Go control stack
 status-dev: ## Inspect production-like Go control stack
 	./scripts/restart_control_stack.sh status
 
-restart-control-stack: ## (native/no-Docker) Restart the host Go+NATS+PG+worker+frontend stack — prefer 'make up'
+restart-control-stack: ## (native, FAST INNER LOOP — not prod parity) host Go+NATS+PG+worker+Vite; use 'make up' to mirror prod
 	./scripts/restart_control_stack.sh restart
 
 stop-control-stack: ## Stop production-like Go control stack

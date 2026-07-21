@@ -601,11 +601,22 @@ stop_services() {
   fi
 }
 
+# Say plainly what this stack is NOT, so nobody reads a green status here as
+# evidence that a production rollout is safe. `make up` is the parity stack.
+parity_notice() {
+  log "NOTE: this native stack is the FAST INNER LOOP, not production parity."
+  log "      Not covered here: image-service, ngff-service, image-convert-worker,"
+  log "      the built SPA + edge cache/security headers (Vite dev server instead),"
+  log "      multi-worker NATS queue-group semantics, and NATS token auth."
+  log "      Run 'make up' to mirror production before trusting a rollout."
+}
+
 start_services() {
   require_command curl
   require_command go
   require_command pnpm
   require_command python3
+  parity_notice
   ensure_nats
   ensure_postgres
   start_control

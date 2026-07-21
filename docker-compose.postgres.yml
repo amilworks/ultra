@@ -1,3 +1,12 @@
+# Standalone dev-database side-stack for the NATIVE path (restart-control-stack /
+# make postgres-*). It MUST declare its own project name: compose derives the
+# project from the directory otherwise, which is also what docker-compose.yml
+# uses — so a plain `make down` (or any `docker compose down` in this repo) would
+# sweep away this container even though it belongs to a different stack. The data
+# itself is a bind mount (./data/postgres) and survives regardless, but losing the
+# container mid-session is a confusing footgun. Keep this name distinct.
+name: bisque-ultra-devdb
+
 services:
   postgres:
     image: postgres:18-alpine

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/bisque-ultra-github-hero.jpg" alt="BisQue Ultra rocket hero image" width="100%" />
+  <img src=".github/assets/bisque-ultra-hero.png" alt="BisQue Ultra — Lens scientific image viewer showing a CIFTI grayordinate carpet plot" width="100%" />
 </p>
 
 <h1 align="center">BisQue Ultra</h1>

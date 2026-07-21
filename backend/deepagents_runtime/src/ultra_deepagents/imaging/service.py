@@ -13,6 +13,8 @@ and live in the ``imaging`` optional-dependency extra.
 from __future__ import annotations
 
 import hashlib
+import math
+import operator
 import os
 import shutil
 import tempfile
@@ -22,6 +24,93 @@ from typing import Any
 __all__ = ["create_app"]
 
 _PNG = "image/png"
+_SCALAR_VOLUME_MAX_BYTES = 256 * 1024 * 1024
+_SCALAR_DTYPE_BYTES = {"uint8": 1, "uint16": 2, "int16": 2, "float32": 4}
+
+
+def _exact_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"scalar-volume {field} must be an integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"scalar-volume {field} must be an integer") from exc
+
+
+def _scalar_volume_envelope(vol: dict[str, Any]) -> tuple[Any, dict[str, str]]:
+    width = _exact_integer(vol["width"], "width")
+    height = _exact_integer(vol["height"], "height")
+    depth = _exact_integer(vol["depth"], "depth")
+    dtype = str(vol["dtype"]).strip().lower()
+    bytes_per_voxel = _exact_integer(vol["bytes_per_voxel"], "bytes_per_voxel")
+    if width <= 0 or height <= 0 or depth <= 0:
+        raise ValueError("invalid scalar-volume geometry")
+    if _SCALAR_DTYPE_BYTES.get(dtype) != bytes_per_voxel:
+        raise ValueError("unsupported scalar-volume dtype/byte width")
+    expected_length = width * height * depth * bytes_per_voxel
+    if expected_length <= 0 or expected_length > _SCALAR_VOLUME_MAX_BYTES:
+        raise ValueError("scalar-volume preview exceeds the bounded response policy")
+    data = vol["data"]
+    if len(data) != expected_length:
+        raise ValueError("scalar-volume body length does not match geometry")
+
+    raw_min = float(vol["raw_min"])
+    raw_max = float(vol["raw_max"])
+    slope = float(vol["scl_slope"])
+    intercept = float(vol["scl_inter"])
+    values = (
+        raw_min,
+        raw_max,
+        slope,
+        intercept,
+        raw_min * slope + intercept,
+        raw_max * slope + intercept,
+    )
+    if not all(math.isfinite(value) for value in values) or slope == 0 or raw_max < raw_min:
+        raise ValueError("scalar-volume intensity metadata is invalid")
+
+    channel = _exact_integer(vol["channel"], "channel")
+    time_index = _exact_integer(vol["t"], "time")
+    source_width = _exact_integer(vol["source_width"], "source_width")
+    source_height = _exact_integer(vol["source_height"], "source_height")
+    source_depth = _exact_integer(vol["source_depth"], "source_depth")
+    downsample_x = _exact_integer(vol["downsample_x"], "downsample_x")
+    downsample_y = _exact_integer(vol["downsample_y"], "downsample_y")
+    downsample_z = _exact_integer(vol["downsample_z"], "downsample_z")
+    preview_policy = str(vol["preview_policy"]).strip()
+    if channel < 0 or time_index < 0:
+        raise ValueError("scalar-volume channel/time identity must be nonnegative")
+    if min(source_width, source_height, source_depth, downsample_x, downsample_y, downsample_z) <= 0:
+        raise ValueError("scalar-volume source geometry/provenance must be positive")
+    delivered = (
+        (source_width + downsample_x - 1) // downsample_x,
+        (source_height + downsample_y - 1) // downsample_y,
+        (source_depth + downsample_z - 1) // downsample_z,
+    )
+    if delivered != (width, height, depth) or not preview_policy:
+        raise ValueError("scalar-volume provenance does not match the delivery grid")
+
+    headers = {
+        "x-volume-width": str(width),
+        "x-volume-height": str(height),
+        "x-volume-depth": str(depth),
+        "x-volume-dtype": dtype,
+        "x-volume-bytes-per-voxel": str(bytes_per_voxel),
+        "x-volume-raw-min": str(raw_min),
+        "x-volume-raw-max": str(raw_max),
+        "x-volume-scl-slope": str(slope),
+        "x-volume-scl-inter": str(intercept),
+        "x-volume-channel": str(channel),
+        "x-volume-time": str(time_index),
+        "x-volume-source-width": str(source_width),
+        "x-volume-source-height": str(source_height),
+        "x-volume-source-depth": str(source_depth),
+        "x-volume-downsample-x": str(downsample_x),
+        "x-volume-downsample-y": str(downsample_y),
+        "x-volume-downsample-z": str(downsample_z),
+        "x-volume-preview-policy": preview_policy,
+    }
+    return data, headers
 
 # --- Local pyramid cache ----------------------------------------------------
 # A derived OME-BigTIFF pyramid has many scattered IFDs (z x channel x level);
@@ -307,17 +396,8 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             vol = await assemble_scalar_volume(runner, path, channel=channel, t=t)
         else:
             vol = await runner.call("scalar_volume", path, channel=channel, t=t)
-        headers = {
-            "x-volume-width": str(vol["width"]),
-            "x-volume-height": str(vol["height"]),
-            "x-volume-depth": str(vol["depth"]),
-            "x-volume-dtype": str(vol["dtype"]),
-            "x-volume-bytes-per-voxel": str(vol["bytes_per_voxel"]),
-            "x-volume-raw-min": str(float(vol["raw_min"])),
-            "x-volume-raw-max": str(float(vol["raw_max"])),
-            "x-volume-channel": str(vol["channel"]),
-        }
-        return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+        data, headers = _scalar_volume_envelope(vol)
+        return Response(content=data, media_type="application/octet-stream", headers=headers)
 
     # --- HDF5 data viewer -------------------------------------------------------
     # These serve the frontend HDF5 explorer (frontend/src/components/viewer/hdf5).
@@ -368,17 +448,8 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             vol = await runner.call("hdf5_scalar_volume", path, dataset_path, channel=channel)
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
-        headers = {
-            "x-volume-width": str(vol["width"]),
-            "x-volume-height": str(vol["height"]),
-            "x-volume-depth": str(vol["depth"]),
-            "x-volume-dtype": str(vol["dtype"]),
-            "x-volume-bytes-per-voxel": str(vol["bytes_per_voxel"]),
-            "x-volume-raw-min": str(float(vol["raw_min"])),
-            "x-volume-raw-max": str(float(vol["raw_max"])),
-            "x-volume-channel": str(vol["channel"]),
-        }
-        return Response(content=vol["data"], media_type="application/octet-stream", headers=headers)
+        data, headers = _scalar_volume_envelope(vol)
+        return Response(content=data, media_type="application/octet-stream", headers=headers)
 
     @app.get("/hdf5/preview/histogram")
     async def hdf5_histogram(path: str, dataset_path: str, component: int = 0, bins: int = 24, file_id: str = ""):

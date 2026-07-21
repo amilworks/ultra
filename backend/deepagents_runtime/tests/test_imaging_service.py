@@ -13,7 +13,7 @@ pytest.importorskip("fastapi")
 pytest.importorskip("PIL")
 from fastapi.testclient import TestClient  # noqa: E402
 from ultra_deepagents.imaging.pool import InlineRunner  # noqa: E402
-from ultra_deepagents.imaging.service import create_app  # noqa: E402
+from ultra_deepagents.imaging.service import _scalar_volume_envelope, create_app  # noqa: E402
 
 
 @pytest.fixture()
@@ -79,9 +79,144 @@ def test_scalar_volume_octet_stream_and_headers(client):
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["x-volume-dtype"] == "float32"
     assert int(r.headers["x-volume-bytes-per-voxel"]) == 4
-    w = int(r.headers["x-volume-width"]); h = int(r.headers["x-volume-height"]); d = int(r.headers["x-volume-depth"])
+    assert float(r.headers["x-volume-scl-slope"]) == 1.0
+    assert float(r.headers["x-volume-scl-inter"]) == 0.0
+    assert int(r.headers["x-volume-time"]) == 0
+    w = int(r.headers["x-volume-width"])
+    h = int(r.headers["x-volume-height"])
+    d = int(r.headers["x-volume-depth"])
     assert d >= 1
     assert len(r.content) == w * h * d * 4
+
+
+def test_scalar_volume_envelope_exposes_preview_provenance_and_actual_time():
+    data, headers = _scalar_volume_envelope(
+        {
+            "width": 2,
+            "height": 1,
+            "depth": 1,
+            "dtype": "uint16",
+            "bytes_per_voxel": 2,
+            "raw_min": 1,
+            "raw_max": 2,
+            "scl_slope": 1,
+            "scl_inter": 0,
+            "channel": 3,
+            "t": 2,
+            "source_width": 4,
+            "source_height": 1,
+            "source_depth": 1,
+            "downsample_x": 2,
+            "downsample_y": 1,
+            "downsample_z": 1,
+            "preview_policy": "auto-v1",
+            "data": b"\x01\x00\x02\x00",
+        }
+    )
+
+    assert data == b"\x01\x00\x02\x00"
+    assert headers["x-volume-channel"] == "3"
+    assert headers["x-volume-time"] == "2"
+    assert headers["x-volume-source-width"] == "4"
+    assert headers["x-volume-downsample-x"] == "2"
+    assert headers["x-volume-preview-policy"] == "auto-v1"
+
+
+def test_scalar_volume_envelope_requires_explicit_consistent_identity_provenance():
+    base = {
+        "width": 2,
+        "height": 1,
+        "depth": 1,
+        "dtype": "uint16",
+        "bytes_per_voxel": 2,
+        "raw_min": 1,
+        "raw_max": 2,
+        "scl_slope": 1,
+        "scl_inter": 0,
+        "channel": 0,
+        "t": 0,
+        "source_width": 4,
+        "source_height": 1,
+        "source_depth": 1,
+        "downsample_x": 2,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "auto-v1",
+        "data": b"\x01\x00\x02\x00",
+    }
+    for field in (
+        "t",
+        "source_width",
+        "source_height",
+        "source_depth",
+        "downsample_x",
+        "downsample_y",
+        "downsample_z",
+        "preview_policy",
+    ):
+        malformed = dict(base)
+        del malformed[field]
+        with pytest.raises((KeyError, ValueError)):
+            _scalar_volume_envelope(malformed)
+    with pytest.raises(ValueError, match="source geometry|delivery grid|provenance"):
+        _scalar_volume_envelope({**base, "source_width": 5})
+
+
+def test_scalar_volume_envelope_rejects_fractional_geometry():
+    with pytest.raises(ValueError, match="width must be an integer"):
+        _scalar_volume_envelope(
+            {
+                "width": 1.5,
+                "height": 1,
+                "depth": 1,
+                "dtype": "uint8",
+                "bytes_per_voxel": 1,
+                "raw_min": 0,
+                "raw_max": 0,
+                "scl_slope": 1,
+                "scl_inter": 0,
+                "channel": 0,
+                "data": b"\x00",
+            }
+        )
+
+
+def test_scalar_volume_envelope_rejects_body_length_mismatch():
+    with pytest.raises(ValueError, match="body length"):
+        _scalar_volume_envelope(
+            {
+                "width": 2,
+                "height": 1,
+                "depth": 1,
+                "dtype": "uint8",
+                "bytes_per_voxel": 1,
+                "raw_min": 0,
+                "raw_max": 0,
+                "scl_slope": 1,
+                "scl_inter": 0,
+                "channel": 0,
+                "data": b"\x00",
+            }
+        )
+
+
+def test_scalar_volume_envelope_requires_explicit_finite_rescale():
+    base = {
+        "width": 1,
+        "height": 1,
+        "depth": 1,
+        "dtype": "uint8",
+        "bytes_per_voxel": 1,
+        "raw_min": 0,
+        "raw_max": 0,
+        "scl_inter": 0,
+        "channel": 0,
+        "data": b"\x00",
+    }
+    with pytest.raises(KeyError, match="scl_slope"):
+        _scalar_volume_envelope(base)
+    with pytest.raises(ValueError, match="intensity metadata"):
+        _scalar_volume_envelope({**base, "scl_slope": 0})
 
 
 class _RaisingRunner:
@@ -186,10 +321,25 @@ def test_hdf5_scalar_volume_headers(client, hdf5_path):
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["x-volume-dtype"] == "float32"
-    w = int(r.headers["x-volume-width"]); h = int(r.headers["x-volume-height"]); d = int(r.headers["x-volume-depth"])
+    assert float(r.headers["x-volume-scl-slope"]) == 1.0
+    assert float(r.headers["x-volume-scl-inter"]) == 0.0
+    w = int(r.headers["x-volume-width"])
+    h = int(r.headers["x-volume-height"])
+    d = int(r.headers["x-volume-depth"])
     assert (w, h, d) == (30, 24, 12)
     assert len(r.content) == w * h * d * 4
     assert float(r.headers["x-volume-raw-max"]) > float(r.headers["x-volume-raw-min"])
+    for header, expected in {
+        "x-volume-time": "0",
+        "x-volume-source-width": "30",
+        "x-volume-source-height": "24",
+        "x-volume-source-depth": "12",
+        "x-volume-downsample-x": "1",
+        "x-volume-downsample-y": "1",
+        "x-volume-downsample-z": "1",
+        "x-volume-preview-policy": "stride-v1",
+    }.items():
+        assert r.headers[header] == expected
 
 
 def test_hdf5_histogram_route(client, hdf5_path):
@@ -207,5 +357,4 @@ def test_hdf5_table_route(client, hdf5_path):
     assert body["preview_kind"] == "series"
     assert body["offset"] == 0 and body["limit"] == 5
     assert len(body["rows"]) == 5
-
 

@@ -179,6 +179,74 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 	}
 }
 
+func TestScalarVolumeResponseHeadersAreRequired(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("read openapi.yaml: %v", err)
+	}
+	doc := string(data)
+	paths := []string{
+		"/v2/uploads/{file_id}/scalar-volume:",
+		"/v2/uploads/{file_id}/hdf5/preview/scalar-volume:",
+	}
+	headers := []string{
+		"x-volume-width",
+		"x-volume-height",
+		"x-volume-depth",
+		"x-volume-dtype",
+		"x-volume-bytes-per-voxel",
+		"x-volume-raw-min",
+		"x-volume-raw-max",
+		"x-volume-scl-slope",
+		"x-volume-scl-inter",
+		"x-volume-channel",
+		"x-volume-time",
+		"x-volume-source-width",
+		"x-volume-source-height",
+		"x-volume-source-depth",
+		"x-volume-downsample-x",
+		"x-volume-downsample-y",
+		"x-volume-downsample-z",
+		"x-volume-preview-policy",
+	}
+	for _, path := range paths {
+		start := strings.Index(doc, "  "+path)
+		if start < 0 {
+			t.Fatalf("missing scalar response path %s", path)
+		}
+		section := doc[start:]
+		if next := strings.Index(section[1:], "\n  /v2/"); next >= 0 {
+			section = section[:next+1]
+		}
+		for _, header := range headers {
+			contract := "            " + header + ":\n              required: true"
+			if !strings.Contains(section, contract) {
+				t.Errorf("%s response header %s is not required", path, header)
+			}
+		}
+	}
+
+	// oapi-codegen honors required response headers as non-pointer fields and
+	// writes them unconditionally. Keep this assertion so generator upgrades
+	// cannot silently weaken the renderer's boundary contract.
+	generated, err := os.ReadFile("generated.gen.go")
+	if err != nil {
+		t.Fatalf("read generated client: %v", err)
+	}
+	for _, declaration := range []string{
+		"type GetUploadScalarVolume200ResponseHeaders struct {",
+		"type GetUploadHdf5ScalarVolume200ResponseHeaders struct {",
+		"XVolumeSclSlope      float32",
+		"XVolumeSclInter      float32",
+	} {
+		if !strings.Contains(string(generated), declaration) {
+			t.Fatalf("generated response contract changed: missing %q", declaration)
+		}
+	}
+}
+
 func TestFrontendV2RoutesAreDocumented(t *testing.T) {
 	t.Parallel()
 

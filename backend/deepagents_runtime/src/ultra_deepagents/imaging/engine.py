@@ -23,6 +23,7 @@ import hashlib
 import io
 import json
 import math
+import operator
 import os
 import tempfile
 from collections.abc import Sequence
@@ -101,6 +102,59 @@ class _BoundedDict(dict):
 # frame stays crisp at typical viewports while decoding/transferring far less than
 # a native plane. Sub-target planes stay native (no downscale).
 SCRUB_MAX_DIMENSION = 1024
+
+# The native binding has no region-read primitive for semantic scalar planes.
+# Bound both a single float32 source plane and the full source work before decode;
+# the delivery planner alone cannot prevent an oversized native allocation.
+_NATIVE_SEMANTIC_SOURCE_PLANE_MAX_BYTES = 64 * 1024 * 1024
+_NATIVE_SEMANTIC_SOURCE_WORK_MAX_BYTES = 512 * 1024 * 1024 + 4 * 1024 * 1024
+
+
+def _exact_semantic_index(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} index must be an integer")
+    try:
+        return operator.index(value)
+    except TypeError as exc:
+        raise ValueError(f"{field} index must be an integer") from exc
+
+
+def _native_scene_count(meta: dict[str, Any]) -> int:
+    return max(1, _meta_int(meta, "image_num_scenes"), _meta_int(meta, "image_num_series"))
+
+
+def _native_axis_count(meta: dict[str, Any], field: str) -> int:
+    key = {"time": "image_num_t", "channel": "image_num_c", "z": "image_num_z"}[field]
+    if field == "z":
+        return max(1, int(viewerinfo.paged_depth(meta) or _meta_int(meta, key) or 1))
+    return max(1, _meta_int(meta, key) or 1)
+
+
+def _validate_native_axis(value: Any, field: str, count: int) -> int:
+    index = _exact_semantic_index(value, field)
+    if index < 0 or index >= count:
+        raise ValueError(f"{field} index {index} is out of range for {field.upper()}={count}")
+    return index
+
+
+def _native_level_plane_bytes(meta: dict[str, Any], level: int, channels: int = 1) -> int:
+    width = max(0, _meta_int(meta, "image_num_x"))
+    height = max(0, _meta_int(meta, "image_num_y"))
+    scales = _resolution_scales(meta)
+    scale = scales[level] if 0 <= level < len(scales) else (1.0 / (2 ** level))
+    delivered_width = max(1, int(math.ceil(width * scale)))
+    delivered_height = max(1, int(math.ceil(height * scale)))
+    return delivered_width * delivered_height * max(1, channels) * 4
+
+
+def _require_native_volume_source(meta: dict[str, Any]) -> None:
+    if _native_scene_count(meta) != 1:
+        raise ValueError("multiple scenes require an explicit scene identity for volume preview")
+    plane_bytes = _native_level_plane_bytes(meta, 0)
+    if plane_bytes > _NATIVE_SEMANTIC_SOURCE_PLANE_MAX_BYTES:
+        raise ValueError("source plane input exceeds the bounded native semantic limit; preview is unsupported")
+    if plane_bytes * _native_axis_count(meta, "z") > _NATIVE_SEMANTIC_SOURCE_WORK_MAX_BYTES:
+        raise ValueError("native semantic source work exceeds the bounded per-channel limit")
 
 
 # --- Persistent viewer-info sidecar cache -----------------------------------
@@ -770,34 +824,95 @@ class LibBioImageEngine(_Hdf5EngineMixin):
     def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
         # Sequential reference, sharing scalar_planes + build_scalar_volume_dict with the
         # parallel orchestrator (imaging/atlas.py) so both produce identical bytes.
-        from ultra_deepagents.imaging.atlas import build_scalar_volume_dict
+        from ultra_deepagents.imaging.atlas import build_scalar_volume_dict, validate_scalar_plan
 
         plan = self.scalar_plan(path, channel=channel, t=t)
+        validate_scalar_plan(plan)
         planes = self.scalar_planes(
             path, zs=list(range(plan["depth"])), channel=plan["channel"], t=plan["t"], pages=plan["pages"]
         )
-        return build_scalar_volume_dict(planes, plan["channel"])
+        return build_scalar_volume_dict(planes, plan["channel"], plan)
 
     def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
         """Depth + addressing for a scalar volume (one engine.meta read; no decode)."""
-        meta = self._bim.meta(path, self._cache)
+        from ultra_deepagents.imaging.atlas import plan_scalar_preview
+
+        meta = dict(self._bim.meta(path, self._cache))
+        _require_native_volume_source(meta)
         pages = viewerinfo.paged_depth(meta)  # paged z-stack -> planes are pages
         depth = pages or int(meta.get("image_num_z", 1) or 1)
-        return {"depth": depth, "pages": int(pages), "channel": 0 if channel is None else int(channel), "t": int(t or 0)}
+        channel_index = _validate_native_axis(
+            0 if channel is None else channel,
+            "channel",
+            max(1, int(meta.get("image_num_c", 1) or 1)),
+        )
+        time_index = _validate_native_axis(
+            0 if t is None else t,
+            "time",
+            max(1, int(meta.get("image_num_t", 1) or 1)),
+        )
+        preview = plan_scalar_preview(
+            int(meta.get("image_num_x", 0) or 0),
+            int(meta.get("image_num_y", 0) or 0),
+            depth,
+            spacing=(
+                float(meta.get("pixel_resolution_x", 1.0) or 1.0),
+                float(meta.get("pixel_resolution_y", 1.0) or 1.0),
+                float(meta.get("pixel_resolution_z", 1.0) or 1.0),
+            ),
+        )
+        return {
+            **preview,
+            "dtype": "float32",
+            "bytes_per_voxel": 4,
+            "pages": int(pages),
+            "channel": channel_index,
+            "t": time_index,
+        }
 
     def scalar_planes(self, path, *, zs, channel, t, pages):
         """Read a contiguous range of single-channel float planes (the unit of parallelism)."""
         np = self._np
+        plan = self.scalar_plan(path, channel=channel, t=t)
+        factor_x = int(plan["downsample_x"])
+        factor_y = int(plan["downsample_y"])
+        factor_z = int(plan["downsample_z"])
         out = []
-        for z in zs:
-            if pages:
-                pipeline = pipelines.page_plane(z, out_depth=pipelines.DEPTH_SCALAR_F32, channels=[channel + 1])
-            else:
-                pipeline = pipelines.scalar_volume_plane(z, t=(t or None), channel=channel)
-            arr = self._bim.read(path, pipeline, self._cache)
-            if arr.ndim == 3:  # (C,H,W) -> single remapped channel
-                arr = arr[0]
-            out.append(np.ascontiguousarray(arr, dtype="float32"))
+        for output_z in zs:
+            output_index = _validate_native_axis(output_z, "z", int(plan["depth"]))
+            source_start = output_index * factor_z
+            source_end = min(int(plan["source_depth"]), source_start + factor_z)
+            expected_shape = (int(plan["source_height"]), int(plan["source_width"]))
+            accumulator = np.zeros(expected_shape, dtype="float32")
+            source_count = 0
+            for source_z in range(source_start, source_end):
+                if pages:
+                    pipeline = pipelines.page_plane(
+                        source_z,
+                        out_depth=pipelines.DEPTH_SCALAR_F32,
+                        channels=[channel + 1],
+                    )
+                else:
+                    pipeline = pipelines.scalar_volume_plane(source_z, t=(t or None), channel=channel)
+                arr = self._bim.read(path, pipeline, self._cache)
+                if arr.ndim == 3:
+                    arr = arr[0]
+                plane_array = np.asarray(arr, dtype="float32")
+                if plane_array.shape != expected_shape:
+                    raise ValueError("cannot decode native scalar plane with the advertised source geometry")
+                np.add(accumulator, plane_array, out=accumulator)
+                source_count += 1
+            if source_count <= 0:
+                raise ValueError("cannot decode native scalar preview with an empty z bin")
+            plane = accumulator if source_count == 1 else accumulator / float(source_count)
+            if factor_x > 1 or factor_y > 1:
+                plane = np.asarray(
+                    self._Image.fromarray(plane, mode="F").resize(
+                        (int(plan["width"]), int(plan["height"])), self._Image.Resampling.BOX
+                    ),
+                    dtype="float32",
+                )
+            out.append(np.ascontiguousarray(plane, dtype="float32"))
         return out
 
     # -- internals ------------------------------------------------------------------
@@ -930,6 +1045,10 @@ class StubEngine(_Hdf5EngineMixin):
         return {
             "data": data, "width": w, "height": h, "depth": d, "dtype": "float32",
             "bytes_per_voxel": 4, "raw_min": 0.0, "raw_max": 255.0, "channel": channel or 0,
+            "scl_slope": 1.0, "scl_inter": 0.0, "t": t or 0,
+            "source_width": w, "source_height": h, "source_depth": d,
+            "downsample_x": 1, "downsample_y": 1, "downsample_z": 1,
+            "preview_policy": "stub-exact-v1",
         }
 
     def _png(self, w: int, h: int, seed: int) -> bytes:

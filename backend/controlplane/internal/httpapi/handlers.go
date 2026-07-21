@@ -7863,6 +7863,13 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-raw-min", formatScalarHeaderFloat(volume.RawMin))
 	w.Header().Set("x-volume-raw-max", formatScalarHeaderFloat(volume.RawMax))
 	w.Header().Set("x-volume-channel", strconv.Itoa(volume.ChannelIndex))
+	w.Header().Set("x-volume-source-width", strconv.Itoa(volume.Width))
+	w.Header().Set("x-volume-source-height", strconv.Itoa(volume.Height))
+	w.Header().Set("x-volume-source-depth", strconv.Itoa(volume.Depth))
+	w.Header().Set("x-volume-downsample-x", "1")
+	w.Header().Set("x-volume-downsample-y", "1")
+	w.Header().Set("x-volume-downsample-z", "1")
+	w.Header().Set("x-volume-preview-policy", "native-exact-v1")
 	// Rescale to physical units (HU/SUV) so the client can window in true
 	// intensities: physical = slope*code + inter.
 	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))

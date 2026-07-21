@@ -10972,6 +10972,19 @@ func TestNiftiUploadViewerServesSelectedScalarTimepoint(t *testing.T) {
 	if header.Get("x-volume-time") != "1" || header.Get("x-volume-time-count") != "2" {
 		t.Fatalf("time headers = idx:%q count:%q, want 1/2", header.Get("x-volume-time"), header.Get("x-volume-time-count"))
 	}
+	for name, want := range map[string]string{
+		"x-volume-source-width":   "2",
+		"x-volume-source-height":  "1",
+		"x-volume-source-depth":   "2",
+		"x-volume-downsample-x":   "1",
+		"x-volume-downsample-y":   "1",
+		"x-volume-downsample-z":   "1",
+		"x-volume-preview-policy": "native-exact-v1",
+	} {
+		if got := header.Get(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
 	if header.Get("x-volume-raw-min") != "100" || header.Get("x-volume-raw-max") != "400" {
 		t.Fatalf("timepoint range headers = min:%q max:%q, want 100..400", header.Get("x-volume-raw-min"), header.Get("x-volume-raw-max"))
 	}

@@ -78,6 +78,94 @@ def test_libbioimage_engine_unavailable_without_native_lib():
         LibBioImageEngine()
 
 
+def test_libbioimage_scalar_plan_rejects_unbounded_native_source_before_plane_decode():
+    class FakeBim:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def meta(self, path, cache):
+            return {
+                "image_num_x": 16_384,
+                "image_num_y": 16_384,
+                "image_num_z": 1,
+                "image_num_t": 1,
+                "image_num_c": 1,
+                "image_num_p": 1,
+            }
+
+        def read(self, path, pipeline, cache):
+            self.reads += 1
+            raise AssertionError("oversize plan must not decode scalar planes")
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+
+    with pytest.raises(ValueError, match="source plane input"):
+        engine.scalar_plan("oversize.nii")
+    assert engine._bim.reads == 0
+
+
+def test_libbioimage_scalar_plan_keeps_bounded_nonintegral_source_eligible():
+    class FakeBim:
+        def meta(self, path, cache):
+            return {
+                "image_num_x": 924,
+                "image_num_y": 624,
+                "image_num_z": 80,
+                "image_num_t": 2,
+                "image_num_c": 2,
+                "image_num_p": 0,
+            }
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+
+    plan = engine.scalar_plan("bounded.czi", channel=1, t=1)
+    assert (plan["width"], plan["height"], plan["depth"]) == (462, 312, 80)
+    assert (plan["channel"], plan["t"]) == (1, 1)
+
+
+def test_libbioimage_z_downsample_is_iterative_without_retaining_factor_planes(monkeypatch):
+    np = pytest.importorskip("numpy")
+
+    class FakeBim:
+        def meta(self, path, cache):
+            return {
+                "image_num_x": 8,
+                "image_num_y": 8,
+                "image_num_z": 513,
+                "image_num_t": 1,
+                "image_num_c": 1,
+                "image_num_p": 0,
+            }
+
+        def read(self, path, pipeline, cache):
+            z = int(pipeline.split("-slice z:", 1)[1].split()[0])
+            return np.full((8, 8), z, dtype="float32")
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+    engine._np = np
+    monkeypatch.setattr(
+        np,
+        "mean",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("z reduction must not retain a list of source planes")
+        ),
+    )
+
+    plan = engine.scalar_plan("deep.czi")
+    assert (plan["source_depth"], plan["depth"], plan["downsample_z"]) == (513, 257, 2)
+    planes = engine.scalar_planes(
+        "deep.czi", zs=[0, 256], channel=0, t=0, pages=plan["pages"]
+    )
+    assert float(planes[0][0, 0]) == pytest.approx(0.5)
+    assert float(planes[1][0, 0]) == pytest.approx(512.0)
+
+
 def test_libbioimage_thumbnail_auto_selects_bounded_level_for_large_pyramid():
     meta = {
         "image_num_x": 95174,

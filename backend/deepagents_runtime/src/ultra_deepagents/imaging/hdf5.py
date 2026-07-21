@@ -1595,6 +1595,16 @@ def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str
             "raw_min": raw_min,
             "raw_max": raw_max,
             "channel": int(channel),
+            "scl_slope": 1.0,
+            "scl_inter": 0.0,
+            "t": 0,
+            "source_width": int(vol["x"]),
+            "source_height": int(vol["y"]),
+            "source_depth": int(vol["z"]),
+            "downsample_x": int(vol["sx"]),
+            "downsample_y": int(vol["sy"]),
+            "downsample_z": int(vol["sz"]),
+            "preview_policy": "stride-v1",
         }
     finally:
         _safe_close(h5)

@@ -37,16 +37,24 @@ frontend/.playwright-cli/
 *.ome.zarr/
 test-prairie/
 legacy/
-# Ignore the runtime data tree, but descend into data/ and data/models/ so the
-# re-includes further down (the tracked data/models/yolo/.gitkeep placeholder that
-# keeps the sandbox Dockerfile's `COPY data/models/yolo/` valid in a clean clone)
-# can take effect. A blanket `data/` would exclude the directory outright and no
-# `!` rule underneath could resurface anything inside it.
-data/*
-!data/models/
-data/models/*
-!data/models/yolo/
-data/models/yolo/*
+# Ignore every runtime `data/` tree at ANY depth (top-level data/, and nested
+# scratch like backend/deepagents_runtime/data/ that the worker/tests create).
+# The unanchored `data/` is what does that — a root-anchored `data/*` would leave
+# nested data/ dirs untracked and trip the release artifact builder's
+# clean-worktree guard (that regression made release CI red). Then, ONLY for the
+# root data tree, descend far enough to keep the tracked data/models/yolo/.gitkeep
+# placeholder (which keeps the sandbox Dockerfile's `COPY data/models/yolo/` valid
+# in a clean clone). Each parent level must be re-included with a leading-slash
+# (root-anchored) `!` rule, then its contents re-ignored, or git cannot resurface
+# a file under an excluded directory.
+data/
+!/data/
+/data/*
+!/data/models/
+/data/models/*
+!/data/models/yolo/
+/data/models/yolo/*
+!/data/models/yolo/.gitkeep
 # but DO track the committed RareSpot parity golden (the gate the CI/parity test reads)
 !backend/deepagents_runtime/tests/data/
 !backend/deepagents_runtime/tests/data/rarespot_parity_golden.json

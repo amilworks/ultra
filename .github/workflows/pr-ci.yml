@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ripgrep is not preinstalled on ubuntu-latest; the scan is built on it and
+      # fails closed without it, so install it before scanning.
+      - name: Install ripgrep (release codescan dependency)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Scan for local paths, internal hosts, and secret-shaped strings
         run: scripts/release_codescan.sh
 

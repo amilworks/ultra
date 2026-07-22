@@ -2890,6 +2890,11 @@ def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str
             "bytes_per_voxel": 4,
             "raw_min": raw_min,
             "raw_max": raw_max,
+            # Identity rescale: HDF5 scalar arrays are used as raw values (no
+            # NIfTI-style scl_slope/scl_inter header). The scalar-volume envelope
+            # in imaging/service.py requires both keys, so emit the identity pair.
+            "scl_slope": 1.0,
+            "scl_inter": 0.0,
             "channel": operator.index(channel),
             "t": 0,
             "source_width": int(vol["x"]),

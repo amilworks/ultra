@@ -324,6 +324,23 @@ ensure_postgres() {
     log "Creating local Postgres container"
     (cd "$ROOT" && make postgres-init)
   fi
+  # A mapped TCP port accepts as soon as docker-proxy is up — BEFORE the postgres
+  # server inside the container is ready (a cold start, and crash recovery after
+  # an unclean Docker shutdown, can take seconds). Without a real readiness gate
+  # the psql bootstrap below fails with
+  # "connection to server on socket .s.PGSQL.5432 failed".
+  local pg_ready=0
+  for _ in $(seq 1 60); do
+    if docker exec bisque-ultra-postgres pg_isready -U "$postgres_user" -d postgres >/dev/null 2>&1; then
+      pg_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$pg_ready" != "1" ]; then
+    echo "Postgres container did not become ready within 60s; check 'docker logs bisque-ultra-postgres'." >&2
+    exit 1
+  fi
   log "Ensuring local Postgres databases exist"
   docker exec \
     -e PGUSER="$postgres_user" \

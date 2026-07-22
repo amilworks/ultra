@@ -4,6 +4,8 @@ import path from "node:path";
 import { DataUtils } from "three";
 import { describe, expect, it } from "vitest";
 
+import type { UploadViewerInfo } from "../../types";
+
 import {
   advanceProgressiveVolumeSteps,
   atlasToVolumeTexture,
@@ -33,6 +35,7 @@ import {
   resolveVolumeCutawayCutZ,
   resolveVolumeCutawayClip,
   resolveVolumeOrientationCue,
+  resolveSpatialUnit,
   scalarVolumePayloadValueAt,
   scalarVolumePayloadToTextureBytes,
   scalarVolumePayloadToHalfFloat,
@@ -42,6 +45,27 @@ import {
   validateVolumeTextureGrid,
   volumeCameraSnapshotKey,
 } from "./SliceStackVolumeCanvas";
+
+describe("physical volume unit authority", () => {
+  it("uses the normalized metadata unit for physical extents", () => {
+    const info = {
+      metadata: {
+        physical_spacing: { x: 2, y: 2, z: 2 },
+        physical_spacing_unit: "mm",
+      },
+    } as UploadViewerInfo;
+
+    expect(resolveSpatialUnit(info)).toBe("mm");
+  });
+
+  it("does not call a unitless physical extent voxels", () => {
+    const info = {
+      metadata: { physical_spacing: { x: 2, y: 2, z: 2 } },
+    } as UploadViewerInfo;
+
+    expect(resolveSpatialUnit(info)).toBe("units");
+  });
+});
 
 describe("volume delivery authority", () => {
   it("checks the delivered texture grid, not the native source axes", () => {

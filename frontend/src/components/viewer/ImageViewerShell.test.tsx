@@ -1618,7 +1618,7 @@ describe("ImageViewerShell", () => {
     expect(screen.getByLabelText("Window level")).toBeInTheDocument();
   });
 
-  it("enables the Z-cursor cutaway with overview camera and a depth scrubber on interior focus", async () => {
+  it("enables the Z-cursor cutaway without changing camera mode and exposes a depth scrubber", async () => {
     const scalarPlane = {
       axis: "z" as const,
       label: "XY plane",
@@ -1654,6 +1654,7 @@ describe("ImageViewerShell", () => {
         channels: [0],
         channel_colors: ["#ffffff"],
         volume_channel: 0,
+        volume_camera_mode: "orthographic",
         volume_clip_min: { x: 0, y: 0, z: 0 },
         volume_clip_max: { x: 1, y: 1, z: 1 },
       },
@@ -1719,16 +1720,16 @@ describe("ImageViewerShell", () => {
 
     render(<Harness />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Interior focus" }));
+    expect(screen.queryByRole("button", { name: "Interior focus" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cutaway" }));
 
     await waitFor(() => {
       const canvas = screen.getByTestId("slice-stack-volume-canvas");
-      // Cutaway mode is on; the cut is derived live from Z (camera stays overview),
-      // so no static clip box is written to display state.
+      // Cutaway changes clipping only; it preserves the user's camera mode.
       expect(canvas.dataset.cutaway).toBe("true");
-      expect(canvas.dataset.cameraMode).toBe("perspective");
+      expect(canvas.dataset.cameraMode).toBe("orthographic");
     });
-    expect(screen.getByText("Interior cutaway active")).toBeInTheDocument();
+    expect(screen.getByText("Cutaway active")).toBeInTheDocument();
     // The user sweeps the cut through Z from the Volume tab.
     expect(screen.getByLabelText("Cutaway depth")).toBeInTheDocument();
   });
@@ -2326,6 +2327,7 @@ describe("ImageViewerShell", () => {
         array_min: 0,
         array_max: 1024,
         physical_spacing: { x: 0.5, y: 0.5, z: 2 },
+        physical_spacing_unit: "mm",
       },
       viewer: {
         ...viewerInfo.viewer,
@@ -2409,10 +2411,10 @@ describe("ImageViewerShell", () => {
     expect(screen.queryByRole("button", { name: "Advanced" })).not.toBeInTheDocument();
     const volumeSummary = await screen.findByLabelText("Volume summary");
     expect(volumeSummary).toHaveAttribute("data-viewer-volume-readout", "compact");
-    expect(within(volumeSummary).getByText("Volume")).toBeInTheDocument();
-    expect(within(volumeSummary).getByText("32 x 16 x 24")).toBeInTheDocument();
+    expect(within(volumeSummary).getByText("Extent")).toBeInTheDocument();
+    expect(within(volumeSummary).getByText("32 x 16 x 24 mm")).toBeInTheDocument();
     expect(within(volumeSummary).getByText("Spacing")).toBeInTheDocument();
-    expect(within(volumeSummary).getByText("0.50 x 0.50 x 2.00")).toBeInTheDocument();
+    expect(within(volumeSummary).getByText("0.50 x 0.50 x 2.00 mm")).toBeInTheDocument();
     expect(within(volumeSummary).getByText("Anisotropic voxels")).toBeInTheDocument();
   });
 

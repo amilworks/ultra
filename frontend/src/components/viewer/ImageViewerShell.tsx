@@ -181,10 +181,16 @@ const isMeaningfulSpatialUnit = (value: unknown): value is string => {
     return false;
   }
   const normalized = value.trim().toLowerCase();
-  return normalized !== "" && normalized !== "px" && normalized !== "pixel" && normalized !== "pixels";
+  return (
+    normalized !== "" &&
+    !["px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(normalized)
+  );
 };
 
 const resolveMetadataSpatialUnit = (viewerInfo: UploadViewerInfo): string => {
+  if (isMeaningfulSpatialUnit(viewerInfo.metadata.physical_spacing_unit)) {
+    return viewerInfo.metadata.physical_spacing_unit.trim();
+  }
   const coordinates = viewerInfo.phys?.coordinates;
   const spaceUnits =
     coordinates && typeof coordinates === "object"
@@ -198,6 +204,16 @@ const resolveMetadataSpatialUnit = (viewerInfo: UploadViewerInfo): string => {
   const pixelUnits = viewerInfo.phys?.pixel_units;
   if (Array.isArray(pixelUnits) && isMeaningfulSpatialUnit(pixelUnits[0])) {
     return pixelUnits[0].trim();
+  }
+  const spacingUnits = viewerInfo.metadata.spacing_units;
+  const uniformSpacingUnits = [spacingUnits?.x, spacingUnits?.y, spacingUnits?.z]
+    .filter(isMeaningfulSpatialUnit)
+    .map((unit) => unit.trim());
+  if (
+    uniformSpacingUnits.length > 0 &&
+    new Set(uniformSpacingUnits.map((unit) => unit.toLowerCase())).size === 1
+  ) {
+    return uniformSpacingUnits[0] ?? "";
   }
   if (viewerInfo.metadata.physical_spacing && String(viewerInfo.modality) === "medical") {
     return "mm";
@@ -1362,6 +1378,9 @@ export function ImageViewerShell({
         physicalSpacing: viewerInfo.metadata.physical_spacing,
       })
     : null;
+  const physicalVolumeUnit = resolveMetadataSpatialUnit(viewerInfo);
+  const withPhysicalUnit = (value: string): string =>
+    physicalVolumeUnit ? `${value} ${physicalVolumeUnit}` : value;
   const canShowVolumeGeometry =
     viewerInfo.is_volume && displayCapabilities.has("physical_scale") && physicalVolumeGeometry != null;
   const volumeSummaryRows: MetadataCard[] = (() => {
@@ -1384,7 +1403,7 @@ export function ImageViewerShell({
         },
       ];
       if (canShowVolumeGeometry && physicalVolumeGeometry) {
-        rows.push({ label: "Spacing", value: physicalVolumeGeometry.spacingLabel });
+        rows.push({ label: "Spacing", value: withPhysicalUnit(physicalVolumeGeometry.spacingLabel) });
         rows.push({
           label: "Sampling",
           value: physicalVolumeGeometry.isAnisotropic ? "Anisotropic voxels" : "Isotropic voxels",
@@ -1413,8 +1432,8 @@ export function ImageViewerShell({
           },
     ];
     if (canShowVolumeGeometry && physicalVolumeGeometry) {
-      rows.push({ label: "Volume", value: physicalVolumeGeometry.aspectLabel });
-      rows.push({ label: "Spacing", value: physicalVolumeGeometry.spacingLabel });
+      rows.push({ label: "Extent", value: withPhysicalUnit(physicalVolumeGeometry.aspectLabel) });
+      rows.push({ label: "Spacing", value: withPhysicalUnit(physicalVolumeGeometry.spacingLabel) });
       rows.push({
         label: "Sampling",
         value: physicalVolumeGeometry.isAnisotropic ? "Anisotropic voxels" : "Isotropic voxels",
@@ -1701,14 +1720,11 @@ export function ImageViewerShell({
     });
   };
 
-  // Interior focus is now a Z-cursor cutaway: the renderer cuts the volume at the
-  // live Z slice and exposes a high-resolution interior cross-section with the
-  // camera kept in overview (no fly-inside fog). The cut sweeps as the user
-  // scrubs Z, so no static clip box is stored here.
-  const focusInteriorVolume = () => {
+  // Cutaway follows the live Z slice. Camera, projection, and window settings
+  // remain untouched so enabling it changes only which portion is visualized.
+  const enableVolumeCutaway = () => {
     updateSelectedDisplay({
       volume_cutaway: true,
-      volume_camera_mode: "perspective",
     });
   };
 
@@ -1922,8 +1938,8 @@ export function ImageViewerShell({
     return (
       <div className="viewer-volume-geometry-panel" data-viewer-volume-geometry="true">
         <span>Physical volume</span>
-        <strong>{physicalVolumeGeometry.aspectLabel}</strong>
-        <span>Spacing {physicalVolumeGeometry.spacingLabel}</span>
+        <strong>{withPhysicalUnit(physicalVolumeGeometry.aspectLabel)}</strong>
+        <span>Spacing {withPhysicalUnit(physicalVolumeGeometry.spacingLabel)}</span>
         {physicalVolumeGeometry.isAnisotropic ? <em>Anisotropic voxels</em> : <em>Isotropic voxels</em>}
       </div>
     );
@@ -2173,18 +2189,18 @@ export function ImageViewerShell({
                 data-viewer-interior-active={volumeClipActive ? "true" : "false"}
               >
                 <div className="viewer-volume-inspection-status">
-                  {volumeClipActive ? "Interior cutaway active" : "Full volume"}
+                  {volumeClipActive ? "Cutaway active" : "Full volume"}
                 </div>
                 <div className="viewer-volume-inspection-actions">
                   <Button
                     type="button"
                     variant={volumeClipActive ? "secondary" : "outline"}
                     size="sm"
-                    onClick={focusInteriorVolume}
+                    onClick={enableVolumeCutaway}
                     aria-pressed={volumeClipActive}
                   >
                     <Focus data-icon="inline-start" />
-                    Interior focus
+                    Cutaway
                   </Button>
                   {volumeClipActive ? (
                     <Button type="button" variant="ghost" size="sm" onClick={resetVolumeClip}>

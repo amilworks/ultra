@@ -125,6 +125,20 @@ const normalizePhysicalSpacing = (
   };
 };
 
+const normalizePhysicalSpacingUnit = (
+  metadata: UnknownRecord,
+  viewer: UnknownRecord,
+  source: UnknownRecord
+): string | null => {
+  const unit = String(
+    metadata.physical_spacing_unit ??
+      viewer.physical_spacing_unit ??
+      source.physical_spacing_unit ??
+      ""
+  ).trim();
+  return unit || null;
+};
+
 const positiveSpacing = (value: unknown): number => {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 1;
@@ -736,6 +750,7 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   const axisSizes = normalizeAxisSizes(source.axis_sizes ?? viewerSource.axis_sizes ?? DEFAULT_AXIS_SIZES);
   const selectedIndices = normalizeSelectedIndices(source.selected_indices ?? viewerSource.selected_indices, axisSizes);
   const physicalSpacing = normalizePhysicalSpacing(metadataSource, source);
+  const physicalSpacingUnit = normalizePhysicalSpacingUnit(metadataSource, viewerSource, source);
   const hdf5ServiceUrls = normalizeHdf5ServiceUrls(
     { ...toRecord(viewerSource.service_urls), ...toRecord(source.service_urls) },
     fileId
@@ -886,6 +901,7 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
       ),
       filename_hints: toRecord(metadataSource.filename_hints),
       physical_spacing: physicalSpacing,
+      physical_spacing_unit: physicalSpacingUnit,
       exif: {},
       geo: null,
       dicom: null,
@@ -1101,6 +1117,7 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
   const axisSizes = normalizeAxisSizes(source.axis_sizes ?? DEFAULT_AXIS_SIZES);
   const selectedIndices = normalizeSelectedIndices(source.selected_indices, axisSizes);
   const physicalSpacing = normalizePhysicalSpacing(metadataSource, source);
+  const physicalSpacingUnit = normalizePhysicalSpacingUnit(metadataSource, viewerSource, source);
   const backendMode = String(source.backend_mode ?? viewerSource.backend_mode ?? "").trim().toLowerCase();
   const isVolume = Boolean(source.is_volume) || axisSizes.Z > 1 || backendMode === "atlas";
   const planesSource = toRecord(viewerSource.planes);
@@ -1279,6 +1296,7 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
         ])
       ),
       physical_spacing: physicalSpacing,
+      physical_spacing_unit: physicalSpacingUnit,
       scene: metadataSource.scene == null ? null : String(metadataSource.scene),
       scene_count: toPositiveInt(metadataSource.scene_count ?? source.scene_count, 1),
       header: Object.fromEntries(Object.entries(toRecord(metadataSource.header)).map(([key, value]) => [key, String(value)])),

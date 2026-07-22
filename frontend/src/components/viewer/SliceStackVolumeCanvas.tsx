@@ -1711,7 +1711,25 @@ const applyVolumeSliceCursorPlanes = ({
   planes.z.position.set(0, 0, normalizedScale.z * cue.z.local);
 };
 
-const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
+const normalizedSpatialUnit = (value: unknown): string | null => {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const unit = value.trim();
+  if (
+    !unit ||
+    ["px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(unit.toLowerCase())
+  ) {
+    return null;
+  }
+  return unit;
+};
+
+export const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
+  const explicitUnit = normalizedSpatialUnit(viewerInfo?.metadata.physical_spacing_unit);
+  if (explicitUnit) {
+    return explicitUnit;
+  }
   const coordinates = viewerInfo?.phys?.coordinates;
   const units =
     coordinates && typeof coordinates === "object"
@@ -1721,35 +1739,25 @@ const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
     units && typeof units === "object"
       ? (units as Record<string, unknown>).spatial
       : null;
-  if (typeof spatial === "string" && spatial.trim()) {
-    return spatial.trim();
+  const coordinateUnit = normalizedSpatialUnit(spatial);
+  if (coordinateUnit) {
+    return coordinateUnit;
   }
-  const pixelUnit = viewerInfo?.phys?.pixel_units?.[0];
-  if (
-    typeof pixelUnit === "string" &&
-    !["", "px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(
-      pixelUnit.trim().toLowerCase()
-    )
-  ) {
-    return pixelUnit.trim();
+  const pixelUnit = normalizedSpatialUnit(viewerInfo?.phys?.pixel_units?.[0]);
+  if (pixelUnit) {
+    return pixelUnit;
   }
   const spacingUnits = viewerInfo?.metadata.spacing_units;
   const spacingUnitValues = [spacingUnits?.x, spacingUnits?.y, spacingUnits?.z]
-    .map((unit) => String(unit ?? "").trim())
-    .filter(
-      (unit) =>
-        unit !== "" &&
-        !["px", "pixel", "pixels", "voxel", "voxels", "unknown"].includes(
-          unit.toLowerCase()
-        )
-    );
+    .map(normalizedSpatialUnit)
+    .filter((unit): unit is string => unit != null);
   if (
     spacingUnitValues.length > 0 &&
     new Set(spacingUnitValues.map((unit) => unit.toLowerCase())).size === 1
   ) {
     return spacingUnitValues[0] as string;
   }
-  return viewerInfo?.metadata.physical_spacing ? "vox" : "units";
+  return viewerInfo?.metadata.physical_spacing ? "units" : "vox";
 };
 
 export function SliceStackVolumeCanvas({

@@ -56,6 +56,12 @@ This builds and starts seven services — Postgres, NATS (JetStream), the libbio
 
 You are signed in automatically as a local guest (`dev` auth — no account, no cloud). Start chatting (the worker calls your Ollama), or open **Resources** to drag in a scientific image (CZI, ND2, OME-TIFF, NIfTI, DICOM, and 90+ more), a multi-page TIFF z-stack, or a video, and explore it in the Scientific Viewer (tiles, z-scrub, video posters).
 
+
+
+https://github.com/user-attachments/assets/5a39f03e-a6d7-489e-95ac-9474bee01df3
+
+
+
 **Point at a different model** — no rebuild needed:
 
 ```bash
@@ -91,6 +97,8 @@ You are starting seven layers:
 7. *(Optional)* An existing **BisQue** deployment provides shared image/dataset/metadata services when `ULTRA_BISQUE_ROOT_URL` is set.
 
 Those layers are deliberately separate. If a page loads but chat fails, the frontend is alive and the API, worker, model server, or durable transport is not. If BisQue imports fail, check the configured BisQue URL and linked credentials before debugging the frontend. That separation is a feature, because it lets you debug the system by following the symptom instead of guessing.
+
+
 
 ## Run from source (advanced)
 

@@ -620,6 +620,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/hdf5/preview/scalar-volume", deps.handleGetUploadHdf5ScalarVolume)
 			r.Get("/uploads/{file_id}/hdf5/preview/histogram", deps.handleGetUploadHdf5Histogram)
 			r.Get("/uploads/{file_id}/hdf5/preview/table", deps.handleGetUploadHdf5Table)
+			r.Get("/uploads/{file_id}/hdf5/materials/dashboard", deps.handleGetUploadHdf5MaterialsDashboard)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
 			r.Post("/bisque/dataset-members", deps.handleBisqueDatasetMembers)

@@ -2,7 +2,7 @@
 
 The frontend ships a complete HDF5 viewer (``frontend/src/components/viewer/hdf5``)
 whose backend never existed. This module is that backend: it opens ``.h5``/``.hdf5``/
-``.hdf`` files with :mod:`h5py` and produces exactly the JSON/PNG/binary
+``.hdf``/``.dream3d`` files with :mod:`h5py` and produces exactly the JSON/PNG/binary
 shapes the frontend's frozen wire contract (``frontend/src/types.ts`` ``Hdf5*`` types)
 expects. It is a pure reader — no FastAPI, no libbioimage — so it is unit-testable
 against synthetic files and is dispatched off the event loop through the engine pool
@@ -19,6 +19,7 @@ Entry points used by the engine:
 - :func:`is_hdf5_data_file` — extension gate (``.ims`` Imaris deliberately excluded).
 - :func:`build_hdf5_viewer_info` — the ``UploadViewerInfo.hdf5`` payload + top-level fields.
 - :func:`dataset_summary` — ``Hdf5DatasetSummary``.
+- :func:`materials_dashboard` — ``Hdf5MaterialsDashboardResponse`` (DREAM.3D).
 - :func:`slice_png` / :func:`atlas_png` — ``image/png`` bytes.
 - :func:`scalar_volume` — raw voxel dict (``x-volume-*`` header contract).
 - :func:`dataset_histogram` — ``Hdf5DatasetHistogramResponse``.
@@ -30,7 +31,9 @@ from __future__ import annotations
 import io
 import itertools
 import math
+import operator
 import os
+import re
 from typing import Any
 
 __all__ = [
@@ -40,6 +43,9 @@ __all__ = [
     "Hdf5DatasetNotFound",
     "build_hdf5_viewer_info",
     "dataset_summary",
+    "default_dataset_path",
+    "materials_dashboard",
+    "thumbnail_png",
     "slice_png",
     "atlas_png",
     "scalar_volume",
@@ -48,12 +54,30 @@ __all__ = [
 ]
 
 # --- Extension gate ---------------------------------------------------------
-# ONLY these extensions are treated as HDF5-*data* (the explorer). ``.ims`` (Imaris),
-# ``.mat`` v7.3, NetCDF4, and other HDF5-based containers are deliberately excluded:
-# they are either images (libbioimage's job) or not images at all. Detection is by
-# extension allowlist, NOT by HDF5 magic-byte sniffing, precisely so those files keep
-# their existing routing.
-HDF5_DATA_EXTS = (".h5", ".hdf5", ".hdf", ".dream3d")
+# ONLY these extensions are treated as HDF5-*data* (the tree/dataset explorer, and
+# the DREAM.3D materials dashboard when that schema is detected). Every entry is a
+# container that is ALWAYS HDF5 and is NEVER a single renderable image, so the
+# explorer is the right home for it.
+#
+# Detection is an extension ALLOWLIST, never HDF5 magic-byte sniffing — precisely so
+# HDF5-*based* formats that belong elsewhere keep their routing:
+#   * ``.ims`` (Imaris)  -> an IMAGE; libbioimage/bioio decode it.
+#   * ``.mat``           -> only v7.3 is HDF5 (older ones are not); not a tree target.
+#   * ``.nc`` / ``.nc4`` -> NetCDF: v3 is not HDF5, and NetCDF4 has its own dimensional
+#                           conventions a generic tree walk would misrepresent.
+# Keep this list in sync with Go ``isHdf5Upload`` (handlers.go) and the frontend
+# ``isHdf5ResourceName`` (ResourceBrowser.tsx) — a mismatch means the grid requests a
+# thumbnail the sidecar won't render, or skips one it would.
+HDF5_DATA_EXTS = (
+    # Generic HDF5 containers.
+    ".h5", ".hdf5", ".hdf", ".he5",
+    # Materials: DREAM.3D reconstruction pipelines + EBSD orientation scans.
+    ".dream3d", ".h5ebsd",
+    # Single-cell bio: AnnData / Loom matrices.
+    ".h5ad", ".loom",
+    # NeXus: neutron / X-ray / synchrotron beamline data.
+    ".nxs",
+)
 
 # --- Bounding caps (documented; surfaced to the UI where relevant) ----------
 MAX_TREE_NODES = 4000          # total nodes visited during the viewer tree walk
@@ -71,9 +95,38 @@ ATLAS_CELL_CAP = 256           # matches viewerinfo.ATLAS_CELL_CAP (kept local t
 SAMPLE_CORNER = 4              # per-axis size of the sample_values corner block
 MAX_ATTRS = 48                 # attributes materialized per node
 MAX_ATTR_ARRAY = 32            # elements kept from an array-valued attribute
+MATERIAL_PHASE_MAX_NAMES = 256  # stored ensemble labels read by the materials probe
+MATERIAL_PHASE_MAX_ITEM_BYTES = 1024
+MATERIAL_PHASE_MAX_TOTAL_BYTES = 16 * 1024
+MATERIAL_ORIENTATION_MAX_ROWS = 2000
+FEATURE_ID_SCAN_CHUNK_VALUES = 1_000_000
+FEATURE_ID_MAX_TRACKED_IDENTITIES = 1_000_000
 MAX_METADATA_ITEM_BYTES = 4096
 MAX_METADATA_TOTAL_BYTES = 64 * 1024
+FEATURE_FILTER_MAX_IDS = 64
+FEATURE_FILTER_MAX_QUERY_BYTES = 1024
+FEATURE_ID_UINT32_MAX = (1 << 32) - 1
 
+_PHASE_NAMES_PROVENANCE = (
+    "Read from stored DREAM.3D PhaseName/MaterialName metadata; "
+    "no phase-identification algorithm was run."
+)
+_FEATURE_GROUP_NAMES = frozenset(
+    {
+        "cellfeaturedata",
+        "featuredata",
+        "grainfeaturedata",
+        "graindata",
+        "cellgraindata",
+    }
+)
+_ENSEMBLE_GROUP_NAMES = frozenset(
+    {
+        "cellensembledata",
+        "ensembledata",
+        "phaseensembledata",
+    }
+)
 
 # Volume preview kinds the frontend renders through the slice/atlas/volume surface.
 _VOLUME_KINDS = frozenset({"scalar_volume", "label_volume", "rgb_volume", "vector_volume"})
@@ -90,19 +143,24 @@ class Hdf5Error(ValueError):
     422 (the message carries a ``_DECODE_ERROR_MARKERS`` token like ``unsupported``)."""
 
 
-class Hdf5DatasetNotFound(Hdf5Error):
-    """Requested ``dataset_path`` is absent — mapped to 404."""
+class Hdf5DatasetNotFound(Hdf5Error):  # noqa: N818 - stable public exception name
+    """Requested ``dataset_path`` (or materials schema) is absent — mapped to 404."""
 
 
 # ---------------------------------------------------------------------------
 # Detection
 # ---------------------------------------------------------------------------
 def is_hdf5_data_file(name: str) -> bool:
-    """True when ``name`` has an HDF5-data extension (tolerating a series/page suffix
-    like ``vol.h5_2``). ``.ims`` and other HDF5-based image formats are excluded."""
+    """True when ``name`` has an HDF5-data extension (tolerating a numeric
+    series/page suffix like ``vol.h5_2``). ``.ims`` and other HDF5-based image
+    formats are excluded. The suffix tolerance is anchored to the END of the
+    name — a bare substring match would hijack rasters like ``scan.h5_v2.tif``
+    into the h5py path and break their previews."""
     lower = (name or "").strip().lower()
     for ext in HDF5_DATA_EXTS:
-        if lower.endswith(ext) or (ext + "_") in lower:
+        if lower.endswith(ext):
+            return True
+        if re.search(re.escape(ext) + r"_\d+$", lower):
             return True
     return False
 
@@ -290,6 +348,32 @@ def _hard_child(group: Any, key: str, *, _depth: int = 0) -> Any | None:
         return None
 
 
+def _direct_hard_child(group: Any, key: str) -> Any | None:
+    """Return a direct hard-linked child without following soft/external links."""
+    import h5py
+
+    if not _is_group(group):
+        return None
+    try:
+        link = group.get(str(key), getlink=True)
+        return group.get(str(key)) if isinstance(link, h5py.HardLink) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _direct_hard_object_at_path(h5: Any, path: str) -> Any | None:
+    """Resolve every component of an absolute path through direct hard links only."""
+    text = str(path or "")
+    if not text.startswith("/") or "\x00" in text:
+        return None
+    current = h5
+    for part in (segment for segment in text.split("/") if segment):
+        current = _direct_hard_child(current, part)
+        if current is None:
+            return None
+    return current
+
+
 def _hard_object_at_path(h5: Any, path: str, *, _depth: int = 0) -> Any | None:
     """Resolve ``path`` component-by-component, following only in-file links.
 
@@ -331,6 +415,25 @@ def _object_address(obj: Any) -> int | None:
         return int(h5py.h5o.get_info(obj.id).addr)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _hard_links_scoped_to_parent(obj: Any, parent: Any) -> bool:
+    """Fail closed when a hard-linked object has owners outside this parent."""
+    try:
+        import h5py
+
+        address = _object_address(obj)
+        reference_count = int(h5py.h5o.get_info(obj.id).rc)
+        if address is None or reference_count <= 0:
+            return False
+        local_count = sum(
+            1
+            for key in _bounded_child_names(parent)
+            if _object_address(_direct_hard_child(parent, key)) == address
+        )
+        return local_count == reference_count
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _visit_hard_objects(h5: Any, callback: Any) -> None:
@@ -416,7 +519,12 @@ def _classify_shallow(name: str, dt: Any, shape: tuple[int, ...]) -> str | None:
     return None
 
 
-def _interpret_volume(shape: tuple[int, ...], dt: Any) -> dict[str, Any] | None:
+def _interpret_volume(
+    shape: tuple[int, ...],
+    dt: Any,
+    *,
+    exact_zyx: tuple[int, int, int] | None = None,
+) -> dict[str, Any] | None:
     """Map a numeric dataset shape onto a (Z, Y, X, C) preview volume + strides.
 
     Returns ``None`` for shapes that are not a renderable volume (rank 0/1, rank≥5
@@ -425,7 +533,11 @@ def _interpret_volume(shape: tuple[int, ...], dt: Any) -> dict[str, Any] | None:
     grid (``p?``) bounded by :data:`PREVIEW_MAX_PLANE` / :data:`PREVIEW_MAX_VOXELS`.
     """
     rank = len(shape)
-    if rank == 2:
+    if rank == 3 and exact_zyx is not None and shape == exact_zyx:
+        z, y, x, comp, layout = int(shape[0]), int(shape[1]), int(shape[2]), 1, "zyx"
+    elif rank == 4 and exact_zyx is not None and shape[:3] == exact_zyx:
+        z, y, x, comp, layout = int(shape[0]), int(shape[1]), int(shape[2]), int(shape[3]), "zyxc"
+    elif rank == 2:
         z, y, x, comp, layout = 1, int(shape[0]), int(shape[1]), 1, "hw"
     elif rank == 3:
         last = shape[-1]
@@ -439,18 +551,38 @@ def _interpret_volume(shape: tuple[int, ...], dt: Any) -> dict[str, Any] | None:
         return None
     if min(z, y, x) <= 0:
         return None
-    sy = max(1, math.ceil(max(y, x) / PREVIEW_MAX_PLANE)) if max(y, x) > PREVIEW_MAX_PLANE else 1
-    sx = sy
-    sz = 1
-    # Bound total preview voxels; grow strides uniformly-ish until under budget.
+    base_z_stride = max(1, math.ceil(z / ATLAS_CELL_CAP))
+    base_plane_stride = max(1, math.ceil(max(y, x) / PREVIEW_MAX_PLANE))
+
     def _pdim(n: int, s: int) -> int:
         return (n + s - 1) // s
-    while _pdim(z, sz) * _pdim(y, sy) * _pdim(x, sx) > PREVIEW_MAX_VOXELS:
-        if _pdim(z, sz) >= _pdim(y, sy) and _pdim(z, sz) >= _pdim(x, sx) and z > 1:
-            sz += 1
-        else:
-            sy += 1
-            sx = sy
+
+    def _preview_count(factor: int) -> int:
+        return (
+            _pdim(z, base_z_stride * factor)
+            * _pdim(y, base_plane_stride * factor)
+            * _pdim(x, base_plane_stride * factor)
+        )
+
+    # Algebraic/binary stride selection is O(log(shape)), including adversarial
+    # sparse shapes whose dimensions are far larger than realistic allocations.
+    factor = 1
+    if _preview_count(factor) > PREVIEW_MAX_VOXELS:
+        estimate = max(2, math.ceil((_preview_count(1) / PREVIEW_MAX_VOXELS) ** (1 / 3)))
+        upper = estimate
+        while _preview_count(upper) > PREVIEW_MAX_VOXELS:
+            upper *= 2
+        lower = 1
+        while lower + 1 < upper:
+            middle = (lower + upper) // 2
+            if _preview_count(middle) <= PREVIEW_MAX_VOXELS:
+                upper = middle
+            else:
+                lower = middle
+        factor = upper
+    sz = base_z_stride * factor
+    sy = base_plane_stride * factor
+    sx = base_plane_stride * factor
     return {
         "layout": layout,
         "z": z, "y": y, "x": x, "comp": comp,
@@ -620,7 +752,7 @@ def _rgb_to_uint8(plane):
 
 
 def _encode_png(arr) -> bytes:
-    """(H, W) uint8 grayscale or (H, W, 3) uint8 RGB → PNG bytes."""
+    """(H, W) grayscale, (H, W, 3) RGB, or (H, W, 4) RGBA → PNG bytes."""
     import numpy as np
     from PIL import Image
 
@@ -629,10 +761,49 @@ def _encode_png(arr) -> bytes:
         raise Hdf5Error("cannot encode an empty region")
     if a.dtype != np.uint8:
         a = a.astype("uint8")
-    mode = "L" if a.ndim == 2 else "RGB"
+    mode = "L" if a.ndim == 2 else ("RGBA" if a.shape[-1] == 4 else "RGB")
     buf = io.BytesIO()
     Image.fromarray(a, mode=mode).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _resize_nearest(array: Any, height: int, width: int):
+    """Deterministic nearest-neighbor resize shared by filtered color and IDs."""
+    import numpy as np
+
+    source = np.asarray(array)
+    if source.ndim < 2 or source.shape[0] <= 0 or source.shape[1] <= 0:
+        raise Hdf5Error("cannot resize an empty feature preview")
+    height, width = max(1, int(height)), max(1, int(width))
+    if source.shape[:2] == (height, width):
+        return np.ascontiguousarray(source)
+    y_index = np.minimum(
+        source.shape[0] - 1,
+        np.floor((np.arange(height, dtype="float64") + 0.5) * source.shape[0] / height),
+    ).astype("int64")
+    x_index = np.minimum(
+        source.shape[1] - 1,
+        np.floor((np.arange(width, dtype="float64") + 0.5) * source.shape[1] / width),
+    ).astype("int64")
+    return np.ascontiguousarray(source[y_index[:, None], x_index[None, :]])
+
+
+def _feature_mask_rgba(image: Any, identities: Any, selected: tuple[int, ...]):
+    """Apply global raw-ID equality after target normalization."""
+    import numpy as np
+
+    rgb = np.asarray(image, dtype="uint8")
+    if rgb.ndim == 2:
+        rgb = np.stack([rgb, rgb, rgb], axis=-1)
+    rgb = rgb[..., :3]
+    ids = np.asarray(identities)
+    if ids.shape != rgb.shape[:2]:
+        raise Hdf5Error("unsupported: FeatureIds and target delivery grids do not match")
+    mask = np.isin(ids, np.asarray(selected, dtype="uint64"))
+    rgba = np.zeros((*rgb.shape[:2], 4), dtype="uint8")
+    rgba[mask, :3] = rgb[mask]
+    rgba[mask, 3] = 255
+    return rgba
 
 
 # ---------------------------------------------------------------------------
@@ -697,7 +868,16 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
 
     layout = vol["layout"]
     sz, sy, sx = vol["sz"], vol["sy"], vol["sx"]
-    comp = max(0, min(comp, vol["comp"] - 1))
+    if isinstance(comp, bool):
+        raise Hdf5Error("scalar volume channel must be an integer")
+    try:
+        comp = operator.index(comp)
+    except TypeError as exc:
+        raise Hdf5Error("scalar volume channel must be an integer") from exc
+    if comp < 0 or comp >= int(vol["comp"]):
+        raise Hdf5Error(
+            f"scalar volume channel {comp} is out of range for C={int(vol['comp'])}"
+        )
     if layout == "zyx":
         arr = dset[::sz, ::sy, ::sx]
     elif layout == "zyxc":
@@ -712,7 +892,7 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
 
 
 # ---------------------------------------------------------------------------
-# Geometry (_SIMPL_GEOMETRY)
+# Geometry (DREAM.3D _SIMPL_GEOMETRY) + materials probe
 # ---------------------------------------------------------------------------
 def _bounded_geometry_vector(dset: Any) -> list[Any] | None:
     """Read one tiny geometry vector without trusting its dataset name alone.
@@ -750,20 +930,343 @@ def _valid_geometry_vector(values: Any, *, positive: bool) -> bool:
     return all(math.isfinite(value) and (not positive or value > 0) for value in numbers)
 
 
+def _normalized_group_name(path: str) -> str:
+    """Normalize only the final group segment for DREAM.3D naming variants."""
+    segment = str(path).rstrip("/").rsplit("/", 1)[-1]
+    return "".join(char for char in segment.casefold() if char.isalnum())
 
 
+def _is_feature_group_path(path: str) -> bool:
+    return _normalized_group_name(path) in _FEATURE_GROUP_NAMES
 
 
+def _is_cell_data_group_path(path: str) -> bool:
+    return _normalized_group_name(path) == "celldata"
 
 
+def _is_ensemble_group_path(path: str) -> bool:
+    return _normalized_group_name(path) in _ENSEMBLE_GROUP_NAMES
 
 
+def _is_orientation_array(name: str, dset: Any, shape: tuple[int, ...]) -> bool:
+    """Require a typed multi-component Euler/quaternion array, not a group hint."""
+    if not _is_dataset(dset) or len(shape) < 2:
+        return False
+    itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+    if getattr(dset.dtype, "kind", "") not in {"i", "u", "f"} or not (
+        0 < itemsize <= 8
+    ):
+        return False
+    normalized = "".join(char for char in str(name).casefold() if char.isalnum())
+    components = int(shape[-1]) if shape else 0
+    return ("euler" in normalized and components >= 3) or (
+        "quat" in normalized and components >= 4
+    )
 
 
+def _read_bounded_phase_names(
+    dset: Any,
+    *,
+    max_names: int,
+    max_bytes: int,
+) -> tuple[list[str], int, int]:
+    """Read stored string labels one scalar at a time within count/byte caps."""
+    import h5py
+    import numpy as np
+
+    if not _is_dataset(dset) or max_names <= 0 or max_bytes <= 0:
+        return [], 0, 0
+    try:
+        dtype = dset.dtype
+        string_info = h5py.check_string_dtype(dtype)
+        if string_info is None and getattr(dtype, "kind", "") not in {"S", "U"}:
+            return [], 0, 0
+        itemsize = int(getattr(dtype, "itemsize", 0) or 0)
+        # Fixed-width strings have a trustworthy pre-read bound. Vlen strings have
+        # an object descriptor and are read one scalar at a time, then byte-checked.
+        if getattr(dtype, "kind", "") != "O" and not (
+            0 < itemsize <= MATERIAL_PHASE_MAX_ITEM_BYTES
+        ):
+            return [], 0, 0
+        shape = tuple(int(value) for value in dset.shape)
+        total_items = int(np.prod(shape)) if shape else 1
+        limit = min(total_items, max_names, MATERIAL_PHASE_MAX_NAMES)
+        indices = (iter([()]) if not shape else itertools.islice(np.ndindex(shape), limit))
+        names: list[str] = []
+        decoded_bytes = 0
+        items_read = 0
+        for index in indices:
+            raw = dset[index]
+            items_read += 1
+            if isinstance(raw, np.ndarray):
+                if raw.size != 1:
+                    continue
+                raw = raw.reshape(-1)[0]
+            if isinstance(raw, np.generic):
+                raw = raw.item()
+            if isinstance(raw, bytes):
+                raw_bytes = raw.rstrip(b"\x00")
+                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                    continue
+                text = raw_bytes.decode("utf-8", "replace")
+            elif isinstance(raw, str):
+                raw_bytes = raw.encode("utf-8", "replace")
+                if len(raw_bytes) > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                    continue
+                text = raw
+            else:
+                continue
+            text = text.strip()
+            item_bytes = len(text.encode("utf-8", "replace"))
+            if item_bytes > MATERIAL_PHASE_MAX_ITEM_BYTES:
+                continue
+            if decoded_bytes + item_bytes > max_bytes:
+                break
+            decoded_bytes += item_bytes
+            names.append(text)
+        return names, decoded_bytes, items_read
+    except Exception:  # noqa: BLE001
+        return [], 0, 0
 
 
+def _feature_id_dataset(h5: Any, geometry: dict[str, Any] | None) -> Any | None:
+    if not isinstance(geometry, dict):
+        return None
+    cell_data_path = geometry.get("cell_data_path")
+    dimensions = geometry.get("dimensions")
+    if not isinstance(cell_data_path, str) or not isinstance(dimensions, list):
+        return None
+    cell_group = _hard_object_at_path(h5, cell_data_path)
+    if not _is_group(cell_group):
+        return None
+    candidates: list[tuple[int, Any]] = []
+    for key in _bounded_child_names(cell_group):
+        normalized = "".join(char for char in str(key).casefold() if char.isalnum())
+        if normalized not in {"featureids", "grainids"}:
+            continue
+        dset = _hard_child(cell_group, key)
+        if not _is_dataset(dset):
+            continue
+        try:
+            shape = tuple(int(value) for value in dset.shape)
+            itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+            if (
+                getattr(dset.dtype, "kind", "") in {"i", "u"}
+                and 0 < itemsize <= 8
+                and _cell_dataset_matches_geometry(shape, dimensions)
+            ):
+                candidates.append((0 if normalized == "featureids" else 1, dset))
+        except Exception:  # noqa: BLE001
+            continue
+    return min(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
+def _bounded_hyperslabs(shape: tuple[int, ...], max_values: int):
+    """Yield selections whose element count never exceeds ``max_values``."""
+    if not shape or any(dimension <= 0 for dimension in shape):
+        return
+    remaining = max(1, int(max_values))
+    block_shape = [1] * len(shape)
+    for index in range(len(shape) - 1, -1, -1):
+        take = min(int(shape[index]), remaining)
+        block_shape[index] = max(1, take)
+        remaining = max(1, remaining // block_shape[index])
+    starts = [range(0, shape[index], block_shape[index]) for index in range(len(shape))]
+    for origin in itertools.product(*starts):
+        yield tuple(
+            slice(start, min(start + block_shape[index], shape[index]))
+            for index, start in enumerate(origin)
+        )
+
+
+def _scan_feature_ids(dset: Any) -> dict[str, Any]:
+    """Completely scan a valid cell FeatureIds array in bounded hyperslabs.
+
+    The set of distinct identities is itself capped. Crossing that cap makes the
+    relationship unverified (``complete=False``) rather than silently sampling.
+    """
+    import numpy as np
+
+    empty = {
+        "complete": False,
+        "positive_count": None,
+        "positive_min": None,
+        "positive_max": None,
+        "has_negative": None,
+    }
+    if not _is_dataset(dset):
+        return empty
+    try:
+        shape = tuple(int(value) for value in dset.shape)
+        itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
+        if (
+            not shape
+            or getattr(dset.dtype, "kind", "") not in {"i", "u"}
+            or not (0 < itemsize <= 8)
+        ):
+            return empty
+        positive_ids: set[int] = set()
+        has_negative = False
+        for selection in _bounded_hyperslabs(shape, FEATURE_ID_SCAN_CHUNK_VALUES):
+            block = np.asarray(dset[selection])
+            if block.size > FEATURE_ID_SCAN_CHUNK_VALUES:
+                return empty
+            unique = np.unique(block)
+            if getattr(dset.dtype, "kind", "") == "i" and unique.size:
+                has_negative = has_negative or bool(unique[0] < 0)
+            for value in unique:
+                identity = int(value)
+                if identity > 0:
+                    positive_ids.add(identity)
+                    if len(positive_ids) > FEATURE_ID_MAX_TRACKED_IDENTITIES:
+                        return empty
+        return {
+            "complete": True,
+            "positive_count": len(positive_ids),
+            "positive_min": min(positive_ids) if positive_ids else None,
+            "positive_max": max(positive_ids) if positive_ids else None,
+            "has_negative": has_negative,
+        }
+    except Exception:  # noqa: BLE001
+        return empty
+
+
+def _feature_group_declaration(
+    h5: Any,
+    *,
+    group_path: str,
+    geometry_container: str | None,
+    geometry_dimensions: list[Any] | None,
+) -> dict[str, Any] | None:
+    group = _hard_object_at_path(h5, group_path)
+    if not _is_group(group):
+        return None
+    row_length_frequency: dict[int, int] = {}
+    orientation = False
+    for key in _bounded_child_names(group):
+        dset = _hard_child(group, key)
+        if not _is_dataset(dset):
+            continue
+        try:
+            shape = tuple(int(value) for value in dset.shape)
+            if len(shape) >= 1 and int(shape[0]) >= 1:
+                row_count = int(shape[0])
+                row_length_frequency[row_count] = row_length_frequency.get(row_count, 0) + 1
+            orientation = orientation or _is_orientation_array(str(key), dset, shape)
+        except Exception:  # noqa: BLE001
+            continue
+    if not row_length_frequency:
+        return None
+    stored_rows = max(
+        row_length_frequency,
+        key=lambda rows: (row_length_frequency[rows], -rows),
+    )
+    reserved_zero = _feature_group_has_reserved_zero(
+        h5,
+        group=group,
+        geometry_container=geometry_container,
+        geometry_dimensions=geometry_dimensions,
+        stored_rows=stored_rows,
+    )
+    return {
+        "path": group_path,
+        "stored_rows": stored_rows,
+        "declared_count": max(0, stored_rows - int(reserved_zero)),
+        "modal_support": row_length_frequency[stored_rows],
+        "reserved_zero": reserved_zero,
+        "orientation": orientation,
+    }
+
+
+_RESERVED_ZERO_ATTRIBUTE_NAMES = {
+    "haszerotuple",
+    "reservedfeaturezero",
+    "reservedtuplezero",
+    "tuple0isreserved",
+    "tuplezeroisreserved",
+    "zerotupleisreserved",
+}
+
+
+def _attribute_bool(value: Any) -> bool | None:
+    try:
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        while isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"1", "true", "yes", "reserved"}:
+                return True
+            if normalized in {"0", "false", "no", "not reserved"}:
+                return False
+            return None
+        if isinstance(value, (bool, int)):
+            return bool(value)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
+def _feature_group_has_reserved_zero(
+    h5: Any,
+    *,
+    group: Any,
+    geometry_container: str | None,
+    geometry_dimensions: list[Any] | None,
+    stored_rows: int,
+) -> bool:
+    """Require file/schema evidence before dropping per-feature tuple zero.
+
+    An explicit group attribute is authoritative. Otherwise, a typed
+    ``FeatureIds``/``GrainIds`` cell array in the selected DREAM.3D container
+    establishes the schema relationship in which cell label zero refers to the
+    reserved feature tuple. A group name alone is not sufficient evidence.
+    """
+
+    if stored_rows <= 0:
+        return False
+    try:
+        for key, value in _iter_bounded_attrs(group):
+            normalized = "".join(char for char in str(key).casefold() if char.isalnum())
+            if normalized in _RESERVED_ZERO_ATTRIBUTE_NAMES:
+                declared = _attribute_bool(value)
+                if declared is not None:
+                    return declared
+    except Exception:  # noqa: BLE001
+        pass
+    if not geometry_container:
+        return False
+    for cell_name in ("CellData", "Cell Data", "Cell_Data"):
+        cell_group = _hard_object_at_path(
+            h5, geometry_container.rstrip("/") + "/" + cell_name
+        )
+        if not _is_group(cell_group):
+            continue
+        for child_key in _bounded_child_names(cell_group):
+            normalized = "".join(
+                char for char in str(child_key).casefold() if char.isalnum()
+            )
+            if normalized not in {"featureids", "grainids"}:
+                continue
+            try:
+                dataset = _hard_child(cell_group, child_key)
+                if dataset is None:
+                    continue
+                shape = tuple(int(value) for value in dataset.shape)
+                if (
+                    _is_dataset(dataset)
+                    and getattr(dataset.dtype, "kind", "") in {"i", "u"}
+                    and 0 < int(getattr(dataset.dtype, "itemsize", 0) or 0) <= 8
+                    and isinstance(geometry_dimensions, list)
+                    and _cell_dataset_matches_geometry(shape, geometry_dimensions)
+                ):
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+    return False
 
 
 def _cell_dataset_matches_geometry(shape: tuple[int, ...], dimensions: list[Any]) -> bool:
@@ -896,6 +1399,22 @@ def _find_geometry(h5: Any) -> dict[str, Any] | None:
     return found
 
 
+def _looks_like_dream3d(h5: Any) -> bool:
+    """DREAM.3D heuristic: a ``/DataContainers`` group (or ``/DataStructure`` in
+    DREAM3D-NX), plus a version root attribute or an image geometry marker."""
+    has_container = any(
+        _is_group(_hard_child(h5, key)) for key in ("DataContainers", "DataStructure")
+    )
+    if not has_container:
+        return False
+    try:
+        attrs = {str(k).lower() for k in itertools.islice(h5.attrs.keys(), MAX_ATTRS)}
+    except Exception:  # noqa: BLE001
+        attrs = set()
+    version_attr = any("dream" in a or "fileversion" in a or a == "version" for a in attrs)
+    return version_attr or _find_geometry(h5) is not None
+
+
 def _semantic_role(name: str, kind: str) -> str:
     low = name.strip().lower()
     if "ipf" in low or ("colors" in low and "ipf" in low):
@@ -921,6 +1440,493 @@ def _semantic_role(name: str, kind: str) -> str:
     if kind == "vector_volume":
         return "vector_field"
     return "scalar_field"
+
+
+def _feature_filter_ids(raw: str | None) -> tuple[int, ...] | None:
+    """Parse the public comma-list contract into sorted, unique positive uint32 IDs."""
+    if raw is None:
+        return None
+    text = str(raw)
+    if (
+        not text
+        or len(text.encode("utf-8")) > FEATURE_FILTER_MAX_QUERY_BYTES
+        or re.fullmatch(r"[0-9]+(?:,[0-9]+)*", text) is None
+    ):
+        raise Hdf5Error(
+            "unsupported: feature_ids must be a comma-separated list of positive uint32 values"
+        )
+    values: set[int] = set()
+    for token in text.split(","):
+        value = int(token, 10)
+        if value <= 0 or value > FEATURE_ID_UINT32_MAX:
+            raise Hdf5Error("unsupported: feature_ids must contain only positive uint32 values")
+        values.add(value)
+    if len(values) > FEATURE_FILTER_MAX_IDS:
+        raise Hdf5Error(
+            f"unsupported: feature_ids supports at most {FEATURE_FILTER_MAX_IDS} unique values"
+        )
+    return tuple(sorted(values))
+
+
+def _native_zyx_shape(dset: Any) -> tuple[int, int, int] | None:
+    try:
+        shape = tuple(int(value) for value in dset.shape)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(shape) == 3:
+        return shape
+    if len(shape) == 4 and shape[-1] >= 1:
+        return shape[:3]
+    return None
+
+
+def _dataset_local_geometry(
+    h5: Any, dataset_path: str, *, target: Any | None = None
+) -> dict[str, Any] | None:
+    """Resolve geometry owned by the selected direct-hard-linked CellData dataset."""
+    text = str(dataset_path or "").strip()
+    if not text.startswith("/") or "\x00" in text:
+        return None
+    parts = text.split("/")[1:]
+    if len(parts) < 2 or any(part in {"", ".", ".."} for part in parts):
+        return None
+    target_name = parts[-1]
+    cell_data_name = parts[-2]
+    if _normalized_group_name(cell_data_name) != "celldata":
+        return None
+    container_path = "/" + "/".join(parts[:-2])
+    container = _direct_hard_object_at_path(h5, container_path)
+    cell_group = _direct_hard_child(container, cell_data_name)
+    geometry_group = _direct_hard_child(container, "_SIMPL_GEOMETRY")
+    direct_target = _direct_hard_child(cell_group, target_name)
+    if not (
+        _is_group(container)
+        and _is_group(cell_group)
+        and _is_group(geometry_group)
+        and _is_dataset(direct_target)
+        and _hard_links_scoped_to_parent(cell_group, container)
+        and _hard_links_scoped_to_parent(geometry_group, container)
+        and _hard_links_scoped_to_parent(direct_target, cell_group)
+    ):
+        return None
+    direct_address = _object_address(direct_target)
+    target_address = _object_address(target) if target is not None else direct_address
+    if direct_address is None or target_address is None or direct_address != target_address:
+        return None
+
+    dimensions_dataset = _direct_hard_child(geometry_group, "DIMENSIONS")
+    spacing_dataset = _direct_hard_child(geometry_group, "SPACING")
+    origin_dataset = _direct_hard_child(geometry_group, "ORIGIN")
+    if not all(
+        _is_dataset(dataset)
+        and _hard_links_scoped_to_parent(dataset, geometry_group)
+        for dataset in (dimensions_dataset, spacing_dataset, origin_dataset)
+    ):
+        return None
+    dimensions = _bounded_geometry_vector(dimensions_dataset)
+    spacing = _bounded_geometry_vector(spacing_dataset)
+    origin = _bounded_geometry_vector(origin_dataset)
+    if not (
+        _valid_geometry_vector(dimensions, positive=True)
+        and _valid_geometry_vector(spacing, positive=True)
+        and _valid_geometry_vector(origin, positive=False)
+    ):
+        return None
+    try:
+        xyz = tuple(int(value) for value in dimensions[:3])
+        if any(float(dimensions[index]) != xyz[index] for index in range(3)):
+            return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if _native_zyx_shape(direct_target) != tuple(reversed(xyz)):
+        return None
+
+    return {
+        "path": str(getattr(geometry_group, "name", "") or ""),
+        "dimensions": dimensions,
+        "spacing": spacing,
+        "origin": origin,
+        "cell_data_path": str(getattr(cell_group, "name", "") or ""),
+        "cell_data_consistent": True,
+        "complete": True,
+    }
+
+
+def _resolve_feature_registration(
+    h5: Any,
+    dataset_path: str,
+    *,
+    target: Any | None = None,
+    target_kind: str | None = None,
+) -> dict[str, Any]:
+    """Resolve an exact DREAM.3D CellData target↔FeatureIds registration.
+
+    This deliberately accepts only direct hard-linked siblings under the selected,
+    complete image geometry.  Names or matching dimensions alone are insufficient:
+    filtering the wrong array would look convincing while corrupting the science.
+    """
+    normalized_path = "/" + str(dataset_path or "").strip().strip("/")
+    cell_data_path, _, target_name = normalized_path.rpartition("/")
+    cell_data_path = cell_data_path or "/"
+    if not target_name or not _is_cell_data_group_path(cell_data_path):
+        raise Hdf5Error("unsupported: feature filtering requires a selected DREAM.3D CellData map")
+    container_path, _, _ = cell_data_path.rstrip("/").rpartition("/")
+    container_path = container_path or "/"
+    container = _direct_hard_object_at_path(h5, container_path)
+    cell_group = _direct_hard_object_at_path(h5, cell_data_path)
+    geometry_group = _direct_hard_child(container, "_SIMPL_GEOMETRY")
+    if not _is_group(container) or not _is_group(cell_group) or not _is_group(geometry_group):
+        raise Hdf5Error("unsupported: DREAM.3D CellData and geometry must be direct hard linked")
+    dimensions = _bounded_geometry_vector(_direct_hard_child(geometry_group, "DIMENSIONS"))
+    spacing = _bounded_geometry_vector(_direct_hard_child(geometry_group, "SPACING"))
+    origin = _bounded_geometry_vector(_direct_hard_child(geometry_group, "ORIGIN"))
+    if not (
+        _valid_geometry_vector(dimensions, positive=True)
+        and _valid_geometry_vector(spacing, positive=True)
+        and _valid_geometry_vector(origin, positive=False)
+    ):
+        raise Hdf5Error("unsupported: incomplete DREAM.3D CellData geometry")
+    try:
+        xyz = tuple(int(value) for value in dimensions[:3])
+        if any(float(dimensions[index]) != xyz[index] or xyz[index] <= 0 for index in range(3)):
+            raise ValueError
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise Hdf5Error("unsupported: invalid DREAM.3D geometry dimensions") from exc
+    expected_zyx = (xyz[2], xyz[1], xyz[0])
+
+    direct_target = _direct_hard_child(cell_group, target_name)
+    if not _is_dataset(direct_target):
+        raise Hdf5Error("unsupported: selected CellData map must be direct hard linked")
+    if target is not None and _object_address(direct_target) != _object_address(target):
+        raise Hdf5Error("unsupported: selected CellData identity is ambiguous")
+    target = direct_target
+
+    target_shape = _native_zyx_shape(target)
+    if target_shape != expected_zyx:
+        raise Hdf5Error("unsupported: selected CellData map does not match native geometry ZYX")
+    target_volume = _interpret_volume(
+        tuple(int(v) for v in target.shape),
+        target.dtype,
+        exact_zyx=expected_zyx,
+    )
+    if target_volume is None or target_volume.get("layout") not in {"zyx", "zyxc"}:
+        raise Hdf5Error("unsupported: selected CellData map has no exact ZYX volume layout")
+    target_kind = target_kind or _classify_shallow(target_name, target.dtype, tuple(target.shape)) or ""
+    target_role = _semantic_role(target_name, target_kind)
+    dtype_kind = getattr(target.dtype, "kind", "")
+    components = int(target_volume.get("comp", 0))
+    role_is_exact = (
+        (target_role == "feature_ids" and dtype_kind in {"i", "u"} and components == 1)
+        or (target_role == "euler_angles" and dtype_kind == "f" and components == 3)
+        or (target_role == "ipf_colors" and dtype_kind in {"i", "u"} and components in {3, 4})
+    )
+    if not role_is_exact:
+        raise Hdf5Error("unsupported: selected CellData map is not FeatureIds, Euler angles, or IPF colors")
+
+    feature_ids_present = "FeatureIds" in cell_group
+    grain_ids_present = "GrainIds" in cell_group
+    feature_ids = _direct_hard_child(cell_group, "FeatureIds") if feature_ids_present else None
+    grain_ids = _direct_hard_child(cell_group, "GrainIds") if grain_ids_present else None
+    if feature_ids_present and not _is_dataset(feature_ids):
+        raise Hdf5Error("unsupported: FeatureIds must be a direct hard-linked dataset")
+    if feature_ids_present and grain_ids_present:
+        if not _is_dataset(grain_ids) or _object_address(feature_ids) != _object_address(grain_ids):
+            raise Hdf5Error("unsupported: FeatureIds and GrainIds identities are ambiguous")
+    identity_name = "FeatureIds" if feature_ids_present else "GrainIds"
+    identity = feature_ids if feature_ids_present else grain_ids
+    if not _is_dataset(identity):
+        raise Hdf5Error("unsupported: no direct hard-linked FeatureIds identity volume")
+    identity_shape = tuple(int(value) for value in identity.shape)
+    identity_zyx = _native_zyx_shape(identity)
+    identity_volume = _interpret_volume(identity_shape, identity.dtype, exact_zyx=expected_zyx)
+    if (
+        getattr(identity.dtype, "kind", "") not in {"i", "u"}
+        or identity_zyx != expected_zyx
+        or identity_volume is None
+        or identity_volume.get("layout") not in {"zyx", "zyxc"}
+        or int(identity_volume.get("comp", 0)) != 1
+    ):
+        raise Hdf5Error("unsupported: FeatureIds must be a co-registered integer ZYX volume")
+    stride = (target_volume["sz"], target_volume["sy"], target_volume["sx"])
+    if stride != (identity_volume["sz"], identity_volume["sy"], identity_volume["sx"]):
+        raise Hdf5Error("unsupported: target and FeatureIds preview grids do not match")
+
+    source_path = f"{cell_data_path.rstrip('/')}/{identity_name}"
+    return {
+        "target": target,
+        "target_volume": target_volume,
+        "target_role": target_role,
+        "identity": identity,
+        "identity_volume": identity_volume,
+        "source_dataset_path": source_path,
+        "native_shape": expected_zyx,
+        "preview_shape": (
+            int(target_volume["pz"]),
+            int(target_volume["py"]),
+            int(target_volume["px"]),
+        ),
+        "preview_stride": stride,
+    }
+
+
+def _feature_filter_metadata(registration: dict[str, Any]) -> dict[str, Any]:
+    native = registration["native_shape"]
+    preview = registration["preview_shape"]
+    stride = registration["preview_stride"]
+    source = registration["source_dataset_path"]
+    return {
+        "supported": True,
+        "source_dataset_path": source,
+        "max_ids": FEATURE_FILTER_MAX_IDS,
+        "background_id": 0,
+        "provenance": "co_registered_raw_integer_feature_ids",
+        "registration_key": (
+            f"{source}|{native[0]}x{native[1]}x{native[2]}|"
+            f"{stride[0]}x{stride[1]}x{stride[2]}"
+        ),
+        "target_role": registration["target_role"],
+        "native_shape": list(native),
+        "preview_shape": list(preview),
+        "preview_stride": {"z": stride[0], "y": stride[1], "x": stride[2]},
+    }
+
+
+def _materials_probe(h5: Any) -> dict[str, Any]:
+    """Detect DREAM.3D and collect the materials capabilities/roles/phase names +
+    renderable cell-data maps and relationally validated feature/grain tables.
+
+    Traversal is hard-link-only. Phase labels must be typed string datasets in an
+    ensemble group belonging to the selected geometry container. Grain count is not
+    inferred from table rows: it is published only after a complete cell FeatureIds
+    scan proves that declared tuples and referenced positive identities agree.
+    """
+
+    detected = _looks_like_dream3d(h5)
+    result: dict[str, Any] = {
+        "detected": detected,
+        "geometry": None,
+        "phase_names": [],
+        "phase_names_source": None,
+        "phase_names_provenance": None,
+        "roles": {},
+        "capabilities": [],
+        "feature_count": None,
+        "grain_count": None,
+        "declared_feature_tuple_count": None,
+        "referenced_positive_feature_count": None,
+        "feature_id_scan_complete": False,
+        "feature_id_consistency": None,
+        "maps": [],          # list of (path, name, kind, role)
+        "feature_groups": [],  # selected relationship-backed feature group
+        "feature_group_reserved_zero": {},
+        "feature_zero_reserved": None,
+        "recommended": None,
+    }
+    if not detected:
+        return result
+    result["geometry"] = _find_geometry(h5)
+    geometry = result["geometry"]
+    geometry_container = None
+    if isinstance(geometry, dict) and isinstance(geometry.get("path"), str):
+        geometry_container = geometry["path"].rsplit("/", 1)[0]
+
+    maps: list[tuple[str, str, str, str]] = []
+    feature_group_paths: list[str] = []
+    phase_names: list[str] = []
+    phase_names_seen: set[str] = set()
+    phase_bytes = 0
+    phase_items_read = 0
+    map_orientation = False
+
+    def _visit(name: str, obj: Any) -> bool | None:
+        nonlocal phase_bytes, phase_items_read, map_orientation
+        base = name.rsplit("/", 1)[-1]
+        dataset_path = "/" + name
+        parent = "/" + name.rsplit("/", 1)[0] if "/" in name else "/"
+        in_selected_container = bool(
+            geometry_container
+            and dataset_path.startswith(geometry_container.rstrip("/") + "/")
+        )
+
+        # Phase/material labels are accepted only from a direct, typed ensemble
+        # group inside the geometry container selected by _find_geometry.
+        if base in ("PhaseName", "MaterialName", "PhaseNames") and _is_dataset(obj):
+            ensemble_parent = parent.rsplit("/", 1)[0] if "/" in parent.rstrip("/") else "/"
+            if not (
+                in_selected_container
+                and _is_ensemble_group_path(parent)
+                and ensemble_parent == geometry_container
+            ):
+                return None
+            remaining_names = MATERIAL_PHASE_MAX_NAMES - phase_items_read
+            remaining_bytes = MATERIAL_PHASE_MAX_TOTAL_BYTES - phase_bytes
+            stored_names, used_bytes, items_read = _read_bounded_phase_names(
+                obj, max_names=remaining_names, max_bytes=remaining_bytes
+            )
+            phase_bytes += used_bytes
+            phase_items_read += items_read
+            for text in stored_names:
+                normalized = text.casefold()
+                if (
+                    text
+                    and normalized not in ("invalid phase", "unknown phase")
+                    and normalized not in phase_names_seen
+                ):
+                    phase_names_seen.add(normalized)
+                    phase_names.append(text)
+            return None
+        if not _is_dataset(obj):
+            return None
+        try:
+            dt = obj.dtype
+            shape = tuple(int(s) for s in obj.shape)
+        except Exception:  # noqa: BLE001
+            return None
+        if _is_compound(dt) or _is_string_dtype(dt):
+            return None
+        kind = _classify_shallow(base, dt, shape)
+        # Renderable spatial maps: volumes under a *CellData* group (the per-voxel
+        # spatial arrays). Match the final normalized segment so similarly named
+        # per-feature/per-phase groups never leak into the map list.
+        if in_selected_container and kind in _VOLUME_KINDS and _is_cell_data_group_path(parent):
+            vol = _interpret_volume(shape, dt)
+            if vol is not None and (vol["z"] > 1 or (vol["y"] > 1 and vol["x"] > 1)):
+                role = _semantic_role(base, kind)
+                maps.append((dataset_path, base, kind, role))
+                map_orientation = map_orientation or _is_orientation_array(base, obj, shape)
+        # Per-feature arrays may use classic CellFeatureData or the real pipeline's
+        # ``Grain Data`` spelling. Keep this to known final group names.
+        if in_selected_container and _is_feature_group_path(parent) and len(shape) in (1, 2):
+            grp = parent
+            if grp not in feature_group_paths:
+                feature_group_paths.append(grp)
+        return None
+
+    try:
+        _visit_hard_objects(h5, _visit)
+    except Exception:  # noqa: BLE001
+        pass
+
+    geometry_dimensions = geometry.get("dimensions") if isinstance(geometry, dict) else None
+    declarations = [
+        declaration
+        for group_path in feature_group_paths
+        if (
+            declaration := _feature_group_declaration(
+                h5,
+                group_path=group_path,
+                geometry_container=geometry_container,
+                geometry_dimensions=geometry_dimensions,
+            )
+        )
+        is not None
+    ]
+    feature_id_dset = _feature_id_dataset(h5, geometry)
+    feature_id_scan = _scan_feature_ids(feature_id_dset)
+    referenced_count = feature_id_scan["positive_count"]
+
+    for declaration in declarations:
+        consistency: bool | None = None
+        declared_count = declaration["declared_count"]
+        if feature_id_scan["complete"] and referenced_count is not None:
+            consistency = bool(
+                not feature_id_scan["has_negative"]
+                and referenced_count == declared_count
+                and (
+                    (declared_count == 0 and feature_id_scan["positive_min"] is None)
+                    or (
+                        declared_count > 0
+                        and feature_id_scan["positive_min"] == 1
+                        and feature_id_scan["positive_max"] == declared_count
+                    )
+                )
+            )
+        declaration["consistency"] = consistency
+
+    selected_declaration = None
+    if declarations:
+        def _relationship_score(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int, int]:
+            index, declaration = item
+            consistency = declaration["consistency"]
+            relationship_rank = 2 if consistency is True else (1 if consistency is False else 0)
+            difference = (
+                abs(declaration["declared_count"] - referenced_count)
+                if referenced_count is not None
+                else 0
+            )
+            # Relationship dominates; modal support resolves unverified ties. The
+            # final tie preserves bounded traversal order rather than filename sort.
+            return (
+                relationship_rank,
+                -difference,
+                declaration["modal_support"],
+                -index,
+            )
+
+        selected_declaration = max(enumerate(declarations), key=_relationship_score)[1]
+
+    feature_groups: list[str] = []
+    feature_group_reserved_zero: dict[str, bool] = {}
+    feature_zero_reserved: bool | None = None
+    declared_feature_tuple_count = None
+    feature_id_consistency = None
+    feature_count = None
+    grain_count = None
+    selected_orientation = False
+    if selected_declaration is not None:
+        selected_path = selected_declaration["path"]
+        feature_groups = [selected_path]
+        feature_zero_reserved = selected_declaration["reserved_zero"]
+        feature_group_reserved_zero[selected_path] = feature_zero_reserved
+        declared_feature_tuple_count = selected_declaration["declared_count"]
+        feature_count = declared_feature_tuple_count
+        feature_id_consistency = selected_declaration["consistency"]
+        selected_orientation = selected_declaration["orientation"]
+        if feature_id_consistency is True:
+            grain_count = referenced_count
+
+    caps: list[str] = ["maps"] if maps else []
+    if feature_groups:
+        caps.append("grain_metrics")
+    if map_orientation or selected_orientation:
+        caps.append("orientation")
+
+    roles = {role: path for (path, _n, _k, role) in maps}
+
+    # Recommended map: IPF colors > feature ids > confidence/quality > first.
+    priority = ["ipf_colors", "feature_ids", "confidence_index", "image_quality"]
+    recommended = None
+    for want in priority:
+        for (path, _n, _k, role) in maps:
+            if role == want:
+                recommended = path
+                break
+        if recommended is not None:
+            break
+    if recommended is None and maps:
+        recommended = maps[0][0]
+
+    result.update(
+        {
+            "phase_names": phase_names,
+            "phase_names_source": "stored_metadata" if phase_names else None,
+            "phase_names_provenance": _PHASE_NAMES_PROVENANCE if phase_names else None,
+            "roles": roles,
+            "capabilities": caps,
+            "feature_count": feature_count,
+            "grain_count": grain_count,
+            "declared_feature_tuple_count": declared_feature_tuple_count,
+            "referenced_positive_feature_count": referenced_count,
+            "feature_id_scan_complete": bool(feature_id_scan["complete"]),
+            "feature_id_consistency": feature_id_consistency,
+            "maps": maps,
+            "feature_groups": feature_groups,
+            "feature_group_reserved_zero": feature_group_reserved_zero,
+            "feature_zero_reserved": feature_zero_reserved,
+            "recommended": recommended,
+        }
+    )
+    return result
 
 
 def _is_dataset(obj: Any) -> bool:
@@ -1094,11 +2100,63 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
         root_keys = [str(key) for key in _bounded_child_names(h5)]
         root_attributes = _read_attrs(h5)
         tree, dataset_kinds, truncated, group_count, dataset_count, default_path = _walk_tree(h5)
+        materials_probe = _materials_probe(h5)
 
-        # Default selection: the largest renderable dataset from the tree walk.
-        default_dataset_path = default_path
+        materials_payload = None
+        if materials_probe["detected"]:
+            recommended_view = "materials" if materials_probe["maps"] else "explorer"
+            materials_payload = {
+                "detected": True,
+                "schema": "dream3d",
+                "capabilities": materials_probe["capabilities"],
+                "roles": materials_probe["roles"],
+                "phase_names": materials_probe["phase_names"],
+                "phase_names_source": materials_probe["phase_names_source"],
+                "phase_names_provenance": materials_probe["phase_names_provenance"],
+                "feature_count": materials_probe["feature_count"],
+                "grain_count": materials_probe["grain_count"],
+                "declared_feature_tuple_count": materials_probe[
+                    "declared_feature_tuple_count"
+                ],
+                "referenced_positive_feature_count": materials_probe[
+                    "referenced_positive_feature_count"
+                ],
+                "feature_id_scan_complete": materials_probe["feature_id_scan_complete"],
+                "feature_id_consistency": materials_probe["feature_id_consistency"],
+                "feature_zero_reserved": materials_probe["feature_zero_reserved"],
+                "recommended_view": recommended_view,
+            }
+            top["modality"] = "materials"
 
-        geometry = _find_geometry(h5)
+        # Default selection: for DREAM.3D prefer the recommended map; else the largest
+        # renderable dataset from the tree walk.
+        default_dataset_path = None
+        if materials_payload is not None and materials_probe["recommended"]:
+            default_dataset_path = materials_probe["recommended"]
+        elif default_path is not None:
+            default_dataset_path = default_path
+
+        # Top-level axis_sizes for the DEFAULT dataset (preview grid — the same
+        # index range the generic /slice endpoint serves), so the Resources-grid
+        # hover z-scrub engages for HDF5 cards. Advisory: any failure just means
+        # no scrub.
+        if default_dataset_path:
+            try:
+                dset = _hard_object_at_path(h5, str(default_dataset_path))
+                if dset is not None and _is_dataset(dset):
+                    vol = _interpret_volume(tuple(dset.shape), dset.dtype)
+                    if vol is not None:
+                        top["axis_sizes"] = {
+                            "T": 1,
+                            "C": int(vol["comp"]),
+                            "Z": int(vol["pz"]),
+                            "Y": int(vol["py"]),
+                            "X": int(vol["px"]),
+                        }
+            except Exception:  # noqa: BLE001 - axis sizes are advisory
+                pass
+
+        geometry = materials_probe["geometry"]
 
         limitations: list[str] = []
         if truncated:
@@ -1126,6 +2184,7 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
             "limitations": limitations,
             "selected_dataset_path": default_dataset_path,
             "default_dataset_path": default_dataset_path,
+            "materials": materials_payload,
         }
         top["hdf5"] = hdf5_block
         return top
@@ -1158,6 +2217,7 @@ def _unsupported_hdf5(reason: str) -> dict[str, Any]:
         "limitations": [reason],
         "selected_dataset_path": None,
         "default_dataset_path": None,
+        "materials": None,
     }
 
 
@@ -1165,9 +2225,12 @@ def _unsupported_hdf5(reason: str) -> dict[str, Any]:
 # Dataset resolution
 # ---------------------------------------------------------------------------
 def _open(path: str):
-    import h5py
-
+    # The h5py import lives inside the try so an environment without h5py
+    # degrades to the same 422 "unsupported" class as a corrupt file, instead
+    # of a 500 with a traceback.
     try:
+        import h5py
+
         return h5py.File(path, "r")
     except Exception as exc:  # noqa: BLE001
         raise Hdf5Error(f"could not open HDF5 file (unsupported or corrupt): {exc}") from exc
@@ -1205,12 +2268,32 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
         estimated_bytes = itemsize * element_count if itemsize else None
 
         shallow = _classify_shallow(name, dt, shape)
-        vol = _interpret_volume(shape, dt) if shallow in _VOLUME_KINDS else None
+        registration = None
+        role_hint = _semantic_role(name, shallow or "")
+        if role_hint in {"feature_ids", "euler_angles", "ipf_colors"}:
+            try:
+                registration = _resolve_feature_registration(
+                    h5,
+                    dataset_path,
+                    target=dset,
+                    target_kind=shallow,
+                )
+            except Hdf5Error:
+                registration = None
+        if registration is not None:
+            vol = registration["target_volume"]
+            shallow = {
+                "feature_ids": "label_volume",
+                "euler_angles": "vector_volume",
+                "ipf_colors": "rgb_volume",
+            }[registration["target_role"]]
+        else:
+            vol = _interpret_volume(shape, dt) if shallow in _VOLUME_KINDS else None
 
         attributes = _read_attrs(dset)
 
-        # Geometry (DREAM.3D) attached if the dataset lives under an image geometry.
-        geometry = _find_geometry(h5)
+        # Geometry is dataset-local: only a direct CellData sibling may calibrate it.
+        geometry = _dataset_local_geometry(h5, dataset_path, target=dset)
 
         # Structured fields (compound) → columns.
         structured_fields: list[dict[str, str]] = []
@@ -1256,7 +2339,7 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
         slice_axes: list[str] = []
         preview_planes: dict[str, Any] = {}
         atlas_scheme = None
-        physical_spacing = _spacing_from_geometry(geometry)
+        physical_spacing = _preview_spacing_from_geometry(geometry, vol)
 
         if vol is not None:
             pz, py, px = vol["pz"], vol["py"], vol["px"]
@@ -1266,6 +2349,11 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             preview_planes = _build_preview_planes(vol, slice_axes, physical_spacing)
             if volume_eligible and render_policy != "scalar":
                 atlas_scheme = _atlas_scheme(px, py, pz)
+
+        semantic_role = _semantic_role(name, preview_kind or "") if is_volume_kind else None
+        feature_filter = (
+            _feature_filter_metadata(registration) if registration is not None else None
+        )
 
         # Capabilities (load-bearing: "volume" gates the Volume tab; "histogram" gates
         # the Distribution tab). Only numeric renderable data gets histogram.
@@ -1278,6 +2366,8 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             capabilities.append("histogram")
         if sample_stats is not None:
             capabilities.append("statistics")
+        if feature_filter is not None:
+            capabilities.append("feature_filter")
 
         # sample_values: a tiny corner excerpt (JSON-safe).
         sample_values = _sample_values_excerpt(dset, dt, shape)
@@ -1288,8 +2378,10 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             "dataset_path": dataset_path,
             "dataset_name": name,
             "preview_kind": preview_kind,
-            "semantic_role": _semantic_role(name, preview_kind or "") if is_volume_kind else None,
+            "semantic_role": semantic_role,
+            "feature_filter": feature_filter,
             "units_hint": _units_hint(name, dset),
+            "materials_domain_tags": [],
             "dtype": _dtype_str(dt),
             "shape": list(shape),
             "rank": int(rank),
@@ -1396,6 +2488,56 @@ def _spacing_from_geometry(geometry: dict[str, Any] | None) -> dict[str, Any]:
     return {"x": None, "y": None, "z": None}
 
 
+def _preview_spacing_from_geometry(
+    geometry: dict[str, Any] | None, vol: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Calibrate native geometry spacing to the bounded preview grid.
+
+    ``geometry`` remains raw XYZ source metadata; ``physical_spacing`` describes
+    preview voxels.  Scaling by native/preview counts preserves the exact native
+    physical extent even when ceil-based sampling produces a partial final stride.
+    """
+    missing = {"x": None, "y": None, "z": None}
+    if vol is None or not geometry:
+        return missing
+    dimensions = geometry.get("dimensions")
+    spacing = geometry.get("spacing")
+    if not (
+        _valid_geometry_vector(dimensions, positive=True)
+        and _valid_geometry_vector(spacing, positive=True)
+    ):
+        return missing
+    try:
+        native_xyz = (int(vol["x"]), int(vol["y"]), int(vol["z"]))
+        preview_xyz = (int(vol["px"]), int(vol["py"]), int(vol["pz"]))
+        geometry_xyz = tuple(float(value) for value in dimensions[:3])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return missing
+    if geometry_xyz != native_xyz or any(value <= 0 for value in preview_xyz):
+        return missing
+
+    raw = _spacing_from_geometry(geometry)
+    try:
+        source_extents = {
+            axis: float(raw[axis]) * native_count
+            for axis, native_count in zip(("x", "y", "z"), native_xyz, strict=True)
+        }
+    except (TypeError, ValueError, OverflowError):
+        return missing
+    if not all(math.isfinite(value) and value > 0 for value in source_extents.values()):
+        return missing
+    try:
+        effective = {
+            axis: source_extents[axis] / preview_count
+            for axis, preview_count in zip(("x", "y", "z"), preview_xyz, strict=True)
+        }
+    except (TypeError, ValueError, OverflowError, ZeroDivisionError):
+        return missing
+    if not all(math.isfinite(value) and value > 0 for value in effective.values()):
+        return missing
+    return effective
+
+
 def _num(v: Any) -> float | None:
     try:
         f = float(v)
@@ -1418,8 +2560,10 @@ def _build_preview_planes(vol: dict[str, Any], slice_axes: list[str], spacing: d
     }
     for axis in slice_axes:
         s = specs[axis]
-        w = int(s["w"]); h = int(s["h"])
-        world_w = w * float(s["col"]); world_h = h * float(s["row"])
+        w = int(s["w"])
+        h = int(s["h"])
+        world_w = w * float(s["col"])
+        world_h = h * float(s["row"])
         planes[axis] = {
             "axis": axis,
             "label": s["label"],
@@ -1496,10 +2640,26 @@ def _volume_context(path: str, dataset_path: str):
         name = dataset_path.rsplit("/", 1)[-1] or dataset_path
         if not _is_numeric_dtype(dt):
             raise Hdf5Error("unsupported: dataset is not numeric and cannot be rendered as an image")
+        shallow = _classify_shallow(name, dt, shape)
+        if _semantic_role(name, shallow or "") in {"feature_ids", "euler_angles", "ipf_colors"}:
+            try:
+                registration = _resolve_feature_registration(
+                    h5,
+                    dataset_path,
+                    target=dset,
+                    target_kind=shallow,
+                )
+                exact_kind = {
+                    "feature_ids": "label_volume",
+                    "euler_angles": "vector_volume",
+                    "ipf_colors": "rgb_volume",
+                }[registration["target_role"]]
+                return h5, dset, dt, registration["target_volume"], exact_kind
+            except Hdf5Error:
+                pass
         vol = _interpret_volume(shape, dt)
         if vol is None:
             raise Hdf5Error("unsupported: dataset shape cannot be rendered as a preview volume")
-        shallow = _classify_shallow(name, dt, shape)
         # Refine kind for label detection (small integer sample).
         integer_unique = None
         if _is_integer_dtype(dt):
@@ -1512,9 +2672,70 @@ def _volume_context(path: str, dataset_path: str):
         raise
 
 
+# Per-worker cache of the default-dataset choice, keyed on (path, mtime): the
+# tree walk is bounded but the DREAM.3D materials probe scans the full
+# FeatureIds array, and the grid z-scrub calls this once per FRAME — uncached,
+# one hover over a production-sized .dream3d card re-reads gigabytes per frame.
+_DEFAULT_DATASET_CACHE: dict[tuple, str | None] = {}
+
+
+def default_dataset_path(path: str) -> str | None:
+    """The dataset the viewer would select by default: the recommended DREAM.3D
+    map when the materials schema is detected, else the largest renderable
+    dataset from the tree walk (same policy as :func:`build_hdf5_viewer_info`)."""
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        mtime = 0
+    key = (path, mtime)
+    if key in _DEFAULT_DATASET_CACHE:
+        return _DEFAULT_DATASET_CACHE[key]
+    h5 = _open(path)
+    try:
+        _tree, _kinds, _truncated, _groups, _datasets, walk_default = _walk_tree(h5)
+        probe = _materials_probe(h5)
+    finally:
+        _safe_close(h5)
+    result: str | None = walk_default
+    if probe["detected"] and probe["recommended"]:
+        result = str(probe["recommended"])
+    if len(_DEFAULT_DATASET_CACHE) > 512:
+        _DEFAULT_DATASET_CACHE.clear()
+    _DEFAULT_DATASET_CACHE[key] = result
+    return result
+
+
+def thumbnail_png(path: str, *, max_size: int = 512) -> bytes:
+    """Grid thumbnail for an HDF5-data file: the default dataset's mid-Z preview
+    slice, bounded to ``max_size`` on the long edge. Raises :class:`Hdf5Error`
+    (a 422 through the service's decode-marker mapping) when the file holds no
+    renderable dataset (tables/scalars only), so the grid falls back to its
+    icon without counting a server fault."""
+    from PIL import Image
+
+    dataset_path = default_dataset_path(path)
+    if not dataset_path:
+        raise Hdf5Error("no renderable dataset in HDF5 file (unsupported for preview)")
+    png = slice_png(path, dataset_path)
+    img = Image.open(io.BytesIO(png))
+    img.load()
+    width, height = img.size
+    long_edge = max(width, height)
+    if long_edge <= max_size:
+        return png
+    scale = max_size / long_edge
+    resized = img.resize(
+        (max(1, round(width * scale)), max(1, round(height * scale))), Image.BILINEAR
+    )
+    buf = io.BytesIO()
+    resized.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def slice_png(path: str, dataset_path: str, *, axis: str = "z", index: int | None = None,
-              component: int = 0) -> bytes:
+              component: int = 0, feature_ids: str | None = None) -> bytes:
     """One preview slice as PNG. ``index`` is a preview-grid index (clamped, never 500)."""
+    selected = _feature_filter_ids(feature_ids)
     h5, dset, dt, vol, kind = _volume_context(path, dataset_path)
     try:
         axis = axis if axis in ("z", "y", "x") else "z"
@@ -1530,26 +2751,57 @@ def slice_png(path: str, dataset_path: str, *, axis: str = "z", index: int | Non
         else:  # scalar_volume / vector_volume(component)
             lo, hi = _global_window(path, dset, dataset_path, vol, int(component))
             img = _window_to_uint8(plane, lo, hi)
+        if selected is not None:
+            registration = _resolve_feature_registration(
+                h5,
+                dataset_path,
+                target=dset,
+                target_kind=kind,
+            )
+            identity_plane = (
+                plane
+                if _object_address(registration["identity"]) == _object_address(dset)
+                else _read_preview_plane(
+                    registration["identity"],
+                    registration["identity_volume"],
+                    axis,
+                    int(index),
+                    0,
+                    rgb=False,
+                )
+            )
+            _validate_feature_identity_values(identity_plane)
+            img = _feature_mask_rgba(img, identity_plane, selected)
         return _encode_png(img)
     finally:
         _safe_close(h5)
 
 
-def atlas_png(path: str, dataset_path: str, **_ignored: Any) -> bytes:
+def atlas_png(path: str, dataset_path: str, *, feature_ids: str | None = None, **_ignored: Any) -> bytes:
     """The Z-atlas mosaic PNG matching the summary's ``atlas_scheme``. Extra params
     (enhancement/fusion_method/negative/channels) are accepted no-op for contract
     compatibility; the sole call site sends only ``dataset_path``."""
     import numpy as np
     from PIL import Image
 
+    selected = _feature_filter_ids(feature_ids)
     h5, dset, dt, vol, kind = _volume_context(path, dataset_path)
     try:
         pz, py, px = vol["pz"], vol["py"], vol["px"]
         scheme = _atlas_scheme(px, py, pz)
         cols, rows = scheme["columns"], scheme["rows"]
         cell_w, cell_h = scheme["slice_width"], scheme["slice_height"]
-        atlas = np.zeros((cell_h * rows, cell_w * cols, 3), dtype="uint8")
+        channels = 4 if selected is not None else 3
+        atlas = np.zeros((cell_h * rows, cell_w * cols, channels), dtype="uint8")
         lo, hi = _global_window(path, dset, dataset_path, vol, 0) if kind not in ("label_volume", "rgb_volume") else (0.0, 1.0)
+        registration = None
+        if selected is not None:
+            registration = _resolve_feature_registration(
+                h5,
+                dataset_path,
+                target=dset,
+                target_kind=kind,
+            )
         for z in range(pz):
             plane = _read_preview_plane(dset, vol, "z", z, 0, rgb=(kind == "rgb_volume"))
             if kind == "label_volume":
@@ -1559,15 +2811,59 @@ def atlas_png(path: str, dataset_path: str, **_ignored: Any) -> bytes:
             else:
                 gray = _window_to_uint8(plane, lo, hi)
                 cell = np.stack([gray, gray, gray], axis=-1)
-            if cell.shape[0] != cell_h or cell.shape[1] != cell_w:
-                cell = np.asarray(Image.fromarray(cell).resize((cell_w, cell_h), Image.BILINEAR), dtype="uint8")
+            if selected is not None and registration is not None:
+                # Normalize the target first, then map both target and identities
+                # through one deterministic nearest-neighbor delivery grid.
+                cell = _resize_nearest(cell, cell_h, cell_w)
+                identity = (
+                    plane
+                    if _object_address(registration["identity"]) == _object_address(dset)
+                    else _read_preview_plane(
+                        registration["identity"],
+                        registration["identity_volume"],
+                        "z",
+                        z,
+                        0,
+                        rgb=False,
+                    )
+                )
+                _validate_feature_identity_values(identity)
+                identity = _resize_nearest(identity, cell_h, cell_w)
+                cell = _feature_mask_rgba(cell, identity, selected)
+            elif cell.shape[0] != cell_h or cell.shape[1] != cell_w:
+                # Categorical palette colors are identifiers, not continuous
+                # measurements. Bilinear resizing invents colors between adjacent
+                # labels, so label atlases must remain nearest-neighbor. Continuous
+                # scalar and display/RGB atlases retain their existing interpolation.
+                if kind == "label_volume":
+                    cell = _resize_nearest(cell, cell_h, cell_w)
+                else:
+                    cell = np.asarray(
+                        Image.fromarray(cell).resize(
+                            (cell_w, cell_h), Image.Resampling.BILINEAR
+                        ),
+                        dtype="uint8",
+                    )
             r, c = divmod(z, cols)
             atlas[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w, :] = cell
         buf = io.BytesIO()
-        Image.fromarray(atlas).save(buf, format="PNG")
+        Image.fromarray(atlas, mode="RGBA" if selected is not None else "RGB").save(buf, format="PNG")
         return buf.getvalue()
     finally:
         _safe_close(h5)
+
+
+def _validate_feature_identity_values(values: Any) -> tuple[int, int]:
+    import numpy as np
+
+    array = np.asarray(values)
+    if array.size == 0:
+        return (0, 0)
+    minimum = int(array.min())
+    maximum = int(array.max())
+    if minimum < 0 or maximum > FEATURE_ID_UINT32_MAX:
+        raise Hdf5Error("unsupported: FeatureIds contains values outside uint32")
+    return minimum, maximum
 
 
 def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str, Any]:
@@ -1578,7 +2874,7 @@ def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str
 
     h5, dset, dt, vol, kind = _volume_context(path, dataset_path)
     try:
-        arr = _read_preview_volume(dset, vol, int(channel))
+        arr = _read_preview_volume(dset, vol, channel)
         if arr.ndim != 3:
             arr = np.atleast_3d(arr)
         raw_min = float(arr.min()) if arr.size else 0.0
@@ -1594,9 +2890,7 @@ def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str
             "bytes_per_voxel": 4,
             "raw_min": raw_min,
             "raw_max": raw_max,
-            "channel": int(channel),
-            "scl_slope": 1.0,
-            "scl_inter": 0.0,
+            "channel": operator.index(channel),
             "t": 0,
             "source_width": int(vol["x"]),
             "source_height": int(vol["y"]),
@@ -1861,10 +3155,228 @@ def _matrix_table(dset, shape, offset, limit, np):
     return columns, rows, total_rows, total_columns, []
 
 
+# ---------------------------------------------------------------------------
+# Materials dashboard
+# ---------------------------------------------------------------------------
+def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
+    import numpy as np
+
+    h5 = _open(path)
+    try:
+        probe = _materials_probe(h5)
+        if not probe["detected"]:
+            raise Hdf5DatasetNotFound("materials dashboard is only available for DREAM.3D files")
+
+        geometry = probe["geometry"]
+        spacing_note = None
+        if geometry and geometry.get("spacing"):
+            spacing_note = f"Voxel spacing {geometry['spacing']} (from _SIMPL_GEOMETRY)."
+
+        maps = []
+        for (mpath, mname, kind, role) in probe["maps"]:
+            maps.append({
+                "title": _titleize(mname),
+                "description": None,
+                "dataset_path": mpath,
+                "semantic_role": role,
+                "preview_kind": kind,
+            })
+
+        dataset_links = []
+        for (mpath, mname, kind, role) in probe["maps"]:
+            dataset_links.append({
+                "label": _titleize(mname),
+                "dataset_path": mpath,
+                "semantic_role": role,
+                "group": mpath.rsplit("/", 1)[0] if "/" in mpath else "/",
+            })
+
+        grain_charts = _grain_charts(h5, probe, np)
+        orientation_charts = _orientation_charts(h5, probe, np)
+        synthetic_stats: list[dict[str, Any]] = []
+
+        overview = {
+            "geometry": geometry,
+            "spacing_note": spacing_note,
+            "phase_names": probe["phase_names"],
+            "phase_names_source": probe["phase_names_source"],
+            "phase_names_provenance": probe["phase_names_provenance"],
+            "feature_count": probe["feature_count"],
+            "grain_count": probe["grain_count"],
+            "declared_feature_tuple_count": probe["declared_feature_tuple_count"],
+            "referenced_positive_feature_count": probe[
+                "referenced_positive_feature_count"
+            ],
+            "feature_id_scan_complete": probe["feature_id_scan_complete"],
+            "feature_id_consistency": probe["feature_id_consistency"],
+            "feature_zero_reserved": probe["feature_zero_reserved"],
+            "capabilities": probe["capabilities"],
+            "recommended_map_dataset_path": probe["recommended"],
+        }
+        return {
+            "file_id": file_id,
+            "schema": "dream3d",
+            "overview": overview,
+            "maps": maps,
+            "grain_charts": grain_charts,
+            "orientation_charts": orientation_charts,
+            "synthetic_stats": synthetic_stats,
+            "dataset_links": dataset_links,
+        }
+    finally:
+        _safe_close(h5)
 
 
+def _bounded_feature_row_sample(
+    dset,
+    np,
+    *,
+    max_rows: int,
+    max_columns: int | None = None,
+    reserved_zero: bool,
+):
+    """Sample feature rows, excluding tuple zero only with schema evidence.
+
+    The slice stride is computed before reading, so a multi-gigabyte feature table
+    never enters memory in full. When tuple zero is established as reserved,
+    exclusion is positional: zero-valued measurements in rows 1..N remain valid.
+    """
+    try:
+        shape = tuple(int(value) for value in dset.shape)
+        start_row = 1 if reserved_zero else 0
+        if len(shape) not in (1, 2) or not shape or shape[0] <= start_row:
+            return np.asarray([], dtype="float64")
+        available_rows = shape[0] - start_row
+        step = max(1, math.ceil(available_rows / max(1, max_rows)))
+        row_slice = slice(start_row, shape[0], step)
+        if len(shape) == 1:
+            block = dset[row_slice]
+        else:
+            column_count = shape[1]
+            if max_columns is not None:
+                column_count = min(column_count, max_columns)
+            if column_count <= 0:
+                return np.asarray([], dtype="float64")
+            block = dset[row_slice, :column_count]
+        return np.asarray(block, dtype="float64")
+    except Exception:  # noqa: BLE001
+        return np.asarray([], dtype="float64")
 
 
+def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
+    """Grain-scale distributions from per-feature 1-D arrays (EquivalentDiameters,
+    NumNeighbors, ...). Bounded sampling; empty list if nothing suitable."""
+    charts: list[dict[str, Any]] = []
+    wanted = ("equivalentdiameters", "numneighbors", "numelements", "volumes", "size")
+    for grp_path in probe["feature_groups"]:
+        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
+        grp = _hard_object_at_path(h5, grp_path)
+        if not _is_group(grp):
+            continue
+        for key in _bounded_child_names(grp):
+            low = key.lower()
+            if not any(w in low for w in wanted):
+                continue
+            try:
+                d = _hard_child(grp, key)
+                if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
+                    continue
+                vals = _bounded_feature_row_sample(
+                    d,
+                    np,
+                    max_rows=TABLE_CHART_MAX_ROWS,
+                    max_columns=1,
+                    reserved_zero=reserved_zero,
+                ).ravel()
+                vals = vals[np.isfinite(vals)]
+                if vals.size < 2:
+                    continue
+                counts, edges = np.histogram(vals, bins=min(24, max(8, int(math.sqrt(vals.size)))))
+                data = [{"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])} for i in range(len(counts))]
+                charts.append({
+                    "kind": "bar",
+                    "title": f"{_titleize(key)} distribution",
+                    "description": f"{vals.size} features sampled",
+                    "x_key": "label",
+                    "y_key": "count",
+                    "data": data,
+                    "source_paths": [grp_path.rstrip("/") + "/" + key],
+                    "units_hint": _units_hint(key, d),
+                    "provenance": (
+                        "Bounded sample of per-feature values; reserved feature row 0 "
+                        "excluded by index based on selected-container FeatureIds/GrainIds "
+                        "schema evidence. Zero-valued measurements in real rows are retained."
+                        if reserved_zero
+                        else "Bounded sample of per-feature values; no reserved feature row "
+                        "was established by file/schema evidence, so row 0 is retained."
+                    ),
+                })
+            except Exception:  # noqa: BLE001
+                continue
+            if len(charts) >= 4:
+                return charts
+    return charts
+
+
+def _orientation_charts(h5, probe, np) -> list[dict[str, Any]]:
+    """An orientation scatter (phi1 vs Phi) from a per-feature AvgEulerAngles array,
+    if present. Bounded to :data:`MATERIAL_ORIENTATION_MAX_ROWS` points."""
+    charts: list[dict[str, Any]] = []
+    for grp_path in probe["feature_groups"]:
+        reserved_zero = bool(probe["feature_group_reserved_zero"].get(grp_path, False))
+        grp = _hard_object_at_path(h5, grp_path)
+        if not _is_group(grp):
+            continue
+        for key in _bounded_child_names(grp):
+            if "euler" not in key.lower():
+                continue
+            try:
+                d = _hard_child(grp, key)
+                if not _is_dataset(d) or not _is_numeric_dtype(d.dtype):
+                    continue
+                arr = _bounded_feature_row_sample(
+                    d,
+                    np,
+                    max_rows=MATERIAL_ORIENTATION_MAX_ROWS,
+                    max_columns=3,
+                    reserved_zero=reserved_zero,
+                )
+                if arr.ndim != 2 or arr.shape[1] < 2:
+                    continue
+                data = [
+                    {"phi1": _num(arr[i, 0]), "value": _num(arr[i, 1])}
+                    for i in range(arr.shape[0])
+                    if math.isfinite(arr[i, 0]) and math.isfinite(arr[i, 1])
+                ]
+                if data:
+                    charts.append({
+                        "kind": "scatter",
+                        "title": f"{_titleize(key)}: φ1 vs Φ",
+                        "description": f"{len(data)} features sampled",
+                        "x_key": "phi1",
+                        "y_key": "value",
+                        "data": data,
+                        "source_paths": [grp_path.rstrip("/") + "/" + key],
+                        "units_hint": _units_hint(key, d),
+                        "provenance": (
+                            "Bounded sample of stored per-feature orientation angles; reserved "
+                            "feature row 0 excluded by index based on selected-container "
+                            "FeatureIds/GrainIds schema evidence."
+                            if reserved_zero
+                            else "Bounded sample of stored per-feature orientation angles; no "
+                            "reserved feature row was established, so row 0 is retained."
+                        ),
+                    })
+            except Exception:  # noqa: BLE001
+                continue
+            if len(charts) >= 2:
+                return charts
+    return charts
+
+
+def _titleize(name: str) -> str:
+    text = str(name).replace("_", " ").strip()
+    return text if text else name
 
 
 # ---------------------------------------------------------------------------

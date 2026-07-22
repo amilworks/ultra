@@ -1,15 +1,18 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 )
 
 // HDF5 viewer proxy routes (/v2/uploads/{file_id}/hdf5/*).
 //
 // The Python image service owns all h5py work (tree walk, dataset summaries,
-// slice/atlas/scalar-volume rendering); the control plane
+// slice/atlas/scalar-volume rendering, DREAM3D dashboards); the control plane
 // is a thin authorized proxy, exactly like the sibling upload image endpoints:
 // auth + ownership are enforced here (resolveUploadServingRequest -> 404 for
 // foreign/unknown files, before the sidecar is ever reached), the resolved
@@ -25,14 +28,62 @@ import (
 // r.URL.RawQuery wholesale).
 var hdf5QueryKeys = map[string][]string{
 	"/hdf5/dataset":               {"dataset_path"},
-	"/hdf5/preview/slice":         {"dataset_path", "axis", "index", "component"},
-	"/hdf5/preview/atlas":         {"dataset_path", "enhancement", "fusion_method", "negative", "channels"},
+	"/hdf5/materials/dashboard":   nil,
+	"/hdf5/preview/slice":         {"dataset_path", "axis", "index", "component", "feature_ids"},
+	"/hdf5/preview/atlas":         {"dataset_path", "enhancement", "fusion_method", "negative", "channels", "feature_ids"},
 	"/hdf5/preview/scalar-volume": {"dataset_path", "channel"},
 	"/hdf5/preview/histogram":     {"dataset_path", "component", "bins"},
 	"/hdf5/preview/table":         {"dataset_path", "offset", "limit"},
 }
 
-// proxyUploadHdf5 is the shared skeleton for all six HDF5 routes: not-configured
+const (
+	hdf5FeatureIDsMaxQueryBytes = 1024
+	hdf5FeatureIDsMaxUnique     = 64
+)
+
+// canonicalHdf5FeatureIDs validates the public filter grammar and produces one
+// stable cache-key representation. It runs only after upload auth/ownership has
+// succeeded, so malformed input cannot reveal whether a foreign file exists.
+func canonicalHdf5FeatureIDs(values []string) (string, error) {
+	if len(values) != 1 {
+		return "", errors.New("feature_ids must be supplied exactly once")
+	}
+	raw := values[0]
+	if raw == "" || len(raw) > hdf5FeatureIDsMaxQueryBytes {
+		return "", errors.New("feature_ids must be a non-empty comma-separated list up to 1 KiB")
+	}
+	for _, char := range raw {
+		if (char < '0' || char > '9') && char != ',' {
+			return "", errors.New("feature_ids must contain only digits and commas")
+		}
+	}
+	unique := make(map[uint32]struct{})
+	for _, token := range strings.Split(raw, ",") {
+		if token == "" {
+			return "", errors.New("feature_ids contains an empty value")
+		}
+		value, err := strconv.ParseUint(token, 10, 32)
+		if err != nil || value == 0 {
+			return "", errors.New("feature_ids must contain only positive uint32 values")
+		}
+		unique[uint32(value)] = struct{}{}
+	}
+	if len(unique) > hdf5FeatureIDsMaxUnique {
+		return "", errors.New("feature_ids supports at most 64 unique values")
+	}
+	ordered := make([]uint32, 0, len(unique))
+	for value := range unique {
+		ordered = append(ordered, value)
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	canonical := make([]string, len(ordered))
+	for index, value := range ordered {
+		canonical[index] = strconv.FormatUint(uint64(value), 10)
+	}
+	return strings.Join(canonical, ","), nil
+}
+
+// proxyUploadHdf5 is the shared skeleton for all HDF5 routes: not-configured
 // guard, auth/ownership resolution, allowlisted query passthrough, then the caller's
 // chosen proxy variant (cached vs streaming). No fallback handler is passed — HDF5
 // has no legacy native path.
@@ -46,15 +97,40 @@ func (deps ServerDeps) proxyUploadHdf5(w http.ResponseWriter, r *http.Request, e
 	if !ok {
 		return
 	}
+	parsedQuery, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid HDF5 preview query"))
+		return
+	}
 	// file_id is echoed by the sidecar into the JSON payloads (dataset summary,
-	// histogram, table). The frontend builds every follow-up preview
+	// dashboard, histogram, table). The frontend builds every follow-up preview
 	// URL from summary.file_id (Hdf5DatasetPreview), so it must be the real id —
 	// always the server-resolved one, never client input.
 	query := url.Values{"path": {path}, "file_id": {record.FileID}}
 	for _, key := range hdf5QueryKeys[endpoint] {
-		if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-			query.Set(key, v)
+		values, present := parsedQuery[key]
+		if key == "dataset_path" {
+			if !present || len(values) != 1 || values[0] == "" {
+				writeError(w, http.StatusBadRequest, errors.New("dataset_path must be supplied exactly once and must not be empty"))
+				return
+			}
+		} else if present && len(values) != 1 {
+			writeError(w, http.StatusBadRequest, errors.New(key+" must be supplied at most once"))
+			return
 		}
+		if !present {
+			continue
+		}
+		if key == "feature_ids" {
+			canonical, err := canonicalHdf5FeatureIDs(values)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
+			query.Set(key, canonical)
+			continue
+		}
+		query.Set(key, values[0])
 	}
 	proxy(w, r, endpoint, query)
 }
@@ -63,6 +139,13 @@ func (deps ServerDeps) proxyUploadHdf5(w http.ResponseWriter, r *http.Request, e
 // repeatable, keyed by the source file's stat stamp + dataset_path -> main cache.
 func (deps ServerDeps) handleGetUploadHdf5Dataset(w http.ResponseWriter, r *http.Request) {
 	deps.proxyUploadHdf5(w, r, "/hdf5/dataset", deps.proxyImageServiceCached)
+}
+
+// handleGetUploadHdf5MaterialsDashboard proxies the DREAM3D materials dashboard
+// (JSON). Expensive to compute (grain stats) and fully deterministic per file ->
+// main cache.
+func (deps ServerDeps) handleGetUploadHdf5MaterialsDashboard(w http.ResponseWriter, r *http.Request) {
+	deps.proxyUploadHdf5(w, r, "/hdf5/materials/dashboard", deps.proxyImageServiceCached)
 }
 
 // handleServeUploadHdf5Slice proxies a rendered dataset slice (PNG). This is a

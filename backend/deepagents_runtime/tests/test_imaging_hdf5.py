@@ -400,7 +400,9 @@ def test_summary_vector_volume_components(general_h5):
 def test_summary_rgb_volume(general_h5):
     s = hdf5.dataset_summary(general_h5, "/volume/ipf")
     assert s["preview_kind"] == "rgb_volume"
+    assert s["semantic_role"] == "ipf_colors"
     assert s["render_policy"] == "display"
+    assert s["texture_policy"] == "nearest"
     assert s["component_count"] == 3
     assert s["atlas_scheme"] is not None
     # rgb is displayed directly, not histogrammed.
@@ -572,6 +574,21 @@ def test_atlas_png_matches_scheme(general_h5):
     assert (img.width, img.height) == (scheme["atlas_width"], scheme["atlas_height"])
 
 
+def test_vector_atlas_renders_the_requested_component(general_h5):
+    atlases = [
+        hdf5.atlas_png(general_h5, "/volume/euler", component=component)
+        for component in range(3)
+    ]
+    assert all(atlas.startswith(_PNG_MAGIC) for atlas in atlases)
+    assert len(set(atlases)) == 3
+
+
+@pytest.mark.parametrize("component", [-1, 3, 1.5, True])
+def test_vector_atlas_rejects_invalid_component(general_h5, component):
+    with pytest.raises(hdf5.Hdf5Error, match="component"):
+        hdf5.atlas_png(general_h5, "/volume/euler", component=component)
+
+
 def test_large_label_atlas_resizes_with_palette_preserving_nearest_neighbor(tmp_path):
     import io as _io
 
@@ -594,6 +611,30 @@ def test_large_label_atlas_resizes_with_palette_preserving_nearest_neighbor(tmp_
     expected_colors = {tuple(int(channel) for channel in pixel) for pixel in palette.reshape(-1, 3)}
     assert actual_colors == expected_colors
     assert actual_colors - {(0, 0, 0)}
+
+
+def test_large_ipf_atlas_resizes_without_inventing_orientation_colors(tmp_path):
+    from PIL import Image
+
+    path = str(tmp_path / "large-ipf.h5")
+    yy, xx = np.indices((520, 516))
+    selector = (yy + xx) % 2 == 0
+    plane = np.zeros((520, 516, 3), dtype="u1")
+    plane[selector] = (255, 0, 0)
+    plane[~selector] = (0, 0, 255)
+    with h5py.File(path, "w") as file:
+        file.create_dataset("IPFColor", data=np.stack([plane, plane[::-1]], axis=0))
+
+    decoded = np.asarray(
+        Image.open(io.BytesIO(hdf5.atlas_png(path, "/IPFColor"))).convert("RGB"),
+        dtype="u1",
+    )
+    actual_colors = {
+        tuple(int(channel) for channel in pixel)
+        for pixel in decoded.reshape(-1, 3)
+    }
+    assert actual_colors <= {(0, 0, 0), (255, 0, 0), (0, 0, 255)}
+    assert {(255, 0, 0), (0, 0, 255)} <= actual_colors
 
 
 @pytest.mark.parametrize(
@@ -914,6 +955,43 @@ def test_dataset_summary_rejects_cross_container_hard_link_geometry_alias(tmp_pa
         assert summary["geometry"] is None
         assert summary["physical_spacing"] == {"x": None, "y": None, "z": None}
         assert summary["measurement_policy"] == "pixel-only"
+        assert summary["feature_filter"] is None
+        assert "feature_filter" not in summary["capabilities"]
+        with pytest.raises(hdf5.Hdf5Error, match="ownership"):
+            hdf5.atlas_png(
+                path,
+                f"/DataContainers/{container_name}/CellData/FeatureIds",
+                feature_ids="1",
+            )
+
+
+def test_feature_filter_rejects_cross_container_aliased_target_map(tmp_path):
+    path = str(tmp_path / "aliased-target-map.dream3d")
+    native_zyx = (2, 3, 4)
+    with h5py.File(path, "w") as file:
+        containers = file.create_group("DataContainers")
+        cells = []
+        for container_name in ("ImageA", "ImageB"):
+            image = containers.create_group(container_name)
+            geometry = image.create_group("_SIMPL_GEOMETRY")
+            geometry.create_dataset("DIMENSIONS", data=np.array([4, 3, 2], dtype="u8"))
+            geometry.create_dataset("SPACING", data=np.ones(3, dtype="f4"))
+            geometry.create_dataset("ORIGIN", data=np.zeros(3, dtype="f4"))
+            cell = image.create_group("CellData")
+            cell.create_dataset("FeatureIds", data=np.ones((*native_zyx, 1), dtype="u4"))
+            cells.append(cell)
+        ipf = cells[0].create_dataset(
+            "IPFColor", data=np.full((*native_zyx, 3), 127, dtype="u1")
+        )
+        cells[1]["IPFColor"] = ipf
+
+    for container_name in ("ImageA", "ImageB"):
+        dataset_path = f"/DataContainers/{container_name}/CellData/IPFColor"
+        summary = hdf5.dataset_summary(path, dataset_path)
+        assert summary["feature_filter"] is None
+        assert "feature_filter" not in summary["capabilities"]
+        with pytest.raises(hdf5.Hdf5Error, match="ownership"):
+            hdf5.atlas_png(path, dataset_path, feature_ids="1")
 
 
 def test_dataset_summary_rejects_geometry_group_shared_across_containers(tmp_path):

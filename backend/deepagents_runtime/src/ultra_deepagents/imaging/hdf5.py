@@ -891,6 +891,29 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
     return np.ascontiguousarray(arr, dtype="float32")
 
 
+def _atlas_component_index(value: Any, vol: dict[str, Any], kind: str) -> int:
+    """Validate the scalar component represented by an atlas.
+
+    Vector atlases expose one selected component. RGB/IPF atlases are already a
+    complete color value and every other atlas kind is scalar, so a non-zero
+    component for those kinds would claim to change data while doing nothing.
+    """
+    if isinstance(value, bool):
+        raise Hdf5Error("unsupported: atlas component must be an integer")
+    try:
+        component = operator.index(value)
+    except TypeError as exc:
+        raise Hdf5Error("unsupported: atlas component must be an integer") from exc
+    component_count = int(vol["comp"])
+    if component < 0 or component >= component_count:
+        raise Hdf5Error(
+            f"unsupported: atlas component {component} is out of range for C={component_count}"
+        )
+    if kind != "vector_volume" and component != 0:
+        raise Hdf5Error(f"unsupported: atlas component selection does not apply to {kind}")
+    return int(component)
+
+
 # ---------------------------------------------------------------------------
 # Geometry (DREAM.3D _SIMPL_GEOMETRY) + materials probe
 # ---------------------------------------------------------------------------
@@ -1570,22 +1593,15 @@ def _resolve_feature_registration(
     cell_data_path = cell_data_path or "/"
     if not target_name or not _is_cell_data_group_path(cell_data_path):
         raise Hdf5Error("unsupported: feature filtering requires a selected DREAM.3D CellData map")
-    container_path, _, _ = cell_data_path.rstrip("/").rpartition("/")
-    container_path = container_path or "/"
-    container = _direct_hard_object_at_path(h5, container_path)
+    geometry = _dataset_local_geometry(h5, normalized_path, target=target)
+    if geometry is None:
+        raise Hdf5Error(
+            "unsupported: feature filtering requires exact direct hard-linked ownership"
+        )
     cell_group = _direct_hard_object_at_path(h5, cell_data_path)
-    geometry_group = _direct_hard_child(container, "_SIMPL_GEOMETRY")
-    if not _is_group(container) or not _is_group(cell_group) or not _is_group(geometry_group):
-        raise Hdf5Error("unsupported: DREAM.3D CellData and geometry must be direct hard linked")
-    dimensions = _bounded_geometry_vector(_direct_hard_child(geometry_group, "DIMENSIONS"))
-    spacing = _bounded_geometry_vector(_direct_hard_child(geometry_group, "SPACING"))
-    origin = _bounded_geometry_vector(_direct_hard_child(geometry_group, "ORIGIN"))
-    if not (
-        _valid_geometry_vector(dimensions, positive=True)
-        and _valid_geometry_vector(spacing, positive=True)
-        and _valid_geometry_vector(origin, positive=False)
-    ):
-        raise Hdf5Error("unsupported: incomplete DREAM.3D CellData geometry")
+    if not _is_group(cell_group):
+        raise Hdf5Error("unsupported: DREAM.3D CellData must be direct hard linked")
+    dimensions = geometry["dimensions"]
     try:
         xyz = tuple(int(value) for value in dimensions[:3])
         if any(float(dimensions[index]) != xyz[index] or xyz[index] <= 0 for index in range(3)):
@@ -1636,6 +1652,8 @@ def _resolve_feature_registration(
     identity = feature_ids if feature_ids_present else grain_ids
     if not _is_dataset(identity):
         raise Hdf5Error("unsupported: no direct hard-linked FeatureIds identity volume")
+    if not _hard_links_scoped_to_parent(identity, cell_group):
+        raise Hdf5Error("unsupported: FeatureIds hard-linked ownership is ambiguous")
     identity_shape = tuple(int(value) for value in identity.shape)
     identity_zyx = _native_zyx_shape(identity)
     identity_volume = _interpret_volume(identity_shape, identity.dtype, exact_zyx=expected_zyx)
@@ -2329,8 +2347,13 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
         elif not is_volume_kind:
             volume_reason = None
 
+        semantic_role = _semantic_role(name, preview_kind or "") if is_volume_kind else None
         render_policy = _render_policy(preview_kind)
-        texture_policy = "nearest" if preview_kind == "label_volume" else "linear"
+        texture_policy = (
+            "nearest"
+            if preview_kind == "label_volume" or semantic_role == "ipf_colors"
+            else "linear"
+        )
         delivery_mode = _delivery_mode(preview_kind, render_policy)
 
         # Axis sizes / dimension summary (PREVIEW grid — what the slice/volume endpoints serve).
@@ -2350,7 +2373,6 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             if volume_eligible and render_policy != "scalar":
                 atlas_scheme = _atlas_scheme(px, py, pz)
 
-        semantic_role = _semantic_role(name, preview_kind or "") if is_volume_kind else None
         feature_filter = (
             _feature_filter_metadata(registration) if registration is not None else None
         )
@@ -2777,23 +2799,38 @@ def slice_png(path: str, dataset_path: str, *, axis: str = "z", index: int | Non
         _safe_close(h5)
 
 
-def atlas_png(path: str, dataset_path: str, *, feature_ids: str | None = None, **_ignored: Any) -> bytes:
-    """The Z-atlas mosaic PNG matching the summary's ``atlas_scheme``. Extra params
-    (enhancement/fusion_method/negative/channels) are accepted no-op for contract
-    compatibility; the sole call site sends only ``dataset_path``."""
+def atlas_png(
+    path: str,
+    dataset_path: str,
+    *,
+    component: int = 0,
+    feature_ids: str | None = None,
+    **_ignored: Any,
+) -> bytes:
+    """The Z-atlas mosaic PNG matching the summary's ``atlas_scheme``.
+
+    ``component`` selects the scalar component for vector volumes. Display-only
+    extras (enhancement/fusion_method/negative/channels) remain accepted no-ops for
+    compatibility with the shared atlas URL surface.
+    """
     import numpy as np
     from PIL import Image
 
     selected = _feature_filter_ids(feature_ids)
     h5, dset, dt, vol, kind = _volume_context(path, dataset_path)
     try:
+        component = _atlas_component_index(component, vol, kind)
         pz, py, px = vol["pz"], vol["py"], vol["px"]
         scheme = _atlas_scheme(px, py, pz)
         cols, rows = scheme["columns"], scheme["rows"]
         cell_w, cell_h = scheme["slice_width"], scheme["slice_height"]
         channels = 4 if selected is not None else 3
         atlas = np.zeros((cell_h * rows, cell_w * cols, channels), dtype="uint8")
-        lo, hi = _global_window(path, dset, dataset_path, vol, 0) if kind not in ("label_volume", "rgb_volume") else (0.0, 1.0)
+        lo, hi = _global_window(path, dset, dataset_path, vol, component) if kind not in ("label_volume", "rgb_volume") else (0.0, 1.0)
+        dataset_name = dataset_path.rsplit("/", 1)[-1] or dataset_path
+        preserve_voxel_colors = (
+            kind == "label_volume" or _semantic_role(dataset_name, kind) == "ipf_colors"
+        )
         registration = None
         if selected is not None:
             registration = _resolve_feature_registration(
@@ -2803,7 +2840,9 @@ def atlas_png(path: str, dataset_path: str, *, feature_ids: str | None = None, *
                 target_kind=kind,
             )
         for z in range(pz):
-            plane = _read_preview_plane(dset, vol, "z", z, 0, rgb=(kind == "rgb_volume"))
+            plane = _read_preview_plane(
+                dset, vol, "z", z, component, rgb=(kind == "rgb_volume")
+            )
             if kind == "label_volume":
                 cell = _label_to_rgb(plane)
             elif kind == "rgb_volume":
@@ -2831,11 +2870,10 @@ def atlas_png(path: str, dataset_path: str, *, feature_ids: str | None = None, *
                 identity = _resize_nearest(identity, cell_h, cell_w)
                 cell = _feature_mask_rgba(cell, identity, selected)
             elif cell.shape[0] != cell_h or cell.shape[1] != cell_w:
-                # Categorical palette colors are identifiers, not continuous
-                # measurements. Bilinear resizing invents colors between adjacent
-                # labels, so label atlases must remain nearest-neighbor. Continuous
-                # scalar and display/RGB atlases retain their existing interpolation.
-                if kind == "label_volume":
+                # Labels and IPF colors encode exact per-voxel identities/orientations.
+                # Bilinear resizing would invent categorical labels or orientation
+                # colors that do not occur in the source field.
+                if preserve_voxel_colors:
                     cell = _resize_nearest(cell, cell_h, cell_w)
                 else:
                     cell = np.asarray(

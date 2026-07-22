@@ -270,7 +270,40 @@ def hdf5_path(tmp_path):
         vol = f.create_group("volume")
         vol.create_dataset("ct", data=(rng.random((12, 24, 30)) * 4000).astype("int16"))
         vol.create_dataset("labels", data=rng.integers(0, 4, (12, 24, 30)).astype("uint8"))
+        zz, yy, xx = np.indices((12, 24, 30))
+        vol.create_dataset(
+            "euler",
+            data=np.stack(
+                [xx + zz, yy * 2 + zz, ((xx + yy + zz) % 5) * 10], axis=-1
+            ).astype("float32"),
+        )
         f.create_dataset("series", data=rng.random(120).astype("float64"))
+    return path
+
+
+@pytest.fixture()
+def hdf5_feature_path(tmp_path):
+    import numpy as np
+
+    path = str(tmp_path / "feature-filter.dream3d")
+    with h5py.File(path, "w") as file:
+        image = file.create_group("DataContainers").create_group("Image")
+        geometry = image.create_group("_SIMPL_GEOMETRY")
+        geometry.create_dataset("DIMENSIONS", data=np.array([2, 2, 1], dtype="u8"))
+        geometry.create_dataset("SPACING", data=np.ones(3, dtype="f4"))
+        geometry.create_dataset("ORIGIN", data=np.zeros(3, dtype="f4"))
+        cell = image.create_group("CellData")
+        cell.create_dataset(
+            "FeatureIds",
+            data=np.array([[[[25], [7]], [[7], [7]]]], dtype="u4"),
+        )
+        cell.create_dataset(
+            "IPFColor",
+            data=np.array(
+                [[[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]]],
+                dtype="u1",
+            ),
+        )
     return path
 
 
@@ -316,6 +349,54 @@ def test_hdf5_atlas_png(client, hdf5_path):
     assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
+def test_hdf5_atlas_threads_vector_component_to_reader(client, hdf5_path):
+    responses = [
+        client.get(
+            "/hdf5/preview/atlas",
+            params={
+                "path": hdf5_path,
+                "dataset_path": "/volume/euler",
+                "component": component,
+            },
+        )
+        for component in range(3)
+    ]
+    assert all(response.status_code == 200 for response in responses)
+    assert len({response.content for response in responses}) == 3
+
+
+def test_hdf5_atlas_rejects_out_of_range_vector_component(client, hdf5_path):
+    response = client.get(
+        "/hdf5/preview/atlas",
+        params={"path": hdf5_path, "dataset_path": "/volume/euler", "component": 3},
+    )
+    assert response.status_code == 422
+    assert "component" in response.json()["detail"].lower()
+
+
+def test_hdf5_service_threads_feature_ids_to_slice_and_atlas(client, hdf5_feature_path):
+    import io
+
+    import numpy as np
+    from PIL import Image
+
+    params = {
+        "path": hdf5_feature_path,
+        "dataset_path": "/DataContainers/Image/CellData/IPFColor",
+        "feature_ids": "25",
+    }
+    atlas = client.get("/hdf5/preview/atlas", params=params)
+    slice_response = client.get(
+        "/hdf5/preview/slice", params={**params, "axis": "z", "index": 0}
+    )
+    assert atlas.status_code == 200
+    assert slice_response.status_code == 200
+    for response in (atlas, slice_response):
+        rgba = np.asarray(Image.open(io.BytesIO(response.content)).convert("RGBA"))
+        assert int(np.count_nonzero(rgba[..., 3] == 255)) == 1
+        assert np.all(rgba[rgba[..., 3] == 0] == 0)
+
+
 def test_hdf5_scalar_volume_headers(client, hdf5_path):
     r = client.get("/hdf5/preview/scalar-volume", params={"path": hdf5_path, "dataset_path": "/volume/ct"})
     assert r.status_code == 200
@@ -357,4 +438,3 @@ def test_hdf5_table_route(client, hdf5_path):
     assert body["preview_kind"] == "series"
     assert body["offset"] == 0 and body["limit"] == 5
     assert len(body["rows"]) == 5
-

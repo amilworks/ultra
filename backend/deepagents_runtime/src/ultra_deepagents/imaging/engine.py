@@ -57,8 +57,12 @@ class _Hdf5EngineMixin:
         return hdf5.materials_dashboard(path, file_id=file_id)
 
     def hdf5_slice_png(self, path: str, dataset_path: str, *, axis: str = "z",
-                       index: int | None = None, component: int = 0) -> bytes:
-        return hdf5.slice_png(path, dataset_path, axis=axis, index=index, component=component)
+                       index: int | None = None, component: int = 0,
+                       feature_ids: str | None = None) -> bytes:
+        return hdf5.slice_png(
+            path, dataset_path, axis=axis, index=index, component=component,
+            feature_ids=feature_ids,
+        )
 
     def hdf5_atlas_png(self, path: str, dataset_path: str, **kwargs: Any) -> bytes:
         return hdf5.atlas_png(path, dataset_path, **kwargs)

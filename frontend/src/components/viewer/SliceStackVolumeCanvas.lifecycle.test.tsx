@@ -374,6 +374,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
       />
     );
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
+    expect(getUploadScalarVolume.mock.calls.at(-1)?.[1]?.t).toBe(1);
     expect(seenSignals[0]?.aborted).toBe(true);
     const sourceBUniforms = scalarUniformSets[scalarUniformSets.length - 1];
     const sourceBWindowLow = sourceBUniforms?.uWindowLow.value;

@@ -1942,6 +1942,8 @@ export type UploadViewerInfo = {
       y?: number | null;
       x?: number | null;
     } | null;
+    /** Unit for physical_spacing and derived physical extents (for example, mm or um). */
+    physical_spacing_unit?: string | null;
     spacing_units?: {
       z?: string | null;
       y?: string | null;

@@ -83,6 +83,29 @@ describe("thumbnailScrubAxis", () => {
 });
 
 describe("normalizeUploadViewerInfo scalar medical defaults", () => {
+  it("preserves the backend physical spacing unit for derived volume extents", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-nifti",
+      original_name: "timeseries.nii.gz",
+      modality: "medical",
+      backend_mode: "scalar",
+      dims_order: "TZYX",
+      axis_sizes: { T: 405, C: 1, Z: 72, Y: 104, X: 90 },
+      selected_indices: { T: 259, C: 0, Z: 43 },
+      is_volume: true,
+      metadata: {
+        array_dtype: "int16",
+        physical_spacing: { x: 2, y: 2, z: 2 },
+        physical_spacing_unit: "mm",
+      },
+      viewer: { volume_mode: "scalar", default_surface: "volume" },
+    });
+
+    expect(viewer.metadata.physical_spacing).toEqual({ x: 2, y: 2, z: 2 });
+    expect(viewer.metadata.physical_spacing_unit).toBe("mm");
+  });
+
   it("promotes CT-like scalar volumes to legible scientific 3D defaults", () => {
     const viewer = normalizeUploadViewerInfo({
       kind: "image",

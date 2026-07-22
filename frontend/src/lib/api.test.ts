@@ -209,13 +209,14 @@ describe("ApiClient HDF5 viewer endpoints", () => {
     expect(
       client.hdf5AtlasPreviewUrl("file-123", {
         datasetPath: "/volume",
+        component: 1,
         enhancement: "d",
         fusionMethod: "max",
         negative: false,
         channels: [0, 2],
       })
     ).toBe(
-      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/atlas?dataset_path=%2Fvolume&enhancement=d&fusion_method=max&negative=false&channels=0%2C2"
+      "https://ultra.example.org/v2/uploads/file-123/hdf5/preview/atlas?dataset_path=%2Fvolume&component=1&enhancement=d&fusion_method=max&negative=false&channels=0%2C2"
     );
   });
 

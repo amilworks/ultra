@@ -1656,11 +1656,18 @@ paths:
           in: query
           description: Component index for vector datasets rendered as a scalar map.
           schema: { type: integer, minimum: 0 }
+        - name: feature_ids
+          in: query
+          description: Comma-separated positive uint32 Feature IDs to retain across the co-registered target map (maximum 64 unique IDs).
+          schema:
+            type: string
+            maxLength: 1024
+            pattern: "^[1-9][0-9]*(,[1-9][0-9]*)*$"
       responses:
         "200":
           description: Rendered HDF5 dataset slice (PNG)
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
@@ -1679,6 +1686,10 @@ paths:
           in: query
           required: true
           schema: { type: string }
+        - name: component
+          in: query
+          description: Component index for vector datasets rendered as a scalar atlas. Defaults to 0.
+          schema: { type: integer, minimum: 0 }
         - name: enhancement
           in: query
           schema: { type: string }
@@ -1692,11 +1703,18 @@ paths:
           in: query
           description: Comma-separated channel indices.
           schema: { type: string }
+        - name: feature_ids
+          in: query
+          description: Comma-separated positive uint32 Feature IDs to retain across the co-registered target map (maximum 64 unique IDs).
+          schema:
+            type: string
+            maxLength: 1024
+            pattern: "^[1-9][0-9]*(,[1-9][0-9]*)*$"
       responses:
         "200":
           description: Row-major Z-slice atlas mosaic (PNG) matching the dataset summary's atlas_scheme.
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary

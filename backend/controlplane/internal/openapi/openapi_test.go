@@ -179,6 +179,37 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 	}
 }
 
+func TestHdf5RasterContractsExposeScientificSelectorsAndPngMediaType(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("read openapi.yaml: %v", err)
+	}
+	doc := string(data)
+	atlasStart := strings.Index(doc, "  /v2/uploads/{file_id}/hdf5/preview/atlas:")
+	atlasEnd := strings.Index(doc, "  /v2/uploads/{file_id}/hdf5/preview/scalar-volume:")
+	sliceStart := strings.Index(doc, "  /v2/uploads/{file_id}/hdf5/preview/slice:")
+	sliceEnd := atlasStart
+	if atlasStart < 0 || atlasEnd <= atlasStart || sliceStart < 0 || sliceEnd <= sliceStart {
+		t.Fatal("HDF5 slice/atlas OpenAPI sections are missing or out of order")
+	}
+
+	for name, section := range map[string]string{
+		"slice": doc[sliceStart:sliceEnd],
+		"atlas": doc[atlasStart:atlasEnd],
+	} {
+		for _, marker := range []string{"- name: feature_ids", "image/png:"} {
+			if !strings.Contains(section, marker) {
+				t.Errorf("HDF5 %s contract missing %q", name, marker)
+			}
+		}
+	}
+	if !strings.Contains(doc[atlasStart:atlasEnd], "- name: component") {
+		t.Error("HDF5 atlas contract is missing the vector component selector")
+	}
+}
+
 func TestScalarVolumeResponseHeadersAreRequired(t *testing.T) {
 	t.Parallel()
 

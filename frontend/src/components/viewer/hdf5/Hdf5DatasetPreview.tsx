@@ -295,6 +295,7 @@ function Hdf5VolumePreview({
       kind: "atlas",
       atlasUrl: apiClient.hdf5AtlasPreviewUrl(summary.file_id, {
         datasetPath: summary.dataset_path,
+        component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
         featureIds: selectedFeatureIds,
       }),
       fallbackImageUrl: volumeFallbackUrl,
@@ -307,6 +308,7 @@ function Hdf5VolumePreview({
     };
   }, [
     apiClient,
+    activeComponent,
     canRenderVolume,
     summary.atlas_scheme,
     summary.axis_sizes,
@@ -314,6 +316,7 @@ function Hdf5VolumePreview({
     summary.file_id,
     summary.physical_spacing,
     summary.preview_planes.z,
+    summary.preview_kind,
     summary.render_policy,
     summary.texture_policy,
     selectedFeatureIds,

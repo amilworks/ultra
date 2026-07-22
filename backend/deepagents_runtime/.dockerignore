@@ -9,10 +9,8 @@
 .ruff_cache
 .git
 data
-# Keep the production core sensor smoke available to Dockerfile.worker while
-# excluding the rest of the test suite from every image context.
+# Exclude the test suite from every image context.
 tests/*
-!tests/test_sensor_worker_core_smoke.py
 *.egg-info
 build
 dist

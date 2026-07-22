@@ -14,7 +14,7 @@ Two properties matter for the user's "launch back to back to back with no errors
 
 Configuration (worker env; deliberately UNSET on the service node so the adapter's
 routing does not recurse):
-    ULTRA_COMPUTE_SERVICE_URL     base url, e.g. http://tesla.internal:8030
+    ULTRA_COMPUTE_SERVICE_URL     base url, e.g. http://compute-host.example:8030
     ULTRA_COMPUTE_SERVICE_TOKEN   bearer token (matches the service's ULTRA_COMPUTE_API_KEY)
     ULTRA_COMPUTE_POLL_INTERVAL   seconds between status polls (default 10)
     ULTRA_COMPUTE_REQUEST_TIMEOUT seconds per HTTP call (default 30)

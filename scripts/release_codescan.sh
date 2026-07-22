@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# FAIL CLOSED. This scan is the "nothing internal ships" release gate. It is built
+# on ripgrep; if rg is not installed the pattern loop below silently matches
+# nothing (each `$(rg … || true)` swallows the "command not found" error) and the
+# gate reports "clean" while scanning NOTHING. That made this a no-op on CI
+# runners without ripgrep. Refuse to run rather than pass blind.
+if ! command -v rg >/dev/null 2>&1; then
+  echo "release_codescan: ripgrep (rg) is required but not installed — refusing to" >&2
+  echo "run the release source scan blind. Install ripgrep on the runner." >&2
+  exit 1
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
 
@@ -62,7 +73,10 @@ for i in "${!CHECK_LABELS[@]}"; do
   if matches="$(rg "${RG_COMMON[@]}" -e "${pattern}" . || true)" && [[ -n "${matches}" ]]; then
     if [[ "${label}" == "Campus-specific domains" ]]; then
       # The production BisQue service is intentionally public runtime configuration.
-      matches="$(printf '%s\n' "${matches}" | rg -v 'bisque2\.ece\.ucsb\.edu' || true)"
+      # bisque2 and ultra are the PUBLIC production URLs (the live site + BisQue),
+      # already public and required in-repo (e.g. OG/link-preview tags). Everything
+      # else on the campus domain is internal infrastructure and stays flagged.
+      matches="$(printf '%s\n' "${matches}" | rg -v 'bisque2\.ece\.ucsb\.edu|ultra\.ece\.ucsb\.edu' || true)"
       [[ -z "${matches}" ]] && continue
     fi
     if [[ "${label}" == "Internal .internal hostnames" ]]; then

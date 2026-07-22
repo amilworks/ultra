@@ -1616,6 +1616,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/uploads/{file_id}/hdf5/materials/dashboard:
+    get:
+      operationId: getUploadHdf5MaterialsDashboard
+      description: DREAM3D microstructure dashboard for a materials HDF5 file (overview, feature maps, grain/orientation charts). Viewer functionality; independent of the removed materials compute platform.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: DREAM3D dashboard (frozen frontend contract Hdf5MaterialsDashboardResponse).
+          content:
+            application/json:
+              schema:
+                type: object
+        "501":
+          description: HDF5 preview is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/uploads/{file_id}/hdf5/preview/slice:
     get:
       operationId: getUploadHdf5SlicePreview

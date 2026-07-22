@@ -45,6 +45,11 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir frontend install --frozen-lockfile
 
+      # ripgrep is not preinstalled on ubuntu-latest; the scan is built on it and
+      # now fails closed without it, so install it before scanning.
+      - name: Install ripgrep (release codescan dependency)
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
       - name: Scan release source
         run: scripts/release_codescan.sh
 

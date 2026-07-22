@@ -1,9 +1,88 @@
+.viewer-workspace-hdf5,
+.viewer-workspace-hdf5 .viewer-body,
+.viewer-workspace-hdf5 .viewer-stage {
+  min-width: 0;
+  min-height: 0;
+}
+
+.viewer-workspace-hdf5 .viewer-stage {
+  height: 100%;
+  overflow: hidden;
+}
+
+.viewer-workspace-sheet.viewer-workspace-hdf5 {
+  height: 100%;
+}
+
+.viewer-workspace-embedded.viewer-workspace-hdf5 {
+  height: clamp(420px, calc(100vh - 7rem), 1100px);
+  height: clamp(420px, calc(100dvh - 7rem), 1100px);
+  min-height: clamp(420px, calc(100vh - 7rem), 1100px);
+  min-height: clamp(420px, calc(100dvh - 7rem), 1100px);
+}
+
+@media (max-width: 767px), (max-height: 700px) {
+  .viewer-workspace-embedded.viewer-workspace-hdf5 {
+    height: clamp(320px, calc(100vh - 10rem), 1100px);
+    height: clamp(320px, calc(100dvh - 10rem), 1100px);
+    min-height: clamp(320px, calc(100vh - 10rem), 1100px);
+    min-height: clamp(320px, calc(100dvh - 10rem), 1100px);
+  }
+}
+
+.viewer-hdf-feature-id-list,
+.viewer-hdf-material-map-actions,
+.viewer-hdf-workspace-tab,
+.viewer-hdf-shell > .viewer-hdf-dashboard,
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body {
+  scrollbar-width: none;
+}
+
+.viewer-hdf-feature-id-list::-webkit-scrollbar,
+.viewer-hdf-material-map-actions::-webkit-scrollbar,
+.viewer-hdf-workspace-tab::-webkit-scrollbar,
+.viewer-hdf-shell > .viewer-hdf-dashboard::-webkit-scrollbar,
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .viewer-hdf-shell {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
+  width: 100%;
+  height: 100%;
   min-height: 0;
   flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.viewer-hdf-shell:focus,
+.viewer-hdf-shell:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent) 58%, var(--line) 42%);
+  outline-offset: -2px;
+}
+
+.viewer-hdf-shell-top {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.viewer-hdf-shell[data-hdf5-fullscreen="true"] {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  box-sizing: border-box;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-width: none;
+  padding: 14px;
+  border-radius: 0;
+  background: var(--bg-main);
 }
 
 .viewer-hdf-hero {
@@ -42,10 +121,14 @@
 }
 
 .viewer-hdf-hero-heading h3 {
+  min-width: 0;
+  max-width: 100%;
   margin: 0;
   font-size: 1.06rem;
   line-height: 1.2;
   color: var(--text-main);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .viewer-hdf-current-inline {
@@ -74,8 +157,29 @@
 
 .viewer-hdf-hero-badges {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.viewer-hdf-fullscreen-toggle {
+  flex: 0 0 auto;
+}
+
+.viewer-hdf-path-chip {
+  display: block;
+  margin: 0;
+  border: 1px solid color-mix(in oklab, var(--line) 82%, transparent 18%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 76%, white 24%);
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  color: var(--text-main);
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1 1 320px;
 }
 
 .viewer-hdf-context-trigger {
@@ -84,7 +188,15 @@
 }
 
 .viewer-hdf-context-card {
+  z-index: 90;
   width: min(360px, calc(100vw - 48px));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  padding: 16px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
+  outline: none;
 }
 
 .viewer-hdf-context-card-grid {
@@ -129,16 +241,24 @@
   color: var(--text-muted);
 }
 
+.viewer-hdf-context-card-section .viewer-hdf-context-provenance {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
 .viewer-hdf-dashboard-card {
   min-height: 0;
   overflow: hidden;
-  border-color: var(--line);
-  background: var(--viewer-panel-bg);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
+
 .viewer-hdf-dashboard-header {
   border-bottom: 1px solid color-mix(in oklab, var(--line) 84%, transparent 16%);
-  gap: 10px;
-  padding: 16px 24px 14px;
+  gap: 8px;
+  padding: 12px 14px 10px;
 }
 
 .viewer-hdf-dashboard-header-split {
@@ -157,9 +277,12 @@
 
 .viewer-hdf-dashboard {
   display: grid;
-  grid-template-columns: minmax(260px, 0.68fr) minmax(0, 1.32fr);
-  gap: 12px;
+  grid-template-columns: clamp(280px, 21vw, 312px) minmax(0, 1fr);
+  grid-template-areas: "navigator inspector";
+  gap: 0;
+  height: 100%;
   min-height: 0;
+  overflow: hidden;
 }
 
 .viewer-hdf-dashboard-card {
@@ -169,8 +292,16 @@
 
 .viewer-hdf-dashboard-content {
   min-height: 0;
-  padding-top: 16px;
-  padding-bottom: 16px;
+  padding: 12px 14px;
+}
+
+.viewer-hdf-navigator-card {
+  grid-area: navigator;
+  border-right: 1px solid var(--line);
+}
+
+.viewer-hdf-inspector-card {
+  grid-area: inspector;
 }
 
 .viewer-hdf-navigator-content {
@@ -288,6 +419,8 @@
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  height: 100%;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -299,14 +432,45 @@
   gap: 4px;
 }
 
+.viewer-hdf-workspace-tabs {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer-hdf-workspace-tabs-list {
+  display: inline-flex;
+  width: fit-content;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.viewer-hdf-workspace-tab {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+}
+
+.viewer-hdf-workspace-tab[data-state="active"] {
+  display: grid;
+}
+
 .viewer-hdf-detail-tab,
 .viewer-hdf-preview-tab {
+  min-width: 0;
   min-height: 0;
   margin-top: 0;
 }
 
 .viewer-hdf-detail-tab-preview {
   overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .viewer-hdf-detail-stack {
@@ -364,12 +528,127 @@
 
 .viewer-hdf-preview-body {
   display: grid;
-  gap: 14px;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
 }
 
 .viewer-hdf-preview-tabs {
   display: grid;
-  gap: 14px;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.viewer-hdf-feature-filter {
+  display: contents;
+}
+
+.viewer-hdf-feature-filter-heading {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.viewer-hdf-feature-filter-count,
+.viewer-hdf-feature-filter-helper,
+.viewer-hdf-histogram-filter-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.73rem;
+  line-height: 1.45;
+}
+
+.viewer-hdf-feature-filter-count {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.viewer-hdf-feature-filter-trigger svg[data-icon="inline-end"] {
+  transition: transform 140ms ease;
+}
+
+.viewer-hdf-feature-filter[data-state="open"] .viewer-hdf-feature-filter-trigger svg[data-icon="inline-end"] {
+  transform: rotate(180deg);
+}
+
+.viewer-hdf-feature-filter-content {
+  display: grid;
+  flex: 1 1 100%;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.viewer-hdf-feature-filter-form {
+  display: flex;
+  gap: 8px;
+}
+
+.viewer-hdf-feature-filter-form input {
+  min-width: 0;
+  flex: 1;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-main);
+  background: color-mix(in oklab, var(--panel-strong) 86%, transparent 14%);
+}
+
+.viewer-hdf-feature-filter-form input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.viewer-hdf-feature-filter-form input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.viewer-hdf-feature-filter-error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.74rem;
+}
+
+.viewer-hdf-feature-id-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 6px;
+  max-height: 7.25rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.viewer-hdf-feature-id-list button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--line) 60%);
+  border-radius: 999px;
+  color: var(--text-main);
+  background: color-mix(in oklab, var(--accent) 13%, transparent 87%);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (pointer: coarse) {
+  .viewer-hdf-feature-filter-form input,
+  .viewer-hdf-feature-filter-form button,
+  .viewer-hdf-feature-id-list button,
+  .viewer-hdf-categorical-modes button {
+    min-height: 44px;
+  }
+}
+
+.viewer-hdf-feature-id-list button:hover {
+  border-color: color-mix(in oklab, var(--accent) 72%, var(--line) 28%);
 }
 
 .viewer-hdf-preview-toolbar {
@@ -387,6 +666,16 @@
   color: var(--text-muted);
 }
 
+.viewer-hdf-preview-toolbar-actions {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
 .viewer-hdf-preview-controls {
   display: flex;
   flex-wrap: wrap;
@@ -400,10 +689,72 @@
   gap: 10px;
 }
 
+.viewer-hdf-preview-compact-toolbar .viewer-hdf-preview-toolbar-actions {
+  justify-content: flex-start;
+  width: 100%;
+}
+
 .viewer-hdf-axis-toggle {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.viewer-hdf-categorical-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  min-width: 0;
+  padding: 2px;
+}
+
+.viewer-hdf-categorical-modes {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.viewer-hdf-categorical-caveat {
+  flex: 1 1 360px;
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.viewer-hdf-categorical-depth {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(180px, 1fr);
+  align-items: center;
+  gap: 4px 12px;
+  flex: 1 1 420px;
+  min-width: min(100%, 320px);
+}
+
+.viewer-hdf-categorical-depth-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 5px 8px;
+}
+
+.viewer-hdf-categorical-depth-label strong {
+  font-size: 0.78rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-categorical-depth-label span,
+.viewer-hdf-categorical-depth small {
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.viewer-hdf-categorical-depth small {
+  grid-column: 2;
 }
 
 .viewer-hdf-inline-field {
@@ -429,6 +780,23 @@
 
 .viewer-hdf-select {
   width: 100%;
+}
+
+.viewer-hdf-select-content {
+  z-index: 90;
+  max-height: var(--radix-select-content-available-height);
+  min-width: var(--radix-select-trigger-width);
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.15);
+}
+
+.viewer-hdf-select-viewport {
+  padding: 4px;
 }
 
 .viewer-hdf-slider-field {
@@ -464,23 +832,26 @@
 }
 
 .viewer-hdf-slider {
-  padding-inline: 2px;
+  width: 100%;
+  min-height: 32px;
+  accent-color: color-mix(in oklab, var(--accent) 88%, black 12%);
+  cursor: pointer;
 }
 
-.viewer-hdf-slider [data-slot="slider-track"] {
+.viewer-hdf-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
   background: color-mix(in oklab, var(--line) 72%, white 28%);
 }
 
-.viewer-hdf-slider [data-slot="slider-range"] {
-  background: color-mix(in oklab, var(--accent) 88%, black 12%);
+.viewer-hdf-slider::-webkit-slider-thumb {
+  margin-top: -5px;
 }
 
-.viewer-hdf-slider [data-slot="slider-thumb"] {
-  border-color: color-mix(in oklab, var(--accent) 88%, black 12%);
-  background: var(--viewer-panel-bg);
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--accent) 12%, transparent 88%),
-    0 1px 2px rgba(15, 23, 42, 0.18);
+.viewer-hdf-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--line) 72%, white 28%);
 }
 
 .viewer-hdf-slider-header,
@@ -503,9 +874,9 @@
 
 .viewer-hdf-preview-note,
 .viewer-hdf-provenance-note {
-  border: 1px solid color-mix(in oklab, var(--accent) 22%, var(--line) 78%);
-  border-radius: 12px;
-  background: color-mix(in oklab, var(--accent-soft) 78%, white 22%);
+  border: 1px solid color-mix(in oklab, var(--line) 88%, transparent 12%);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 90%, var(--bg-main) 10%);
   padding: 10px 12px;
   display: grid;
   gap: 4px;
@@ -538,15 +909,21 @@
 
 .viewer-hdf-slice-shell {
   border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  background: color-mix(in oklab, var(--viewer-panel-bg) 76%, white 24%);
-  padding: 10px;
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--viewer-panel-bg) 92%, black 8%);
+  padding: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .viewer-hdf-slice-canvas {
-  height: clamp(280px, 44vh, 420px);
-  min-height: clamp(280px, 44vh, 420px);
-  max-height: clamp(280px, 44vh, 420px);
+  width: 100%;
+  height: clamp(480px, 60vh, 760px);
+  height: clamp(480px, 60dvh, 760px);
+  min-height: clamp(480px, 60vh, 760px);
+  min-height: clamp(480px, 60dvh, 760px);
+  max-height: clamp(480px, 60vh, 760px);
+  max-height: clamp(480px, 60dvh, 760px);
 }
 
 .viewer-hdf-slice-layout {
@@ -570,10 +947,12 @@
 
 [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas {
   width: 100%;
-  height: auto;
-  min-height: 0;
-  max-height: none;
-  aspect-ratio: 1 / 1.16;
+  height: clamp(480px, 60vh, 760px);
+  height: clamp(480px, 60dvh, 760px);
+  min-height: clamp(480px, 60vh, 760px);
+  min-height: clamp(480px, 60dvh, 760px);
+  max-height: clamp(480px, 60vh, 760px);
+  max-height: clamp(480px, 60dvh, 760px);
 }
 
 .viewer-hdf-chart-grid {
@@ -593,6 +972,374 @@
 
 .viewer-hdf-chart-canvas {
   min-height: 220px;
+}
+
+.viewer-hdf-material-shell {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer-hdf-material-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body {
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-panel {
+  grid-template-rows: minmax(0, 1fr);
+  align-content: stretch;
+  height: 100%;
+  min-height: 0;
+}
+
+.viewer-hdf-material-section-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-note {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.viewer-hdf-material-panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewer-hdf-material-panel-header h4 {
+  margin: 0;
+  font-size: 0.98rem;
+  line-height: 1.2;
+  color: var(--text-main);
+}
+
+.viewer-hdf-material-map-grid {
+  display: grid;
+  grid-template-columns: clamp(260px, 20vw, 300px) minmax(0, 1fr);
+  grid-template-areas: "rail stage";
+  gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.viewer-hdf-material-map-rail {
+  grid-area: rail;
+  position: sticky;
+  top: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.viewer-hdf-material-map-rail-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 10px;
+}
+
+.viewer-hdf-material-map-rail-header strong {
+  font-size: 0.82rem;
+  color: var(--text-main);
+}
+
+.viewer-hdf-material-map-rail-header span {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-map-actions {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px 0;
+}
+
+.viewer-hdf-material-map-button {
+  align-items: flex-start;
+  justify-content: flex-start;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  min-height: 3.25rem;
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+  white-space: normal;
+}
+
+.viewer-hdf-material-map-button-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-map-button-copy strong {
+  font-size: 0.83rem;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.viewer-hdf-material-map-button-copy small {
+  font-size: 0.72rem;
+  font-weight: 400;
+  line-height: 1.35;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.viewer-hdf-material-map-stage {
+  grid-area: stage;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.viewer-hdf-material-map-stage-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 0 4px;
+}
+
+.viewer-hdf-material-map-stage-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.3;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+}
+
+.viewer-hdf-material-stage-description {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-card {
+  min-width: 0;
+  overflow: hidden;
+  border-color: var(--line);
+  background: var(--viewer-panel-bg);
+}
+
+.viewer-hdf-material-card-header {
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.viewer-hdf-material-card-title-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.viewer-hdf-material-card-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-source-list {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-material-card-badges {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.viewer-hdf-material-source-card {
+  z-index: 90;
+  width: min(420px, calc(100vw - 48px));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  padding: 16px;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.16);
+  outline: none;
+}
+
+.viewer-hdf-material-source-card-grid,
+.viewer-hdf-material-source-card-section {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-hdf-material-source-card-section strong {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.viewer-hdf-material-source-card-section p {
+  margin: 0;
+  font-size: 0.79rem;
+  line-height: 1.5;
+  color: var(--text-main);
+}
+
+.viewer-hdf-material-path-chip {
+  max-width: 100%;
+}
+
+.viewer-hdf-material-card-content {
+  display: grid;
+  grid-template-rows: minmax(220px, auto) auto;
+  gap: 12px;
+  min-width: 0;
+}
+
+.viewer-hdf-material-chart-canvas {
+  min-width: 0;
+  min-height: 228px;
+  overflow: hidden;
+}
+
+.viewer-hdf-material-chart-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  align-items: start;
+}
+
+.viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
+  grid-column: span 6;
+}
+
+.viewer-hdf-material-card-footer {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.viewer-hdf-material-preview-content {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-preview-content,
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-body {
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tabs {
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tab[data-state="active"] {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-slice-layout {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-preview-toolbar {
+  align-items: center;
+  gap: 8px;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-preview-toolbar-copy {
+  display: none;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-preview-note {
+  display: none;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-inline-field.viewer-hdf-slider-field {
+  gap: 8px;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-preview-compact-toolbar {
+  gap: 12px;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-slice-shell {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  padding: 8px;
+}
+
+.viewer-hdf-material-map-stage .viewer-hdf-slice-canvas,
+.viewer-hdf-material-map-stage [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+.viewer-hdf-material-map-stage [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+}
+
+.viewer-hdf-material-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-start;
+}
+
+.viewer-hdf-material-actions-top {
+  padding-top: 2px;
 }
 
 .viewer-hdf-pagination-actions {
@@ -665,35 +1412,125 @@
   min-height: 220px;
 }
 
-@media (min-width: 960px) {
+@media (min-width: 1121px) {
   .viewer-hdf-slice-layout {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+    grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
     align-items: start;
   }
 }
 
 @media (max-width: 1380px) {
-  .viewer-hdf-shell {
-    grid-template-rows: auto auto minmax(0, 1fr);
+  .viewer-hdf-dashboard {
+    grid-template-columns: clamp(280px, 24vw, 300px) minmax(0, 1fr);
   }
 
-  .viewer-hdf-dashboard {
-    grid-template-columns: minmax(240px, 0.72fr) minmax(0, 1.28fr);
+  .viewer-hdf-material-chart-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .viewer-hdf-material-chart-grid > .viewer-hdf-material-card {
+    grid-column: span 1;
   }
 }
 
 @media (max-width: 1120px) {
-  .viewer-hdf-shell {
-    grid-template-rows: auto auto minmax(0, 1fr);
-  }
-
   .viewer-hdf-dashboard {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "inspector"
+      "navigator";
+    height: auto;
+    overflow: visible;
+  }
+
+  .viewer-hdf-workspace-tab {
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .viewer-hdf-shell > .viewer-hdf-dashboard {
+    height: 100%;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .viewer-hdf-navigator-card {
+    max-height: min(420px, 46vh);
+    max-height: min(420px, 46dvh);
+    border-top: 1px solid var(--line);
+    border-right: 0;
+  }
+
+  .viewer-hdf-hero-copy,
+  .viewer-hdf-material-card-title-row {
+    align-items: flex-start;
   }
 
   .viewer-hdf-hero-copy {
-    align-items: flex-start;
     flex-wrap: wrap;
+  }
+
+  .viewer-hdf-material-map-grid,
+  .viewer-hdf-material-chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .viewer-hdf-material-map-grid {
+    grid-template-areas:
+      "rail"
+      "stage";
+  }
+
+  .viewer-hdf-material-map-rail {
+    position: static;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    max-height: none;
+  }
+
+  .viewer-hdf-material-map-rail-header {
+    padding: 4px;
+  }
+
+  .viewer-hdf-material-map-actions {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+    overflow: visible;
+    padding: 2px 4px;
+  }
+
+  .viewer-hdf-material-map-button {
+    width: 100%;
+    min-height: 44px;
+    padding-block: 0.5rem;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"],
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-panel,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-grid,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-preview-content,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-body,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tabs,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-slice-layout {
+    height: auto;
+    overflow: visible;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tab[data-state="active"] {
+    display: block;
+    height: auto;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+    height: clamp(420px, 58vh, 640px);
+    height: clamp(420px, 58dvh, 640px);
+    min-height: clamp(420px, 58vh, 640px);
+    min-height: clamp(420px, 58dvh, 640px);
+    max-height: clamp(420px, 58vh, 640px);
+    max-height: clamp(420px, 58dvh, 640px);
   }
 
   .viewer-hdf-slider-panel {
@@ -709,13 +1546,124 @@
 @media (min-width: 1121px) {
   .viewer-hdf-navigator-card > .viewer-hdf-dashboard-header,
   .viewer-hdf-inspector-card > .viewer-hdf-dashboard-header {
-    min-height: 104px;
+    min-height: 72px;
+  }
+}
+
+@media (max-width: 620px) {
+  .viewer-hdf-shell {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .viewer-hdf-shell[data-hdf5-fullscreen="true"] {
+    padding: 8px;
+  }
+
+  .viewer-hdf-hero-heading,
+  .viewer-hdf-material-map-stage-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .viewer-hdf-hero-badges,
+  .viewer-hdf-material-actions {
+    width: 100%;
+  }
+
+  .viewer-hdf-current-inline {
+    display: grid;
+    gap: 2px;
+  }
+
+  .viewer-hdf-current-inline strong,
+  .viewer-hdf-context-code,
+  .viewer-hdf-material-note,
+  .viewer-hdf-material-stage-description {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .viewer-hdf-workspace-tabs-list,
+  .viewer-hdf-detail-tabs-list,
+  .viewer-hdf-preview-tabs-list {
+    display: flex;
+    width: 100%;
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    overflow-x: visible;
+  }
+
+  .viewer-hdf-workspace-tabs-list > *,
+  .viewer-hdf-detail-tabs-list > *,
+  .viewer-hdf-preview-tabs-list > * {
+    flex: 1 1 auto;
+  }
+
+  .viewer-hdf-preview-toolbar,
+  .viewer-hdf-preview-controls,
+  .viewer-hdf-axis-toggle {
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .viewer-hdf-categorical-controls,
+  .viewer-hdf-categorical-modes {
+    width: 100%;
+  }
+
+  .viewer-hdf-categorical-depth {
+    grid-template-columns: 1fr;
+    min-width: 0;
+  }
+
+  .viewer-hdf-categorical-depth small {
+    grid-column: 1;
+  }
+
+  .viewer-hdf-slice-canvas,
+  [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-map-stage .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-map-stage [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-map-stage [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+    height: clamp(320px, 52vh, 560px);
+    height: clamp(320px, 52dvh, 560px);
+    min-height: clamp(320px, 52vh, 560px);
+    min-height: clamp(320px, 52dvh, 560px);
+    max-height: clamp(320px, 52vh, 560px);
+    max-height: clamp(320px, 52dvh, 560px);
+  }
+
+  .viewer-hdf-material-panel-header {
+    display: none;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+    height: clamp(320px, 52vh, 560px);
+    height: clamp(320px, 52dvh, 560px);
+    min-height: clamp(320px, 52vh, 560px);
+    min-height: clamp(320px, 52dvh, 560px);
+    max-height: clamp(320px, 52vh, 560px);
+    max-height: clamp(320px, 52dvh, 560px);
+  }
+}
+
+@media (pointer: coarse) {
+  .viewer-hdf-shell button,
+  .viewer-hdf-shell [role="tab"],
+  .viewer-hdf-shell [data-slot="select-trigger"],
+  .viewer-hdf-slider {
+    min-height: 44px;
   }
 }
 
 @media (max-height: 860px) {
   .viewer-hdf-dashboard-header {
-    padding: 14px 20px 12px;
+    padding: 10px 14px 8px;
   }
 
   .viewer-hdf-tree-scroll,
@@ -724,6 +1672,32 @@
   }
 
   .viewer-hdf-slice-canvas {
-    min-height: 280px;
+    min-height: 360px;
+  }
+}
+
+@media (min-width: 1121px) and (max-height: 700px) {
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-panel,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-grid,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-preview-content,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-body,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tabs,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-preview-tab[data-state="active"],
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-slice-layout {
+    height: auto;
+  }
+
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas,
+  .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-map-stage [data-hdf5-volume-preview="true"] .viewer-hdf-slice-canvas {
+    height: clamp(320px, 52dvh, 440px);
+    min-height: clamp(320px, 52dvh, 440px);
+    max-height: clamp(320px, 52dvh, 440px);
   }
 }

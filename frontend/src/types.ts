@@ -3,6 +3,12 @@ export type ChatRole = "system" | "user" | "assistant" | "tool";
 export type ChatMessage = {
   role: ChatRole;
   content: string;
+  // Durable wire identity (present on server-persisted thread messages).
+  message_id?: string;
+  thread_id?: string | null;
+  run_id?: string | null;
+  created_at?: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 export type ToolBudget = {
@@ -56,7 +62,8 @@ export type ChatWorkflowHintId =
   | "goal_driven_build"
   | "quantitative_analysis"
   | "image_analysis"
-  | "megaseg";
+  | "megaseg"
+  | "knowledge";
 
 export type ChatWorkflowHint = {
   id: ChatWorkflowHintId;
@@ -1665,8 +1672,10 @@ export type Hdf5DatasetSummary = {
   file_id: string;
   dataset_path: string;
   dataset_name: string;
+  materials_domain_tags: string[];
   preview_kind?: string | null;
   semantic_role?: string | null;
+  feature_filter?: Hdf5FeatureFilter | null;
   units_hint?: string | null;
   dtype: string;
   shape: number[];
@@ -1754,6 +1763,19 @@ export type Hdf5DatasetSummary = {
   } | null;
 };
 
+export type Hdf5FeatureFilter = {
+  supported: true;
+  source_dataset_path: string;
+  max_ids: number;
+  background_id: 0;
+  provenance: "co_registered_raw_integer_feature_ids" | string;
+  registration_key: string;
+  target_role: "feature_ids" | "euler_angles" | "ipf_colors" | string;
+  native_shape: [number, number, number];
+  preview_shape: [number, number, number];
+  preview_stride: { z: number; y: number; x: number };
+};
+
 export type Hdf5DatasetHistogramResponse = {
   file_id: string;
   dataset_path: string;
@@ -1828,8 +1850,11 @@ export type UploadViewerInfo = {
   decodable?: boolean;
   /** Human-readable explanation shown when `decodable` is false. */
   message?: string;
-  modality?: "microscopy" | "medical" | "geospatial" | "image" | "unknown" | string;
+  modality?: "microscopy" | "medical" | "geospatial" | "materials" | "image" | "unknown" | string;
+  /** Canonical in-memory order used by every semantic viewer operation. */
   dims_order: string;
+  /** Axis order reported by the source container before canonicalization. */
+  source_dims_order?: string;
   backend_mode?: "direct" | "pyramid" | "atlas" | "scalar" | "hdf5" | string;
   axis_sizes: {
     T: number;
@@ -1949,8 +1974,11 @@ export type UploadViewerInfo = {
       y?: string | null;
       x?: string | null;
     } | null;
+    source_dims_order?: string;
     scene?: string | null;
     scene_count: number;
+    selected_scene_index?: number | null;
+    selected_scene_id?: string | null;
     /** Tiled-mosaic acquisition (multi-field stage scan). Null/absent for a normal
      *  single-field image. An unstitched mosaic shows per-field illumination seams. */
     mosaic?: {
@@ -2155,6 +2183,7 @@ export type UploadViewerInfo = {
     limitations: string[];
     selected_dataset_path?: string | null;
     default_dataset_path?: string | null;
+    materials?: Hdf5MaterialsPayload | null;
   } | null;
   /** Present for kind:"cifti" — drives the grayordinate carpet + connectivity views. */
   cifti?: CiftiViewerData | null;
@@ -2260,3 +2289,294 @@ export type AccountRequestPayload = {
 };
 
 export type AccountRequestResponse = BisqueAuthSessionResponse;
+
+// ---------------------------------------------------------------------------
+// Ultra execution tier — capability visibility + admission wire contract (v1).
+// Mirrors the Go control-plane views in internal/httpapi/ultra_*.go.
+// ---------------------------------------------------------------------------
+
+export type UltraCapabilityRetryMode =
+  | "not_retryable"
+  | "after_state_change"
+  | "retry_at"
+  | "requote";
+
+export type UltraCapabilityDisabledReason =
+  | "phase2_capabilities_unavailable"
+  | "policy_disabled"
+  | "kill_switch_active"
+  | "entitlement_missing"
+  | "capability_missing"
+  | "capability_version_mismatch"
+  | "capability_surface_mismatch"
+  | "capability_unhealthy"
+  | "user_quota_unavailable"
+  | "org_quota_unavailable"
+  | "global_capacity_unavailable"
+  | "endpoint_capacity_unavailable"
+  | "resource_authorization_failed"
+  | "profile_incompatible"
+  | "account_binding_invalid"
+  | "scheduler_unavailable"
+  | "worker_class_unavailable";
+
+export type UltraCapabilityRetryDirective = {
+  mode: UltraCapabilityRetryMode;
+  retry_at?: string | null;
+};
+
+export type UltraCapabilityAvailability = {
+  available: boolean;
+  reason?: UltraCapabilityDisabledReason | null;
+  retry?: UltraCapabilityRetryDirective | null;
+};
+
+export type UltraCapabilityCatalogResponse = {
+  schema_version: "ultra.capability_catalog.v1";
+  scope: "visibility_only_not_authorization";
+  observed_at: string;
+  ultra: {
+    visible: boolean;
+    quote_available: boolean;
+    admission_available: boolean;
+    dispatch_available: boolean;
+    requirements_published: boolean;
+    capability_binding_sha256: string;
+    availability: UltraCapabilityAvailability;
+  };
+};
+
+export type UltraRetryDirectiveV1 = {
+  mode: UltraCapabilityRetryMode;
+  retry_at?: string;
+};
+
+export type UltraTokenCallBudgetV1 = {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  model_calls: number;
+  tool_calls: number;
+};
+
+export type UltraRoleBudgetV1 = {
+  role_id: string;
+  limits: UltraTokenCallBudgetV1;
+};
+
+export type UltraEffectiveBudgetV1 = {
+  schema_version: "ultra.effective_budget.v1";
+  root_deadline: string;
+  root_limits: UltraTokenCallBudgetV1;
+  role_budgets: UltraRoleBudgetV1[];
+  dispatch: {
+    autonomous_cycles: number;
+    dynamic_dispatches: number;
+    concurrent_dynamic_dispatches: number;
+    durable_tasks: number;
+    concurrent_leases: number;
+    retries_per_task: number;
+    retries_per_phase: number;
+  };
+  compute: {
+    sandbox_executions: number;
+    sandbox_compute_milliseconds: number;
+  };
+  evidence: {
+    events: number;
+    event_bytes: number;
+    checkpoints: number;
+    checkpoint_bytes: number;
+    output_bytes: number;
+  };
+  quotas: {
+    user_concurrent_runs: number;
+    org_concurrent_runs: number;
+    fleet_concurrent_runs: number;
+    endpoint_concurrent_calls: number;
+    sandbox_concurrent_actions: number;
+  };
+};
+
+export type UltraEstimateRangeV1 = {
+  lower: number;
+  upper: number;
+};
+
+export type UltraEstimateBandV1 = {
+  schema_version: "ultra.estimate_band.v1";
+  estimator_id: string;
+  estimator_version: string;
+  estimator_sha256: string;
+  confidence_basis_points: number;
+  wall_clock_milliseconds: UltraEstimateRangeV1;
+  input_tokens: UltraEstimateRangeV1;
+  output_tokens: UltraEstimateRangeV1;
+  total_tokens: UltraEstimateRangeV1;
+  model_calls: UltraEstimateRangeV1;
+  tool_calls: UltraEstimateRangeV1;
+  dynamic_dispatches: UltraEstimateRangeV1;
+  durable_tasks: UltraEstimateRangeV1;
+  sandbox_executions: UltraEstimateRangeV1;
+  checkpoints: UltraEstimateRangeV1;
+  output_bytes: UltraEstimateRangeV1;
+};
+
+export type UltraAcceptanceCriterionViewV1 = {
+  ordinal: number;
+  criterion_id: string;
+  statement: string;
+  required_evidence: string[];
+};
+
+export type UltraAcceptanceIntentViewV1 = {
+  schema_version: "ultra.acceptance_intent.v1";
+  intent_sha256: string;
+  criteria: UltraAcceptanceCriterionViewV1[];
+  deliverables: string[];
+  exclusions: string[];
+};
+
+export type UltraAdmissionQuoteViewV1 = {
+  schema_version: "ultra.admission_quote.v1";
+  canonicalization_version: "ultra.canonical_json.v1";
+  quote_id: string;
+  quote_sha256: string;
+  request_sha256: string;
+  issued_at: string;
+  expires_at: string;
+  hold_expires_at: string | null;
+  effective_tier: "ultra";
+  policy_id: string;
+  policy_version: string;
+  effective_budget: UltraEffectiveBudgetV1;
+  estimate_band: UltraEstimateBandV1;
+  confirmation_requirement: "explicit_required" | "not_required";
+  acceptance_intent: UltraAcceptanceIntentViewV1;
+};
+
+export type UltraAdmissionQuoteDecisionV1 = {
+  schema_version: "ultra.quote_issuance_decision.v1";
+  outcome: "quoted" | "rejected";
+  decided_at: string;
+  reason?: string;
+  retry?: UltraRetryDirectiveV1;
+  quote?: UltraAdmissionQuoteViewV1;
+};
+
+export type UltraConfirmedRunV1 = {
+  run_id: string;
+  goal: string;
+  status: string;
+  workflow_kind: string;
+  created_at: string;
+  updated_at: string;
+  metadata: Record<string, unknown>;
+  thread_id?: string;
+  user_id?: string;
+  mode?: string;
+  requested_execution_tier?: "ultra";
+  effective_execution_tier?: "ultra";
+  resolved_reasoning_profile_id?: string;
+  current_node?: string;
+  parent_run_id?: string;
+  planner_version?: string;
+  agent_role?: string;
+  trace_group_id?: string;
+  checkpoint_id?: string;
+  checkpoint_state?: Record<string, unknown> | null;
+  budget_state?: Record<string, unknown> | null;
+  response_text?: string;
+  error?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+
+export type UltraQuoteConfirmationResponseV1 = {
+  schema_version: "ultra.quote_confirmation_response.v1";
+  outcome: "created" | "replayed" | "rejected";
+  reason?: string;
+  retry?: UltraRetryDirectiveV1;
+  run?: UltraConfirmedRunV1;
+};
+
+// --- DREAM3D microstructure viewer types (restored: viewer functionality removed by #40) ---
+export type Hdf5MaterialsPayload = {
+  detected: boolean;
+  schema?: "dream3d" | null;
+  capabilities: string[];
+  roles: Record<string, string>;
+  phase_names: string[];
+  phase_names_source?: string | null;
+  phase_names_provenance?: string | null;
+  feature_count?: number | null;
+  grain_count?: number | null;
+  declared_feature_tuple_count?: number | null;
+  referenced_positive_feature_count?: number | null;
+  feature_id_scan_complete: boolean;
+  feature_id_consistency?: boolean | null;
+  feature_zero_reserved?: boolean | null;
+  recommended_view: "materials" | "explorer";
+};
+
+
+export type Hdf5MaterialsChartResponse = {
+  kind: "scatter" | "histogram" | "bar";
+  title: string;
+  description?: string | null;
+  x_key: string;
+  y_key: string;
+  data: Array<Record<string, unknown>>;
+  source_paths: string[];
+  units_hint?: string | null;
+  provenance?: string | null;
+};
+
+export type Hdf5MaterialsMapResponse = {
+  title: string;
+  description?: string | null;
+  dataset_path: string;
+  semantic_role: string;
+  preview_kind?: string | null;
+};
+
+export type Hdf5MaterialsDatasetLinkResponse = {
+  label: string;
+  dataset_path: string;
+  semantic_role: string;
+  group: string;
+};
+
+export type Hdf5MaterialsDashboardResponse = {
+  file_id: string;
+  schema: "dream3d";
+  overview: {
+    geometry?: {
+      path?: string | null;
+      dimensions?: number[] | null;
+      spacing?: number[] | null;
+      origin?: number[] | null;
+      cell_data_path?: string | null;
+      cell_data_consistent?: boolean | null;
+      complete?: boolean | null;
+    } | null;
+    spacing_note?: string | null;
+    phase_names: string[];
+    phase_names_source?: string | null;
+    phase_names_provenance?: string | null;
+    feature_count?: number | null;
+    grain_count?: number | null;
+    declared_feature_tuple_count?: number | null;
+    referenced_positive_feature_count?: number | null;
+    feature_id_scan_complete: boolean;
+    feature_id_consistency?: boolean | null;
+    feature_zero_reserved?: boolean | null;
+    capabilities: string[];
+    recommended_map_dataset_path?: string | null;
+  };
+  maps: Hdf5MaterialsMapResponse[];
+  grain_charts: Hdf5MaterialsChartResponse[];
+  orientation_charts: Hdf5MaterialsChartResponse[];
+  synthetic_stats: Hdf5MaterialsChartResponse[];
+  dataset_links: Hdf5MaterialsDatasetLinkResponse[];
+};

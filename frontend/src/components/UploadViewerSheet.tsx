@@ -579,6 +579,7 @@ export function UploadViewerWorkspace({
         "viewer-workspace",
         !showFileStrip && "viewer-workspace-single-file",
         (selectedFileIsPdf || selectedFileIsVideo || selectedFileIsText) && "viewer-workspace-document",
+        isHdf5Viewer && "viewer-workspace-hdf5",
         selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
         className
       )}

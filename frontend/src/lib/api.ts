@@ -35,6 +35,7 @@ import type {
   Hdf5DatasetHistogramResponse,
   Hdf5DatasetSummary,
   Hdf5DatasetTablePreviewResponse,
+  Hdf5MaterialsDashboardResponse,
   PublicConfigResponse,
   PrairieBenchmarkRunRequest,
   PrairieBenchmarkRunResponse,
@@ -1026,6 +1027,29 @@ const isUploadSessionPaused = (
   sessionId: string,
   fileToken?: string | null
 ): boolean => Boolean(options.pauseSignal?.isPaused(sessionId, fileToken));
+
+// Canonicalize a Feature-ID selection for DREAM3D microstructure filtering: dedup,
+// reject non-digit / non-uint32 / zero (background), sort, cap. Throws RangeError on
+// invalid input so the viewer can surface a clear message instead of a bad request.
+export const canonicalizeHdf5FeatureIds = (values: readonly string[], maxIds = 64): string[] => {
+  const unique = new Set<number>();
+  values.forEach((raw) => {
+    const token = String(raw);
+    if (!/^[0-9]+$/.test(token)) {
+      throw new RangeError("Feature IDs must contain digits only.");
+    }
+    const value = Number(token);
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 0xffff_ffff) {
+      throw new RangeError("Feature IDs must be positive uint32 values; 0 is background.");
+    }
+    unique.add(value);
+  });
+  const safeMaxIds = Math.max(1, Math.floor(maxIds));
+  if (unique.size > safeMaxIds) {
+    throw new RangeError(`Select at most ${safeMaxIds} unique Feature IDs.`);
+  }
+  return [...unique].sort((a, b) => a - b).map(String);
+};
 
 export class ApiClient {
   private readonly baseUrl: string;
@@ -4814,6 +4838,32 @@ export class ApiClient {
     return (await response.json()) as Hdf5DatasetSummary;
   }
 
+  async getHdf5MaterialsDashboard(fileId: string): Promise<Hdf5MaterialsDashboardResponse> {
+    const safeFileId = encodeURIComponent(fileId);
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 20000);
+    let response: Response;
+    try {
+      response = await fetch(buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/materials/dashboard`), {
+        method: "GET",
+        headers: this.headers(),
+        signal: controller.signal,
+        credentials: "include",
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new ApiError("HDF5 materials dashboard request timed out", 504, null);
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as Hdf5MaterialsDashboardResponse;
+  }
+
   hdf5SlicePreviewUrl(
     fileId: string,
     config: {
@@ -4821,6 +4871,7 @@ export class ApiClient {
       axis?: "z" | "y" | "x";
       index?: number | null;
       component?: number | null;
+      featureIds?: readonly string[];
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -4836,6 +4887,9 @@ export class ApiClient {
     if (typeof config.component === "number" && Number.isFinite(config.component)) {
       params.component = String(Math.max(0, Math.floor(config.component)));
     }
+    if (config.featureIds?.length) {
+      params.feature_ids = canonicalizeHdf5FeatureIds(config.featureIds).join(",");
+    }
     return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/slice`, params);
   }
 
@@ -4847,6 +4901,7 @@ export class ApiClient {
       fusionMethod?: string;
       negative?: boolean;
       channels?: number[];
+      featureIds?: readonly string[];
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -4867,6 +4922,9 @@ export class ApiClient {
         .filter((value) => Number.isFinite(value))
         .map((value) => String(Math.max(0, Math.floor(value))))
         .join(",");
+    }
+    if (config.featureIds?.length) {
+      params.feature_ids = canonicalizeHdf5FeatureIds(config.featureIds).join(",");
     }
     return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/hdf5/preview/atlas`, params);
   }

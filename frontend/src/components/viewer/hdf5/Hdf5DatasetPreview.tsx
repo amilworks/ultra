@@ -1,38 +1,61 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { Select as SelectPrimitive } from "radix-ui";
 import { Bar, BarChart, CartesianGrid, Scatter, ScatterChart, XAxis, YAxis } from "recharts";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Select,
-  SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   Hdf5DatasetHistogramResponse,
   Hdf5DatasetSummary,
   Hdf5DatasetTablePreviewResponse,
 } from "@/types";
-import type { ApiClient } from "@/lib/api";
+import { canonicalizeHdf5FeatureIds, type ApiClient } from "@/lib/api";
 
 import { SlicePlaneCanvas } from "../SlicePlaneCanvas";
 import { SliceStackVolumeCanvas } from "../SliceStackVolumeCanvas";
+import { useHdf5OverlayContainer } from "./Hdf5OverlayContainer";
 
 type Hdf5DatasetPreviewProps = {
   apiClient: ApiClient;
   summary: Hdf5DatasetSummary;
   compactLayout?: boolean;
+  featureSelection?: Hdf5FeatureSelectionState | null;
+  onFeatureSelectionChange?: (selection: Hdf5FeatureSelectionState) => void;
+};
+
+export type Hdf5FeatureSelectionState = {
+  fileId: string;
+  registrationKey: string;
+  appliedFeatureIds: string[];
+  draftFeatureIds: string;
+  error: string | null;
+};
+
+type Hdf5FeatureSelectionProps = {
+  selectedFeatureIds: string[];
+  manualFeatureId: string;
+  featureSelectionError: string | null;
+  onManualFeatureIdChange: (value: string) => void;
+  onApplyFeatureIds: (values: readonly string[]) => void;
+  onRemoveFeatureId: (value: string) => void;
+  onClearFeatureIds: () => void;
 };
 
 type Hdf5VolumeSource = NonNullable<Parameters<typeof SliceStackVolumeCanvas>[0]["volumeSource"]>;
 
 type HistogramPreviewState = {
   key: string;
+  status: "idle" | "loading" | "success" | "error";
   histogram: Hdf5DatasetHistogramResponse | null;
   error: string | null;
 };
@@ -52,6 +75,7 @@ const SCATTER_CHART_CONFIG = {
 };
 
 const VOLUME_PREVIEW_KINDS = new Set(["scalar_volume", "label_volume", "rgb_volume", "vector_volume"]);
+const NO_FEATURE_IDS: string[] = [];
 
 const formatRangeValue = (value: number | null | undefined): string => {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -111,7 +135,36 @@ const canRenderNativeVolume = (summary: Hdf5DatasetSummary): boolean =>
       (summary.render_policy === "scalar" || summary.atlas_scheme)
   );
 
-function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5DatasetPreviewProps) {
+function Hdf5SelectContent({ children }: { children: ReactNode }) {
+  const overlayContainer = useHdf5OverlayContainer();
+  return (
+    <SelectPrimitive.Portal container={overlayContainer}>
+      <SelectPrimitive.Content
+        data-slot="select-content"
+        data-hdf5-overlay="select"
+        position="item-aligned"
+        className="viewer-hdf-select-content"
+      >
+        <SelectPrimitive.Viewport className="viewer-hdf-select-viewport">
+          {children}
+        </SelectPrimitive.Viewport>
+      </SelectPrimitive.Content>
+    </SelectPrimitive.Portal>
+  );
+}
+
+function Hdf5VolumePreview({
+  apiClient,
+  summary,
+  compactLayout = false,
+  selectedFeatureIds,
+  manualFeatureId,
+  featureSelectionError,
+  onManualFeatureIdChange,
+  onApplyFeatureIds,
+  onRemoveFeatureId,
+  onClearFeatureIds,
+}: Hdf5DatasetPreviewProps & Hdf5FeatureSelectionProps) {
   const availableAxes = useMemo(
     () => (summary.slice_axes.length > 0 ? summary.slice_axes : (["z"] as Array<"z" | "y" | "x">)),
     [summary.slice_axes]
@@ -119,14 +172,36 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
   const [selectedAxis, setSelectedAxis] = useState<"z" | "y" | "x">(availableAxes[0] ?? "z");
   const [selectedComponent, setSelectedComponent] = useState(0);
   const canRenderVolume = canRenderNativeVolume(summary);
-  const [selectedTab, setSelectedTab] = useState<"volume" | "visual" | "distribution">(
-    canRenderVolume ? "volume" : "visual"
+  const isCategoricalVolume = summary.preview_kind === "label_volume";
+  const categoricalDepth = axisSize(summary, "z");
+  const [categoricalMode, setCategoricalMode] = useState<"surface" | "xray">("surface");
+  const [categoricalCutaway, setCategoricalCutaway] = useState(false);
+  const [categoricalDepthIndex, setCategoricalDepthIndex] = useState(
+    Math.floor((categoricalDepth - 1) / 2)
   );
+  const [featureFilterOpen, setFeatureFilterOpen] = useState(Boolean(featureSelectionError));
+  const featureFilterDescriptionId = useId();
+  const featureFilterErrorId = useId();
+  const [selectedTab, setSelectedTab] = useState<"volume" | "visual" | "distribution">("visual");
   const [histogramState, setHistogramState] = useState<HistogramPreviewState>({
     key: "",
+    status: "idle",
     histogram: null,
     error: null,
   });
+  const [histogramCache, setHistogramCache] = useState(
+    new Map<string, { histogram: Hdf5DatasetHistogramResponse | null; error: string | null }>()
+  );
+  const histogramRequestsRef = useRef(new Map<string, Promise<Hdf5DatasetHistogramResponse>>());
+  const histogramKeyRef = useRef("");
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const maxIndex = axisSize(summary, selectedAxis);
   const [selectedIndex, setSelectedIndex] = useState(Math.max(0, Math.floor(maxIndex / 2)));
@@ -148,25 +223,51 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
         summary.preview_kind === "vector_volume" ? activeComponent : "scalar",
       ].join("\u0000")
     : "";
+  const cachedHistogramState = histogramCache.get(histogramRequestKey);
   const currentHistogramState =
     histogramState.key === histogramRequestKey
       ? histogramState
-      : { key: histogramRequestKey, histogram: null, error: null };
+      : cachedHistogramState
+        ? {
+            key: histogramRequestKey,
+            status: cachedHistogramState.error ? ("error" as const) : ("success" as const),
+            ...cachedHistogramState,
+          }
+        : {
+            key: histogramRequestKey,
+            status: "idle" as const,
+            histogram: null,
+            error: null,
+          };
   const histogram = currentHistogramState.histogram;
   const histogramError = currentHistogramState.error;
-  const histogramLoading = Boolean(histogramRequestKey && histogramState.key !== histogramRequestKey);
+  const histogramLoading = Boolean(
+    selectedTab === "distribution" &&
+      histogramRequestKey &&
+      (currentHistogramState.status === "idle" || currentHistogramState.status === "loading")
+  );
   const activePlane = summary.preview_planes[selectedAxis];
-  const previewUrl = apiClient.hdf5SlicePreviewUrl(summary.file_id, {
-    datasetPath: summary.dataset_path,
-    axis: selectedAxis,
-    index: selectedIndex,
-    component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
-  });
-  const volumeFallbackUrl = apiClient.hdf5SlicePreviewUrl(summary.file_id, {
-    datasetPath: summary.dataset_path,
-    axis: "z",
-    index: Math.max(0, Math.floor(axisSize(summary, "z") / 2)),
-  });
+  const previewUrl = useMemo(
+    () =>
+      apiClient.hdf5SlicePreviewUrl(summary.file_id, {
+        datasetPath: summary.dataset_path,
+        axis: selectedAxis,
+        index: selectedIndex,
+        component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
+        featureIds: selectedFeatureIds,
+      }),
+    [apiClient, activeComponent, selectedAxis, selectedFeatureIds, selectedIndex, summary]
+  );
+  const volumeFallbackUrl = useMemo(
+    () =>
+      apiClient.hdf5SlicePreviewUrl(summary.file_id, {
+        datasetPath: summary.dataset_path,
+        axis: "z",
+        index: Math.max(0, Math.floor(axisSize(summary, "z") / 2)),
+        featureIds: selectedFeatureIds,
+      }),
+    [apiClient, selectedFeatureIds, summary]
+  );
   const hdf5VolumeSource = useMemo<Hdf5VolumeSource | null>(() => {
     if (!canRenderVolume || !summary.axis_sizes || !summary.preview_planes.z) {
       return null;
@@ -174,9 +275,10 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
     if (summary.render_policy === "scalar") {
       return {
         kind: "scalar",
-        loadScalarVolume: () =>
+        loadScalarVolume: (signal?: AbortSignal) =>
           apiClient.getHdf5ScalarVolume(summary.file_id, {
             datasetPath: summary.dataset_path,
+            signal,
           }),
         fallbackImageUrl: volumeFallbackUrl,
         axisSizes: summary.axis_sizes,
@@ -193,6 +295,7 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
       kind: "atlas",
       atlasUrl: apiClient.hdf5AtlasPreviewUrl(summary.file_id, {
         datasetPath: summary.dataset_path,
+        featureIds: selectedFeatureIds,
       }),
       fallbackImageUrl: volumeFallbackUrl,
       atlasScheme: summary.atlas_scheme,
@@ -200,7 +303,7 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
       plane: summary.preview_planes.z,
       physicalSpacing: summary.physical_spacing ?? null,
       renderPolicy: summary.render_policy,
-      texturePolicy: summary.texture_policy,
+      texturePolicy: selectedFeatureIds.length > 0 ? "nearest" : summary.texture_policy,
     };
   }, [
     apiClient,
@@ -213,6 +316,7 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
     summary.preview_planes.z,
     summary.render_policy,
     summary.texture_policy,
+    selectedFeatureIds,
     volumeFallbackUrl,
   ]);
   const previewTabCount = (canRenderVolume ? 1 : 0) + 1 + (summary.capabilities.includes("histogram") ? 1 : 0);
@@ -234,62 +338,194 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
           <SelectTrigger className="viewer-hdf-select">
             <SelectValue placeholder="Select component" />
           </SelectTrigger>
-          <SelectContent>
+          <Hdf5SelectContent>
             {componentLabels.map((label, index) => (
               <SelectItem key={`${label}:${index}`} value={String(index)}>
                 {label}
               </SelectItem>
             ))}
-          </SelectContent>
+          </Hdf5SelectContent>
         </Select>
       </label>
     ) : null;
 
-  const renderCompactToolbar = () =>
-    compactLayout && (previewTabCount > 1 || summary.preview_kind === "vector_volume") ? (
-      <div className="viewer-hdf-preview-compact-toolbar">
-        {renderPreviewTabsList()}
-        {renderComponentField()}
-      </div>
-    ) : null;
+  useEffect(() => {
+    histogramKeyRef.current = histogramRequestKey;
+  }, [histogramRequestKey]);
 
   useEffect(() => {
-    if (!histogramRequestKey) {
+    if (selectedTab !== "distribution" || !histogramRequestKey) {
       return;
     }
-    let cancelled = false;
-    apiClient
-      .getHdf5DatasetHistogram(summary.file_id, summary.dataset_path, {
-        component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
-        bins: 24,
-      })
+    const cached = histogramCache.get(histogramRequestKey);
+    if (cached) {
+      return;
+    }
+    if (histogramRequestsRef.current.has(histogramRequestKey)) {
+      return;
+    }
+    const request = apiClient.getHdf5DatasetHistogram(summary.file_id, summary.dataset_path, {
+      component: summary.preview_kind === "vector_volume" ? activeComponent : undefined,
+      bins: 24,
+    });
+    histogramRequestsRef.current.set(histogramRequestKey, request);
+    void request
       .then((response) => {
-        if (cancelled) {
-          return;
+        const cachedResponse = { histogram: response, error: null };
+        setHistogramCache((current) => new Map(current).set(histogramRequestKey, cachedResponse));
+        if (mountedRef.current && histogramKeyRef.current === histogramRequestKey) {
+          setHistogramState({
+            key: histogramRequestKey,
+            status: "success",
+            ...cachedResponse,
+          });
         }
-        setHistogramState({ key: histogramRequestKey, histogram: response, error: null });
       })
       .catch((error: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setHistogramState({
-          key: histogramRequestKey,
+        const cachedError = {
           histogram: null,
           error: error instanceof Error ? error.message : "Failed to load histogram preview.",
-        });
+        };
+        setHistogramCache((current) => new Map(current).set(histogramRequestKey, cachedError));
+        if (mountedRef.current && histogramKeyRef.current === histogramRequestKey) {
+          setHistogramState({
+            key: histogramRequestKey,
+            status: "error",
+            ...cachedError,
+          });
+        }
+      })
+      .finally(() => {
+        histogramRequestsRef.current.delete(histogramRequestKey);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [
     activeComponent,
     apiClient,
+    histogramCache,
     histogramRequestKey,
+    selectedTab,
     summary.dataset_path,
     summary.file_id,
     summary.preview_kind,
   ]);
+
+  const renderFeatureFilter = () =>
+    summary.feature_filter ? (
+      <Collapsible
+        className="viewer-hdf-feature-filter"
+        data-hdf5-feature-filter="true"
+        open={featureFilterOpen || Boolean(featureSelectionError)}
+        onOpenChange={(open) => {
+          if (!open && featureSelectionError) {
+            return;
+          }
+          setFeatureFilterOpen(open);
+        }}
+      >
+        <div className="viewer-hdf-feature-filter-heading">
+          <CollapsibleTrigger asChild>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="viewer-hdf-feature-filter-trigger"
+              aria-label={
+                selectedFeatureIds.length > 0
+                  ? `Filter grains, ${selectedFeatureIds.length.toLocaleString()} selected`
+                  : "Filter grains"
+              }
+            >
+              Filter grains
+              <ChevronDown data-icon="inline-end" aria-hidden="true" />
+            </Button>
+          </CollapsibleTrigger>
+          {selectedFeatureIds.length > 0 ? (
+            <span className="viewer-hdf-feature-filter-count" aria-live="polite">
+              {selectedFeatureIds.length.toLocaleString()} selected
+            </span>
+          ) : null}
+          {selectedFeatureIds.length > 0 ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              aria-label="Clear grain filter"
+              onClick={onClearFeatureIds}
+            >
+              Clear
+            </Button>
+          ) : null}
+        </div>
+        <CollapsibleContent className="viewer-hdf-feature-filter-content">
+          <p id={featureFilterDescriptionId} className="viewer-hdf-feature-filter-helper">
+            Raw Feature IDs; background 0 excluded.
+          </p>
+          <form
+            className="viewer-hdf-feature-filter-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              onApplyFeatureIds(manualFeatureId.split(","));
+            }}
+          >
+            <input
+              type="text"
+              inputMode="text"
+              value={manualFeatureId}
+              aria-label="Feature IDs"
+              aria-invalid={featureSelectionError ? "true" : undefined}
+              aria-describedby={
+                featureSelectionError
+                  ? `${featureFilterDescriptionId} ${featureFilterErrorId}`
+                  : featureFilterDescriptionId
+              }
+              placeholder="e.g. 7, 25"
+              onChange={(event) => {
+                setFeatureFilterOpen(true);
+                onManualFeatureIdChange(event.currentTarget.value);
+              }}
+            />
+            <Button type="submit" size="sm" variant="outline" disabled={!manualFeatureId.trim()}>
+              Apply
+            </Button>
+          </form>
+          {featureSelectionError ? (
+            <p id={featureFilterErrorId} className="viewer-hdf-feature-filter-error" role="alert">
+              {featureSelectionError}
+            </p>
+          ) : null}
+          {selectedFeatureIds.length > 0 ? (
+            <div className="viewer-hdf-feature-id-list" aria-label="Selected Feature IDs">
+              {selectedFeatureIds.map((featureId) => (
+                <button
+                  key={featureId}
+                  type="button"
+                  aria-label={`Remove Feature ID ${featureId}`}
+                  onClick={() => onRemoveFeatureId(featureId)}
+                >
+                  ID {featureId}<span aria-hidden="true">×</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </CollapsibleContent>
+      </Collapsible>
+    ) : null;
+
+  const renderPreviewToolbarActions = () => (
+    <div className="viewer-hdf-preview-toolbar-actions">
+      {renderPreviewTabsList()}
+      {renderFeatureFilter()}
+    </div>
+  );
+
+  const renderCompactToolbar = () =>
+    compactLayout &&
+    (previewTabCount > 1 || summary.preview_kind === "vector_volume" || summary.feature_filter) ? (
+      <div className="viewer-hdf-preview-compact-toolbar">
+        {renderPreviewToolbarActions()}
+        {renderComponentField()}
+      </div>
+    ) : null;
 
   return (
     <div className="viewer-hdf-preview-body" data-hdf5-preview-kind={summary.preview_kind ?? "unknown"}>
@@ -298,36 +534,104 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
         onValueChange={(value) => setSelectedTab(value as "volume" | "visual" | "distribution")}
         className={`viewer-hdf-preview-tabs${compactLayout ? " viewer-hdf-preview-tabs-compact" : ""}`}
       >
-        {!compactLayout ? (
+        {compactLayout ? renderCompactToolbar() : (
           <div className="viewer-hdf-preview-toolbar">
             <div className="viewer-hdf-preview-toolbar-copy">
               <span>
                 {canRenderVolume
-                  ? "Use Volume for native 3D inspection, Slice for orthogonal spot checks, and Distribution when you want bounded numeric context."
+                  ? "Use Volume for 3D preview inspection, Slice for orthogonal spot checks, and Distribution when you want bounded numeric context."
                   : "Use Slice to inspect the selected dataset, then switch to Distribution when you want bounded numeric context."}
               </span>
             </div>
             {renderComponentField()}
-            {renderPreviewTabsList()}
+            {renderPreviewToolbarActions()}
           </div>
-        ) : null}
+        )}
 
         {canRenderVolume && hdf5VolumeSource ? (
           <TabsContent value="volume" className="viewer-hdf-preview-tab">
-            {renderCompactToolbar()}
             <div className="viewer-hdf-preview-note">
               <strong>
                 {summary.preview_kind === "label_volume" ? "Categorical volume" : "Scalar volume"}
               </strong>
               <span>
                 {summary.render_policy === "scalar"
-                  ? "Native 3D preserves scalar intensity ordering from the HDF5 dataset and scales the volume from stored geometry metadata."
-                  : "Native 3D uses the categorical/display volume path and scales the volume from stored geometry metadata."}
+                  ? "The 3D scalar preview preserves intensity ordering from the HDF5 dataset and scales the volume from stored geometry metadata."
+                  : "The 3D categorical/display preview uses bounded atlas data and scales the preview volume from stored geometry metadata."}
               </span>
             </div>
+            {isCategoricalVolume ? (
+              <div
+                className="viewer-hdf-categorical-controls"
+                role="group"
+                aria-label="Categorical volume rendering"
+              >
+                <div className="viewer-hdf-categorical-modes">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={categoricalMode === "surface" ? "secondary" : "outline"}
+                    aria-pressed={categoricalMode === "surface"}
+                    onClick={() => setCategoricalMode("surface")}
+                  >
+                    Surface
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={categoricalMode === "xray" ? "secondary" : "outline"}
+                    aria-pressed={categoricalMode === "xray"}
+                    onClick={() => setCategoricalMode("xray")}
+                  >
+                    X-ray
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={categoricalCutaway ? "secondary" : "outline"}
+                    aria-pressed={categoricalCutaway}
+                    onClick={() => setCategoricalCutaway((active) => !active)}
+                  >
+                    Cutaway
+                  </Button>
+                </div>
+                {categoricalMode === "xray" ? (
+                  <p className="viewer-hdf-categorical-caveat" role="note">
+                    X-ray blends labels for depth context; blended colors do not represent feature IDs.
+                  </p>
+                ) : null}
+                {categoricalCutaway ? (
+                  <label className="viewer-hdf-categorical-depth">
+                    <span className="viewer-hdf-categorical-depth-label">
+                      <strong>Z depth</strong>
+                      <span>
+                        Preview-grid Z {categoricalDepthIndex + 1} of {categoricalDepth}
+                      </span>
+                    </span>
+                    <input
+                      type="range"
+                      className="viewer-hdf-slider"
+                      aria-label="Cutaway Z depth"
+                      aria-valuetext={`Preview-grid Z ${categoricalDepthIndex + 1} of ${categoricalDepth}`}
+                      min={0}
+                      max={Math.max(0, categoricalDepth - 1)}
+                      step={1}
+                      value={categoricalDepthIndex}
+                      onChange={(event) => setCategoricalDepthIndex(Number(event.currentTarget.value))}
+                    />
+                    <small>Depth follows the bounded preview grid, not native source topology.</small>
+                  </label>
+                ) : null}
+              </div>
+            ) : null}
             <div className="viewer-hdf-slice-shell" data-hdf5-volume-preview="true">
               <SliceStackVolumeCanvas
                 volumeSource={hdf5VolumeSource}
+                categoricalMode={isCategoricalVolume ? categoricalMode : undefined}
+                volumeCutaway={isCategoricalVolume ? categoricalCutaway : undefined}
+                zIndex={isCategoricalVolume ? categoricalDepthIndex : undefined}
+                featureMask={selectedFeatureIds.length > 0}
+                cameraPersistenceKey={`${summary.file_id}:${summary.dataset_path}`}
                 className="viewer-canvas-root viewer-hdf-slice-canvas"
               />
             </div>
@@ -337,17 +641,17 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
         <TabsContent value="visual" className="viewer-hdf-preview-tab">
           <div className="viewer-hdf-slice-layout">
             <div className="viewer-hdf-slice-sidebar">
-              {renderCompactToolbar()}
               <div className="viewer-hdf-preview-controls">
-                <div className="viewer-hdf-axis-toggle" role="tablist" aria-label="Slice orientation">
+                <div className="viewer-hdf-axis-toggle" role="group" aria-label="Slice orientation">
                   {availableAxes.map((axis) => (
-	                    <Button
-	                      key={axis}
-	                      type="button"
-	                      size="sm"
-	                      variant={selectedAxis === axis ? "secondary" : "outline"}
-	                      onClick={() => handleSelectedAxisChange(axis)}
-	                    >
+                    <Button
+                      key={axis}
+                      type="button"
+                      size="sm"
+                      variant={selectedAxis === axis ? "secondary" : "outline"}
+                      aria-pressed={selectedAxis === axis}
+                      onClick={() => handleSelectedAxisChange(axis)}
+                    >
                       {axisLabel(axis)}
                     </Button>
                   ))}
@@ -383,13 +687,16 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
                         slice {selectedIndex + 1} / {maxIndex}
                       </span>
                     </div>
-                    <Slider
+                    <input
+                      type="range"
                       className="viewer-hdf-slider"
+                      aria-label={`${activePlane?.label ?? `${axisLabel(selectedAxis)} plane`} slice`}
+                      aria-valuetext={`Slice ${selectedIndex + 1} of ${maxIndex}`}
                       min={0}
                       max={Math.max(0, maxIndex - 1)}
                       step={1}
-                      value={[selectedIndex]}
-                      onValueChange={(value) => setSelectedIndex(value[0] ?? 0)}
+                      value={selectedIndex}
+                      onChange={(event) => setSelectedIndex(Number(event.currentTarget.value))}
                     />
                   </div>
                 </CardContent>
@@ -413,7 +720,6 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
 
         {summary.capabilities.includes("histogram") ? (
           <TabsContent value="distribution" className="viewer-hdf-preview-tab">
-            {renderCompactToolbar()}
             <section className="viewer-hdf-chart-card" data-hdf5-histogram="true">
               <div className="viewer-hdf-tree-header">
                 <strong>Sampled distribution</strong>
@@ -422,6 +728,11 @@ function Hdf5VolumePreview({ apiClient, summary, compactLayout = false }: Hdf5Da
                   {buildSampleSummary(histogram?.sample_count, summary.element_count)}
                 </span>
               </div>
+              {selectedFeatureIds.length > 0 ? (
+                <p className="viewer-hdf-histogram-filter-note" role="note">
+                  Histogram values remain an unfiltered bounded sample of the full dataset.
+                </p>
+              ) : null}
               {histogramLoading ? (
                 <div className="viewer-empty">Loading histogram preview...</div>
               ) : histogramError ? (
@@ -626,11 +937,97 @@ function Hdf5TablePreview({ apiClient, summary }: Hdf5DatasetPreviewProps) {
   );
 }
 
-export function Hdf5DatasetPreview({ apiClient, summary, compactLayout = false }: Hdf5DatasetPreviewProps) {
+export function Hdf5DatasetPreview({
+  apiClient,
+  summary,
+  compactLayout = false,
+  featureSelection,
+  onFeatureSelectionChange,
+}: Hdf5DatasetPreviewProps) {
+  const [localFeatureSelection, setLocalFeatureSelection] = useState<Hdf5FeatureSelectionState | null>(null);
+  const storedSelection = featureSelection === undefined ? localFeatureSelection : featureSelection;
+  const registrationKey = summary.feature_filter?.registration_key ?? "";
+  const selectionMatches = Boolean(
+    storedSelection &&
+      storedSelection.fileId === summary.file_id &&
+      storedSelection.registrationKey === registrationKey &&
+      registrationKey
+  );
+  const activeSelection: Hdf5FeatureSelectionState = selectionMatches && storedSelection
+    ? storedSelection
+    : {
+        fileId: summary.file_id,
+        registrationKey,
+        appliedFeatureIds: NO_FEATURE_IDS,
+        draftFeatureIds: "",
+        error: null,
+      };
+  const commitSelection = (next: Hdf5FeatureSelectionState): void => {
+    if (onFeatureSelectionChange) {
+      onFeatureSelectionChange(next);
+    } else {
+      setLocalFeatureSelection(next);
+    }
+  };
+  const applyFeatureIds = (values: readonly string[]) => {
+    try {
+      const tokens = values.map((value) => value.trim());
+      if (tokens.length === 0 || tokens.some((value) => !value)) {
+        throw new RangeError("Enter one or more comma-separated Feature IDs.");
+      }
+      const nextIds = canonicalizeHdf5FeatureIds(
+        [...activeSelection.appliedFeatureIds, ...tokens],
+        summary.feature_filter?.max_ids ?? 64
+      );
+      const currentIds = activeSelection.appliedFeatureIds;
+      const unchanged =
+        currentIds.length === nextIds.length && currentIds.every((value, index) => value === nextIds[index]);
+      if (unchanged && !activeSelection.error) {
+        if (activeSelection.draftFeatureIds) {
+          commitSelection({ ...activeSelection, appliedFeatureIds: currentIds, draftFeatureIds: "" });
+        }
+        return;
+      }
+      commitSelection({
+        ...activeSelection,
+        appliedFeatureIds: unchanged ? currentIds : nextIds,
+        draftFeatureIds: "",
+        error: null,
+      });
+    } catch (error) {
+      commitSelection({
+        ...activeSelection,
+        error: error instanceof Error ? error.message : "Invalid Feature ID.",
+      });
+    }
+  };
+  const featureSelectionProps: Hdf5FeatureSelectionProps = {
+    selectedFeatureIds: activeSelection.appliedFeatureIds,
+    manualFeatureId: activeSelection.draftFeatureIds,
+    featureSelectionError: activeSelection.error,
+    onManualFeatureIdChange: (value) => {
+      commitSelection({ ...activeSelection, draftFeatureIds: value, error: null });
+    },
+    onApplyFeatureIds: applyFeatureIds,
+    onRemoveFeatureId: (value) => {
+      commitSelection({
+        ...activeSelection,
+        appliedFeatureIds: activeSelection.appliedFeatureIds.filter((featureId) => featureId !== value),
+        error: null,
+      });
+    },
+    onClearFeatureIds: () => {
+      if (activeSelection.appliedFeatureIds.length === 0 && !activeSelection.error) {
+        return;
+      }
+      commitSelection({ ...activeSelection, appliedFeatureIds: NO_FEATURE_IDS, error: null });
+    },
+  };
   const previewKind = summary.preview_kind ?? "unknown";
   const previewKey = [
     summary.file_id,
     summary.dataset_path,
+    registrationKey || "unregistered",
     previewKind,
     summary.slice_axes.join(","),
     canRenderNativeVolume(summary) ? "volume" : "slice",
@@ -638,7 +1035,15 @@ export function Hdf5DatasetPreview({ apiClient, summary, compactLayout = false }
   ].join(":");
 
   if (VOLUME_PREVIEW_KINDS.has(previewKind)) {
-    return <Hdf5VolumePreview key={previewKey} apiClient={apiClient} summary={summary} compactLayout={compactLayout} />;
+    return (
+      <Hdf5VolumePreview
+        key={previewKey}
+        apiClient={apiClient}
+        summary={summary}
+        compactLayout={compactLayout}
+        {...featureSelectionProps}
+      />
+    );
   }
 
   if (previewKind === "table" || previewKind === "series") {

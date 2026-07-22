@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/assets/bisque-ultra-hero.png" alt="BisQue Ultra — Lens scientific image viewer showing a CIFTI grayordinate carpet plot" width="100%" />
+  <img src=".github/assets/bisque-ultra-readme.gif" alt="BisQue Ultra — moving from generated quantitative analysis figures to interactive CIFTI inspection in the Lens scientific viewer" width="100%" />
 </p>
 
 <h1 align="center">BisQue Ultra</h1>
@@ -9,7 +9,6 @@
 </p>
 
 <p align="center">
-  <a href="#product-tour">Product tour</a> ·
   <a href="#quick-start-docker-compose">Quick start (Docker)</a> ·
   <a href="#what-you-are-launching">What you launch</a> ·
   <a href="#step-2-choose-an-openai-compatible-model-endpoint">Choose a model endpoint</a> ·
@@ -20,16 +19,6 @@
 BisQue Ultra gives you one surface for scientific images, datasets, metadata, model calls, and long-running tool workflows. An existing BisQue service stores the data, the Go control plane owns runs and access, Deep Agents workers execute long-running tool work, and React keeps the whole process visible. The model layer stays replaceable, so you can point the same platform at any OpenAI-compatible server without rewriting the application around a single vendor.
 
 If you want one sentence to hold the whole system in your head, use this one: BisQue Ultra is a scientific workbench whose data layer is an existing BisQue deployment, whose control plane is Go, whose workers are Deep Agents, whose interface is React, and whose language model can come from any OpenAI-compatible server.
-
-## Product Tour
-
-<p align="center">
-  <img src=".github/assets/bisque-ultra-readme.gif" alt="BisQue Ultra moving from generated quantitative analysis figures to interactive CIFTI inspection in the Lens scientific viewer" width="100%" />
-</p>
-
-<p align="center">
-  <em>Follow generated quantitative outputs into interactive scientific data inspection in Lens—without leaving the workbench.</em>
-</p>
 
 Production deployment and operator runbooks are intentionally kept in private internal documentation rather than the public repo.
 

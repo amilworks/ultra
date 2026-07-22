@@ -6556,14 +6556,23 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   pointer-events: none;
   border: 0;
   background: none;
+  /* Hit-target padding with margins compensating ONLY horizontally: for an
+     absolutely positioned box, top:50% anchors the MARGIN edge, so a negative
+     top margin leaks into the anchor and translateY(-50%) can't recover it —
+     the label rode ~5.6px high of true center. The horizontal pair is kept
+     because right + negative margin-right cancel exactly, holding the text's
+     1rem gap to the send button. */
   padding: 0.35rem 0.45rem;
-  margin: -0.35rem -0.45rem;
+  margin: 0 -0.45rem;
   border-radius: 999px;
   cursor: pointer;
   /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
      `font: inherit` out-orders that clamp, so the field actually renders at the
-     card's inherited size — inheriting here matches the real placeholder. */
+     card's inherited size — inheriting here matches the real placeholder;
+     line-height restates the textarea's 1.45 so the two line boxes (and thus
+     baselines) are metric-identical when both sit centered in the pill. */
   font-size: inherit;
+  line-height: 1.45;
   font-weight: 400;
   letter-spacing: -0.015em;
   color: var(--composer-placeholder);

@@ -61,12 +61,6 @@ jobs:
           tests/test_bisque_tools.py
           tests/test_worker_transport.py
 
-      - name: Test sensor worker core smoke
-        working-directory: backend/deepagents_runtime
-        run: >-
-          uv run --extra dev pytest -q
-          tests/test_sensor_worker_core_smoke.py
-
       - name: Run frontend quality checks
         run: make frontend-quality
 

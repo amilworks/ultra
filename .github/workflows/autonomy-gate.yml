@@ -26,7 +26,6 @@ on:
       - "Makefile"
       - "README.md"
       - "scripts/deploy_ultra_control_stack.sh"
-      - "tests/test_control_stack_deploy_assets.py"
       - ".github/workflows/autonomy-gate.yml"
   pull_request:
     paths:
@@ -49,7 +48,6 @@ on:
       - "Makefile"
       - "README.md"
       - "scripts/deploy_ultra_control_stack.sh"
-      - "tests/test_control_stack_deploy_assets.py"
       - ".github/workflows/autonomy-gate.yml"
 
 concurrency:

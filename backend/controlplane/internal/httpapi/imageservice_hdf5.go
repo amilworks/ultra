@@ -30,7 +30,7 @@ var hdf5QueryKeys = map[string][]string{
 	"/hdf5/dataset":               {"dataset_path"},
 	"/hdf5/materials/dashboard":   nil,
 	"/hdf5/preview/slice":         {"dataset_path", "axis", "index", "component", "feature_ids"},
-	"/hdf5/preview/atlas":         {"dataset_path", "enhancement", "fusion_method", "negative", "channels", "feature_ids"},
+	"/hdf5/preview/atlas":         {"dataset_path", "component", "enhancement", "fusion_method", "negative", "channels", "feature_ids"},
 	"/hdf5/preview/scalar-volume": {"dataset_path", "channel"},
 	"/hdf5/preview/histogram":     {"dataset_path", "component", "bins"},
 	"/hdf5/preview/table":         {"dataset_path", "offset", "limit"},

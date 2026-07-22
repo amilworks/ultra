@@ -429,10 +429,12 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
     @app.get("/hdf5/preview/slice")
     async def hdf5_slice(
         path: str, dataset_path: str, axis: str = "z", index: int | None = None, component: int = 0,
+        feature_ids: str | None = None,
     ):
         try:
             png = await runner.call(
                 "hdf5_slice_png", path, dataset_path, axis=axis, index=index, component=component,
+                feature_ids=feature_ids,
             )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
@@ -441,10 +443,14 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
     @app.get("/hdf5/preview/atlas")
     async def hdf5_atlas(
         path: str, dataset_path: str, enhancement: str | None = None, fusion_method: str | None = None,
-        negative: str | None = None, channels: str | None = None,
+        negative: str | None = None, channels: str | None = None, component: int = 0,
+        feature_ids: str | None = None,
     ):
         try:
-            png = await runner.call("hdf5_atlas_png", path, dataset_path)
+            png = await runner.call(
+                "hdf5_atlas_png", path, dataset_path, component=component,
+                feature_ids=feature_ids,
+            )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
         return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})

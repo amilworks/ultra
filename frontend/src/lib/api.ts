@@ -4897,6 +4897,7 @@ export class ApiClient {
     fileId: string,
     config: {
       datasetPath: string;
+      component?: number | null;
       enhancement?: string;
       fusionMethod?: string;
       negative?: boolean;
@@ -4908,6 +4909,9 @@ export class ApiClient {
     const params: Record<string, string> = {
       dataset_path: config.datasetPath,
     };
+    if (typeof config.component === "number" && Number.isFinite(config.component)) {
+      params.component = String(Math.max(0, Math.floor(config.component)));
+    }
     if (config.enhancement) {
       params.enhancement = config.enhancement;
     }

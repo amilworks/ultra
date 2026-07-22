@@ -174,13 +174,13 @@ func TestV2UploadHdf5RoutesProxyImageService(t *testing.T) {
 		t.Fatalf("slice forwarded query = %v, want axis=y index=7 component=2", q)
 	}
 
-	rec = do("/hdf5/preview/atlas?dataset_path=" + url.QueryEscape(datasetPath) + "&channels=0,1&negative=true")
+	rec = do("/hdf5/preview/atlas?dataset_path=" + url.QueryEscape(datasetPath) + "&channels=0,1&negative=true&component=2")
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), wantPNG) {
 		t.Fatalf("atlas status=%d, want 200 + proxied PNG", rec.Code)
 	}
 	q = gotQueries["/hdf5/preview/atlas"]
-	if q.Get("channels") != "0,1" || q.Get("negative") != "true" {
-		t.Fatalf("atlas forwarded query = %v, want channels=0,1 negative=true", q)
+	if q.Get("channels") != "0,1" || q.Get("negative") != "true" || q.Get("component") != "2" {
+		t.Fatalf("atlas forwarded query = %v, want channels=0,1 negative=true component=2", q)
 	}
 
 	// Scalar volume: raw bytes stream through with the x-volume-* metadata headers.

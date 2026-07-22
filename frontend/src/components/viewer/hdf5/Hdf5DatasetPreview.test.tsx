@@ -640,10 +640,12 @@ describe("Hdf5DatasetPreview first paint", () => {
     const overlayContainer = document.createElement("div");
     document.body.append(overlayContainer);
     const vectorSummary: Hdf5DatasetSummary = {
-      ...volumeSummary,
+      ...categoricalSummary,
       preview_kind: "vector_volume",
+      render_policy: "analysis",
       component_count: 2,
       component_labels: ["x", "y"],
+      feature_filter: undefined,
     };
     const { apiClient } = buildApiClient();
 
@@ -656,6 +658,16 @@ describe("Hdf5DatasetPreview first paint", () => {
 
     const option = await screen.findByRole("option", { name: "y" });
     expect(overlayContainer).toContainElement(option);
+    fireEvent.click(option);
+    await waitFor(() =>
+      expect(apiClient.hdf5AtlasPreviewUrl).toHaveBeenLastCalledWith(
+        vectorSummary.file_id,
+        expect.objectContaining({
+          datasetPath: vectorSummary.dataset_path,
+          component: 1,
+        })
+      )
+    );
     overlayContainer.remove();
   });
 });

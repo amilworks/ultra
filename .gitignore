@@ -37,7 +37,16 @@ frontend/.playwright-cli/
 *.ome.zarr/
 test-prairie/
 legacy/
-data/
+# Ignore the runtime data tree, but descend into data/ and data/models/ so the
+# re-includes further down (the tracked data/models/yolo/.gitkeep placeholder that
+# keeps the sandbox Dockerfile's `COPY data/models/yolo/` valid in a clean clone)
+# can take effect. A blanket `data/` would exclude the directory outright and no
+# `!` rule underneath could resurface anything inside it.
+data/*
+!data/models/
+data/models/*
+!data/models/yolo/
+data/models/yolo/*
 # but DO track the committed RareSpot parity golden (the gate the CI/parity test reads)
 !backend/deepagents_runtime/tests/data/
 !backend/deepagents_runtime/tests/data/rarespot_parity_golden.json
@@ -60,9 +69,13 @@ planning/
 sqlite:/
 postgresql:/
 
-# Large local model assets and weights
+# Large local model assets and weights. Everything under data/models/yolo stays
+# untracked EXCEPT the .gitkeep placeholder (see the data/ block above) — the real
+# RareSpot weights (data/models/yolo/RareSpotWeights.pt) bake into the sandbox only
+# when present locally; a clean clone builds a weights-less sandbox instead of a
+# failed image.
 *.pt
-data/models/
+!data/models/yolo/.gitkeep
 data/runtime/MedSAM2/
 
 # OS/editor noise

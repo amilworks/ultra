@@ -95,14 +95,24 @@ RUN python -m pip install --no-cache-dir \
 # runs entirely in the --network none sandbox (which mounts only /workspace+/outputs).
 # A minimal ultra_deepagents tree (empty __init__, standalone config.py, the rarespot
 # package) preserves the ultra_deepagents.rarespot import path WITHOUT dragging
-# nats/langgraph; yolov5 is the vendored runtime (IPython import made optional); the
-# 88MB weights are an immutable, versioned asset. The CLI imports the package and the
-# detect subprocess sets YOLOv5_AUTOINSTALL=false (no offline pip).
+# nats/langgraph; yolov5 is the vendored runtime (IPython import made optional). The
+# 88MB weights are lab data (data/ is untracked except a .gitkeep), so they bake in
+# only when present in the build context: production/lab builds have them, a clean
+# clone builds a weights-less sandbox and the Skill fails fast at runtime instead of
+# the image failing to build. The CLI imports the package and the detect subprocess
+# sets YOLOv5_AUTOINSTALL=false (no offline pip).
 COPY backend/deepagents_runtime/src/ultra_deepagents/config.py /opt/rarespot/ultra_deepagents/config.py
 COPY backend/deepagents_runtime/src/ultra_deepagents/rarespot /opt/rarespot/ultra_deepagents/rarespot
 COPY backend/deepagents_runtime/skills/prairie-dog-detection/rarespot_detect.py /opt/rarespot/rarespot_detect.py
 COPY third_party/yolov5 /opt/rarespot/yolov5
-COPY data/models/yolo/RareSpotWeights.pt /opt/rarespot/RareSpotWeights.pt
+COPY data/models/yolo/ /opt/rarespot/weights-src/
+RUN if [ -f /opt/rarespot/weights-src/RareSpotWeights.pt ]; then \
+        mv /opt/rarespot/weights-src/RareSpotWeights.pt /opt/rarespot/RareSpotWeights.pt \
+        && echo "RareSpot weights baked into the sandbox"; \
+    else \
+        echo >&2 "NOTE: data/models/yolo/RareSpotWeights.pt not in build context — sandbox built WITHOUT RareSpot weights (prairie-dog detection unavailable at runtime)"; \
+    fi \
+    && rm -rf /opt/rarespot/weights-src
 RUN : > /opt/rarespot/ultra_deepagents/__init__.py \
     && python -c "import sys; sys.path.insert(0, '/opt/rarespot'); import torchvision; from ultra_deepagents.rarespot.inference import run_rarespot_inference; print('rarespot bake OK', torchvision.__version__)"
 
@@ -203,13 +213,6 @@ RUN python -m pip install --no-cache-dir \
         mapclassify \
     && python -c "import numpy, zarr, dask, torch, torchvision, cv2, bioio_ome_zarr; assert numpy.__version__ == '1.26.4', numpy.__version__; print('geo main-env no-regression OK: numpy', numpy.__version__, 'zarr', zarr.__version__)" \
     && python -c "import geopandas, pyogrio, shapely, pyproj, rasterio, rioxarray, libpysal, esda, pointpats, spreg, spopt, pylandstats, rasterstats, xrspatial, pysheds, movingpandas, contextily, mapclassify; print('geo main-env imports OK: geopandas', geopandas.__version__, 'esda', esda.__version__)"
-
-# Expose the sensor-series readers to ordinary sandbox jobs. This is intentionally
-# a tiny package copy, not the networked worker runtime.
-COPY backend/deepagents_runtime/src/ultra_deepagents/sensors /opt/ultra-runtime/ultra_deepagents/sensors
-RUN : > /opt/ultra-runtime/ultra_deepagents/__init__.py
-ENV PYTHONPATH=/opt/ultra-runtime
-RUN python -c "from ultra_deepagents.sensors import open_sensor_series, parse_sensor_series; assert all(callable(value) for value in (open_sensor_series, parse_sensor_series)); print('sensor runtime imports OK')"
 
 # numba/llvmlite mis-detects the CPU's feature set on some virtualized hosts (notably the arm64
 # Docker VM on Apple Silicon), emitting an illegal instruction (SIGILL) on the FIRST @njit

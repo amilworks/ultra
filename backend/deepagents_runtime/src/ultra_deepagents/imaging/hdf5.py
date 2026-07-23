@@ -2109,7 +2109,10 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
         return top
 
     try:
-        h5 = h5py.File(path, "r")
+        # locking=False: uploads live on an NFS mount where HDF5's default
+        # POSIX file lock can wedge the open in an uninterruptible syscall.
+        # We only ever open read-only, so the writer-coordination lock is moot.
+        h5 = h5py.File(path, "r", locking=False)
     except Exception as exc:  # noqa: BLE001
         top["hdf5"] = _unsupported_hdf5(f"could not open as HDF5: {exc}")
         return top
@@ -2249,7 +2252,10 @@ def _open(path: str):
     try:
         import h5py
 
-        return h5py.File(path, "r")
+        # locking=False: files sit on NFS, where HDF5's default file lock can
+        # hang the open indefinitely (uninterruptible D-state). Opens are always
+        # read-only here, so the lock (which coordinates writers) is unnecessary.
+        return h5py.File(path, "r", locking=False)
     except Exception as exc:  # noqa: BLE001
         raise Hdf5Error(f"could not open HDF5 file (unsupported or corrupt): {exc}") from exc
 

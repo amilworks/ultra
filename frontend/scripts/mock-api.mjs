@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const port = Number(process.env.MOCK_API_PORT || "8000");
+const smokeRunNonce = String(process.env.SMOKE_RUN_NONCE || "");
 
 // Real CIFTI payloads dumped from the Go endpoints (set ULTRA_CIFTI_DUMP_DIR), so
 // the CIFTI viewer renders against backend-shaped data in the browser harness.
@@ -1178,6 +1179,18 @@ const readSessionMode = (request) =>
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
+
+  if (
+    request.method === "GET" &&
+    url.pathname === "/v1/smoke/identity" &&
+    /^[a-f0-9]{64}$/.test(smokeRunNonce)
+  ) {
+    sendJson(response, 200, {
+      service: "ultra-mobile-smoke-mock",
+      nonce: smokeRunNonce,
+    });
+    return;
+  }
 
   if (request.method === "GET" && url.pathname === "/v1/health") {
     sendJson(response, 200, { status: "ok", ts: new Date().toISOString() });

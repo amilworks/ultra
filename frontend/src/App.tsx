@@ -226,6 +226,7 @@ import type {
   UploadedFileRecord,
 } from "./types";
 import type { SettingsTab } from "./components/AppSettingsDialog";
+import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
@@ -11087,7 +11088,7 @@ export function App() {
     [historyItems]
   );
   // Contextual title for the mobile top bar: the panel name, or the active
-  // conversation's title once it has a real exchange (else the app name).
+  // conversation's title once it has a real exchange (else the shared app wordmark).
   const mobileShellTitle =
     activePanel === "resources"
       ? "Resources"
@@ -11100,7 +11101,7 @@ export function App() {
             : activeConversation &&
                 activeConversation.messages.some((message) => message.role === "user")
               ? activeConversation.title
-              : "BisQue Ultra";
+              : null;
   const showAppShellBanner = shouldShowAppShellBanner(activePanel, uiErrorBanner);
 
   if (authStatus !== "authenticated") {
@@ -11161,9 +11162,7 @@ export function App() {
             <span className="app-sidebar-brand-mark bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
               <BisqueMarkIcon className="size-4" />
             </span>
-            <span className="app-shell-brand text-primary truncate">
-              BisQue Ultra
-            </span>
+            <BrandWordmark className="app-shell-brand text-primary truncate" />
           </Button>
           <SidebarTrigger
             className="app-sidebar-trigger app-sidebar-header-trigger shrink-0"
@@ -11514,7 +11513,9 @@ export function App() {
               aria-label="Open navigation"
               title="Open navigation"
             />
-            <div className="app-mobile-shell-title">{mobileShellTitle}</div>
+            <div className="app-mobile-shell-title">
+              {mobileShellTitle ?? <BrandWordmark />}
+            </div>
             {activePanel === "chat" ? (
               <button
                 type="button"

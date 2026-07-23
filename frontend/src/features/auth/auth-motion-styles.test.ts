@@ -20,8 +20,9 @@ describe("auth motion styles", () => {
     expect(styles).toMatch(/\.auth-card:hover::before/);
     expect(styles).toMatch(/@keyframes auth-card-sheen/);
     expect(styles).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
-    expect(styles).toMatch(/\.auth-screen-logo\s*{[^}]*font-weight:\s*300;/s);
-    expect(styles).toMatch(/\.auth-screen-hero h1\s*{[^}]*font-weight:\s*300;/s);
+    expect(styles).toMatch(/\.auth-screen-logo\s*{[^}]*font-weight:\s*400;/s);
+    expect(styles).toMatch(/\.auth-screen-hero h1\s*{[^}]*font-weight:\s*400;/s);
+    expect(authScreen).toMatch(/<BrandWordmark \/>/);
     expect(authScreen).toMatch(/const HERO_PHRASE_DWELL_MS = 12_000;/);
     expect(authScreen).not.toMatch(/}, 2200\)/);
   });

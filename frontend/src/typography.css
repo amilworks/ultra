@@ -1,0 +1,50 @@
+@font-face {
+  font-family: "BisQue Inter Variable";
+  src: url("./assets/fonts/InterVariable-v4.1.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "BisQue Inter Variable";
+  src: url("./assets/fonts/InterVariable-Italic-v4.1.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --font-sans: "BisQue Inter Variable", "Segoe UI", sans-serif;
+  --font-reading: "BisQue Inter Variable", "Segoe UI", sans-serif;
+  --brand-wordmark-accent-light: #0b6b3a;
+  --brand-wordmark-accent-dark: #72d69a;
+  --brand-wordmark-accent: var(--brand-wordmark-accent-light);
+  font-optical-sizing: auto;
+  font-synthesis: none;
+}
+
+.dark {
+  --brand-wordmark-accent: var(--brand-wordmark-accent-dark);
+}
+
+.brand-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.24em;
+  font-family: var(--font-sans);
+  line-height: inherit;
+}
+
+.brand-wordmark__bisque {
+  font-weight: 400;
+}
+
+.brand-wordmark__ultra {
+  color: var(--brand-wordmark-accent);
+  font-weight: 600;
+}
+
+.auth-screen-logo {
+  --brand-wordmark-accent: var(--brand-wordmark-accent-dark);
+}

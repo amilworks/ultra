@@ -10,6 +10,7 @@ import {
   sampleColor,
   shortStructure,
 } from "./colormaps";
+import { scheduleFontsReadyRedraw } from "./fontReadyRedraw";
 
 type Props = {
   carpet: CiftiCarpetResponse;
@@ -135,7 +136,7 @@ export function CiftiCarpet({ carpet }: Props) {
       }
       ctx.textAlign = "right";
       ctx.fillStyle = ink;
-      ctx.font = '600 11px "Inter", system-ui, sans-serif';
+      ctx.font = '600 11px "BisQue Inter Variable", system-ui, sans-serif';
       const twoLine = bandH[i] >= 30 && Math.abs(ly - cy) <= 1.5;
       ctx.fillText(shortStructure(structures[i].name), R.x - 10, twoLine ? ly - 6 : ly);
       if (twoLine) {
@@ -228,6 +229,29 @@ export function CiftiCarpet({ carpet }: Props) {
     paintOffscreen();
     draw();
   }, [paintOffscreen, draw]);
+
+  useEffect(
+    () =>
+      scheduleFontsReadyRedraw(
+        document.fonts,
+        [
+          {
+            query: '600 11px "BisQue Inter Variable"',
+            sample: "CORTEX_LEFT",
+          },
+          {
+            query: '400 11px "JetBrains Mono"',
+            sample: "frame index 12,345",
+          },
+          {
+            query: '400 10px "JetBrains Mono"',
+            sample: "+3σ 0 −3σ",
+          },
+        ],
+        draw
+      ),
+    [draw]
+  );
 
   // Size to container (single canvas, explicit CSS px to match device px / dpr).
   useEffect(() => {

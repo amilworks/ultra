@@ -24,7 +24,7 @@
 }
 .cifti-title {
   font-size: 0.98rem;
-  font-weight: 640;
+  font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text-main);
   overflow: hidden;
@@ -118,7 +118,7 @@
 .cifti-seg button[aria-selected="true"] {
   background: var(--text-main);
   color: var(--bg-panel-strong, #fff);
-  font-weight: 560;
+  font-weight: 500;
 }
 .cifti-seg button:hover:not([aria-pressed="true"]):not([aria-selected="true"]) {
   color: var(--text-main);

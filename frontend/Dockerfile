@@ -85,8 +85,9 @@ server {
   # Cache contract, identical to production: hashed /assets/* are immutable; the
   # app shell (index.html and every SPA fallback) is no-cache so a deploy takes
   # effect on the next navigation and a stale index can never reference a
-  # 404'd hashed asset; stable images/fonts get a week.
-  location /assets/ {
+  # 404'd hashed asset. Hashed images/fonts under /assets/ keep the immutable
+  # one-year policy; only stable public image/font URLs get a week.
+  location ^~ /assets/ {
     add_header Cache-Control "public, max-age=31536000, immutable" always;
     try_files $uri =404;
   }

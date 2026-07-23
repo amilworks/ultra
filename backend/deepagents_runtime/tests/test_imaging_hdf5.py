@@ -510,6 +510,25 @@ def test_default_dataset_path_is_memoized(general_h5, monkeypatch):
     assert opens["n"] == 1
 
 
+def test_open_uses_locking_false_for_nfs_safety(general_h5, monkeypatch):
+    # Regression: uploads live on NFS, where HDF5's default POSIX file lock can
+    # wedge the open in an uninterruptible (D-state) syscall. _open must pass
+    # locking=False (opens are always read-only, so the writer lock is moot).
+    captured = {}
+    real_file = h5py.File
+
+    def spy_file(path, mode="r", *args, **kwargs):
+        captured["mode"] = mode
+        captured["locking"] = kwargs.get("locking", "MISSING")
+        return real_file(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(h5py, "File", spy_file)
+    handle = hdf5._open(general_h5)
+    handle.close()
+    assert captured["mode"] == "r"
+    assert captured["locking"] is False
+
+
 def test_default_dataset_path_corrupt_file_maps_to_decode_class(tmp_path):
     path = str(tmp_path / "not-really.h5")
     with open(path, "wb") as f:

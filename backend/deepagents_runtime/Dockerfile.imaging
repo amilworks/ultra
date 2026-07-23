@@ -91,6 +91,10 @@ RUN pip install --no-cache-dir "/app/deepagents_runtime[imaging]" \
   && pip install --no-cache-dir /opt/libbioimage-python
 RUN python -c 'import libbioimage.libbioimage as bim; formats = {str(name).lower() for name in getattr(bim, "formats", {})}; assert "czi" in formats, sorted(formats)'
 
+# HDF5 uploads live on NFS; disable libhdf5 file locking so a read-only open
+# can't wedge on an NFS POSIX lock (belt-and-suspenders with hdf5.py locking=False).
+ENV HDF5_USE_FILE_LOCKING=FALSE
+
 EXPOSE 8090
 # Default command runs the FastAPI image service; the same image also runs the
 # convert worker (compose overrides `command` with

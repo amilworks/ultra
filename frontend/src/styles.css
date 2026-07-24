@@ -662,6 +662,30 @@ body {
 }
 
 .app-collapsed-sidebar-toggle:hover,
+/* Rail tooltip: same bubble language as the composer's, plus a muted shortcut
+   chip. The icon is a collapsed control's only label, so these carry the
+   keyboard hint the expanded row shows on hover — collapsing costs nothing.
+   Colour comes from the tooltip primitive (bg-foreground/text-background). */
+.app-collapsed-sidebar-tooltip {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow:
+    0 12px 28px rgba(12, 12, 12, 0.18),
+    0 3px 8px rgba(12, 12, 12, 0.1);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.app-collapsed-sidebar-tooltip-key {
+  color: currentColor;
+  opacity: 0.6;
+}
+
 .app-collapsed-sidebar-action:hover,
 .app-collapsed-sidebar-action[data-active="true"] {
   background: var(--collapsed-sidebar-accent);

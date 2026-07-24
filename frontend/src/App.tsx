@@ -11158,8 +11158,15 @@ export function App() {
           recentItems={collapsedRecentItems}
           activeConversationId={activeConversation?.id ?? null}
           resourcesActive={activePanel === "resources"}
+          trainingActive={activePanel === "training"}
+          lensActive={activePanel === "scientific-viewer"}
+          adminActive={activePanel === "admin"}
+          isAdmin={authIsAdmin}
           onCreateConversation={createNewConversation}
           onOpenResources={openResourcesPanel}
+          onOpenTraining={openTrainingPanel}
+          onOpenLens={openScientificViewerPanel}
+          onOpenAdmin={openAdminPanel}
           onOpenRecent={openHistoryItem}
         />
         <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">

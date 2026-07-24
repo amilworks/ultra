@@ -6778,9 +6778,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     color 160ms ease;
 }
 
+/* Keyed on aria-expanded, NOT data-state: this button is now both a tooltip
+   trigger and a menu trigger, and Radix writes `data-state` from BOTH — the
+   tooltip's value ("closed" while you are not hovering) wins the merge, so a
+   [data-state="open"] selector silently stops matching while the menu is open.
+   aria-expanded is set only by the menu trigger, so it is uncontested. */
 .app-composer-intelligence-trigger:hover,
 .app-composer-intelligence-trigger:focus-visible,
-.app-composer-intelligence-trigger[data-state="open"] {
+.app-composer-intelligence-trigger[aria-expanded="true"] {
   background: var(--composer-control-hover-bg);
   color: var(--text-main);
   box-shadow: none;

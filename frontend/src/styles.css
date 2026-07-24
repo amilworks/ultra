@@ -1807,19 +1807,37 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     max(0.75rem, env(safe-area-inset-left, 0px));
 }
 
+/* The menu trigger and the compose action flank the same nav bar, so they are
+   peers and share one treatment: transparent at rest, a quiet ink wash on
+   hover, a firmer one on press. This used to be an elevated card (border +
+   panel fill + 0 8px 24px shadow) opposite a bare compose glyph, which read as
+   two different kinds of control — and it carried no transition, so its hover
+   snapped while every other control in the app eases. Kept as its own rule
+   (not grouped with .app-mobile-shell-action): sidebar-collapse-layout.test.ts
+   matches `width: 2.35rem` inside this exact selector's block, and a comma
+   group would break that regex. */
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] {
   width: 2.35rem;
   height: 2.35rem;
-  border: 1px solid color-mix(in oklab, var(--line) 72%, transparent);
+  border: 1px solid transparent;
   border-radius: 0.85rem;
-  background: color-mix(in oklab, var(--bg-panel-strong) 88%, var(--background) 12%);
+  background: transparent;
   color: var(--text-main);
-  box-shadow: 0 8px 24px rgba(12, 12, 12, 0.08);
+  box-shadow: none;
+  transition:
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:hover,
-.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:focus-visible {
-  background: color-mix(in oklab, var(--bg-panel-strong) 78%, var(--accent) 22%);
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:focus-visible,
+.app-mobile-shell-action:hover,
+.app-mobile-shell-action:focus-visible {
+  background: color-mix(in oklab, var(--text-main) 7%, transparent);
+}
+
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:active {
+  background: color-mix(in oklab, var(--text-main) 12%, transparent);
 }
 
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] svg {
@@ -1857,11 +1875,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background-color 160ms ease, color 160ms ease;
+  /* House curve, matching the trigger opposite it (hover-enter is shortened to
+     60ms app-wide by the snappy-hover convention at the end of this file). */
+  transition:
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
+/* Press is firmer than hover, and identical on both nav-bar controls. */
 .app-mobile-shell-action:active {
-  background: color-mix(in oklab, var(--text-main) 7%, transparent);
+  background: color-mix(in oklab, var(--text-main) 12%, transparent);
 }
 
 .app-mobile-shell-action-spacer {

@@ -23,7 +23,24 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
+  /* Inter's own recommended pairing; do not extend casually. */
   font-feature-settings: "liga" 1, "calt" 1;
+
+  /* TRACKING — derive, don't eyeball.
+     Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
+     applied as `em`. Rough values: 12px→0, 15px→-0.009, 19px→-0.016,
+     23px→-0.019, 26px→-0.020, 34px+→-0.022.
+
+     Inter v4 ships an `opsz` axis spanning 14–32 (see assets/fonts/PROVENANCE.md)
+     and `font-optical-sizing: auto` is on, so between those sizes the font is
+     already compensating and only a light hand is needed. Outside that band the
+     axis clamps and the metric must be supplied manually — which is why the
+     34px hero carries more tracking than anything else here, and why type below
+     14px should carry almost none.
+
+     Two things this does NOT govern: uppercase/label tracking (positive values
+     of 0.02–0.08em, a different job entirely) and monospace, which has its own
+     spacing design — the Inter curve does not apply to either. */
   --bg-page: #f5f5f4;
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
@@ -1758,7 +1775,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-shell-brand {
   font-size: 0.92rem;
   font-weight: 400;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.008em;
 }
 
 .app-sidebar-header-trigger[data-slot="sidebar-trigger"] {
@@ -2267,10 +2284,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
   /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight and restrained display tracking. */
+     regular reading weight. Tracking is NOT restrained here: at 34px this sits
+     past Inter's opsz ceiling (14–32), so the axis has stopped tightening and
+     the tracking has to be supplied by hand — see the tracking note at the top
+     of this file. Inter's metric for ~34px is -0.022em; -0.01em left the
+     largest text in the product visibly the loosest. */
   font-weight: 400;
   line-height: 1.2;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.022em;
   color: var(--text-main);
 }
 
@@ -4588,7 +4609,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: 1.2rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.016em;
   color: var(--text-main);
 }
 
@@ -6552,7 +6573,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 1.1rem 1.35rem 0.35rem;
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
-  letter-spacing: -0.015em;
+  /* Metric for the size this ACTUALLY renders at. The clamp above is dead —
+     .pk-prompt-input-textarea's `font: inherit` is declared later at equal
+     specificity and wins — so the field is 15px, not the 17.3px the clamp
+     implies, and -0.015em was the metric for a size that never happens.
+     (letter-spacing survives `font: inherit`; it is not part of that shorthand.) */
+  letter-spacing: -0.009em;
   /* Slim horizontal insets, defined here (unconditionally) so the JS overflow
      mirror can read the SAME values it measures against — see the composer
      measurement effect in App.tsx. Left clears the floating + attach; right
@@ -6619,7 +6645,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      card's inherited size — inheriting here matches the real placeholder. */
   font-size: inherit;
   font-weight: 400;
-  letter-spacing: -0.015em;
+  /* Tracks the placeholder exactly — same 15px, same metric — so the slim line
+     still reads as one layer: "Ask anything … Pro". */
+  letter-spacing: -0.009em;
   color: var(--composer-placeholder);
   white-space: nowrap;
   /* visibility flips instantly (no hide-delay) so it leaves the a11y tree the
@@ -10213,7 +10241,10 @@ details {
   font-family: var(--font-reading);
   font-weight: var(--font-weight-reading-heading);
   line-height: 1.24;
-  letter-spacing: -0.014em;
+  /* Baseline for h4–h6, which set no size and so render at the inherited 15px.
+     h1–h3 override per level below: one flat value across six levels was tuned
+     for h3 and drifted in both directions — too loose on h1, too tight on h4+. */
+  letter-spacing: -0.009em;
   text-wrap: balance;
 }
 
@@ -10223,14 +10254,17 @@ details {
 
 .pk-markdown > :where(h1) {
   font-size: 1.45rem;
+  letter-spacing: -0.019em;
 }
 
 .pk-markdown > :where(h2) {
   font-size: 1.28rem;
+  letter-spacing: -0.017em;
 }
 
 .pk-markdown > :where(h3) {
   font-size: 1.12rem;
+  letter-spacing: -0.014em;
 }
 
 .pk-markdown p {
@@ -10308,7 +10342,9 @@ details {
   font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-main);
-  letter-spacing: -0.01em;
+  /* 13.8px is below Inter's opsz floor (14), so the axis is already serving the
+     Text cut — it needs barely any help. */
+  letter-spacing: -0.005em;
 }
 
 .pk-table-wrap {

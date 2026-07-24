@@ -1291,13 +1291,15 @@ paths:
         - $ref: "#/components/parameters/FileID"
         - name: t
           in: query
+          description: Zero-based time index in the authoritative source image.
           schema: { type: integer, minimum: 0 }
         - name: channel
           in: query
+          description: Zero-based channel index in the authoritative source image.
           schema: { type: integer, minimum: 0 }
       responses:
         "200":
-          description: Upload scalar volume payload
+          description: Source-authoritative upload scalar volume payload
           headers:
             x-volume-width:
               required: true
@@ -1358,6 +1360,24 @@ paths:
               schema:
                 type: string
                 format: binary
+        "400":
+          description: Channel or time index is malformed, ambiguous, or out of range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "422":
+          description: Authoritative source axis metadata is malformed or the source cannot be rendered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "502":
+          description: Authoritative source metadata is temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "501":
           description: Upload scalar volume preparation is not configured
           content:

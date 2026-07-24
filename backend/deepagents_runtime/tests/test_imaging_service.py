@@ -234,11 +234,20 @@ class _RaisingRunner:
         pass
 
 
-def test_undecodable_image_maps_to_422_not_500():
+@pytest.mark.parametrize(
+    "message",
+    [
+        "engine returned an empty region (shape (0, 0, 0))",
+        "scalar volume channel index 7 is out of range for C=3",
+        "multiple scenes require an explicit scene identity for volume preview",
+        "source plane input exceeds the bounded native semantic limit",
+    ],
+)
+def test_undecodable_image_maps_to_422_not_500(message):
     # A malformed/unsupported file that the engine reads as a 0-sized region (after its
     # own transient-retry) must surface as 422 "preview unavailable", not a 500 that looks
     # like a server fault. Reproduced live on an undecodable .czi (libbioimage -> 0x0).
-    app = create_app(runner=_RaisingRunner(ValueError("engine returned an empty region (shape (0, 0, 0))")))
+    app = create_app(runner=_RaisingRunner(ValueError(message)))
     with TestClient(app, raise_server_exceptions=False) as c:
         r = c.get("/thumbnail", params={"path": "/bad.czi", "max_size": 512})
         assert r.status_code == 422

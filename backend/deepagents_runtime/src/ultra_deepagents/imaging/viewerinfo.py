@@ -446,13 +446,18 @@ def default_visible_channels(
 
 
 def build_viewer_info(
-    meta: dict[str, Any], signal_scores: list[float] | None = None
+    meta: dict[str, Any], signal_scores: list[float] | None = None, reader: str = "libbioimage"
 ) -> dict[str, Any]:
-    """Map a libbioimage ``meta`` dict to the viewer-info structure.
+    """Map a libbioimage-shaped ``meta`` dict to the viewer-info structure.
 
     ``signal_scores`` (optional, per-channel spatial-structure 0..1) is supplied by
     the engine for multichannel files so the default channel selection prefers real
     imagery over noise/segmentation channels (see :func:`default_visible_channels`).
+
+    ``reader`` names the library that actually decoded the file — the native
+    default, or "tifffile"/"bioio" when the pure-Python engine served it. It is
+    surfaced in the viewer's metadata panel, so it must not claim a decoder that
+    did not do the work.
     """
     x = _int(meta, "image_num_x")
     y = _int(meta, "image_num_y")
@@ -519,48 +524,66 @@ def build_viewer_info(
         modality = "microscopy"
     else:
         modality = "image"
-    dims = str(meta.get("image_dimensions", "XYCZT"))
+    reported_dims = str(meta.get("image_dimensions", "XYCZT"))
+    dims = "TCZYX"
+    source_dims = str(meta.get("source_dimension_order", reported_dims))
+    scene_count = max(1, _int(meta, "image_num_scenes", 1))
+    multi_scene = scene_count > 1
+    volume_preview_supported = bool(meta.get("volume_preview_supported", True)) and scene_count == 1
     dtype = _dtype_name(pixel_format_raw, depth)
-    tile_scheme = build_tile_scheme(meta)
-    is_volume = z > 1
+    tile_scheme = None if multi_scene else build_tile_scheme(meta)
+    is_volume = z > 1 and not multi_scene
+    can_preview_volume = is_volume and volume_preview_supported
     has_tiles = tile_scheme is not None
-    backend_mode = "pyramid" if has_tiles else "direct"
-    # Medical volumes (DICOM/NIfTI) render as 3D scalar fields; microscopy
-    # z-stacks scrub plane-by-plane (bandwidth-friendly) rather than downloading
-    # the whole volume up front.
-    if not is_volume:
+    backend_mode = "none" if multi_scene else ("pyramid" if has_tiles else "direct")
+    # Medical volumes (DICOM/NIfTI) use the clinical scalar contract. Microscopy
+    # remains a slice_stack for its 2D Z scrub while the Volume surface can load
+    # source-authoritative per-channel scalar grids.
+    if not can_preview_volume:
         volume_mode = "none"
     elif modality == "medical":
         volume_mode = "scalar"
     else:
         volume_mode = "slice_stack"
-    delivery_mode = "deferred_multiscale" if has_tiles else "direct"
+    delivery_mode = "none" if multi_scene else ("deferred_multiscale" if has_tiles else "direct")
     # An RGB(A) photo renders its native colors directly (no per-channel LUT fuse),
     # so it is a single display surface, not a composite of science channels.
-    channel_mode = "composite" if (c > 1 and not is_photo) else "single"
+    channel_mode = "single" if multi_scene else ("composite" if (c > 1 and not is_photo) else "single")
     visible_channels = default_visible_channels(names, colors, c, channel_mode, signal_scores)
     # Photos use the display (full-colour) render path; scalar science data uses the
     # window/level intensity path. This drives the viewer to a plain zoomable image
     # instead of the composite channel-pills + window/level controls.
-    render_policy = "display" if is_photo else "scalar"
-    # A z>1 image is a 3D volume, so it earns BOTH 3D surfaces: the orthogonal
-    # The 3D surfaces (reslice + volume) are offered ONLY for medical (clinical)
-    # volumes, which have the mature scalar MPR/volume path. Non-medical z-stacks
-    # (microscopy) are intentionally 2D-only for now: the multichannel 3D
-    # render is not yet reliable enough to ship, and a fast 2D view with first-class
-    # Z/T scrubbing is the better experience. volume_mode stays "slice_stack" so the
-    # 2D Z scrub still knows it is a stack — only the 3D SURFACES are withheld. (To
-    # re-enable microscopy 3D, drop the modality guard.)
-    volume_surfaces = ["mpr", "volume"] if (is_volume and modality == "medical") else []
-    available_surfaces = ["2d", "metadata"] + volume_surfaces
+    render_policy = "metadata" if multi_scene else ("display" if is_photo else "scalar")
+    # Every true 3D image can use the shared scalar-volume/WebGL surface. Medical
+    # volumes additionally expose MPR; non-medical microscopy remains slice_stack
+    # so its existing 2D Z-scrub contract is unchanged.
+    volume_surfaces = []
+    if can_preview_volume:
+        volume_surfaces = ["mpr", "volume"] if modality == "medical" else ["volume"]
+    available_surfaces = ["metadata"] if multi_scene else ["2d", "metadata"] + volume_surfaces
+
+    def _axis_unit(axis: str) -> str:
+        raw = str(meta.get(f"pixel_resolution_unit_{axis}", "") or "").strip()
+        if raw:
+            return "um" if raw in {"µm", "μm"} else raw
+        return "um" if f"pixel_resolution_{axis}" in meta else "voxel"
+
+    spacing_units = {axis: _axis_unit(axis) for axis in ("x", "y", "z")}
+    unit_values = list(spacing_units.values())
+    if all(unit == "um" for unit in unit_values):
+        units_mode = "physical"
+    elif len(set(unit_values)) == 1 and unit_values[0] in {"voxel", "pixel"}:
+        units_mode = "voxel"
+    else:
+        units_mode = "mixed"
 
     phys = {
         "x": x, "y": y, "z": z, "t": t, "ch": c,
         "pixel_depth": depth, "pixel_format": pixel_format,
         "pixel_size": [spacing["x"], spacing["y"], spacing["z"], 1.0],
-        "pixel_units": ["um", "um", "um", "frame"],
+        "pixel_units": [spacing_units["x"], spacing_units["y"], spacing_units["z"], "frame"],
         "channel_names": names, "display_channels": visible_channels,
-        "channel_colors": colors, "units": "physical",
+        "channel_colors": colors, "units": units_mode,
     }
     display_defaults = {
         "enhancement": "d", "negative": False, "rotate": 0, "fusion_method": "m",
@@ -568,12 +591,23 @@ def build_viewer_info(
         "time_index": 0, "z_index": z // 2, "volume_channel": visible_channels[0],
     }
     metadata = {
-        "reader": "libbioimage", "dims_order": dims, "array_dtype": dtype,
+        "reader": reader, "dims_order": dims, "array_dtype": dtype,
         # The REAL container format (e.g. "OME-TIFF"/"BigTIFF"), distinct from the
         # reader. The viewer's Format row should show this, not "libbioimage".
         "format": fmt,
-        "physical_spacing": spacing, "scene_count": 1, "warnings": [],
+        "physical_spacing": spacing, "spacing_units": spacing_units, "scene_count": scene_count,
+        "source_dims_order": source_dims, "warnings": [],
     }
+    selected_scene_index = meta.get("selected_scene_index")
+    selected_scene_id = meta.get("selected_scene_id")
+    if selected_scene_index is not None:
+        metadata["selected_scene_index"] = selected_scene_index
+    if selected_scene_id is not None:
+        metadata["selected_scene_id"] = selected_scene_id
+    if multi_scene:
+        metadata["limitation"] = (
+            "Multiple scenes require an explicit scene identity; pixel preview is unavailable."
+        )
     acquisition = build_acquisition(meta)
     if acquisition:
         metadata["acquisition"] = acquisition
@@ -590,37 +624,43 @@ def build_viewer_info(
         }
     viewer = {
         "status": "ready", "warmup_mode": "lazy", "backend_mode": backend_mode,
-        "default_surface": "2d", "available_surfaces": available_surfaces,
-        "default_axis": "z", "slice_axes": ["z"], "channel_mode": channel_mode,
+        "default_surface": "metadata" if multi_scene else "2d",
+        "available_surfaces": available_surfaces,
+        "channel_mode": channel_mode,
         "volume_mode": volume_mode, "render_policy": render_policy, "delivery_mode": delivery_mode,
         "first_paint_mode": "webgl", "texture_policy": "linear",
         "asset_preparation": {
-            "status": "ready", "native_supported": True,
+            "status": "unsupported" if multi_scene else "ready",
+            "native_supported": not multi_scene,
             "tile_pyramid": "ready" if has_tiles else "none",
             "volume_representation": volume_mode,
         },
     }
+    if not multi_scene:
+        viewer["default_axis"] = "z"
+        viewer["slice_axes"] = ["z"]
     if has_tiles:
         viewer["tile_scheme"] = tile_scheme
-    # A slice_stack volume (microscopy z-stack) renders in 3D from a texture
-    # atlas. Emit the authoritative grid/cell layout the engine assembles to, so
-    # the frontend decodes the atlas with the exact same cell size and columns
-    # (its native-size fallback would mis-tile a downsampled atlas).
+    # Keep an authoritative atlas layout as a bounded compatibility fallback for
+    # slice_stack clients. The high-quality viewer prefers per-channel scalar
+    # grids, but any atlas consumer must still decode the exact assembled cells.
     if volume_mode == "slice_stack":
         atlas_scheme = build_atlas_scheme(meta, depth=z)
         if atlas_scheme is not None:
             viewer["atlas_scheme"] = atlas_scheme
 
     return {
-        "kind": "image",
+        "kind": "unsupported" if multi_scene else "image",
+        "decodable": not multi_scene,
+        "preview_supported": not multi_scene,
         "modality": modality,
         "backend_mode": backend_mode,
         "dims_order": dims,
         "axis_sizes": {"T": t, "C": c, "Z": z, "Y": y, "X": x},
         "selected_indices": {"T": 0, "C": 0, "Z": z // 2},
         "is_volume": is_volume,
-        "is_timeseries": t > 1,
-        "is_multichannel": c > 1,
+        "is_timeseries": t > 1 and not multi_scene,
+        "is_multichannel": c > 1 and not multi_scene,
         "phys": phys,
         "display_defaults": display_defaults,
         "metadata": metadata,
@@ -634,6 +674,18 @@ def build_viewer_info(
         "channel_colors": colors,
         "objective": str(objective) if objective is not None else None,
         "format": fmt,
-        "reader": "libbioimage",
+        "reader": reader,
         "tile_scheme": tile_scheme,
+        "scene_count": scene_count,
+        "source_dims_order": source_dims,
+        **(
+            {"selected_scene_index": selected_scene_index}
+            if selected_scene_index is not None
+            else {}
+        ),
+        **(
+            {"selected_scene_id": selected_scene_id}
+            if selected_scene_id is not None
+            else {}
+        ),
     }

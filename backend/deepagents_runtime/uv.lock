@@ -3236,6 +3236,7 @@ dev = [
     { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "tifffile", version = "2026.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "uvicorn" },
+    { name = "zarr" },
 ]
 imaging = [
     { name = "aicspylibczi" },
@@ -3252,6 +3253,7 @@ imaging = [
     { name = "tifffile", version = "2026.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "tifffile", version = "2026.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "uvicorn" },
+    { name = "zarr" },
 ]
 ngff = [
     { name = "fastapi" },
@@ -3298,6 +3300,7 @@ requires-dist = [
     { name = "ultra-deepagents-runtime", extras = ["imaging"], marker = "extra == 'dev'" },
     { name = "uvicorn", marker = "extra == 'imaging'", specifier = ">=0.29.0,<1" },
     { name = "uvicorn", marker = "extra == 'ngff'", specifier = ">=0.29.0,<1" },
+    { name = "zarr", marker = "extra == 'imaging'", specifier = ">=2.18,<4" },
     { name = "zarr", marker = "extra == 'ngff'", specifier = ">=2.18,<4" },
 ]
 provides-extras = ["dev", "imaging", "ngff"]

@@ -279,12 +279,23 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
     # so map it to 422 instead of a 500: the client shows a clean "preview unavailable"
     # and monitoring doesn't count an undecodable upload as a server error. Genuine bugs
     # (any other exception) keep the default 500.
-    _DECODE_ERROR_MARKERS = ("empty region", "cannot encode", "cannot decode", "unsupported")
+    decode_error_markers = (
+        "empty region",
+        "cannot encode",
+        "cannot decode",
+        "unsupported",
+        "out of range",
+        "channel selection",
+        "channel colors",
+        "duplicate channel",
+        "multiple scenes",
+        "source plane input",
+    )
 
     @app.exception_handler(ValueError)
     async def _engine_value_error(_request, exc: ValueError):  # noqa: ANN202
         message = str(exc)
-        if any(marker in message for marker in _DECODE_ERROR_MARKERS):
+        if any(marker in message for marker in decode_error_markers):
             return JSONResponse(status_code=422, content={"error": "image could not be decoded or rendered", "detail": message})
         return JSONResponse(status_code=500, content={"error": "internal error", "detail": message})
 

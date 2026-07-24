@@ -39,9 +39,8 @@ imaging = [
     # are needed at build time. 3.11+ has firm numpy-2 wheels (the imaging extra resolves
     # numpy>=2 via bioio-lif).
     "h5py>=3.11.0,<4",
-    # bioio transcode fallback for formats libbioimage cannot decode: read via bioio ->
-    # write OME-TIFF -> pyramid (imaging/transcode.py). Used ONLY in the batch convert
-    # lane, never on the serving hot path.
+    # Source-authoritative TIFF serving uses tifffile; bioio supplies the real-decode
+    # fallback for proprietary microscopy formats and the transcode-to-pyramid lane.
     #
     # PLUGIN SELECTION: bioio + the readers for formats libbioimage can't decode (.lif/.dv)
     # plus .czi (preferentially routed to bioio — it assembles Zeiss mosaics/scenes that

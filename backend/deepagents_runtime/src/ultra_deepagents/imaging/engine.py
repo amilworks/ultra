@@ -1,17 +1,23 @@
 """Image engine backends.
 
-:class:`ImageEngine` is the interface the image service depends on. Two backends
-implement it:
+:class:`ImageEngine` is the interface the image service depends on. Its
+user-facing fallback ladder is:
 
 - :class:`LibBioImageEngine` — the real engine over ``libbioimage`` (requires
   ``libimgcnv.so`` + the ``libbioimage`` wheel + numpy + Pillow). It builds read
   pipelines with :mod:`~ultra_deepagents.imaging.pipelines` and encodes results
   to PNG. The binding serializes on a global lock, so one engine instance is used
   per worker process (see the process pool).
+- :class:`~ultra_deepagents.imaging.bioio_engine.BioioEngine` — a real
+  tifffile/bioio decoder when the native binding is unavailable.
+- :class:`Hdf5OnlyEngine` — a final honest fallback that serves HDF5 through
+  h5py and refuses raster formats it cannot decode.
+
+Tests may explicitly select:
+
 - :class:`StubEngine` — a deterministic, dependency-light backend (Pillow only)
-  used by tests, CI, and local dev when the native lib is unavailable. It returns
-  valid PNGs whose content is a pure function of the request, so the service and
-  the Go proxy can be exercised end-to-end without the ``.so``.
+  whose valid PNGs are pure functions of requests, so service and proxy behavior
+  can be exercised without native image dependencies.
 
 Image-returning methods return encoded PNG ``bytes``; ``meta``/``histogram``
 return plain dicts; ``formats`` returns the engine's supported format names.
@@ -31,7 +37,14 @@ from typing import Any, Protocol, runtime_checkable
 
 from ultra_deepagents.imaging import fusion, hdf5, pipelines, viewerinfo
 
-__all__ = ["ImageEngine", "LibBioImageEngine", "StubEngine", "EngineUnavailable", "build_engine"]
+__all__ = [
+    "ImageEngine",
+    "LibBioImageEngine",
+    "Hdf5OnlyEngine",
+    "StubEngine",
+    "EngineUnavailable",
+    "build_engine",
+]
 
 
 class _Hdf5EngineMixin:
@@ -49,6 +62,20 @@ class _Hdf5EngineMixin:
         if hdf5.is_hdf5_data_file(basename):
             return hdf5.build_hdf5_viewer_info(path, original_name=basename)
         return None
+
+    def _maybe_hdf5_thumbnail(self, path: str, max_size: int) -> bytes | None:
+        if hdf5.is_hdf5_data_file(os.path.basename(path)):
+            return hdf5.thumbnail_png(path, max_size=max_size)
+        return None
+
+    def _maybe_hdf5_slice(self, path: str, z: Any) -> bytes | None:
+        if not hdf5.is_hdf5_data_file(os.path.basename(path)):
+            return None
+        dataset = hdf5.default_dataset_path(path)
+        if not dataset:
+            raise hdf5.Hdf5Error("no renderable dataset in HDF5 file (unsupported for preview)")
+        index = None if z is None else int(z)
+        return hdf5.slice_png(path, dataset, axis="z", index=index)
 
     def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
         return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
@@ -257,7 +284,8 @@ class ImageEngine(Protocol):
 
     def thumbnail(
         self, path: str, *, max_size: int = 256, z: int | None = None,
-        level: int | None = None, channels: Sequence[int] | None = None,
+        t: int | None = None, level: int | None = None,
+        channels: Sequence[int] | None = None,
         colors: Any = None, windows: Any = None,
     ) -> bytes:
         """A thumbnail (or one z-scrub frame when ``z`` is set) as PNG."""
@@ -320,6 +348,21 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         # One robust global display window per (path, mtime, channels) so tiled scalar
         # reads share a single mapping instead of auto-scaling per tile (checkerboard).
         self._display_window_cache = _BoundedDict(_engine_cache_entries())
+        # TIFF containers have an authoritative T/C/Z axis model that the native
+        # compatibility layer can flatten or reinterpret. Keep the native engine
+        # for tiled pyramids and other formats, but use tifffile for TIFF semantic
+        # pixel operations so channel/time/plane identity remains exact.
+        self._semantic_tiff_engine: Any | None = None
+
+    def _tiff_scalar_engine(self, path: str):
+        """Return the semantic TIFF decoder for TIFF sources, otherwise ``None``."""
+        from ultra_deepagents.imaging.bioio_engine import TIFF_EXTENSIONS, BioioEngine, _lower_ext
+
+        if _lower_ext(path) not in TIFF_EXTENSIONS:
+            return None
+        if self._semantic_tiff_engine is None:
+            self._semantic_tiff_engine = BioioEngine()
+        return self._semantic_tiff_engine
 
     # -- public API -----------------------------------------------------------------
     def formats(self) -> list[str]:
@@ -519,6 +562,15 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         )
 
     def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
+        hdf5_png = self._maybe_hdf5_slice(path, z)
+        if hdf5_png is not None:
+            return hdf5_png
+        if os.path.isfile(path) and (semantic_tiff := self._tiff_scalar_engine(path)):
+            return semantic_tiff.slice_plane(
+                path, z=z, t=t, level=level, plane_scale=plane_scale,
+                channels=channels, colors=colors, windows=windows,
+                full_resolution=full_resolution,
+            )
         meta = self._bim.meta(path, self._cache)
         paged = z is not None and t is None and viewerinfo.paged_depth(meta)
         # A transient z-scrub frame (full_resolution=False) only needs to fill the
@@ -549,7 +601,15 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             return self._render_fused(path, pipeline, colors, windows)
         return self._render(path, pipeline)
 
-    def thumbnail(self, path, *, max_size=256, z=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+        hdf5_png = self._maybe_hdf5_thumbnail(path, max_size)
+        if hdf5_png is not None:
+            return hdf5_png
+        if os.path.isfile(path) and (semantic_tiff := self._tiff_scalar_engine(path)):
+            return semantic_tiff.thumbnail(
+                path, max_size=max_size, z=z, t=t, level=level,
+                channels=channels, colors=colors, windows=windows,
+            )
         if level is None:
             try:
                 level = _thumbnail_level_for_meta(dict(self._bim.meta(path, self._cache)), max_size)
@@ -755,6 +815,8 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         hdf5_info = self._maybe_hdf5_viewer_info(path, name)
         if hdf5_info is not None:
             return hdf5_info
+        if os.path.isfile(path) and (semantic_tiff := self._tiff_scalar_engine(path)):
+            return semantic_tiff.viewer_info(path, name=name)
         cached = read_viewerinfo_sidecar(path)
         if cached is not None:
             return cached
@@ -842,6 +904,8 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
     def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
         """Depth + addressing for a scalar volume (one engine.meta read; no decode)."""
+        if semantic_tiff := self._tiff_scalar_engine(path):
+            return semantic_tiff.scalar_plan(path, channel=channel, t=t)
         from ultra_deepagents.imaging.atlas import plan_scalar_preview
 
         meta = dict(self._bim.meta(path, self._cache))
@@ -879,6 +943,10 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
     def scalar_planes(self, path, *, zs, channel, t, pages):
         """Read a contiguous range of single-channel float planes (the unit of parallelism)."""
+        if semantic_tiff := self._tiff_scalar_engine(path):
+            return semantic_tiff.scalar_planes(
+                path, zs=zs, channel=channel, t=t, pages=pages
+            )
         np = self._np
         plan = self.scalar_plan(path, channel=channel, t=t)
         factor_x = int(plan["downsample_x"])
@@ -1017,8 +1085,8 @@ class StubEngine(_Hdf5EngineMixin):
     def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
         return self._png(512, 512, _seed(path, "slice", z, t, level, colors, full_resolution))
 
-    def thumbnail(self, path, *, max_size=256, z=None, level=None, channels=None, colors=None, windows=None) -> bytes:
-        return self._png(max_size, max_size, _seed(path, "thumb", z, level, colors))
+    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+        return self._png(max_size, max_size, _seed(path, "thumb", z, t, level, colors))
 
     def atlas(self, path, *, grid=None, level=None, atlas_scale=None, channels=None, colors=None, windows=None) -> bytes:
         return self._png(512, 512, _seed(path, "atlas", grid, level, channels, colors))
@@ -1187,16 +1255,103 @@ def _histogram_level_for_meta(meta: dict[str, Any]) -> int | None:
     return _thumbnail_level_for_meta(meta, 1024)
 
 
-def build_engine(*, prefer_real: bool = True, cache_size: int = 4) -> ImageEngine:
-    """Construct the best available engine: the real one if possible, else the stub."""
+class Hdf5OnlyEngine(_Hdf5EngineMixin):
+    """Serve HDF5 data for real and refuse raster requests honestly.
+
+    This is the last user-facing fallback when neither native libbioimage nor the
+    Python raster decoder is available. ``StubEngine`` deliberately fabricates
+    deterministic pixels and is therefore only selected explicitly by tests.
+    """
+
+    _REFUSAL = (
+        "unsupported format: this image service is running in hdf5-only mode "
+        "(no raster decoder is available)"
+    )
+
+    def _refuse(self):
+        raise ValueError(self._REFUSAL)
+
+    def formats(self) -> list[str]:
+        return ["h5", "hdf5", "hdf", "dream3d"]
+
+    def meta(self, path: str) -> dict[str, Any]:
+        return self._refuse()
+
+    def tile(self, path, *, level=0, col=0, row=0, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
+        return self._refuse()
+
+    def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
+        return self._refuse()
+
+    def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
+        hdf5_png = self._maybe_hdf5_slice(path, z)
+        return hdf5_png if hdf5_png is not None else self._refuse()
+
+    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+        hdf5_png = self._maybe_hdf5_thumbnail(path, max_size)
+        return hdf5_png if hdf5_png is not None else self._refuse()
+
+    def atlas(self, path, *, grid=None, level=None, atlas_scale=None, channels=None, colors=None, windows=None, t=0) -> bytes:
+        return self._refuse()
+
+    def atlas_plan(self, path, *, channels=None, colors=None, level=None, t=0) -> dict[str, Any]:
+        return self._refuse()
+
+    def atlas_windows(self, path, *, depth, level, channels, paged, t=0):
+        return self._refuse()
+
+    def atlas_cell(self, path, *, z, level, channels, colors, windows, cell_w, cell_h, paged, t=0):
+        return self._refuse()
+
+    def atlas_cells(self, path, *, zs, level, channels, colors, windows, cell_w, cell_h, paged, t=0):
+        return self._refuse()
+
+    def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
+        return self._refuse()
+
+    def scalar_planes(self, path, *, zs, channel, t, pages):
+        return self._refuse()
+
+    def histogram(self, path, *, bins=256, channels=None, t=0) -> dict[str, Any]:
+        return self._refuse()
+
+    def viewer_info(self, path, name=None) -> dict[str, Any]:
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        return hdf5_info if hdf5_info is not None else self._refuse()
+
+    def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
+        return self._refuse()
+
+
+def build_engine(
+    *, prefer_real: bool = True, cache_size: int = 4, hdf5_only: bool = False
+) -> ImageEngine:
+    """Construct the highest-fidelity available image engine.
+
+    The user-facing fallback ladder is native libbioimage, then the real Python
+    decoder, then HDF5-only refusal. The pixel-fabricating stub remains an
+    explicit tests-only opt-out.
+    """
     import logging
 
     log = logging.getLogger(__name__)
-    if prefer_real:
-        try:
-            engine = LibBioImageEngine(cache_size=cache_size)
-            log.info("imaging: using LibBioImageEngine")
-            return engine
-        except EngineUnavailable as exc:
-            log.warning("imaging: libbioimage unavailable (%s); falling back to StubEngine", exc)
-    return StubEngine()
+    if hdf5_only:
+        log.info("imaging: using Hdf5OnlyEngine (rasters refused as unsupported)")
+        return Hdf5OnlyEngine()
+    if not prefer_real:
+        return StubEngine()
+    try:
+        engine = LibBioImageEngine(cache_size=cache_size)
+        log.info("imaging: using LibBioImageEngine")
+        return engine
+    except EngineUnavailable as exc:
+        log.warning("imaging: libbioimage unavailable (%s); trying BioioEngine", exc)
+    try:
+        from ultra_deepagents.imaging.bioio_engine import BioioEngine
+
+        engine = BioioEngine(cache_size=cache_size)
+        log.info("imaging: using BioioEngine")
+        return engine
+    except Exception as exc:  # noqa: BLE001 - any dependency failure drops one tier
+        log.warning("imaging: BioioEngine unavailable (%s); serving HDF5 only", exc)
+    return Hdf5OnlyEngine()

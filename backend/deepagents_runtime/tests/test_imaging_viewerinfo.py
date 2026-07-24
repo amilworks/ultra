@@ -303,9 +303,9 @@ def test_viewer_info_microscopy_zstack():
     # nested frontend contract
     assert vi["kind"] == "image"
     assert vi["viewer"]["volume_mode"] == "slice_stack"
-    # A non-medical (microscopy) z-stack is 2D-only: volume_mode stays "slice_stack"
-    # (so the 2D Z scrub knows it is a stack) but the 3D surfaces are withheld.
-    assert vi["viewer"]["available_surfaces"] == ["2d", "metadata"]
+    # Microscopy remains slice_stack for 2D and gains the shared scalar Volume
+    # surface without claiming medical multiplanar reconstruction.
+    assert vi["viewer"]["available_surfaces"] == ["2d", "metadata", "volume"]
     assert vi["viewer"]["delivery_mode"] == "direct"  # no pyramid -> direct
     assert "tile_scheme" not in vi["viewer"]
     assert vi["phys"]["channel_names"] == ["DAPI", "FITC"]
@@ -389,18 +389,15 @@ def test_viewer_info_plain_image():
     assert vi["viewer"]["available_surfaces"] == ["2d", "metadata"]  # flat 2D: no 3D surfaces
 
 
-def test_viewer_info_3d_surfaces_are_medical_only():
-    # The 3D surfaces (reslice + volume) are offered ONLY for medical (clinical)
-    # volumes. A non-medical (microscopy) z-stack is 2D-only — its multichannel 3D
-    # render is not shippable yet, so we lead with reliable 2D + Z/T scrubbing. A
-    # flat 2D image gets neither. (volume_mode is unaffected; see the slice_stack
-    # assertions elsewhere.)
+def test_viewer_info_microscopy_volume_surface_does_not_claim_mpr():
+    # True microscopy stacks reuse the shared volume renderer while remaining a
+    # slice_stack for 2D. MPR stays medical-only.
     microscopy = build_viewer_info({
         "image_num_x": 924, "image_num_y": 624, "image_num_z": 80, "image_num_c": 7,
         "format": "OME-TIFF", "image_pixel_depth": 16,
     })
     assert microscopy["modality"] == "microscopy"
-    assert microscopy["viewer"]["available_surfaces"] == ["2d", "metadata"]
+    assert microscopy["viewer"]["available_surfaces"] == ["2d", "metadata", "volume"]
     medical = build_viewer_info({
         "image_num_x": 256, "image_num_y": 256, "image_num_z": 128,
         "format": "NIfTI", "image_pixel_depth": 32, "image_pixel_format": "floating point",

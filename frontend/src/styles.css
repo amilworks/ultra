@@ -23,8 +23,18 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
-  /* Inter's own recommended pairing; do not extend casually. */
-  font-feature-settings: "liga" 1, "calt" 1;
+  /* Inter's recommended pairing ("liga"/"calt") plus one deliberate addition.
+     "ss02" is Inter's Disambiguation set: it separates the characters that
+     collide in this product's actual content — capital I, lowercase l and
+     numeral 1; letter O and slashed zero. Ultra's text is accession IDs, run
+     IDs, dataset paths, channel indices and parameter values, where a misread
+     Il1 or 0O is a real error, not a cosmetic one. It doubles as identity:
+     these letterforms are visibly not stock Inter, so the type is ours without
+     changing typeface.
+     ss02 already includes the slashed zero, so "zero" is not set separately.
+     NOTE: font-feature-settings REPLACES rather than merges — any component
+     that sets its own would drop these. Keep this the only declaration. */
+  font-feature-settings: "liga" 1, "calt" 1, "ss02" 1;
 
   /* TRACKING — derive, don't eyeball.
      Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
@@ -145,13 +155,29 @@
   --collapsed-sidebar-action-size: 2.25rem;
   --collapsed-sidebar-icon-size: 1.125rem;
   --collapsed-sidebar-logo-size: 1.25rem;
-  --sidebar-motion-duration: 280ms;
-  --sidebar-motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
-  --sidebar-motion-fade-duration: 160ms;
-  /* The house motion curve (calm design law: 160–280ms on this easing). It was
-     only tokenized for the sidebar; surfaces that animate geometry should share
-     it so the whole app decelerates the same way. */
+  /* MOTION — the house gesture.
+     One curve, everywhere: a hard ease-out where movement leaves quickly and
+     takes its time arriving, so surfaces *settle* rather than slide. This is a
+     brand signature in the same way the monochrome palette is — the product
+     should be recognisable with the logo cropped out — so every `transition`
+     uses var(--motion-ease) and never a bare `ease`. brand-motion.test.ts
+     enforces that; it was 5 declarations on the curve against 127 stray
+     `ease` keywords before this was made a rule.
+
+     Three deliberate exemptions, none of which are the gesture:
+       - `linear`   — continuous indicators (spinners, progress) must not ease.
+       - `steps()`  — discrete visibility flips.
+       - `ease-out` on one 120ms width nudge, too brief to read as motion.
+     Hover-enter is separately shortened to 60ms at the end of this file
+     (fast in, calm out) — a duration override, not a second curve.
+
+     Durations already sit inside the law's 160–280ms band: 160ms for
+     colour/opacity, 220ms for geometry, 280ms for the sidebar. Stay in it. */
   --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --sidebar-motion-duration: 280ms;
+  /* Alias kept for existing sidebar consumers — there is only one curve. */
+  --sidebar-motion-ease: var(--motion-ease);
+  --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
   --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
@@ -438,7 +464,10 @@ body {
 
 .auth-card:hover::before,
 .auth-card:focus-within::before {
-  animation: auth-card-sheen 880ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Same house curve, via the token — a sheen is a long decorative sweep, so it
+     sits outside the transition duration band on purpose, but not outside the
+     gesture. */
+  animation: auth-card-sheen 880ms var(--motion-ease);
 }
 
 .auth-card > * {
@@ -586,8 +615,8 @@ body {
   visibility: visible;
   transform: translateX(0);
   transition:
-    opacity var(--sidebar-motion-fade-duration) ease,
-    transform var(--sidebar-motion-duration) var(--sidebar-motion-ease),
+    opacity var(--sidebar-motion-fade-duration) var(--motion-ease),
+    transform var(--sidebar-motion-duration) var(--motion-ease),
     visibility 0s linear 0s;
   will-change: opacity, transform;
 }
@@ -610,8 +639,8 @@ body {
     transform: translateX(-0.35rem);
     pointer-events: none;
     transition:
-      opacity var(--sidebar-motion-fade-duration) ease,
-      transform var(--sidebar-motion-duration) var(--sidebar-motion-ease),
+      opacity var(--sidebar-motion-fade-duration) var(--motion-ease),
+      transform var(--sidebar-motion-duration) var(--motion-ease),
       visibility 0s linear var(--sidebar-motion-fade-duration);
     will-change: opacity, transform;
   }
@@ -634,8 +663,8 @@ body {
   transform: translateX(-0.55rem);
   pointer-events: none;
   transition:
-    opacity 120ms ease,
-    transform 220ms var(--sidebar-motion-ease),
+    opacity 120ms var(--motion-ease),
+    transform 220ms var(--motion-ease),
     visibility 0s linear 120ms;
 }
 
@@ -792,7 +821,7 @@ body {
   color: var(--collapsed-sidebar-popover-fg);
   text-align: left;
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-collapsed-recent-item:hover,
@@ -1064,7 +1093,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 500;
   line-height: 1.3;
   box-shadow: none;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-settings-nav-item[data-slot="tabs-trigger"]:hover,
@@ -1466,7 +1495,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.74rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s var(--motion-ease), color 0.15s var(--motion-ease);
 }
 
 .token-heatmap-mode:hover {
@@ -1501,7 +1530,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: var(--token-heatmap-cell-size);
   border-radius: max(2px, calc(var(--token-heatmap-cell-size) * 0.22));
   background: var(--muted);
-  transition: transform 0.12s ease, outline-color 0.12s ease;
+  transition: transform 0.12s var(--motion-ease), outline-color 0.12s var(--motion-ease);
 }
 
 .token-heatmap-cell:not(.is-future):hover {
@@ -1664,7 +1693,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.35;
   font-weight: var(--font-weight-action);
   color: var(--sidebar-foreground);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-new-chat-button {
@@ -1694,7 +1723,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
   fill: transparent;
-  transition: fill 160ms ease;
+  transition: fill 160ms var(--motion-ease);
 }
 
 .app-resource-browser-button[data-variant="secondary"]:hover .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
@@ -1715,7 +1744,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: var(--font-size-nav);
   line-height: 1.35;
   font-weight: var(--font-weight-nav);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-bisque-link-button:hover {
@@ -1749,7 +1778,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.35;
   font-weight: 400;
   color: var(--sidebar-foreground);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-sidebar-brand-button[data-slot="button"] {
@@ -1764,7 +1793,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
   font-family: var(--font-sans);
   line-height: 1.35;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-sidebar-brand-button[data-slot="button"]:hover {
@@ -1935,13 +1964,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    scrolled back to the bottom or a run starts (attribute cleared in JS). */
 @media (max-width: 640px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms var(--motion-ease), max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
   }
   .app-composer-shell .app-composer-actions {
     max-height: 5rem;
     overflow: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease, padding 220ms ease,
-      margin-top 220ms ease;
+    transition: max-height 220ms var(--motion-ease), opacity 160ms var(--motion-ease), padding 220ms var(--motion-ease),
+      margin-top 220ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
     min-height: 2.55rem;
@@ -2158,10 +2187,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-history-action-button {
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease,
-    transform 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
 }
 
 .chat-width-frame {
@@ -2257,7 +2286,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   list-style: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  transition: color 160ms ease, background-color 160ms ease;
+  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .mobile-usage-summary::-webkit-details-marker {
@@ -2270,7 +2299,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .mobile-usage-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
 }
 
 .mobile-usage-disclosure[open] .mobile-usage-chevron {
@@ -2352,7 +2381,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   list-style: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  transition: color 160ms ease, background-color 160ms ease;
+  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .blank-chat-usage-strip::-webkit-details-marker {
@@ -2387,7 +2416,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .blank-chat-usage-strip-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
 }
 
 .blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
@@ -2535,9 +2564,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding-inline: 0.78rem 0.2rem;
   box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
   transition:
-    border-color 150ms ease,
-    box-shadow 150ms ease,
-    background-color 150ms ease;
+    border-color 150ms var(--motion-ease),
+    box-shadow 150ms var(--motion-ease),
+    background-color 150ms var(--motion-ease);
 }
 
 .resource-browser-search-field:focus-within {
@@ -2647,8 +2676,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   outline: 1px solid transparent;
   outline-offset: 0.35rem;
   transition:
-    background-color 140ms ease,
-    outline-color 140ms ease;
+    background-color 140ms var(--motion-ease),
+    outline-color 140ms var(--motion-ease);
 }
 
 .resource-browser-content[data-file-drop-active="true"] {
@@ -2968,7 +2997,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 100%;
   border-radius: inherit;
   background: color-mix(in oklab, var(--accent) 58%, var(--foreground));
-  transition: width 160ms ease;
+  transition: width 160ms var(--motion-ease);
 }
 
 .resource-browser-upload-progress-actions {
@@ -3611,7 +3640,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 17.75rem;
   display: grid;
   grid-template-rows: 10.75rem minmax(0, 1fr);
-  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  transition: border-color 160ms var(--motion-ease), box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease);
 }
 
 .resource-browser-card:hover,
@@ -3845,7 +3874,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border-radius: 7px;
   color: #cfd2d6;
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .figure-lightbox-act:hover {
@@ -3993,7 +4022,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: #0e0e10;
   cursor: pointer;
   opacity: 0.55;
-  transition: opacity 160ms ease, border-color 160ms ease;
+  transition: opacity 160ms var(--motion-ease), border-color 160ms var(--motion-ease);
   padding: 0;
 }
 
@@ -6179,7 +6208,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   inset: 0;
   opacity: 0;
   transform: translateY(2px);
-  transition: opacity 130ms ease, transform 130ms ease;
+  transition: opacity 130ms var(--motion-ease), transform 130ms var(--motion-ease);
   pointer-events: none;
 }
 
@@ -6230,7 +6259,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
   opacity: 0;
   transform: translateY(4px);
-  transition: opacity 130ms ease, transform 130ms ease;
+  transition: opacity 130ms var(--motion-ease), transform 130ms var(--motion-ease);
   pointer-events: none;
   max-width: min(88%, 320px);
 }
@@ -6365,7 +6394,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overflow: hidden;
   text-decoration: none;
   color: inherit;
-  transition: border-color 140ms ease, transform 140ms ease;
+  transition: border-color 140ms var(--motion-ease), transform 140ms var(--motion-ease);
 }
 
 .chat-artifact-card:disabled {
@@ -6481,7 +6510,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.78rem;
   color: var(--text-muted);
   text-decoration: none;
-  transition: border-color 140ms ease, color 140ms ease;
+  transition: border-color 140ms var(--motion-ease), color 140ms var(--motion-ease);
 }
 
 .chat-document-report-download:hover {
@@ -6530,7 +6559,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: var(--bg-panel);
   color: inherit;
   text-decoration: none;
-  transition: border-color 140ms ease, transform 140ms ease;
+  transition: border-color 140ms var(--motion-ease), transform 140ms var(--motion-ease);
 }
 
 .chat-document-chip:hover {
@@ -6590,9 +6619,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     );
   box-shadow: var(--composer-shell-shadow);
   transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
+    border-color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
 }
 
 .app-composer-card:focus-within {
@@ -6711,7 +6740,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      moment the toolbar's real selector takes over — see the actions-start note.
      Only opacity animates; the fade-out is cut, which is imperceptible on this
      small chrome and buys the "exactly one control" invariant. */
-  transition: opacity 160ms ease;
+  transition: opacity 160ms var(--motion-ease);
 }
 
 .app-composer-idle-mode:focus-visible {
@@ -6742,7 +6771,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     /* instant visibility hide (no delay), matching idle-mode/actions-start, so
        exactly one attach control is in the tab order + a11y tree at any moment. */
     visibility: hidden;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach {
     opacity: 1;
@@ -6750,7 +6779,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     /* re-arm clicks: the collapsed toolbar (its DOM parent) is pointer-events:
        none, and pointer-events inherits — without this the pill's + is inert. */
     pointer-events: auto;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
 }
 
@@ -6860,11 +6889,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-composer-submit-button,
 .app-composer-stop-button {
   transition:
-    transform 160ms ease,
-    background-color 160ms ease,
-    border-color 160ms ease,
-    color 160ms ease,
-    box-shadow 160ms ease;
+    transform 160ms var(--motion-ease),
+    background-color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease);
 }
 
 .composer textarea {
@@ -6887,9 +6916,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
   color: var(--text-muted);
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease);
 }
 
 .app-composer-icon-button {
@@ -6916,8 +6945,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 400;
   letter-spacing: 0;
   transition:
-    background-color 160ms ease,
-    color 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
 /* Keyed on aria-expanded, NOT data-state: this button is now both a tooltip
@@ -7543,7 +7572,7 @@ details {
   border-radius: 8px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .text-viewer-action:hover {
@@ -7867,7 +7896,7 @@ details {
   cursor: pointer;
   opacity: 0;
   backdrop-filter: blur(6px);
-  transition: opacity 160ms ease, color 160ms ease, background-color 160ms ease;
+  transition: opacity 160ms var(--motion-ease), color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .resource-browser-card:hover .resource-quick-peek-trigger,
@@ -8103,7 +8132,7 @@ details {
    controls stay in the tab order and the accessibility tree — never
    display:none / visibility:hidden / pointer-events:none on focusable controls. */
 .viewer-chrome-fade {
-  transition: opacity 240ms ease;
+  transition: opacity 240ms var(--motion-ease);
 }
 
 [data-chrome-faded="true"] .viewer-chrome-fade {
@@ -8737,7 +8766,7 @@ details {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 4px 10px;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition: color 120ms var(--motion-ease), border-color 120ms var(--motion-ease);
 }
 
 .viewer-bisque-open-link:hover {
@@ -9590,7 +9619,7 @@ details {
 }
 
 .viewer-advanced-trigger svg[data-icon="inline-end"] {
-  transition: transform 140ms ease;
+  transition: transform 140ms var(--motion-ease);
 }
 
 .viewer-advanced-controls[data-state="open"] .viewer-advanced-trigger svg[data-icon="inline-end"] {
@@ -9656,9 +9685,9 @@ details {
   overflow: hidden;
   opacity: 0.6;
   transition:
-    opacity var(--motion-fast, 160ms) ease,
-    border-color var(--motion-fast, 160ms) ease,
-    background var(--motion-fast, 160ms) ease;
+    opacity var(--motion-fast, 160ms) var(--motion-ease),
+    border-color var(--motion-fast, 160ms) var(--motion-ease),
+    background var(--motion-fast, 160ms) var(--motion-ease);
 }
 
 .viewer-channel-chip[data-active="true"] {
@@ -9891,7 +9920,7 @@ details {
   color: var(--text-muted);
   cursor: pointer;
   line-height: 0;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  transition: color 0.12s var(--motion-ease), border-color 0.12s var(--motion-ease);
 }
 
 .viewer-metadata-copy:hover {
@@ -11121,7 +11150,7 @@ details {
   font-size: 0.8125rem;
   color: var(--text-muted);
   user-select: none;
-  transition: color 140ms ease;
+  transition: color 140ms var(--motion-ease);
 }
 
 .live-reasoning > summary::-webkit-details-marker {
@@ -11136,7 +11165,7 @@ details {
 .live-reasoning-chevron {
   opacity: 0.7;
   transform: rotate(-90deg);
-  transition: transform 140ms ease;
+  transition: transform 140ms var(--motion-ease);
 }
 
 .live-reasoning[open] .live-reasoning-chevron {
@@ -11171,7 +11200,7 @@ details {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--text-muted);
-  transition: background-color 140ms ease, color 140ms ease;
+  transition: background-color 140ms var(--motion-ease), color 140ms var(--motion-ease);
 }
 
 .pro-mode-dev-trace > summary::-webkit-details-marker {
@@ -11197,10 +11226,10 @@ details {
   font-weight: 600;
   line-height: 1;
   transition:
-    color 140ms ease,
-    background-color 140ms ease,
-    border-color 140ms ease,
-    transform 140ms ease;
+    color 140ms var(--motion-ease),
+    background-color 140ms var(--motion-ease),
+    border-color 140ms var(--motion-ease),
+    transform 140ms var(--motion-ease);
 }
 
 .pro-mode-dev-copy-button:hover {
@@ -11339,7 +11368,7 @@ details {
   letter-spacing: 0.01em;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   cursor: pointer;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  transition: transform 0.12s var(--motion-ease), box-shadow 0.12s var(--motion-ease), border-color 0.12s var(--motion-ease);
 }
 
 .upload-flight-chip:hover {
@@ -11547,7 +11576,7 @@ details {
   height: 100%;
   border-radius: 999px;
   background: var(--primary);
-  transition: width 0.4s ease;
+  transition: width 0.4s var(--motion-ease);
 }
 
 .training-progress-caption {
@@ -11719,7 +11748,7 @@ details {
 }
 
 .training-disclosure-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
   flex: none;
 }
 

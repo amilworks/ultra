@@ -628,11 +628,16 @@ body {
   color: var(--collapsed-sidebar-fg);
 }
 
+/* Full-bleed, because this divider is the collapsed stand-in for the expanded
+   sidebar's right border — and that border runs the whole viewport height. When
+   this was inset (top 3.65rem / bottom 2.35rem) collapsing turned a continuous
+   edge into a floating 902px segment, so the seam visibly broke at the top on
+   every toggle. Same line, same length, both states. */
 [data-slot="sidebar"][data-collapsible="icon"] .app-collapsed-sidebar-rail::after {
   position: absolute;
-  top: 3.65rem;
+  top: 0;
   right: 0;
-  bottom: 2.35rem;
+  bottom: 0;
   width: 1px;
   content: "";
   background: var(--collapsed-sidebar-divider);
@@ -657,7 +662,18 @@ body {
   box-shadow: none;
 }
 
+/* One hover treatment for every rail control, toggle included — the expand
+   button is a rail button like the others, not a special surface. Keep this
+   selector list intact: an earlier edit inserted the tooltip rule between the
+   toggle and action selectors, which orphaned `.app-collapsed-sidebar-toggle:hover`
+   onto the tooltip bubble and gave the toggle a drop-shadow card on hover. */
 .app-collapsed-sidebar-toggle:hover,
+.app-collapsed-sidebar-action:hover,
+.app-collapsed-sidebar-action[data-active="true"] {
+  background: var(--collapsed-sidebar-accent);
+  color: var(--collapsed-sidebar-accent-foreground);
+}
+
 /* Rail tooltip: same bubble language as the composer's, plus a muted shortcut
    chip. The icon is a collapsed control's only label, so these carry the
    keyboard hint the expanded row shows on hover — collapsing costs nothing.
@@ -680,12 +696,6 @@ body {
 .app-collapsed-sidebar-tooltip-key {
   color: currentColor;
   opacity: 0.6;
-}
-
-.app-collapsed-sidebar-action:hover,
-.app-collapsed-sidebar-action[data-active="true"] {
-  background: var(--collapsed-sidebar-accent);
-  color: var(--collapsed-sidebar-accent-foreground);
 }
 
 .app-collapsed-sidebar-toggle svg {

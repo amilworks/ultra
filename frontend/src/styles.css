@@ -6861,6 +6861,25 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   white-space: nowrap;
 }
 
+/* The same bubble for the composer's other controls (attach, intelligence), so
+   every tip on the bar reads as one surface. Deliberately a separate block
+   rather than a shared comma selector: composer-send-tooltip.test.ts asserts on
+   the declarations inside `.app-composer-submit-tooltip {` and its regex needs
+   that selector immediately followed by the brace, so grouping them would
+   silently break the pinned contract. Colour comes from the tooltip primitive
+   (bg-foreground/text-background) — never restate it here. */
+.app-composer-tooltip {
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow:
+    0 12px 28px rgba(12, 12, 12, 0.18),
+    0 3px 8px rgba(12, 12, 12, 0.1);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .app-composer-submit-tooltip-row {
   display: inline-flex;
   align-items: center;

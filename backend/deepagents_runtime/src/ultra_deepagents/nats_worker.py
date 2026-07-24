@@ -718,7 +718,22 @@ async def fetch_job_messages(
 ) -> list[Any]:
     try:
         return await subscription.fetch(batch=batch, timeout=timeout)
-    except nats.errors.TimeoutError:
+    except asyncio.TimeoutError:
+        # An idle pull consumer with nothing to deliver is the normal case, never a
+        # connection failure — swallow it so the supervisor never sees it.
+        #
+        # This MUST be asyncio.TimeoutError, not nats.errors.TimeoutError. nats-py
+        # raises both flavours from fetch(): nats.errors.TimeoutError (a subclass of
+        # asyncio.TimeoutError) and, from JetStream's own _fetch_n, a BARE
+        # asyncio.TimeoutError. Catching only the nats flavour missed the bare one —
+        # and because asyncio.TimeoutError IS builtin TimeoutError on Python 3.11+,
+        # an OSError subclass, it then matched the OSError arm of
+        # _RECOVERABLE_NATS_ERRORS below and was misreported as a lost connection,
+        # reconnecting the pump on every idle cycle. asyncio.TimeoutError covers both.
+        #
+        # Genuine transport failures are unaffected: a closed/drained/serverless link
+        # raises ConnectionClosedError / DrainTimeoutError / NoServersError, which are
+        # nats.errors.Error but NOT TimeoutError, so they still reach the supervisor.
         return []
 
 
@@ -733,6 +748,11 @@ def _should_load_user_profile(job: RunJobEnvelope) -> bool:
 # the in-flight run. nats.errors.Error is the base of all of them (DrainTimeoutError,
 # ConnectionClosedError, ...); the normal idle-fetch TimeoutError is already swallowed in
 # fetch_job_messages, so it never reaches the supervisor.
+#
+# CAUTION when adding to this tuple: OSError is broader than it looks. On Python 3.11+
+# asyncio.TimeoutError IS builtin TimeoutError, which subclasses OSError — so any bare
+# asyncio timeout that escapes a call site lands here and is misreported as a lost
+# connection. Keep timeouts swallowed at their call site (see fetch_job_messages).
 _RECOVERABLE_NATS_ERRORS = (nats.errors.Error, OSError)
 
 

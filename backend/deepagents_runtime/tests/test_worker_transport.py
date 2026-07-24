@@ -20,6 +20,7 @@ from ultra_deepagents.nats_worker import (
     NATSDeepAgentsWorker,
     RunLeaseConflict,
     RunLeaseUnavailable,
+    _RECOVERABLE_NATS_ERRORS,
     build_job_consumer_config,
     fetch_control_plane_run_max_sequence,
     fetch_control_plane_run_status,
@@ -3678,8 +3679,49 @@ class TimeoutSubscription:
         raise nats.errors.TimeoutError
 
 
+class BareAsyncioTimeoutSubscription:
+    """What JetStream's own _fetch_n raises when an idle pull finds nothing:
+    a BARE asyncio.TimeoutError, not the nats.errors flavour."""
+
+    async def fetch(self, *_args, **_kwargs):
+        raise asyncio.TimeoutError
+
+
+class ConnectionClosedSubscription:
+    async def fetch(self, *_args, **_kwargs):
+        raise nats.errors.ConnectionClosedError
+
+
 def test_fetch_job_messages_treats_nats_timeout_as_empty_poll():
     assert asyncio.run(fetch_job_messages(TimeoutSubscription())) == []
+
+
+def test_fetch_job_messages_treats_bare_asyncio_timeout_as_empty_poll():
+    """Regression: an idle JetStream fetch raises a bare asyncio.TimeoutError, which is
+    NOT a nats.errors.TimeoutError. It used to escape this helper and then match the
+    OSError arm of _RECOVERABLE_NATS_ERRORS (asyncio.TimeoutError is builtin
+    TimeoutError, an OSError subclass, on 3.11+), so every idle poll was misreported as
+    'NATS connection lost' and reconnected the pump."""
+
+    assert asyncio.run(fetch_job_messages(BareAsyncioTimeoutSubscription())) == []
+
+
+def test_bare_asyncio_timeout_would_be_mistaken_for_a_recoverable_nats_error():
+    """Pins the hazard the fix guards against: if a bare timeout ever escapes a call
+    site, the supervisor's OSError arm swallows it as a connection failure. This is why
+    timeouts must be caught where they are raised, not left to the supervisor."""
+
+    assert issubclass(asyncio.TimeoutError, OSError)
+    assert not issubclass(asyncio.TimeoutError, nats.errors.TimeoutError)
+    assert isinstance(asyncio.TimeoutError(), _RECOVERABLE_NATS_ERRORS)
+
+
+def test_fetch_job_messages_still_propagates_real_connection_failures():
+    """The pump must NOT go silent-busy-loop on a dead link: a closed connection is a
+    genuine transport failure and has to reach the supervisor so it reconnects."""
+
+    with pytest.raises(nats.errors.ConnectionClosedError):
+        asyncio.run(fetch_job_messages(ConnectionClosedSubscription()))
 
 
 def test_job_consumer_config_uses_long_running_ack_settings():

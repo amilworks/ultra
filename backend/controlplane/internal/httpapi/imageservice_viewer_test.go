@@ -367,32 +367,58 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 	t.Parallel()
 
 	raw := bytes.Repeat([]byte{1, 2, 3, 4}, 8)
+	var viewerPath, scalarPath, scalarChannel, scalarTime string
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/scalar-volume" {
+		switch r.URL.Path {
+		case "/viewerinfo":
+			viewerPath = r.URL.Query().Get("path")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"axis_sizes": map[string]any{"T": 2, "C": 3, "Z": 8},
+			})
+		case "/scalar-volume":
+			scalarPath = r.URL.Query().Get("path")
+			scalarChannel = r.URL.Query().Get("channel")
+			scalarTime = r.URL.Query().Get("t")
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("x-volume-width", "2")
+			w.Header().Set("x-volume-height", "2")
+			w.Header().Set("x-volume-depth", "8")
+			w.Header().Set("x-volume-dtype", "float32")
+			w.Header().Set("x-volume-bytes-per-voxel", "4")
+			_, _ = w.Write(raw)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("x-volume-width", "2")
-		w.Header().Set("x-volume-height", "2")
-		w.Header().Set("x-volume-depth", "8")
-		w.Header().Set("x-volume-dtype", "float32")
-		w.Header().Set("x-volume-bytes-per-voxel", "4")
-		_, _ = w.Write(raw)
 	}))
 	defer imageSvc.Close()
 
 	mem := store.NewMemoryStore()
+	uploadRoot := t.TempDir()
 	router := NewRouter(ServerDeps{
 		Version:         "test-version",
 		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
 		Store:           mem,
-		UploadRoot:      t.TempDir(),
+		UploadRoot:      uploadRoot,
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "vol.tif", testPNGBytes(t, 4, 4))
+	derivedDir := filepath.Join(uploadRoot, "derived")
+	if err := os.MkdirAll(derivedDir, 0o755); err != nil {
+		t.Fatalf("create derived dir: %v", err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(derivedDir, derivedPyramidName(fileID)),
+		[]byte("display derivative"),
+		0o644,
+	); err != nil {
+		t.Fatalf("create derived pyramid fixture: %v", err)
+	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?channel=0", nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v2/uploads/"+fileID+"/scalar-volume?channel=2&t=1",
+		nil,
+	)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -404,6 +430,110 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes(), raw) {
 		t.Fatalf("scalar-volume body not proxied")
+	}
+	if scalarPath == "" || scalarPath != viewerPath {
+		t.Fatalf(
+			"scalar-volume path = %q, viewer-info source path = %q",
+			scalarPath,
+			viewerPath,
+		)
+	}
+	if strings.Contains(scalarPath, "__pyramid") {
+		t.Fatalf("scalar-volume used display derivative %q instead of source", scalarPath)
+	}
+	if scalarChannel != "2" || scalarTime != "1" {
+		t.Fatalf(
+			"scalar-volume selection channel=%q t=%q, want channel=2 t=1",
+			scalarChannel,
+			scalarTime,
+		)
+	}
+}
+
+func TestSourceViewerAxesRequirePositiveIntegers(t *testing.T) {
+	t.Parallel()
+
+	valid := map[string]any{
+		"axis_sizes": map[string]any{"T": float64(2), "C": 3, "Z": float64(8)},
+	}
+	if gotT, gotC, gotZ, ok := sourceViewerAxes(valid); !ok || gotT != 2 || gotC != 3 || gotZ != 8 {
+		t.Fatalf("sourceViewerAxes(valid) = (%d, %d, %d, %t)", gotT, gotC, gotZ, ok)
+	}
+
+	for name, axes := range map[string]map[string]any{
+		"fractional": {"T": 1.5, "C": 3, "Z": 8},
+		"zero":       {"T": 1, "C": 0, "Z": 8},
+		"missing":    {"T": 1, "C": 3},
+		"string":     {"T": 1, "C": 3, "Z": "8"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, _, ok := sourceViewerAxes(map[string]any{"axis_sizes": axes}); ok {
+				t.Fatal("sourceViewerAxes accepted malformed source axes")
+			}
+		})
+	}
+}
+
+func TestV2UploadScalarVolumeRejectsAmbiguousOrOutOfRangeIndices(t *testing.T) {
+	t.Parallel()
+
+	scalarRequests := 0
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/viewerinfo":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"axis_sizes": map[string]any{"T": 2, "C": 3, "Z": 8},
+			})
+		case "/scalar-volume":
+			scalarRequests++
+			http.Error(w, "must not reach scalar decoder", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer imageSvc.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "vol.ome.tiff", testPNGBytes(t, 4, 4))
+
+	for _, rawQuery := range []string{
+		"channel=-1",
+		"channel=1.5",
+		"channel=1&channel=2",
+		"channel=1&c=1",
+		"channel=3",
+		"t=2",
+		"time=1&timepoint=1",
+		"t=",
+	} {
+		t.Run(rawQuery, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/v2/uploads/"+fileID+"/scalar-volume?"+rawQuery,
+				nil,
+			)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"query %q status = %d body=%s, want 400",
+					rawQuery,
+					rec.Code,
+					rec.Body.String(),
+				)
+			}
+		})
+	}
+	if scalarRequests != 0 {
+		t.Fatalf("invalid selections reached scalar decoder %d times", scalarRequests)
 	}
 }
 

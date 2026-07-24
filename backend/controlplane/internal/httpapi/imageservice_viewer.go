@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -178,6 +179,51 @@ func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path st
 		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
 	}
 	return out, nil
+}
+
+func sourceViewerAxes(info map[string]any) (t, c, z int, ok bool) {
+	axes, ok := info["axis_sizes"].(map[string]any)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	t, tOK := jsonInt(axes["T"])
+	c, cOK := jsonInt(axes["C"])
+	z, zOK := jsonInt(axes["Z"])
+	if !tOK || !cOK || !zOK || t < 1 || c < 1 || z < 1 {
+		return 0, 0, 0, false
+	}
+	return t, c, z, true
+}
+
+var errMalformedImageViewerAxes = errors.New("image service returned malformed source axes")
+
+// sourceImageServiceViewerInfo obtains T/C/Z from the original upload. A
+// display pyramid is an acceleration artifact and must never become the
+// authority for semantic channel or time selection.
+func (deps ServerDeps) sourceImageServiceViewerInfo(
+	ctx context.Context,
+	sourcePath string,
+) (info map[string]any, t, c, z int, err error) {
+	info, err = deps.cachedImageServiceViewerInfo(ctx, sourcePath)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	t, c, z, ok := sourceViewerAxes(info)
+	if !ok {
+		return nil, 0, 0, 0, errMalformedImageViewerAxes
+	}
+	return info, t, c, z, nil
+}
+
+func writeImageSourceAuthorityError(w http.ResponseWriter, err error) {
+	status := http.StatusUnprocessableEntity
+	var serviceErr *imageServiceStatusError
+	if errors.As(err, &serviceErr) {
+		status = serviceErr.status
+	} else if !errors.Is(err, errMalformedImageViewerAxes) {
+		status = http.StatusBadGateway
+	}
+	writeError(w, status, errors.New("authoritative source image metadata is unavailable"))
 }
 
 // handleGetUploadViewerService backs /viewer with libbioimage metadata. The
@@ -410,7 +456,7 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		deps.handleGetUploadScalarVolume(w, r)
 		return
 	}
-	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	_, record, path, ok := deps.resolveUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
@@ -418,23 +464,105 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		deps.handleGetUploadScalarVolume(w, r)
 		return
 	}
-	// Prefer the derived tiled pyramid for the per-channel volume read: its native
-	// level 0 is pixel-identical to the source but a bounded (tiled) read, so the
-	// engine assembles the z-stack ~10x faster than re-decoding every plane from a
-	// non-pyramidal source (measured 3.2s vs 37s on the 7-channel OME-TIFF). Mirrors
-	// what handleServeUploadSliceService already does for z-scrub planes.
-	servePath := path
-	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-		servePath = dp
+	channelIndex, err := parseExactScalarIndex(r, []string{"channel", "c"})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	timeIndex, err := parseExactScalarIndex(r, []string{"t", "time", "timepoint"})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_, timeCount, channelCount, _, authorityErr := deps.sourceImageServiceViewerInfo(
+		r.Context(),
+		path,
+	)
+	if authorityErr != nil {
+		writeImageSourceAuthorityError(w, authorityErr)
+		return
+	}
+	if channelIndex >= channelCount {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			fmt.Errorf(
+				"scalar volume channel index %d is out of range for C=%d",
+				channelIndex,
+				channelCount,
+			),
+		)
+		return
+	}
+	if timeIndex >= timeCount {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			fmt.Errorf(
+				"scalar volume time index %d is out of range for T=%d",
+				timeIndex,
+				timeCount,
+			),
+		)
+		return
 	}
 	query := url.Values{
-		"path":    {servePath},
-		"channel": {strconv.Itoa(parseUploadScalarChannelIndex(r))},
-	}
-	if t := strings.TrimSpace(r.URL.Query().Get("t")); t != "" {
-		query.Set("t", t)
+		"path":    {path},
+		"channel": {strconv.Itoa(channelIndex)},
+		"t":       {strconv.Itoa(timeIndex)},
 	}
 	deps.proxyImageService(w, r, "/scalar-volume", query, deps.handleGetUploadScalarVolume)
+}
+
+func exactRawQueryValue(
+	query url.Values,
+	aliases []string,
+	label string,
+) (raw string, present bool, err error) {
+	for _, alias := range aliases {
+		values, exists := query[alias]
+		if !exists {
+			continue
+		}
+		if present || len(values) != 1 {
+			return "", false, fmt.Errorf("%s must be supplied exactly once", label)
+		}
+		present = true
+		raw = strings.TrimSpace(values[0])
+		if raw == "" {
+			return "", false, fmt.Errorf("%s must not be empty", label)
+		}
+	}
+	return raw, present, nil
+}
+
+func parseExactNonNegativeDecimal(raw, label string) (int, error) {
+	if raw == "" {
+		return 0, fmt.Errorf("%s must be a non-negative integer", label)
+	}
+	for _, char := range raw {
+		if char < '0' || char > '9' {
+			return 0, fmt.Errorf("%s must be a non-negative integer", label)
+		}
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	maxInt := uint64(^uint(0) >> 1)
+	if err != nil || value > maxInt {
+		return 0, fmt.Errorf("%s must be a non-negative integer", label)
+	}
+	return int(value), nil
+}
+
+func parseExactScalarIndex(r *http.Request, aliases []string) (int, error) {
+	if r == nil {
+		return 0, nil
+	}
+	label := "scalar volume " + strings.Join(aliases, "/") + " index"
+	raw, present, err := exactRawQueryValue(r.URL.Query(), aliases, label)
+	if err != nil || !present {
+		return 0, err
+	}
+	return parseExactNonNegativeDecimal(raw, label)
 }
 
 // isVideoUpload reports whether a resource is a video (rendered client-side with
@@ -612,13 +740,28 @@ func mapImageServiceHistogram(core map[string]any, fileID string, channelIdx, bi
 	}
 }
 
-// jsonInt/jsonFloat coerce decoded JSON numbers (always float64) to Go numerics.
+// jsonInt/jsonFloat coerce decoded JSON numbers to Go numerics. Integer fields
+// reject fractions, infinities, and values outside the platform int range.
 func jsonInt(v any) (int, bool) {
 	switch n := v.(type) {
 	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+			return 0, false
+		}
+		intLimit := math.Ldexp(1, strconv.IntSize-1)
+		if n < -intLimit || n >= intLimit {
+			return 0, false
+		}
 		return int(n), true
 	case int:
 		return n, true
+	case json.Number:
+		parsed, err := strconv.ParseInt(string(n), 10, 64)
+		if err != nil ||
+			strconv.IntSize == 32 && (parsed > math.MaxInt32 || parsed < math.MinInt32) {
+			return 0, false
+		}
+		return int(parsed), true
 	}
 	return 0, false
 }

@@ -181,11 +181,14 @@
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
   --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
-  /* Ghost-weight hint: a step lighter than muted body text so "Ask Ultra" reads
-     as an invitation rather than content. Held at 3.07:1 on the white card
-     (muted text is 4.74:1) — light enough to recede, not so light it stops
-     being readable. Lighter than this drops under 3:1. */
-  --composer-placeholder: color-mix(in oklab, var(--text-muted) 76%, #ffffff 24%);
+  /* True ghost weight: resolves to #b1b1b1, 2.14:1 on the white card, matching
+     the reference composers this was tuned against. Deliberately below 3:1 —
+     the textarea now carries its own aria-label, so nothing about the control's
+     name or operability depends on how faint this hint is drawn; it is
+     decoration over an input that is obvious on its own.
+     Paired with the dark value by perceptual lightness, not by contrast ratio:
+     this sits L* 27.8 below its background, dark sits 28.2 below its. */
+  --composer-placeholder: color-mix(in oklab, var(--text-muted) 54%, #ffffff 46%);
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
@@ -11136,12 +11139,16 @@ details {
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
   --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
   --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
-  /* Fades toward the panel it sits on, NOT toward white. Mixing with white on a
-     dark surface brightens the hint: it measured 8.16:1 against the card while
-     muted body text was 6.71:1, making the placeholder the loudest muted text
-     in the product — the opposite of a hint. Now 4.57:1, the same step below
-     body text that the light theme uses. */
-  --composer-placeholder: color-mix(in oklab, var(--text-muted) 80%, var(--bg-panel-strong) 20%);
+  /* Fades toward the panel it sits on, NOT toward white — mixing with white on
+     a dark surface brightens a hint rather than dimming it (this token once
+     measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was
+     the loudest muted text in the product).
+     Resolves to #59595f. Matched to light by PERCEPTUAL LIGHTNESS: L* 28.2
+     below its background against light's 27.8 — a hair more, because
+     light-on-dark strokes read thinner than dark-on-light at equal offset.
+     Matching raw contrast ratio instead would have made this look dimmer than
+     its light counterpart. */
+  --composer-placeholder: color-mix(in oklab, var(--text-muted) 50%, var(--bg-panel-strong) 50%);
   --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);

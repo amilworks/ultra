@@ -11939,6 +11939,11 @@ export function App() {
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
                       placeholder={activeConversationHydrated ? "Ask Ultra" : "Loading chat…"}
+                      /* Explicit name so the field is not relying on its
+                         placeholder for one: the placeholder is deliberately
+                         ghost-weight (~2.1:1) and a control's accessible name
+                         should not depend on how faint its hint is drawn. */
+                      aria-label="Ask Ultra"
                       className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
                       onPaste={(event) => {

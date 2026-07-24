@@ -120,6 +120,10 @@
   --sidebar-motion-duration: 280ms;
   --sidebar-motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --sidebar-motion-fade-duration: 160ms;
+  /* The house motion curve (calm design law: 160–280ms on this easing). It was
+     only tokenized for the sidebar; surfaces that animate geometry should share
+     it so the whole app decelerates the same way. */
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
   --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
@@ -1886,10 +1890,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    the phone-only block above; mobile keeps its own scroll-away behavior. */
 @media (min-width: 641px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms var(--motion-ease),
+      max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
   }
   .app-composer-shell .app-composer-actions {
-    transition: padding 220ms ease, margin-top 220ms ease;
+    transition: padding 220ms var(--motion-ease),
+      margin-top 220ms var(--motion-ease);
   }
   /* the collapse mechanism lives on the +/model group (not the whole row) so the
      send button in .app-composer-actions-end can stay visible at idle.
@@ -1898,7 +1904,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .app-composer-shell .app-composer-actions-start {
     max-height: 2.5rem;
     overflow: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease;
+    transition: max-height 220ms var(--motion-ease),
+      opacity 160ms var(--motion-ease);
   }
   /* The send/stop group is ALWAYS absolutely positioned against the card on
      desktop — position cannot animate, so toggling absolute↔flow on the slim
@@ -1912,28 +1919,37 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     bottom: 1.625rem;
     margin: 0;
     z-index: 2;
-    transition: right 220ms ease, bottom 220ms ease;
+    transition: right 220ms var(--motion-ease), bottom 220ms var(--motion-ease);
   }
   /* animate the card's own padding so the idle padding trim collapses in sync
-     with the textarea/action-row (overrides the base 160ms card transition). */
+     with the textarea/action-row (overrides the base 160ms card transition).
+     border-radius animates too — see the slim rule: the surface is a true pill
+     at rest and a rounded card once it grows, and the shape morphs with the
+     height rather than snapping. The radius is restated here because the
+     element also carries .pk-prompt-input, whose later rule would otherwise
+     win; scoping to .app-composer-shell out-specifies it without touching the
+     phone composer (this whole block is min-width: 641px). */
   .app-composer-shell .app-composer-card {
-    transition: border-color 160ms ease, box-shadow 160ms ease,
-      transform 160ms ease, padding 220ms ease;
+    border-radius: calc(var(--radius) + 0.65rem);
+    transition: border-color 160ms var(--motion-ease),
+      box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease),
+      padding 220ms var(--motion-ease), border-radius 220ms var(--motion-ease);
   }
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
      was expanded; releases back to the pk max-height on focus. */
   /* Lock the idle pill to exactly 3rem and center the single placeholder line
-     optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
-     font-size clamp. min = max defeats any stale autosize inline height, so the
+     optically: padding = (pill − one real line box) / 2, in em off
+     --composer-line-height so it tracks the rendered type, not the dead 1.45
+     declaration. min = max defeats any stale autosize inline height, so the
      pill and its text land identically every time. padding-left clears the
      idle attach button; padding-right reserves the floating Pro/High + send.
      Both come from the shared --composer-slim-pad-* vars the JS mirror reads. */
   .app-composer-shell[data-composer-slim="true"] .app-composer-textarea {
     min-height: 3rem;
     max-height: 3rem;
-    padding-top: calc((3rem - 1.45em) / 2);
-    padding-bottom: calc((3rem - 1.45em) / 2);
+    padding-top: calc((3rem - 1em * var(--composer-line-height)) / 2);
+    padding-bottom: calc((3rem - 1em * var(--composer-line-height)) / 2);
     padding-left: var(--composer-slim-pad-left);
     padding-right: var(--composer-slim-pad-right);
   }
@@ -1951,7 +1967,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
        reveal instantly too, so exactly one set is ever exposed. A delayed hide
        would leave both sets in the a11y tree for the transition window. */
     visibility: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease;
+    transition: max-height 220ms var(--motion-ease),
+      opacity 160ms var(--motion-ease);
   }
   /* keep the submit affordance on the slim line to balance the placeholder.
      Offsets ONLY — the positioning model never changes, so the button glides
@@ -1966,12 +1983,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     box-shadow: var(--composer-shell-shadow-rest);
     padding-top: 0;
     padding-bottom: 0;
+    /* A real pill, not 90% of one. At 3rem tall the inherited 22.4px radius
+       landed 2.6px short of the semicircle — the "almost round" zone that reads
+       as a mistake. 999px is the house idiom for stadium shapes (the most-used
+       radius in this file), and it makes the resting composer state a
+       deliberate pill that the expanded card visibly grows out of. */
+    border-radius: 999px;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode:hover {
     color: var(--text-main);
@@ -6508,6 +6531,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   --composer-slim-pad-right: 7.5rem;
 }
 
+/* The line-height the composer text ACTUALLY renders at. The `line-height: 1.45`
+   above is dead — `.pk-prompt-input-textarea { font: inherit }` is declared later
+   at equal specificity, so the field inherits 1.5 (same trap that kills the
+   font-size clamp). Anything centering against the text line must use this
+   value, not the dead one, or it lands half a pixel off. */
+.app-composer-shell {
+  --composer-line-height: 1.5;
+}
+
 .app-composer-textarea::placeholder {
   color: var(--composer-placeholder);
   opacity: 1;
@@ -6569,10 +6601,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
      `font: inherit` out-orders that clamp, so the field actually renders at the
      card's inherited size — inheriting here matches the real placeholder;
-     line-height restates the textarea's 1.45 so the two line boxes (and thus
-     baselines) are metric-identical when both sit centered in the pill. */
+     line-height matches the field's REAL line box (--composer-line-height) so
+     the two boxes are metric-identical and their baselines coincide exactly
+     when both are centered in the pill. */
   font-size: inherit;
-  line-height: 1.45;
+  line-height: var(--composer-line-height);
   font-weight: 400;
   letter-spacing: -0.015em;
   color: var(--composer-placeholder);

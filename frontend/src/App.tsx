@@ -11938,7 +11938,7 @@ export function App() {
                     ) : null}
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
-                      placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
+                      placeholder={activeConversationHydrated ? "Ask Ultra" : "Loading chat…"}
                       className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
                       onPaste={(event) => {

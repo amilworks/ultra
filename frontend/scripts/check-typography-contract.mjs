@@ -240,8 +240,14 @@ check(
 
 const accentLight = typographyCss.match(/--brand-wordmark-accent-light:\s*(#[0-9a-f]{6})/i)?.[1];
 const accentDark = typographyCss.match(/--brand-wordmark-accent-dark:\s*(#[0-9a-f]{6})/i)?.[1];
-check(Boolean(accentLight && contrastRatio(accentLight, "#ffffff") >= 4.5), "Light wordmark green is not AA");
-check(Boolean(accentDark && contrastRatio(accentDark, "#0f0f10") >= 4.5), "Dark wordmark green is not AA");
+check(
+  accentLight === "#0068c9" && contrastRatio(accentLight, "#ffffff") >= 4.5,
+  "Light wordmark blue must be #0068c9 and meet AA"
+);
+check(
+  accentDark === "#67b7ff" && contrastRatio(accentDark, "#111113") >= 4.5,
+  "Dark wordmark blue must be #67b7ff and meet AA"
+);
 
 check(/location \^~ \/assets\/ \{/.test(dockerfile), "nginx /assets/ cache location must use ^~");
 if (caddyfile === null) {

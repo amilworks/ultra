@@ -418,9 +418,9 @@ function assertTypographyMetrics(typography, testCase) {
     `${testCase.name}: markdown emphasis did not compute to true italic`
   );
   assert(
-    typography.roles.brandUltra.color === "rgb(11, 107, 58)" &&
+    typography.roles.brandUltra.color === "rgb(0, 104, 201)" &&
       typography.roles.brandUltra.color !== typography.roles.brandBisque.color,
-    `${testCase.name}: wordmark Ultra segment did not compute to the light-theme brand green`
+    `${testCase.name}: wordmark Ultra segment did not compute to the light-theme brand blue`
   );
   assert(
     typography.roles.monoComment.family.includes("JetBrains Mono") &&

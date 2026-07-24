@@ -33,6 +33,17 @@
   --line: rgba(23, 23, 23, 0.08);
   --brand: #171717;
   --brand-strong: #0a0a0a;
+  --ultra-accent-signal: #1994ff;
+  --ultra-accent-solid: #006fd6;
+  --ultra-accent-foreground: #ffffff;
+  --ultra-accent-text: #0068c9;
+  --ultra-accent-soft: #e8f4ff;
+  --ultra-accent-border: #9fd1ff;
+  --activity-heatmap-1: #b9dcff;
+  --activity-heatmap-2: #75bcff;
+  --activity-heatmap-3: #319fff;
+  --activity-heatmap-4: #087ce8;
+  --status-success: #047857;
   --danger: #c62828;
   --selection-bg: #d4d4d8;
   --selection-fg: #171717;
@@ -813,8 +824,8 @@ body {
 
 .app-sidebar-account-avatar [data-slot="avatar-fallback"],
 .app-settings-account-avatar [data-slot="avatar-fallback"] {
-  background: var(--chart-2);
-  color: var(--primary-foreground);
+  background: var(--ultra-accent-solid);
+  color: var(--ultra-accent-foreground);
   font-weight: 600;
 }
 
@@ -1152,7 +1163,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   align-items: center;
   gap: 0.45rem;
   border-radius: calc(var(--radius) + 0.2rem);
-  background: color-mix(in oklab, var(--chart-2) 14%, var(--background) 86%);
+  background: color-mix(in oklab, var(--status-success) 14%, var(--background) 86%);
   padding: 0.6rem 0.7rem;
   color: var(--popover-foreground);
   font-size: 0.8125rem;
@@ -1160,7 +1171,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .app-settings-bisque-link-status svg[data-icon] {
-  color: var(--chart-2);
+  color: var(--status-success);
 }
 
 .app-settings-about-alert[data-slot="alert"] {
@@ -1184,13 +1195,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .app-settings-bisque-linked-alert[data-slot="alert"] {
-  border-color: color-mix(in oklab, var(--chart-2) 46%, var(--border) 54%);
-  background: color-mix(in oklab, var(--chart-2) 12%, var(--background) 88%);
+  border-color: color-mix(in oklab, var(--status-success) 46%, var(--border) 54%);
+  background: color-mix(in oklab, var(--status-success) 12%, var(--background) 88%);
   color: var(--popover-foreground);
 }
 
 .app-settings-bisque-linked-alert > svg[data-icon] {
-  color: var(--chart-2);
+  color: var(--status-success);
 }
 
 .app-settings-bisque-linked-alert [data-slot="alert-title"] {
@@ -1206,7 +1217,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-settings-bisque-linked-alert [data-slot="alert-action"] [data-slot="button"] {
   min-height: 2rem;
   border-radius: var(--sidebar-radius-row);
-  background: color-mix(in oklab, var(--background) 86%, var(--chart-2) 14%);
+  background: color-mix(in oklab, var(--background) 86%, var(--status-success) 14%);
 }
 
 .app-settings-inline-actions {
@@ -1455,19 +1466,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .token-heatmap-cell[data-level="1"] {
-  background: color-mix(in oklab, var(--chart-2) 26%, var(--background) 74%);
+  background: var(--activity-heatmap-1);
 }
 
 .token-heatmap-cell[data-level="2"] {
-  background: color-mix(in oklab, var(--chart-2) 46%, var(--background) 54%);
+  background: var(--activity-heatmap-2);
 }
 
 .token-heatmap-cell[data-level="3"] {
-  background: color-mix(in oklab, var(--chart-2) 68%, var(--background) 32%);
+  background: var(--activity-heatmap-3);
 }
 
 .token-heatmap-cell[data-level="4"] {
-  background: color-mix(in oklab, var(--chart-2) 90%, var(--background) 10%);
+  background: var(--activity-heatmap-4);
 }
 
 .token-heatmap-legend {
@@ -4588,8 +4599,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .admin-runtime-good {
-  border-color: color-mix(in oklab, var(--chart-2) 42%, var(--border) 58%);
-  background: color-mix(in oklab, var(--chart-2) 12%, var(--background) 88%);
+  border-color: color-mix(in oklab, var(--status-success) 42%, var(--border) 58%);
+  background: color-mix(in oklab, var(--status-success) 12%, var(--background) 88%);
   color: var(--text-main);
 }
 
@@ -10824,6 +10835,17 @@ details {
   --line: rgba(255, 255, 255, 0.14);
   --brand: #f5f5f5;
   --brand-strong: #ffffff;
+  --ultra-accent-signal: #1994ff;
+  --ultra-accent-solid: #006fd6;
+  --ultra-accent-foreground: #ffffff;
+  --ultra-accent-text: #67b7ff;
+  --ultra-accent-soft: #10263a;
+  --ultra-accent-border: #16496d;
+  --activity-heatmap-1: #16496d;
+  --activity-heatmap-2: #13699f;
+  --activity-heatmap-3: #147fcc;
+  --activity-heatmap-4: #1994ff;
+  --status-success: #6ee7b7;
   --selection-bg: #3f3f46;
   --selection-fg: #f5f5f5;
   --shadow: 0 12px 28px rgba(0, 0, 0, 0.45);

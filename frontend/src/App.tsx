@@ -4806,8 +4806,10 @@ function ComposerAttachMenu({
   // stop (attach is a primary action and, while slim, the toolbar's + is
   // visibility:hidden — so this is the only keyboard path to it); its slim CSS
   // gates it out of the tab order + a11y tree when the toolbar + takes over.
-  // mousedown preventDefault only stops a MOUSE click from blurring the caret;
-  // it also skips the tooltip wrapper, since the pill is calm chrome.
+  // mousedown preventDefault only stops a MOUSE click from blurring the caret.
+  // Both variants carry the tooltip: a bare + is the least self-evident control
+  // on the bar, and the tip is where "this also takes folders" is discoverable
+  // without opening the menu.
   const trigger = (
     <DropdownMenuTrigger asChild>
       <Button
@@ -4830,7 +4832,16 @@ function ComposerAttachMenu({
   );
   return (
     <DropdownMenu>
-      {variant === "idle" ? trigger : <PromptInputAction tooltip="Attach">{trigger}</PromptInputAction>}
+      <PromptInputAction
+        tooltip="Attach files or a folder"
+        disabled={disabled}
+        side="top"
+        sideOffset={8}
+        delayDuration={350}
+        className="app-composer-tooltip"
+      >
+        {trigger}
+      </PromptInputAction>
       <DropdownMenuContent
         align="start"
         sideOffset={8}
@@ -12208,24 +12219,33 @@ export function App() {
                           }}
                         />
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              data-testid="composer-intelligence-selector"
-                              aria-label={`Intelligence: ${
-                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                              }`}
-                              className="app-composer-intelligence-trigger"
-                              disabled={!activeConversationHydrated}
-                            >
-                              <span>
-                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                              </span>
-                              <ChevronDown data-icon="inline-end" aria-hidden="true" />
-                            </Button>
-                          </DropdownMenuTrigger>
+                          <PromptInputAction
+                            tooltip="Intelligence mode"
+                            disabled={!activeConversationHydrated}
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-tooltip"
+                          >
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                data-testid="composer-intelligence-selector"
+                                aria-label={`Intelligence: ${
+                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                                }`}
+                                className="app-composer-intelligence-trigger"
+                                disabled={!activeConversationHydrated}
+                              >
+                                <span>
+                                  {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                                </span>
+                                <ChevronDown data-icon="inline-end" aria-hidden="true" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                          </PromptInputAction>
                           <DropdownMenuContent
                             align="end"
                             sideOffset={8}
@@ -12270,19 +12290,27 @@ export function App() {
                             preventDefault keeps a MOUSE click from blurring the
                             textarea; keyboard focus is unaffected. */}
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="app-composer-idle-mode"
-                              data-testid="composer-slim-intelligence-trigger"
-                              aria-label={`Intelligence: ${
-                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                              }`}
-                              onMouseDown={(event) => event.preventDefault()}
-                            >
-                              {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                            </button>
-                          </DropdownMenuTrigger>
+                          <PromptInputAction
+                            tooltip="Intelligence mode"
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-tooltip"
+                          >
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="app-composer-idle-mode"
+                                data-testid="composer-slim-intelligence-trigger"
+                                aria-label={`Intelligence: ${
+                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                                }`}
+                                onMouseDown={(event) => event.preventDefault()}
+                              >
+                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                              </button>
+                            </DropdownMenuTrigger>
+                          </PromptInputAction>
                           <DropdownMenuContent
                             align="end"
                             sideOffset={8}

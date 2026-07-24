@@ -227,9 +227,13 @@ check(
   "Scientific viewer must expose a branded breadcrumb and h1 page hierarchy"
 );
 check(
-  /brand-wordmark__bisque[\s\S]*font-weight:\s*400/.test(typographyCss) &&
-    /brand-wordmark__ultra[\s\S]*font-weight:\s*600/.test(typographyCss),
-  "Wordmark must keep BisQue 400 and Ultra 600"
+  /\.brand-wordmark__bisque\s*\{[^}]*color:\s*var\(--brand-wordmark-context\);[^}]*font-weight:\s*400;/s.test(
+    typographyCss
+  ) &&
+    /\.brand-wordmark__ultra\s*\{[^}]*color:\s*var\(--brand-wordmark-emphasis\);[^}]*font-weight:\s*600;/s.test(
+      typographyCss
+    ),
+  "Wordmark must keep BisQue context 400 and Ultra emphasis 600"
 );
 check(
   wordmarkSource.includes('aria-label": ariaLabel = "BisQue Ultra"') &&
@@ -238,15 +242,37 @@ check(
   "Wordmark must expose one accessible name and hide its split visual spans"
 );
 
-const accentLight = typographyCss.match(/--brand-wordmark-accent-light:\s*(#[0-9a-f]{6})/i)?.[1];
-const accentDark = typographyCss.match(/--brand-wordmark-accent-dark:\s*(#[0-9a-f]{6})/i)?.[1];
+for (const [token, expected, background] of [
+  ["context-light", "#52525b", "#ffffff"],
+  ["emphasis-light", "#171717", "#ffffff"],
+  ["context-dark", "#a1a1aa", "#111113"],
+  ["emphasis-dark", "#f5f5f5", "#111113"],
+]) {
+  const value = typographyCss.match(
+    new RegExp(`--brand-wordmark-${token}:\\s*(#[0-9a-f]{6})`, "i")
+  )?.[1];
+  check(
+    value === expected && contrastRatio(value, background) >= 4.5,
+    `Wordmark ${token} must be ${expected} and meet AA`
+  );
+}
 check(
-  accentLight === "#0068c9" && contrastRatio(accentLight, "#ffffff") >= 4.5,
-  "Light wordmark blue must be #0068c9 and meet AA"
+  /:root\s*\{[^}]*--brand-wordmark-context:\s*var\(--brand-wordmark-context-light\);[^}]*--brand-wordmark-emphasis:\s*var\(--brand-wordmark-emphasis-light\);/s.test(
+    typographyCss
+  ),
+  "Light wordmark aliases must use monochrome context and emphasis"
 );
 check(
-  accentDark === "#67b7ff" && contrastRatio(accentDark, "#111113") >= 4.5,
-  "Dark wordmark blue must be #67b7ff and meet AA"
+  /\.dark\s*\{[^}]*--brand-wordmark-context:\s*var\(--brand-wordmark-context-dark\);[^}]*--brand-wordmark-emphasis:\s*var\(--brand-wordmark-emphasis-dark\);/s.test(
+    typographyCss
+  ),
+  "Dark wordmark aliases must use monochrome context and emphasis"
+);
+check(
+  /\.auth-screen-logo\s*\{[^}]*--brand-wordmark-context:\s*var\(--brand-wordmark-context-dark\);[^}]*--brand-wordmark-emphasis:\s*var\(--brand-wordmark-emphasis-dark\);/s.test(
+    typographyCss
+  ),
+  "Authentication wordmark must override both roles for its dark hero"
 );
 
 check(/location \^~ \/assets\/ \{/.test(dockerfile), "nginx /assets/ cache location must use ^~");

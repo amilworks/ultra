@@ -150,28 +150,36 @@ type PromptInputActionProps = {
   className?: string;
   tooltip: React.ReactNode;
   children: React.ReactNode;
+  disabled?: boolean;
   side?: "top" | "bottom" | "left" | "right";
+  sideOffset?: number;
 } & React.ComponentProps<typeof Tooltip>;
 
 export function PromptInputAction({
   tooltip,
   className,
   children,
+  disabled = false,
   side = "top",
+  sideOffset = 0,
   ...props
 }: PromptInputActionProps) {
-  const disabled = Boolean(React.useContext(PromptInputContext)?.disabled);
+  const contextDisabled = Boolean(React.useContext(PromptInputContext)?.disabled);
+
+  if (disabled) {
+    return <>{children}</>;
+  }
 
   return (
     <Tooltip {...props}>
       <TooltipTrigger
         asChild
-        disabled={disabled}
+        disabled={contextDisabled}
         onClick={(event) => event.stopPropagation()}
       >
         {children}
       </TooltipTrigger>
-      <TooltipContent side={side} className={className}>
+      <TooltipContent side={side} sideOffset={sideOffset} className={className}>
         {tooltip}
       </TooltipContent>
     </Tooltip>

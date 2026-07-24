@@ -7748,6 +7748,8 @@ export function App() {
     // is already active so the menu still works as a workflow switcher.
     activePrompt.startsWith("/") &&
     activePrompt !== dismissedSlashPrompt;
+  const composerSubmitDisabled =
+    !activeConversationHydrated || !activePrompt.trim() || slashMenuOpen;
 
   useEffect(() => {
     if (!slashMenuOpen || composerWorkflows) {
@@ -12330,16 +12332,37 @@ export function App() {
                             <Square className="size-3.5 fill-current" />
                           </Button>
                         ) : (
-                          <Button
-                            size="icon"
-                            type="submit"
-                            disabled={!activeConversationHydrated || !activePrompt.trim() || slashMenuOpen}
-                            aria-label="Send message"
-                            title="Send message"
-                            className="app-composer-submit-button size-11 rounded-full sm:size-10"
+                          <PromptInputAction
+                            tooltip={
+                              <span className="app-composer-submit-tooltip-row">
+                                <span>Send prompt</span>
+                                <span
+                                  className="app-composer-submit-tooltip-key"
+                                  aria-hidden="true"
+                                >
+                                  ↵
+                                </span>
+                                <span className="sr-only">
+                                  Press Enter to send. Shift+Enter starts a new line.
+                                </span>
+                              </span>
+                            }
+                            disabled={composerSubmitDisabled}
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-submit-tooltip"
                           >
-                            <ArrowUp size={18} />
-                          </Button>
+                            <Button
+                              size="icon"
+                              type="submit"
+                              disabled={composerSubmitDisabled}
+                              aria-label="Send prompt"
+                              className="app-composer-submit-button size-11 rounded-full sm:size-10"
+                            >
+                              <ArrowUp size={18} />
+                            </Button>
+                          </PromptInputAction>
                         )}
                       </div>
                     </PromptInputActions>

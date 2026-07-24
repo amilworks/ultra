@@ -17,15 +17,19 @@
 :root {
   --font-sans: "BisQue Inter Variable", "Segoe UI", sans-serif;
   --font-reading: "BisQue Inter Variable", "Segoe UI", sans-serif;
-  --brand-wordmark-accent-light: #0068c9;
-  --brand-wordmark-accent-dark: #67b7ff;
-  --brand-wordmark-accent: var(--brand-wordmark-accent-light);
+  --brand-wordmark-context-light: #52525b;
+  --brand-wordmark-emphasis-light: #171717;
+  --brand-wordmark-context-dark: #a1a1aa;
+  --brand-wordmark-emphasis-dark: #f5f5f5;
+  --brand-wordmark-context: var(--brand-wordmark-context-light);
+  --brand-wordmark-emphasis: var(--brand-wordmark-emphasis-light);
   font-optical-sizing: auto;
   font-synthesis: none;
 }
 
 .dark {
-  --brand-wordmark-accent: var(--brand-wordmark-accent-dark);
+  --brand-wordmark-context: var(--brand-wordmark-context-dark);
+  --brand-wordmark-emphasis: var(--brand-wordmark-emphasis-dark);
 }
 
 .brand-wordmark {
@@ -37,14 +41,16 @@
 }
 
 .brand-wordmark__bisque {
+  color: var(--brand-wordmark-context);
   font-weight: 400;
 }
 
 .brand-wordmark__ultra {
-  color: var(--brand-wordmark-accent);
+  color: var(--brand-wordmark-emphasis);
   font-weight: 600;
 }
 
 .auth-screen-logo {
-  --brand-wordmark-accent: var(--brand-wordmark-accent-dark);
+  --brand-wordmark-context: var(--brand-wordmark-context-dark);
+  --brand-wordmark-emphasis: var(--brand-wordmark-emphasis-dark);
 }

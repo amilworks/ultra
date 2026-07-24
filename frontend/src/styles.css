@@ -33,16 +33,14 @@
   --line: rgba(23, 23, 23, 0.08);
   --brand: #171717;
   --brand-strong: #0a0a0a;
-  --ultra-accent-signal: #1994ff;
-  --ultra-accent-solid: #006fd6;
-  --ultra-accent-foreground: #ffffff;
-  --ultra-accent-text: #0068c9;
-  --ultra-accent-soft: #e8f4ff;
-  --ultra-accent-border: #9fd1ff;
-  --activity-heatmap-1: #b9dcff;
-  --activity-heatmap-2: #75bcff;
-  --activity-heatmap-3: #319fff;
-  --activity-heatmap-4: #087ce8;
+  /* Future launch-only, non-text signal; intentionally has no var() consumers. */
+  --ultra-launch-signal: #1994ff;
+  --account-avatar-fill: #171717;
+  --account-avatar-foreground: #ffffff;
+  --activity-heatmap-1: #d4d4d8;
+  --activity-heatmap-2: #a1a1aa;
+  --activity-heatmap-3: #71717a;
+  --activity-heatmap-4: #3f3f46;
   --status-success: #047857;
   --danger: #c62828;
   --selection-bg: #d4d4d8;
@@ -824,8 +822,8 @@ body {
 
 .app-sidebar-account-avatar [data-slot="avatar-fallback"],
 .app-settings-account-avatar [data-slot="avatar-fallback"] {
-  background: var(--ultra-accent-solid);
-  color: var(--ultra-accent-foreground);
+  background: var(--account-avatar-fill);
+  color: var(--account-avatar-foreground);
   font-weight: 600;
 }
 
@@ -6851,6 +6849,29 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
 }
 
+.app-composer-submit-tooltip {
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow:
+    0 12px 28px rgba(12, 12, 12, 0.18),
+    0 3px 8px rgba(12, 12, 12, 0.1);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.app-composer-submit-tooltip-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.app-composer-submit-tooltip-key {
+  color: currentColor;
+  opacity: 0.6;
+}
+
 .app-composer-stop-button {
   border: 0;
   background: color-mix(in oklab, var(--danger) 86%, #7f1d1d 14%);
@@ -10835,16 +10856,12 @@ details {
   --line: rgba(255, 255, 255, 0.14);
   --brand: #f5f5f5;
   --brand-strong: #ffffff;
-  --ultra-accent-signal: #1994ff;
-  --ultra-accent-solid: #006fd6;
-  --ultra-accent-foreground: #ffffff;
-  --ultra-accent-text: #67b7ff;
-  --ultra-accent-soft: #10263a;
-  --ultra-accent-border: #16496d;
-  --activity-heatmap-1: #16496d;
-  --activity-heatmap-2: #13699f;
-  --activity-heatmap-3: #147fcc;
-  --activity-heatmap-4: #1994ff;
+  --account-avatar-fill: #f5f5f5;
+  --account-avatar-foreground: #111113;
+  --activity-heatmap-1: #3f3f46;
+  --activity-heatmap-2: #71717a;
+  --activity-heatmap-3: #a1a1aa;
+  --activity-heatmap-4: #d4d4d8;
   --status-success: #6ee7b7;
   --selection-bg: #3f3f46;
   --selection-fg: #f5f5f5;

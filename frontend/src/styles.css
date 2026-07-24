@@ -7355,6 +7355,13 @@ details {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Scrolls, because .viewer-workspace above is `overflow: hidden` with a
+     bounded height: anything the stage grows past that was simply cut off and
+     unreachable — no workspace scroll, no page scroll. Opening "Advanced
+     rendering" on a volume put ~830px of histogram and window controls past
+     the edge with no way to reach them. min-height:0 above is what lets this
+     actually scroll rather than just expand the flex item. */
+  overflow-y: auto;
 }
 
 .viewer-stage-header {
@@ -9610,12 +9617,63 @@ details {
   justify-content: flex-end;
 }
 
-.viewer-advanced-trigger[data-slot="button"] {
+/* Viewer controls speak the app's button language, not a separate instrument
+   toolkit: quiet ghosts at rest, lifting on hover exactly like the resource
+   cards and chat chips (translateY(-1px) + a soft shadow on the house curve).
+   Before this they were bordered and filled at rest with NO hover state at
+   all — the only controls in the product that gave no feedback on pointer.
+
+   Scoped to the outline/ghost variants via data-variant so an ACTIVE control
+   (Cutaway while clipping, a selected window preset) keeps its `secondary`
+   fill and stays legible as "on". */
+.viewer-advanced-trigger[data-slot="button"],
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"],
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"],
+.viewer-mpr-actions [data-slot="button"][data-variant="outline"],
+.viewer-mpr-actions [data-slot="button"][data-variant="ghost"],
+.viewer-intensity-actions [data-slot="button"][data-variant="outline"],
+.viewer-intensity-actions [data-slot="button"][data-variant="ghost"],
+.viewer-window-presets-row [data-slot="button"][data-variant="outline"] {
   height: 2rem;
   border-radius: 8px;
-  border-color: var(--viewer-control-line);
-  background: color-mix(in oklab, var(--viewer-control-bg) 88%, transparent);
+  border: 1px solid transparent;
+  background: transparent;
   color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
+  box-shadow: none;
+  transition:
+    background-color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease);
+}
+
+.viewer-advanced-trigger[data-slot="button"]:hover,
+.viewer-advanced-trigger[data-slot="button"]:focus-visible,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"]:focus-visible,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"]:focus-visible,
+.viewer-mpr-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-mpr-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-intensity-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-intensity-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-window-presets-row [data-slot="button"][data-variant="outline"]:hover {
+  background: var(--viewer-control-bg-soft);
+  border-color: var(--viewer-control-line);
+  color: var(--text-main);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+}
+
+/* Press settles back down — the lift is the invitation, not the confirmation. */
+.viewer-advanced-trigger[data-slot="button"]:active,
+.viewer-volume-inspection-actions [data-slot="button"]:active,
+.viewer-mpr-actions [data-slot="button"]:active,
+.viewer-intensity-actions [data-slot="button"]:active,
+.viewer-window-presets-row [data-slot="button"]:active {
+  transform: translateY(0);
+  box-shadow: none;
 }
 
 .viewer-advanced-trigger svg[data-icon="inline-end"] {

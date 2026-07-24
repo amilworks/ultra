@@ -226,6 +226,7 @@ import type {
   UploadedFileRecord,
 } from "./types";
 import type { SettingsTab } from "./components/AppSettingsDialog";
+import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
@@ -7747,6 +7748,8 @@ export function App() {
     // is already active so the menu still works as a workflow switcher.
     activePrompt.startsWith("/") &&
     activePrompt !== dismissedSlashPrompt;
+  const composerSubmitDisabled =
+    !activeConversationHydrated || !activePrompt.trim() || slashMenuOpen;
 
   useEffect(() => {
     if (!slashMenuOpen || composerWorkflows) {
@@ -11087,7 +11090,7 @@ export function App() {
     [historyItems]
   );
   // Contextual title for the mobile top bar: the panel name, or the active
-  // conversation's title once it has a real exchange (else the app name).
+  // conversation's title once it has a real exchange (else the shared app wordmark).
   const mobileShellTitle =
     activePanel === "resources"
       ? "Resources"
@@ -11100,7 +11103,7 @@ export function App() {
             : activeConversation &&
                 activeConversation.messages.some((message) => message.role === "user")
               ? activeConversation.title
-              : "BisQue Ultra";
+              : null;
   const showAppShellBanner = shouldShowAppShellBanner(activePanel, uiErrorBanner);
 
   if (authStatus !== "authenticated") {
@@ -11161,9 +11164,7 @@ export function App() {
             <span className="app-sidebar-brand-mark bg-primary/10 text-primary flex size-8 items-center justify-center rounded-md">
               <BisqueMarkIcon className="size-4" />
             </span>
-            <span className="app-shell-brand text-primary truncate">
-              BisQue Ultra
-            </span>
+            <BrandWordmark className="app-shell-brand text-primary truncate" />
           </Button>
           <SidebarTrigger
             className="app-sidebar-trigger app-sidebar-header-trigger shrink-0"
@@ -11514,7 +11515,9 @@ export function App() {
               aria-label="Open navigation"
               title="Open navigation"
             />
-            <div className="app-mobile-shell-title">{mobileShellTitle}</div>
+            <div className="app-mobile-shell-title">
+              {mobileShellTitle ?? <BrandWordmark />}
+            </div>
             {activePanel === "chat" ? (
               <button
                 type="button"
@@ -12329,16 +12332,37 @@ export function App() {
                             <Square className="size-3.5 fill-current" />
                           </Button>
                         ) : (
-                          <Button
-                            size="icon"
-                            type="submit"
-                            disabled={!activeConversationHydrated || !activePrompt.trim() || slashMenuOpen}
-                            aria-label="Send message"
-                            title="Send message"
-                            className="app-composer-submit-button size-11 rounded-full sm:size-10"
+                          <PromptInputAction
+                            tooltip={
+                              <span className="app-composer-submit-tooltip-row">
+                                <span>Send prompt</span>
+                                <span
+                                  className="app-composer-submit-tooltip-key"
+                                  aria-hidden="true"
+                                >
+                                  ↵
+                                </span>
+                                <span className="sr-only">
+                                  Press Enter to send. Shift+Enter starts a new line.
+                                </span>
+                              </span>
+                            }
+                            disabled={composerSubmitDisabled}
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-submit-tooltip"
                           >
-                            <ArrowUp size={18} />
-                          </Button>
+                            <Button
+                              size="icon"
+                              type="submit"
+                              disabled={composerSubmitDisabled}
+                              aria-label="Send prompt"
+                              className="app-composer-submit-button size-11 rounded-full sm:size-10"
+                            >
+                              <ArrowUp size={18} />
+                            </Button>
+                          </PromptInputAction>
                         )}
                       </div>
                     </PromptInputActions>

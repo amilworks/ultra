@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { ArrowUpRight, LockKeyhole, UserRound } from "lucide-react";
 
+import { BrandWordmark } from "@/components/BrandWordmark";
 import { BisqueMarkIcon } from "@/components/icons/BisqueMarkIcon";
 import { useTextStream } from "@/components/prompt-kit/response-stream";
 import { Button } from "@/components/ui/button";
@@ -174,7 +175,7 @@ export function AuthScreen({
             <div className="auth-screen-logo-mark">
               <BisqueMarkIcon className="size-5" />
             </div>
-            <span>BisQue Ultra</span>
+            <BrandWordmark />
           </div>
           <h1 className="auth-hero-title" aria-label={heroPhrases[0]}>
             <span className="auth-hero-typewriter" aria-hidden="true">

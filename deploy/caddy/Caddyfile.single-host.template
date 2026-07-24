@@ -42,7 +42,10 @@ ${ULTRA_PUBLIC_HOST} {
         root * /srv/ultra/frontend-current
         @assets path /assets/*
         header @assets Cache-Control "public, max-age=31536000, immutable"
-        @staticfiles path *.webp *.png *.svg *.ico *.woff2
+        @staticfiles {
+            path *.webp *.png *.svg *.ico *.woff2
+            not path /assets/*
+        }
         header @staticfiles Cache-Control "public, max-age=604800"
         @appshell not path /assets/* *.webp *.png *.svg *.ico *.woff2
         header @appshell Cache-Control "no-cache"

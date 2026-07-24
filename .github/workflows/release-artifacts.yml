@@ -69,6 +69,12 @@ jobs:
       - name: Run frontend quality checks
         run: make frontend-quality
 
+      - name: Install Chromium for frontend smoke tests
+        run: pnpm --dir frontend exec playwright install --with-deps chromium
+
+      - name: Run frontend smoke tests
+        run: pnpm --dir frontend test:smoke
+
       - name: Build frontend
         run: pnpm --dir frontend build
 

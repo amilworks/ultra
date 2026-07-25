@@ -15,8 +15,12 @@
 }
 
 :root {
-  --font-sans: "BisQue Inter Variable", "Segoe UI", sans-serif;
-  --font-reading: "BisQue Inter Variable", "Segoe UI", sans-serif;
+  /* system-ui sits ahead of Segoe UI so the pre-swap frame is covered on every
+     platform: system-ui resolves to San Francisco on Apple and Segoe on
+     Windows, whereas a Segoe-only fallback dropped straight to generic
+     sans-serif on macOS/iOS — the widest metric jump of the three. */
+  --font-sans: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
+  --font-reading: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
   --brand-wordmark-context-light: #52525b;
   --brand-wordmark-emphasis-light: #171717;
   --brand-wordmark-context-dark: #a1a1aa;

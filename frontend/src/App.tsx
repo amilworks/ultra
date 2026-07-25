@@ -4845,8 +4845,10 @@ function ComposerAttachMenu({
   // stop (attach is a primary action and, while slim, the toolbar's + is
   // visibility:hidden — so this is the only keyboard path to it); its slim CSS
   // gates it out of the tab order + a11y tree when the toolbar + takes over.
-  // mousedown preventDefault only stops a MOUSE click from blurring the caret;
-  // it also skips the tooltip wrapper, since the pill is calm chrome.
+  // mousedown preventDefault only stops a MOUSE click from blurring the caret.
+  // Both variants carry the tooltip: a bare + is the least self-evident control
+  // on the bar, and the tip is where "this also takes folders" is discoverable
+  // without opening the menu.
   const trigger = (
     <DropdownMenuTrigger asChild>
       <Button
@@ -4869,7 +4871,16 @@ function ComposerAttachMenu({
   );
   return (
     <DropdownMenu>
-      {variant === "idle" ? trigger : <PromptInputAction tooltip="Attach">{trigger}</PromptInputAction>}
+      <PromptInputAction
+        tooltip="Attach files or a folder"
+        disabled={disabled}
+        side="top"
+        sideOffset={8}
+        delayDuration={350}
+        className="app-composer-tooltip"
+      >
+        {trigger}
+      </PromptInputAction>
       <DropdownMenuContent
         align="start"
         sideOffset={8}
@@ -7536,6 +7547,60 @@ export function App() {
           })
         : null,
     [activeStreamingMessage]
+  );
+  // Elapsed time for the in-flight turn. The completed-message footer shows
+  // "<tokens> tokens · <elapsed>"; the composer had only the token half, which
+  // left the loudest number on screen as the one users can least interpret.
+  // Ticks once a second — fast enough to read as live, slow enough to stay calm.
+  const [activeElapsedSeconds, setActiveElapsedSeconds] = useState(0);
+  const activeRunStartedAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!activeSending) {
+      activeRunStartedAtRef.current = null;
+      setActiveElapsedSeconds(0);
+      return;
+    }
+    // Anchor on the first tick of THIS run so a re-render mid-run (new tokens,
+    // new events) never restarts the clock.
+    if (activeRunStartedAtRef.current === null) {
+      activeRunStartedAtRef.current = Date.now();
+    }
+    const tick = () => {
+      const startedAt = activeRunStartedAtRef.current;
+      if (startedAt !== null) {
+        setActiveElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSending]);
+  // Metrics ADD to the status line, they don't replace it: the plain-language
+  // "is processing" is what reassures during a long agentic turn, and it used to
+  // vanish the moment the first usage event landed.
+  const composerRunningLabel = useMemo(() => {
+    const parts = ["BisQue Ultra is processing"];
+    const elapsed = formatElapsedDuration(activeElapsedSeconds);
+    if (elapsed) {
+      parts.push(elapsed);
+    }
+    if (activeStreamingTokenUsage) {
+      parts.push(`${formatTokens(activeStreamingTokenUsage.total_tokens)} tokens`);
+    }
+    return parts.join(" · ");
+  }, [activeElapsedSeconds, activeStreamingTokenUsage]);
+  // The headline total is cumulative across every model call in the turn — each
+  // agentic step re-sends the conversation, so input is counted again each step.
+  // Without this breakdown a number like "616K tokens" reads as conversation
+  // size or context fullness, which it is not. Mirrors the message footer.
+  const composerRunningTitle = useMemo(
+    () =>
+      activeStreamingTokenUsage
+        ? `${activeStreamingTokenUsage.input_tokens.toLocaleString()} input · ${activeStreamingTokenUsage.output_tokens.toLocaleString()} output${
+            activeStreamingTokenUsage.model ? ` · ${activeStreamingTokenUsage.model}` : ""
+          }`
+        : undefined,
+    [activeStreamingTokenUsage]
   );
   const shouldShowBlankChatUsage =
     authStatus === "authenticated" &&
@@ -11170,8 +11235,15 @@ export function App() {
           recentItems={collapsedRecentItems}
           activeConversationId={activeConversation?.id ?? null}
           resourcesActive={activePanel === "resources"}
+          trainingActive={activePanel === "training"}
+          lensActive={activePanel === "scientific-viewer"}
+          adminActive={activePanel === "admin"}
+          isAdmin={authIsAdmin}
           onCreateConversation={createNewConversation}
           onOpenResources={openResourcesPanel}
+          onOpenTraining={openTrainingPanel}
+          onOpenLens={openScientificViewerPanel}
+          onOpenAdmin={openAdminPanel}
           onOpenRecent={openHistoryItem}
         />
         <SidebarHeader className="app-sidebar-header flex flex-row items-center justify-between gap-2 px-3 py-4">
@@ -11930,20 +12002,18 @@ export function App() {
                       }}
                     />
                     {activeSending ? (
-                      <div className="composer-running">
-                        <Loader
-                          size="sm"
-                          text={
-                            activeStreamingTokenUsage
-                              ? `${formatTokens(activeStreamingTokenUsage.total_tokens)} tokens`
-                              : "BisQue Ultra is processing"
-                          }
-                        />
+                      <div className="composer-running" title={composerRunningTitle}>
+                        <Loader size="sm" text={composerRunningLabel} />
                       </div>
                     ) : null}
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
-                      placeholder={activeConversationHydrated ? "Ask anything" : "Loading chat…"}
+                      placeholder={activeConversationHydrated ? "Ask Ultra" : "Loading chat…"}
+                      /* Explicit name so the field is not relying on its
+                         placeholder for one: the placeholder is deliberately
+                         ghost-weight (~2.1:1) and a control's accessible name
+                         should not depend on how faint its hint is drawn. */
+                      aria-label="Ask Ultra"
                       className="app-composer-textarea"
                       disabled={!activeConversationHydrated}
                       onPaste={(event) => {
@@ -12231,24 +12301,33 @@ export function App() {
                           }}
                         />
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="sm"
-                              data-testid="composer-intelligence-selector"
-                              aria-label={`Intelligence: ${
-                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                              }`}
-                              className="app-composer-intelligence-trigger"
-                              disabled={!activeConversationHydrated}
-                            >
-                              <span>
-                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                              </span>
-                              <ChevronDown data-icon="inline-end" aria-hidden="true" />
-                            </Button>
-                          </DropdownMenuTrigger>
+                          <PromptInputAction
+                            tooltip="Intelligence mode"
+                            disabled={!activeConversationHydrated}
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-tooltip"
+                          >
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                data-testid="composer-intelligence-selector"
+                                aria-label={`Intelligence: ${
+                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                                }`}
+                                className="app-composer-intelligence-trigger"
+                                disabled={!activeConversationHydrated}
+                              >
+                                <span>
+                                  {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                                </span>
+                                <ChevronDown data-icon="inline-end" aria-hidden="true" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                          </PromptInputAction>
                           <DropdownMenuContent
                             align="end"
                             sideOffset={8}
@@ -12293,19 +12372,27 @@ export function App() {
                             preventDefault keeps a MOUSE click from blurring the
                             textarea; keyboard focus is unaffected. */}
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="app-composer-idle-mode"
-                              data-testid="composer-slim-intelligence-trigger"
-                              aria-label={`Intelligence: ${
-                                activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                              }`}
-                              onMouseDown={(event) => event.preventDefault()}
-                            >
-                              {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                            </button>
-                          </DropdownMenuTrigger>
+                          <PromptInputAction
+                            tooltip="Intelligence mode"
+                            side="top"
+                            sideOffset={8}
+                            delayDuration={350}
+                            className="app-composer-tooltip"
+                          >
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="app-composer-idle-mode"
+                                data-testid="composer-slim-intelligence-trigger"
+                                aria-label={`Intelligence: ${
+                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
+                                }`}
+                                onMouseDown={(event) => event.preventDefault()}
+                              >
+                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
+                              </button>
+                            </DropdownMenuTrigger>
+                          </PromptInputAction>
                           <DropdownMenuContent
                             align="end"
                             sideOffset={8}

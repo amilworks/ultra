@@ -23,7 +23,34 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
-  font-feature-settings: "liga" 1, "calt" 1;
+  /* Inter's recommended pairing ("liga"/"calt") plus one deliberate addition.
+     "ss02" is Inter's Disambiguation set: it separates the characters that
+     collide in this product's actual content — capital I, lowercase l and
+     numeral 1; letter O and slashed zero. Ultra's text is accession IDs, run
+     IDs, dataset paths, channel indices and parameter values, where a misread
+     Il1 or 0O is a real error, not a cosmetic one. It doubles as identity:
+     these letterforms are visibly not stock Inter, so the type is ours without
+     changing typeface.
+     ss02 already includes the slashed zero, so "zero" is not set separately.
+     NOTE: font-feature-settings REPLACES rather than merges — any component
+     that sets its own would drop these. Keep this the only declaration. */
+  font-feature-settings: "liga" 1, "calt" 1, "ss02" 1;
+
+  /* TRACKING — derive, don't eyeball.
+     Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
+     applied as `em`. Rough values: 12px→0, 15px→-0.009, 19px→-0.016,
+     23px→-0.019, 26px→-0.020, 34px+→-0.022.
+
+     Inter v4 ships an `opsz` axis spanning 14–32 (see assets/fonts/PROVENANCE.md)
+     and `font-optical-sizing: auto` is on, so between those sizes the font is
+     already compensating and only a light hand is needed. Outside that band the
+     axis clamps and the metric must be supplied manually — which is why the
+     34px hero carries more tracking than anything else here, and why type below
+     14px should carry almost none.
+
+     Two things this does NOT govern: uppercase/label tracking (positive values
+     of 0.02–0.08em, a different job entirely) and monospace, which has its own
+     spacing design — the Inter curve does not apply to either. */
   --bg-page: #f5f5f4;
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
@@ -57,6 +84,16 @@
   --sidebar-section-margin-top: 1.25rem;
   --sidebar-section-padding-x: 0.5rem;
   --sidebar-item-padding-x: 0.75rem;
+  /* One voice for EVERY sidebar section label — "BisQue", "Recents",
+     "Yesterday", "Last 7 days". A section label is the quietest thing in its
+     group; it must never outrank the rows it labels. Any group that needs to
+     feel more prominent buys that with space, not with louder type.
+     The 0.02em tracking is deliberate: at ~11px Inter needs positive tracking
+     to stay legible (see the tracking note in typography.css). */
+  --sidebar-eyebrow-size: 0.68rem;
+  --sidebar-eyebrow-weight: var(--font-weight-panel-heading);
+  --sidebar-eyebrow-color: var(--text-muted);
+  --sidebar-eyebrow-tracking: 0.02em;
   --sidebar-item-gap: 0.625rem;
   --radius: 0.75rem;
   --sidebar-radius-action: calc(var(--radius) + 0.05rem);
@@ -128,13 +165,40 @@
   --collapsed-sidebar-action-size: 2.25rem;
   --collapsed-sidebar-icon-size: 1.125rem;
   --collapsed-sidebar-logo-size: 1.25rem;
+  /* MOTION — the house gesture.
+     One curve, everywhere: a hard ease-out where movement leaves quickly and
+     takes its time arriving, so surfaces *settle* rather than slide. This is a
+     brand signature in the same way the monochrome palette is — the product
+     should be recognisable with the logo cropped out — so every `transition`
+     uses var(--motion-ease) and never a bare `ease`. brand-motion.test.ts
+     enforces that; it was 5 declarations on the curve against 127 stray
+     `ease` keywords before this was made a rule.
+
+     Three deliberate exemptions, none of which are the gesture:
+       - `linear`   — continuous indicators (spinners, progress) must not ease.
+       - `steps()`  — discrete visibility flips.
+       - `ease-out` on one 120ms width nudge, too brief to read as motion.
+     Hover-enter is separately shortened to 60ms at the end of this file
+     (fast in, calm out) — a duration override, not a second curve.
+
+     Durations already sit inside the law's 160–280ms band: 160ms for
+     colour/opacity, 220ms for geometry, 280ms for the sidebar. Stay in it. */
+  --motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --sidebar-motion-duration: 280ms;
-  --sidebar-motion-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  /* Alias kept for existing sidebar consumers — there is only one curve. */
+  --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
   --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
   --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
-  --composer-placeholder: color-mix(in oklab, var(--text-muted) 82%, #ffffff 18%);
+  /* True ghost weight: resolves to #b1b1b1, 2.14:1 on the white card, matching
+     the reference composers this was tuned against. Deliberately below 3:1 —
+     the textarea now carries its own aria-label, so nothing about the control's
+     name or operability depends on how faint this hint is drawn; it is
+     decoration over an input that is obvious on its own.
+     Paired with the dark value by perceptual lightness, not by contrast ratio:
+     this sits L* 27.8 below its background, dark sits 28.2 below its. */
+  --composer-placeholder: color-mix(in oklab, var(--text-muted) 54%, #ffffff 46%);
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
@@ -417,7 +481,10 @@ body {
 
 .auth-card:hover::before,
 .auth-card:focus-within::before {
-  animation: auth-card-sheen 880ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Same house curve, via the token — a sheen is a long decorative sweep, so it
+     sits outside the transition duration band on purpose, but not outside the
+     gesture. */
+  animation: auth-card-sheen 880ms var(--motion-ease);
 }
 
 .auth-card > * {
@@ -565,8 +632,8 @@ body {
   visibility: visible;
   transform: translateX(0);
   transition:
-    opacity var(--sidebar-motion-fade-duration) ease,
-    transform var(--sidebar-motion-duration) var(--sidebar-motion-ease),
+    opacity var(--sidebar-motion-fade-duration) var(--motion-ease),
+    transform var(--sidebar-motion-duration) var(--motion-ease),
     visibility 0s linear 0s;
   will-change: opacity, transform;
 }
@@ -589,8 +656,8 @@ body {
     transform: translateX(-0.35rem);
     pointer-events: none;
     transition:
-      opacity var(--sidebar-motion-fade-duration) ease,
-      transform var(--sidebar-motion-duration) var(--sidebar-motion-ease),
+      opacity var(--sidebar-motion-fade-duration) var(--motion-ease),
+      transform var(--sidebar-motion-duration) var(--motion-ease),
       visibility 0s linear var(--sidebar-motion-fade-duration);
     will-change: opacity, transform;
   }
@@ -613,8 +680,8 @@ body {
   transform: translateX(-0.55rem);
   pointer-events: none;
   transition:
-    opacity 120ms ease,
-    transform 220ms var(--sidebar-motion-ease),
+    opacity 120ms var(--motion-ease),
+    transform 220ms var(--motion-ease),
     visibility 0s linear 120ms;
 }
 
@@ -628,11 +695,16 @@ body {
   color: var(--collapsed-sidebar-fg);
 }
 
+/* Full-bleed, because this divider is the collapsed stand-in for the expanded
+   sidebar's right border — and that border runs the whole viewport height. When
+   this was inset (top 3.65rem / bottom 2.35rem) collapsing turned a continuous
+   edge into a floating 902px segment, so the seam visibly broke at the top on
+   every toggle. Same line, same length, both states. */
 [data-slot="sidebar"][data-collapsible="icon"] .app-collapsed-sidebar-rail::after {
   position: absolute;
-  top: 3.65rem;
+  top: 0;
   right: 0;
-  bottom: 2.35rem;
+  bottom: 0;
   width: 1px;
   content: "";
   background: var(--collapsed-sidebar-divider);
@@ -657,11 +729,40 @@ body {
   box-shadow: none;
 }
 
+/* One hover treatment for every rail control, toggle included — the expand
+   button is a rail button like the others, not a special surface. Keep this
+   selector list intact: an earlier edit inserted the tooltip rule between the
+   toggle and action selectors, which orphaned `.app-collapsed-sidebar-toggle:hover`
+   onto the tooltip bubble and gave the toggle a drop-shadow card on hover. */
 .app-collapsed-sidebar-toggle:hover,
 .app-collapsed-sidebar-action:hover,
 .app-collapsed-sidebar-action[data-active="true"] {
   background: var(--collapsed-sidebar-accent);
   color: var(--collapsed-sidebar-accent-foreground);
+}
+
+/* Rail tooltip: same bubble language as the composer's, plus a muted shortcut
+   chip. The icon is a collapsed control's only label, so these carry the
+   keyboard hint the expanded row shows on hover — collapsing costs nothing.
+   Colour comes from the tooltip primitive (bg-foreground/text-background). */
+.app-collapsed-sidebar-tooltip {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow:
+    0 12px 28px rgba(12, 12, 12, 0.18),
+    0 3px 8px rgba(12, 12, 12, 0.1);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.app-collapsed-sidebar-tooltip-key {
+  color: currentColor;
+  opacity: 0.6;
 }
 
 .app-collapsed-sidebar-toggle svg {
@@ -737,7 +838,7 @@ body {
   color: var(--collapsed-sidebar-popover-fg);
   text-align: left;
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-collapsed-recent-item:hover,
@@ -790,8 +891,11 @@ body {
   padding-bottom: 0.95rem;
 }
 
+/* The first history group ("Recents") reads as the start of a new region.
+   That separation is bought here, with space, rather than by shouting its
+   label — see the eyebrow note on the group-label rule. */
 .app-sidebar-history-scroll > .app-history-group:first-child {
-  margin-top: 0.75rem;
+  margin-top: 1.25rem;
 }
 
 .app-sidebar-user-menu {
@@ -1009,7 +1113,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 500;
   line-height: 1.3;
   box-shadow: none;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-settings-nav-item[data-slot="tabs-trigger"]:hover,
@@ -1411,7 +1515,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.74rem;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: background 0.15s var(--motion-ease), color 0.15s var(--motion-ease);
 }
 
 .token-heatmap-mode:hover {
@@ -1446,7 +1550,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: var(--token-heatmap-cell-size);
   border-radius: max(2px, calc(var(--token-heatmap-cell-size) * 0.22));
   background: var(--muted);
-  transition: transform 0.12s ease, outline-color 0.12s ease;
+  transition: transform 0.12s var(--motion-ease), outline-color 0.12s var(--motion-ease);
 }
 
 .token-heatmap-cell:not(.is-future):hover {
@@ -1564,27 +1668,29 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-sidebar-content [data-slot="sidebar-group-label"] {
   padding-inline: var(--sidebar-item-padding-x);
-  font-size: 0.68rem;
-  font-weight: var(--font-weight-panel-heading);
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
+  font-size: var(--sidebar-eyebrow-size);
+  font-weight: var(--sidebar-eyebrow-weight);
+  color: var(--sidebar-eyebrow-color);
+  letter-spacing: var(--sidebar-eyebrow-tracking);
 }
 
+/* History groups differ from the other sidebar groups only in LAYOUT — they
+   stack inside a scroll container and need their own vertical rhythm. Type is
+   inherited from the shared eyebrow tokens above; do NOT re-declare size,
+   weight, colour, or tracking here.
+
+   This previously promoted the first history group's label to 0.875rem/600 at
+   full --sidebar-foreground, which made "Recents" tie for the brightest text in
+   the sidebar and rendered it larger and heavier than the conversation rows it
+   labels — while "Yesterday" and "Last 7 days" directly beneath it, same
+   component and same role, stayed quiet muted eyebrows. A `:not(:first-child)`
+   rule then partially undid it, leaving three sizes (0.68 / 0.72 / 0.875rem)
+   for one role. The first group's prominence is bought with space instead —
+   see .app-sidebar-history-scroll > .app-history-group:first-child. */
 .app-sidebar-content .app-history-group [data-slot="sidebar-group-label"] {
   height: auto;
-  padding: 0 0.75rem 0.5rem;
-  color: var(--sidebar-foreground);
-  font-size: 0.875rem;
-  font-weight: 600;
+  padding-block: 0 0.5rem;
   line-height: 1.25;
-  letter-spacing: 0;
-}
-
-.app-sidebar-content .app-history-group:not(:first-child) [data-slot="sidebar-group-label"] {
-  padding-top: 0.2rem;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: var(--font-weight-panel-heading);
 }
 
 .app-sidebar-actions {
@@ -1609,7 +1715,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.35;
   font-weight: var(--font-weight-action);
   color: var(--sidebar-foreground);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-new-chat-button {
@@ -1639,7 +1745,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
   fill: transparent;
-  transition: fill 160ms ease;
+  transition: fill 160ms var(--motion-ease);
 }
 
 .app-resource-browser-button[data-variant="secondary"]:hover .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
@@ -1660,7 +1766,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: var(--font-size-nav);
   line-height: 1.35;
   font-weight: var(--font-weight-nav);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-bisque-link-button:hover {
@@ -1694,7 +1800,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.35;
   font-weight: 400;
   color: var(--sidebar-foreground);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-sidebar-brand-button[data-slot="button"] {
@@ -1709,7 +1815,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
   font-family: var(--font-sans);
   line-height: 1.35;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .app-sidebar-brand-button[data-slot="button"]:hover {
@@ -1724,7 +1830,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-shell-brand {
   font-size: 0.92rem;
   font-weight: 400;
-  letter-spacing: -0.012em;
+  letter-spacing: -0.008em;
 }
 
 .app-sidebar-header-trigger[data-slot="sidebar-trigger"] {
@@ -1769,19 +1875,37 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     max(0.75rem, env(safe-area-inset-left, 0px));
 }
 
+/* The menu trigger and the compose action flank the same nav bar, so they are
+   peers and share one treatment: transparent at rest, a quiet ink wash on
+   hover, a firmer one on press. This used to be an elevated card (border +
+   panel fill + 0 8px 24px shadow) opposite a bare compose glyph, which read as
+   two different kinds of control — and it carried no transition, so its hover
+   snapped while every other control in the app eases. Kept as its own rule
+   (not grouped with .app-mobile-shell-action): sidebar-collapse-layout.test.ts
+   matches `width: 2.35rem` inside this exact selector's block, and a comma
+   group would break that regex. */
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] {
   width: 2.35rem;
   height: 2.35rem;
-  border: 1px solid color-mix(in oklab, var(--line) 72%, transparent);
+  border: 1px solid transparent;
   border-radius: 0.85rem;
-  background: color-mix(in oklab, var(--bg-panel-strong) 88%, var(--background) 12%);
+  background: transparent;
   color: var(--text-main);
-  box-shadow: 0 8px 24px rgba(12, 12, 12, 0.08);
+  box-shadow: none;
+  transition:
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:hover,
-.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:focus-visible {
-  background: color-mix(in oklab, var(--bg-panel-strong) 78%, var(--accent) 22%);
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:focus-visible,
+.app-mobile-shell-action:hover,
+.app-mobile-shell-action:focus-visible {
+  background: color-mix(in oklab, var(--text-main) 7%, transparent);
+}
+
+.app-mobile-sidebar-trigger[data-slot="sidebar-trigger"]:active {
+  background: color-mix(in oklab, var(--text-main) 12%, transparent);
 }
 
 .app-mobile-sidebar-trigger[data-slot="sidebar-trigger"] svg {
@@ -1819,11 +1943,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-  transition: background-color 160ms ease, color 160ms ease;
+  /* House curve, matching the trigger opposite it (hover-enter is shortened to
+     60ms app-wide by the snappy-hover convention at the end of this file). */
+  transition:
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
+/* Press is firmer than hover, and identical on both nav-bar controls. */
 .app-mobile-shell-action:active {
-  background: color-mix(in oklab, var(--text-main) 7%, transparent);
+  background: color-mix(in oklab, var(--text-main) 12%, transparent);
 }
 
 .app-mobile-shell-action-spacer {
@@ -1857,13 +1986,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    scrolled back to the bottom or a run starts (attribute cleared in JS). */
 @media (max-width: 640px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms var(--motion-ease), max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
   }
   .app-composer-shell .app-composer-actions {
     max-height: 5rem;
     overflow: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease, padding 220ms ease,
-      margin-top 220ms ease;
+    transition: max-height 220ms var(--motion-ease), opacity 160ms var(--motion-ease), padding 220ms var(--motion-ease),
+      margin-top 220ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
     min-height: 2.55rem;
@@ -1897,38 +2026,66 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    the phone-only block above; mobile keeps its own scroll-away behavior. */
 @media (min-width: 641px) {
   .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms ease, max-height 220ms ease, padding 220ms ease;
+    transition: min-height 220ms var(--motion-ease),
+      max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
   }
   .app-composer-shell .app-composer-actions {
-    transition: padding 220ms ease, margin-top 220ms ease;
+    transition: padding 220ms var(--motion-ease),
+      margin-top 220ms var(--motion-ease);
   }
   /* the collapse mechanism lives on the +/model group (not the whole row) so the
-     send button in .app-composer-actions-end can stay visible at idle. */
+     send button in .app-composer-actions-end can stay visible at idle.
+     2.5rem = the row's actual content height (sm:size-10 buttons), so the
+     reveal/collapse rides the full 220ms instead of dead time past the cap. */
   .app-composer-shell .app-composer-actions-start {
-    max-height: 5rem;
+    max-height: 2.5rem;
     overflow: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease;
+    transition: max-height 220ms var(--motion-ease),
+      opacity 160ms var(--motion-ease);
+  }
+  /* The send/stop group is ALWAYS absolutely positioned against the card on
+     desktop — position cannot animate, so toggling absolute↔flow on the slim
+     flip teleported the send button mid-transition. Instead it glides between
+     two anchors on animatable offsets: the toolbar spot (card pad 10px + row
+     pad 1rem = 1.625rem) and the slim spot (right 1rem, vertically centered
+     in the 3rem pill). Pure CSS motion, synced to the 220ms height ride. */
+  .app-composer-shell .app-composer-actions-end {
+    position: absolute;
+    right: 1.625rem;
+    bottom: 1.625rem;
+    margin: 0;
+    z-index: 2;
+    transition: right 220ms var(--motion-ease), bottom 220ms var(--motion-ease);
   }
   /* animate the card's own padding so the idle padding trim collapses in sync
-     with the textarea/action-row (overrides the base 160ms card transition). */
+     with the textarea/action-row (overrides the base 160ms card transition).
+     border-radius animates too — see the slim rule: the surface is a true pill
+     at rest and a rounded card once it grows, and the shape morphs with the
+     height rather than snapping. The radius is restated here because the
+     element also carries .pk-prompt-input, whose later rule would otherwise
+     win; scoping to .app-composer-shell out-specifies it without touching the
+     phone composer (this whole block is min-width: 641px). */
   .app-composer-shell .app-composer-card {
-    transition: border-color 160ms ease, box-shadow 160ms ease,
-      transform 160ms ease, padding 220ms ease;
+    border-radius: calc(var(--radius) + 0.65rem);
+    transition: border-color 160ms var(--motion-ease),
+      box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease),
+      padding 220ms var(--motion-ease), border-radius 220ms var(--motion-ease);
   }
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
      was expanded; releases back to the pk max-height on focus. */
   /* Lock the idle pill to exactly 3rem and center the single placeholder line
-     optically: padding = (pill − one 1.45 line box) / 2, in em so it tracks the
-     font-size clamp. min = max defeats any stale autosize inline height, so the
+     optically: padding = (pill − one real line box) / 2, in em off
+     --composer-line-height so it tracks the rendered type, not the dead 1.45
+     declaration. min = max defeats any stale autosize inline height, so the
      pill and its text land identically every time. padding-left clears the
      idle attach button; padding-right reserves the floating Pro/High + send.
      Both come from the shared --composer-slim-pad-* vars the JS mirror reads. */
   .app-composer-shell[data-composer-slim="true"] .app-composer-textarea {
     min-height: 3rem;
     max-height: 3rem;
-    padding-top: calc((3rem - 1.45em) / 2);
-    padding-bottom: calc((3rem - 1.45em) / 2);
+    padding-top: calc((3rem - 1em * var(--composer-line-height)) / 2);
+    padding-bottom: calc((3rem - 1em * var(--composer-line-height)) / 2);
     padding-left: var(--composer-slim-pad-left);
     padding-right: var(--composer-slim-pad-right);
   }
@@ -1946,29 +2103,34 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
        reveal instantly too, so exactly one set is ever exposed. A delayed hide
        would leave both sets in the a11y tree for the transition window. */
     visibility: hidden;
-    transition: max-height 220ms ease, opacity 160ms ease;
+    transition: max-height 220ms var(--motion-ease),
+      opacity 160ms var(--motion-ease);
   }
-  /* keep the submit affordance on the idle line to balance the placeholder; it
-     floats inline at the right and rejoins the toolbar in flow on focus. */
+  /* keep the submit affordance on the slim line to balance the placeholder.
+     Offsets ONLY — the positioning model never changes, so the button glides
+     to/from the toolbar anchor instead of jumping when slim flips mid-type.
+     bottom centers the 2.5rem button in the 3rem pill (card padding is 0). */
   .app-composer-shell[data-composer-slim="true"] .app-composer-actions-end {
-    position: absolute;
     right: 1rem;
-    top: 50%;
-    transform: translateY(-50%);
-    margin: 0;
-    z-index: 2;
+    bottom: 0.25rem;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-card {
     border-color: color-mix(in oklab, var(--line) 70%, transparent);
     box-shadow: var(--composer-shell-shadow-rest);
     padding-top: 0;
     padding-bottom: 0;
+    /* A real pill, not 90% of one. At 3rem tall the inherited 22.4px radius
+       landed 2.6px short of the semicircle — the "almost round" zone that reads
+       as a mistake. 999px is the house idiom for stadium shapes (the most-used
+       radius in this file), and it makes the resting composer state a
+       deliberate pill that the expanded card visibly grows out of. */
+    border-radius: 999px;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode:hover {
     color: var(--text-main);
@@ -1979,6 +2141,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .app-composer-shell .app-composer-textarea,
   .app-composer-shell .app-composer-actions,
   .app-composer-shell .app-composer-actions-start,
+  .app-composer-shell .app-composer-actions-end,
   .app-composer-shell .app-composer-card,
   .app-composer-shell .app-composer-idle-attach,
   .app-composer-shell .app-composer-idle-mode {
@@ -2046,10 +2209,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-history-action-button {
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease,
-    transform 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
 }
 
 .chat-width-frame {
@@ -2145,7 +2308,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   list-style: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  transition: color 160ms ease, background-color 160ms ease;
+  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .mobile-usage-summary::-webkit-details-marker {
@@ -2158,7 +2321,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .mobile-usage-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
 }
 
 .mobile-usage-disclosure[open] .mobile-usage-chevron {
@@ -2210,10 +2373,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
   /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight and restrained display tracking. */
+     regular reading weight. Tracking is NOT restrained here: at 34px this sits
+     past Inter's opsz ceiling (14–32), so the axis has stopped tightening and
+     the tracking has to be supplied by hand — see the tracking note at the top
+     of this file. Inter's metric for ~34px is -0.022em; -0.01em left the
+     largest text in the product visibly the loosest. */
   font-weight: 400;
   line-height: 1.2;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.022em;
   color: var(--text-main);
 }
 
@@ -2236,7 +2403,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   list-style: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
-  transition: color 160ms ease, background-color 160ms ease;
+  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .blank-chat-usage-strip::-webkit-details-marker {
@@ -2271,7 +2438,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .blank-chat-usage-strip-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
 }
 
 .blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
@@ -2419,9 +2586,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding-inline: 0.78rem 0.2rem;
   box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
   transition:
-    border-color 150ms ease,
-    box-shadow 150ms ease,
-    background-color 150ms ease;
+    border-color 150ms var(--motion-ease),
+    box-shadow 150ms var(--motion-ease),
+    background-color 150ms var(--motion-ease);
 }
 
 .resource-browser-search-field:focus-within {
@@ -2531,8 +2698,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   outline: 1px solid transparent;
   outline-offset: 0.35rem;
   transition:
-    background-color 140ms ease,
-    outline-color 140ms ease;
+    background-color 140ms var(--motion-ease),
+    outline-color 140ms var(--motion-ease);
 }
 
 .resource-browser-content[data-file-drop-active="true"] {
@@ -2852,7 +3019,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 100%;
   border-radius: inherit;
   background: color-mix(in oklab, var(--accent) 58%, var(--foreground));
-  transition: width 160ms ease;
+  transition: width 160ms var(--motion-ease);
 }
 
 .resource-browser-upload-progress-actions {
@@ -3495,7 +3662,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 17.75rem;
   display: grid;
   grid-template-rows: 10.75rem minmax(0, 1fr);
-  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  transition: border-color 160ms var(--motion-ease), box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease);
 }
 
 .resource-browser-card:hover,
@@ -3729,7 +3896,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border-radius: 7px;
   color: #cfd2d6;
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .figure-lightbox-act:hover {
@@ -3877,7 +4044,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: #0e0e10;
   cursor: pointer;
   opacity: 0.55;
-  transition: opacity 160ms ease, border-color 160ms ease;
+  transition: opacity 160ms var(--motion-ease), border-color 160ms var(--motion-ease);
   padding: 0;
 }
 
@@ -4531,7 +4698,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: 1.2rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.016em;
   color: var(--text-main);
 }
 
@@ -6063,7 +6230,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   inset: 0;
   opacity: 0;
   transform: translateY(2px);
-  transition: opacity 130ms ease, transform 130ms ease;
+  transition: opacity 130ms var(--motion-ease), transform 130ms var(--motion-ease);
   pointer-events: none;
 }
 
@@ -6114,7 +6281,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
   opacity: 0;
   transform: translateY(4px);
-  transition: opacity 130ms ease, transform 130ms ease;
+  transition: opacity 130ms var(--motion-ease), transform 130ms var(--motion-ease);
   pointer-events: none;
   max-width: min(88%, 320px);
 }
@@ -6249,7 +6416,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overflow: hidden;
   text-decoration: none;
   color: inherit;
-  transition: border-color 140ms ease, transform 140ms ease;
+  transition: border-color 140ms var(--motion-ease), transform 140ms var(--motion-ease);
 }
 
 .chat-artifact-card:disabled {
@@ -6365,7 +6532,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.78rem;
   color: var(--text-muted);
   text-decoration: none;
-  transition: border-color 140ms ease, color 140ms ease;
+  transition: border-color 140ms var(--motion-ease), color 140ms var(--motion-ease);
 }
 
 .chat-document-report-download:hover {
@@ -6414,7 +6581,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: var(--bg-panel);
   color: inherit;
   text-decoration: none;
-  transition: border-color 140ms ease, transform 140ms ease;
+  transition: border-color 140ms var(--motion-ease), transform 140ms var(--motion-ease);
 }
 
 .chat-document-chip:hover {
@@ -6474,9 +6641,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     );
   box-shadow: var(--composer-shell-shadow);
   transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
+    border-color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
 }
 
 .app-composer-card:focus-within {
@@ -6495,7 +6662,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 1.1rem 1.35rem 0.35rem;
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
-  letter-spacing: -0.015em;
+  /* Metric for the size this ACTUALLY renders at. The clamp above is dead —
+     .pk-prompt-input-textarea's `font: inherit` is declared later at equal
+     specificity and wins — so the field is 15px, not the 17.3px the clamp
+     implies, and -0.015em was the metric for a size that never happens.
+     (letter-spacing survives `font: inherit`; it is not part of that shorthand.) */
+  letter-spacing: -0.009em;
   /* Slim horizontal insets, defined here (unconditionally) so the JS overflow
      mirror can read the SAME values it measures against — see the composer
      measurement effect in App.tsx. Left clears the floating + attach; right
@@ -6503,6 +6675,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      line wraps (and the pill expands) before it could slide under them. */
   --composer-slim-pad-left: 3.4rem;
   --composer-slim-pad-right: 7.5rem;
+}
+
+/* The line-height the composer text ACTUALLY renders at. The `line-height: 1.45`
+   above is dead — `.pk-prompt-input-textarea { font: inherit }` is declared later
+   at equal specificity, so the field inherits 1.5 (same trap that kills the
+   font-size clamp). Anything centering against the text line must use this
+   value, not the dead one, or it lands half a pixel off. */
+.app-composer-shell {
+  --composer-line-height: 1.5;
 }
 
 .app-composer-textarea::placeholder {
@@ -6553,23 +6734,35 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   pointer-events: none;
   border: 0;
   background: none;
+  /* Hit-target padding with margins compensating ONLY horizontally: for an
+     absolutely positioned box, top:50% anchors the MARGIN edge, so a negative
+     top margin leaks into the anchor and translateY(-50%) can't recover it —
+     the label rode ~5.6px high of true center. The horizontal pair is kept
+     because right + negative margin-right cancel exactly, holding the text's
+     1rem gap to the send button. */
   padding: 0.35rem 0.45rem;
-  margin: -0.35rem -0.45rem;
+  margin: 0 -0.45rem;
   border-radius: 999px;
   cursor: pointer;
   /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
      `font: inherit` out-orders that clamp, so the field actually renders at the
-     card's inherited size — inheriting here matches the real placeholder. */
+     card's inherited size — inheriting here matches the real placeholder;
+     line-height matches the field's REAL line box (--composer-line-height) so
+     the two boxes are metric-identical and their baselines coincide exactly
+     when both are centered in the pill. */
   font-size: inherit;
+  line-height: var(--composer-line-height);
   font-weight: 400;
-  letter-spacing: -0.015em;
+  /* Tracks the placeholder exactly — same 15px, same metric — so the slim line
+     still reads as one layer: "Ask anything … Pro". */
+  letter-spacing: -0.009em;
   color: var(--composer-placeholder);
   white-space: nowrap;
   /* visibility flips instantly (no hide-delay) so it leaves the a11y tree the
      moment the toolbar's real selector takes over — see the actions-start note.
      Only opacity animates; the fade-out is cut, which is imperceptible on this
      small chrome and buys the "exactly one control" invariant. */
-  transition: opacity 160ms ease;
+  transition: opacity 160ms var(--motion-ease);
 }
 
 .app-composer-idle-mode:focus-visible {
@@ -6600,7 +6793,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     /* instant visibility hide (no delay), matching idle-mode/actions-start, so
        exactly one attach control is in the tab order + a11y tree at any moment. */
     visibility: hidden;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach {
     opacity: 1;
@@ -6608,7 +6801,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     /* re-arm clicks: the collapsed toolbar (its DOM parent) is pointer-events:
        none, and pointer-events inherits — without this the pill's + is inert. */
     pointer-events: auto;
-    transition: opacity 160ms ease;
+    transition: opacity 160ms var(--motion-ease);
   }
 }
 
@@ -6718,11 +6911,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-composer-submit-button,
 .app-composer-stop-button {
   transition:
-    transform 160ms ease,
-    background-color 160ms ease,
-    border-color 160ms ease,
-    color 160ms ease,
-    box-shadow 160ms ease;
+    transform 160ms var(--motion-ease),
+    background-color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease);
 }
 
 .composer textarea {
@@ -6745,9 +6938,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
   color: var(--text-muted);
   transition:
-    background-color 160ms ease,
-    color 160ms ease,
-    border-color 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease);
 }
 
 .app-composer-icon-button {
@@ -6774,13 +6967,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 400;
   letter-spacing: 0;
   transition:
-    background-color 160ms ease,
-    color 160ms ease;
+    background-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease);
 }
 
+/* Keyed on aria-expanded, NOT data-state: this button is now both a tooltip
+   trigger and a menu trigger, and Radix writes `data-state` from BOTH — the
+   tooltip's value ("closed" while you are not hovering) wins the merge, so a
+   [data-state="open"] selector silently stops matching while the menu is open.
+   aria-expanded is set only by the menu trigger, so it is uncontested. */
 .app-composer-intelligence-trigger:hover,
 .app-composer-intelligence-trigger:focus-visible,
-.app-composer-intelligence-trigger[data-state="open"] {
+.app-composer-intelligence-trigger[aria-expanded="true"] {
   background: var(--composer-control-hover-bg);
   color: var(--text-main);
   box-shadow: none;
@@ -6861,6 +7059,25 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   white-space: nowrap;
 }
 
+/* The same bubble for the composer's other controls (attach, intelligence), so
+   every tip on the bar reads as one surface. Deliberately a separate block
+   rather than a shared comma selector: composer-send-tooltip.test.ts asserts on
+   the declarations inside `.app-composer-submit-tooltip {` and its regex needs
+   that selector immediately followed by the brace, so grouping them would
+   silently break the pinned contract. Colour comes from the tooltip primitive
+   (bg-foreground/text-background) — never restate it here. */
+.app-composer-tooltip {
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  box-shadow:
+    0 12px 28px rgba(12, 12, 12, 0.18),
+    0 3px 8px rgba(12, 12, 12, 0.1);
+  font-size: 0.75rem;
+  line-height: 1rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 .app-composer-submit-tooltip-row {
   display: inline-flex;
   align-items: center;
@@ -6930,8 +7147,25 @@ details {
   padding-top: 7px;
 }
 
+/* Background telemetry, not an announcement. This line previously inherited the
+   composer's full-brightness foreground at body size, which made a raw token
+   count the loudest thing on screen while a turn was running — louder than the
+   placeholder and competing with the stop button.
+
+   Colour is set on the WRAPPER, not on .pk-loader-text: the loader's dots are
+   `background: currentColor`, so quieting the wrapper quiets the dots and the
+   text together and they can never drift apart. (Setting it deeper would also
+   lose to the .pk-loader-* rules ~4000 lines below at equal specificity —
+   inheritance sidesteps that entirely.)
+
+   tabular-nums matters here: the elapsed seconds and token total both tick
+   while running, and proportional digits reflow the line on every update. */
 .composer-running {
   padding: 0.8rem 1.15rem 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 .composer-preview-section {
@@ -7160,6 +7394,13 @@ details {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Scrolls, because .viewer-workspace above is `overflow: hidden` with a
+     bounded height: anything the stage grows past that was simply cut off and
+     unreachable — no workspace scroll, no page scroll. Opening "Advanced
+     rendering" on a volume put ~830px of histogram and window controls past
+     the edge with no way to reach them. min-height:0 above is what lets this
+     actually scroll rather than just expand the flex item. */
+  overflow-y: auto;
 }
 
 .viewer-stage-header {
@@ -7377,7 +7618,7 @@ details {
   border-radius: 8px;
   color: var(--text-muted);
   cursor: pointer;
-  transition: background-color 160ms ease, color 160ms ease;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
 .text-viewer-action:hover {
@@ -7701,7 +7942,7 @@ details {
   cursor: pointer;
   opacity: 0;
   backdrop-filter: blur(6px);
-  transition: opacity 160ms ease, color 160ms ease, background-color 160ms ease;
+  transition: opacity 160ms var(--motion-ease), color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
 .resource-browser-card:hover .resource-quick-peek-trigger,
@@ -7937,7 +8178,7 @@ details {
    controls stay in the tab order and the accessibility tree — never
    display:none / visibility:hidden / pointer-events:none on focusable controls. */
 .viewer-chrome-fade {
-  transition: opacity 240ms ease;
+  transition: opacity 240ms var(--motion-ease);
 }
 
 [data-chrome-faded="true"] .viewer-chrome-fade {
@@ -8571,7 +8812,7 @@ details {
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 4px 10px;
-  transition: color 120ms ease, border-color 120ms ease;
+  transition: color 120ms var(--motion-ease), border-color 120ms var(--motion-ease);
 }
 
 .viewer-bisque-open-link:hover {
@@ -9415,16 +9656,67 @@ details {
   justify-content: flex-end;
 }
 
-.viewer-advanced-trigger[data-slot="button"] {
+/* Viewer controls speak the app's button language, not a separate instrument
+   toolkit: quiet ghosts at rest, lifting on hover exactly like the resource
+   cards and chat chips (translateY(-1px) + a soft shadow on the house curve).
+   Before this they were bordered and filled at rest with NO hover state at
+   all — the only controls in the product that gave no feedback on pointer.
+
+   Scoped to the outline/ghost variants via data-variant so an ACTIVE control
+   (Cutaway while clipping, a selected window preset) keeps its `secondary`
+   fill and stays legible as "on". */
+.viewer-advanced-trigger[data-slot="button"],
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"],
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"],
+.viewer-mpr-actions [data-slot="button"][data-variant="outline"],
+.viewer-mpr-actions [data-slot="button"][data-variant="ghost"],
+.viewer-intensity-actions [data-slot="button"][data-variant="outline"],
+.viewer-intensity-actions [data-slot="button"][data-variant="ghost"],
+.viewer-window-presets-row [data-slot="button"][data-variant="outline"] {
   height: 2rem;
   border-radius: 8px;
-  border-color: var(--viewer-control-line);
-  background: color-mix(in oklab, var(--viewer-control-bg) 88%, transparent);
+  border: 1px solid transparent;
+  background: transparent;
   color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
+  box-shadow: none;
+  transition:
+    background-color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease);
+}
+
+.viewer-advanced-trigger[data-slot="button"]:hover,
+.viewer-advanced-trigger[data-slot="button"]:focus-visible,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="outline"]:focus-visible,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-volume-inspection-actions [data-slot="button"][data-variant="ghost"]:focus-visible,
+.viewer-mpr-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-mpr-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-intensity-actions [data-slot="button"][data-variant="outline"]:hover,
+.viewer-intensity-actions [data-slot="button"][data-variant="ghost"]:hover,
+.viewer-window-presets-row [data-slot="button"][data-variant="outline"]:hover {
+  background: var(--viewer-control-bg-soft);
+  border-color: var(--viewer-control-line);
+  color: var(--text-main);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+}
+
+/* Press settles back down — the lift is the invitation, not the confirmation. */
+.viewer-advanced-trigger[data-slot="button"]:active,
+.viewer-volume-inspection-actions [data-slot="button"]:active,
+.viewer-mpr-actions [data-slot="button"]:active,
+.viewer-intensity-actions [data-slot="button"]:active,
+.viewer-window-presets-row [data-slot="button"]:active {
+  transform: translateY(0);
+  box-shadow: none;
 }
 
 .viewer-advanced-trigger svg[data-icon="inline-end"] {
-  transition: transform 140ms ease;
+  transition: transform 140ms var(--motion-ease);
 }
 
 .viewer-advanced-controls[data-state="open"] .viewer-advanced-trigger svg[data-icon="inline-end"] {
@@ -9490,9 +9782,9 @@ details {
   overflow: hidden;
   opacity: 0.6;
   transition:
-    opacity var(--motion-fast, 160ms) ease,
-    border-color var(--motion-fast, 160ms) ease,
-    background var(--motion-fast, 160ms) ease;
+    opacity var(--motion-fast, 160ms) var(--motion-ease),
+    border-color var(--motion-fast, 160ms) var(--motion-ease),
+    background var(--motion-fast, 160ms) var(--motion-ease);
 }
 
 .viewer-channel-chip[data-active="true"] {
@@ -9725,7 +10017,7 @@ details {
   color: var(--text-muted);
   cursor: pointer;
   line-height: 0;
-  transition: color 0.12s ease, border-color 0.12s ease;
+  transition: color 0.12s var(--motion-ease), border-color 0.12s var(--motion-ease);
 }
 
 .viewer-metadata-copy:hover {
@@ -10132,7 +10424,10 @@ details {
   font-family: var(--font-reading);
   font-weight: var(--font-weight-reading-heading);
   line-height: 1.24;
-  letter-spacing: -0.014em;
+  /* Baseline for h4–h6, which set no size and so render at the inherited 15px.
+     h1–h3 override per level below: one flat value across six levels was tuned
+     for h3 and drifted in both directions — too loose on h1, too tight on h4+. */
+  letter-spacing: -0.009em;
   text-wrap: balance;
 }
 
@@ -10142,14 +10437,17 @@ details {
 
 .pk-markdown > :where(h1) {
   font-size: 1.45rem;
+  letter-spacing: -0.019em;
 }
 
 .pk-markdown > :where(h2) {
   font-size: 1.28rem;
+  letter-spacing: -0.017em;
 }
 
 .pk-markdown > :where(h3) {
   font-size: 1.12rem;
+  letter-spacing: -0.014em;
 }
 
 .pk-markdown p {
@@ -10227,7 +10525,9 @@ details {
   font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-main);
-  letter-spacing: -0.01em;
+  /* 13.8px is below Inter's opsz floor (14), so the axis is already serving the
+     Text cut — it needs barely any help. */
+  letter-spacing: -0.005em;
 }
 
 .pk-table-wrap {
@@ -10871,7 +11171,16 @@ details {
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
   --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
   --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
-  --composer-placeholder: color-mix(in srgb, var(--text-muted) 82%, white 18%);
+  /* Fades toward the panel it sits on, NOT toward white — mixing with white on
+     a dark surface brightens a hint rather than dimming it (this token once
+     measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was
+     the loudest muted text in the product).
+     Resolves to #59595f. Matched to light by PERCEPTUAL LIGHTNESS: L* 28.2
+     below its background against light's 27.8 — a hair more, because
+     light-on-dark strokes read thinner than dark-on-light at equal offset.
+     Matching raw contrast ratio instead would have made this look dimmer than
+     its light counterpart. */
+  --composer-placeholder: color-mix(in oklab, var(--text-muted) 50%, var(--bg-panel-strong) 50%);
   --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
@@ -10947,7 +11256,7 @@ details {
   font-size: 0.8125rem;
   color: var(--text-muted);
   user-select: none;
-  transition: color 140ms ease;
+  transition: color 140ms var(--motion-ease);
 }
 
 .live-reasoning > summary::-webkit-details-marker {
@@ -10962,7 +11271,7 @@ details {
 .live-reasoning-chevron {
   opacity: 0.7;
   transform: rotate(-90deg);
-  transition: transform 140ms ease;
+  transition: transform 140ms var(--motion-ease);
 }
 
 .live-reasoning[open] .live-reasoning-chevron {
@@ -11062,7 +11371,7 @@ details {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--text-muted);
-  transition: background-color 140ms ease, color 140ms ease;
+  transition: background-color 140ms var(--motion-ease), color 140ms var(--motion-ease);
 }
 
 .pro-mode-dev-trace > summary::-webkit-details-marker {
@@ -11088,10 +11397,10 @@ details {
   font-weight: 600;
   line-height: 1;
   transition:
-    color 140ms ease,
-    background-color 140ms ease,
-    border-color 140ms ease,
-    transform 140ms ease;
+    color 140ms var(--motion-ease),
+    background-color 140ms var(--motion-ease),
+    border-color 140ms var(--motion-ease),
+    transform 140ms var(--motion-ease);
 }
 
 .pro-mode-dev-copy-button:hover {
@@ -11230,7 +11539,7 @@ details {
   letter-spacing: 0.01em;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
   cursor: pointer;
-  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+  transition: transform 0.12s var(--motion-ease), box-shadow 0.12s var(--motion-ease), border-color 0.12s var(--motion-ease);
 }
 
 .upload-flight-chip:hover {
@@ -11438,7 +11747,7 @@ details {
   height: 100%;
   border-radius: 999px;
   background: var(--primary);
-  transition: width 0.4s ease;
+  transition: width 0.4s var(--motion-ease);
 }
 
 .training-progress-caption {
@@ -11610,7 +11919,7 @@ details {
 }
 
 .training-disclosure-chevron {
-  transition: transform 160ms ease;
+  transition: transform 160ms var(--motion-ease);
   flex: none;
 }
 

@@ -98,27 +98,66 @@ export const appendUniqueRunEvent = <T extends RunEventLike>(
   return [...events, nextEvent];
 };
 
-// Reasoning deltas are cumulative snapshots of the live thinking text: every consumer renders only
-// the LATEST one (ChatRunSteps upserts a single 'reasoning' step), so keeping the whole history in
-// message.runEvents grows the array unbounded (~2.5 events/s while thinking) and makes each append
-// quadratic. Coalesce: replace the previous reasoning delta IN PLACE (positional replace preserves
-// step order in buildStepItems); with coalescing at most one such event exists, so the backward
-// scan is O(1) amortized. Everything else keeps the dedup-append semantics.
+const REASONING_DELTA_KIND = "trace.reasoning.delta";
+
+// The reasoning text carried by a `trace.reasoning.delta` payload.
+const reasoningDeltaText = (event: RunEventLike): string => {
+  const text = toRecord(event.payload)?.text;
+  return typeof text === "string" ? text : "";
+};
+
+// Merge a new reasoning delta into the coalesced one by ACCUMULATING its text. The worker flushes
+// reasoning as INCREMENTAL fragments (reasoning_stream.py joins the buffered parts then clears them),
+// so each delta carries only the text since the last flush — NOT a cumulative snapshot. We therefore
+// concatenate rather than replace, taking the newer event's status/sequence (the closing
+// status="completed" flush usually carries no text, so this preserves the full chain-of-thought
+// while flipping the step to done).
+const mergeReasoningDelta = <T extends RunEventLike>(prev: T, next: T): T =>
+  ({
+    ...next,
+    payload: {
+      ...(toRecord(prev.payload) ?? {}),
+      ...(toRecord(next.payload) ?? {}),
+      text: reasoningDeltaText(prev) + reasoningDeltaText(next),
+    },
+  }) as T;
+
+// Coalesce reasoning deltas into a SINGLE run event (bounded array — a long think is ~2.5 events/s),
+// accumulating their text IN PLACE so the full reasoning trace is preserved for the "Thinking"
+// expansion instead of only the latest ~160-char fragment. Positional replace keeps step order in
+// buildStepItems; with coalescing at most one such event exists, so the backward scan is O(1)
+// amortized. Everything else keeps the dedup-append semantics.
 export const appendRunEventCoalescing = <T extends RunEventLike>(
   events: T[],
   nextEvent: T
 ): T[] => {
-  if (eventKindOf(nextEvent) === "trace.reasoning.delta") {
+  if (eventKindOf(nextEvent) === REASONING_DELTA_KIND) {
     for (let i = events.length - 1; i >= 0; i--) {
-      if (eventKindOf(events[i]) === "trace.reasoning.delta") {
+      if (eventKindOf(events[i]) === REASONING_DELTA_KIND) {
         const next = events.slice();
-        next[i] = nextEvent;
+        next[i] = mergeReasoningDelta(events[i], nextEvent);
         return next;
       }
     }
     return [...events, nextEvent];
   }
   return appendUniqueRunEvent(events, nextEvent);
+};
+
+// The full accumulated reasoning text across a message's run events — the durable trace of the
+// coordinator's thinking, surfaced under the "Thinking" expansion. After coalescing there is at most
+// one reasoning delta, but this sums defensively so the poll path / any un-coalesced history still
+// reconstruct the whole trace.
+export const reasoningTextFromRunEvents = (
+  events: Array<{ event_type?: unknown; event_kind?: unknown; payload?: unknown }>
+): string => {
+  let text = "";
+  for (const event of events) {
+    if (eventKindOf(event) === REASONING_DELTA_KIND) {
+      text += reasoningDeltaText(event);
+    }
+  }
+  return text.trim();
 };
 
 // Whether a run is a multi-step agentic run (it ran a tool / executed code) vs. a plain text reply.

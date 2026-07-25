@@ -5,6 +5,7 @@ import {
   appendUniqueRunEvent,
   isEphemeralDeltaEvent,
   isEphemeralDeltaEventKind,
+  reasoningTextFromRunEvents,
   runEventIdentity,
   runHasToolActivity,
 } from "./run-events";
@@ -144,28 +145,33 @@ describe("appendUniqueRunEvent", () => {
 });
 
 describe("appendRunEventCoalescing", () => {
-  it("replaces the previous reasoning delta IN PLACE instead of accumulating", () => {
+  it("accumulates reasoning delta text in place (incremental fragments, not snapshots)", () => {
     const started = { event_kind: "tool_call.started", payload: { sequence: 1, run_id: "run_1" } };
     const reasoning1 = {
       event_kind: "trace.reasoning.delta",
-      payload: { sequence: 2, run_id: "run_1", text: "Thinking…" },
+      payload: { sequence: 2, run_id: "run_1", text: "Thinking… ", status: "running" },
     };
     const completed = { event_kind: "tool_call.completed", payload: { sequence: 3, run_id: "run_1" } };
     const reasoning2 = {
       event_kind: "trace.reasoning.delta",
-      payload: { sequence: 4, run_id: "run_1", text: "Thinking… more." },
+      payload: { sequence: 4, run_id: "run_1", text: "more.", status: "completed" },
     };
 
     const events = [started, reasoning1, completed];
     const coalesced = appendRunEventCoalescing(events, reasoning2);
 
     expect(coalesced).toHaveLength(3);
-    // Positional replace: the reasoning slot keeps its place in the step order.
+    // Same slot (step order preserved), but the reasoning event ACCUMULATES its text and takes the
+    // newer event's status/sequence.
     expect(coalesced[0]).toBe(started);
-    expect(coalesced[1]).toBe(reasoning2);
     expect(coalesced[2]).toBe(completed);
-    // Input array untouched.
+    const merged = coalesced[1] as { payload: Record<string, unknown> };
+    expect(merged.payload.text).toBe("Thinking… more.");
+    expect(merged.payload.status).toBe("completed");
+    expect(merged.payload.sequence).toBe(4);
+    // Input array + its events are not mutated.
     expect(events[1]).toBe(reasoning1);
+    expect((reasoning1 as { payload: Record<string, unknown> }).payload.text).toBe("Thinking… ");
   });
 
   it("appends the first reasoning delta when none exists yet", () => {
@@ -179,18 +185,18 @@ describe("appendRunEventCoalescing", () => {
     expect(appended[1]).toBe(reasoning);
   });
 
-  it("matches reasoning deltas by event_type when event_kind is absent", () => {
+  it("accumulates reasoning deltas matched by event_type when event_kind is absent", () => {
     const reasoning1 = {
       event_type: "trace.reasoning.delta",
       payload: { sequence: 1, run_id: "run_1", text: "a" },
     };
     const reasoning2 = {
       event_type: "trace.reasoning.delta",
-      payload: { sequence: 2, run_id: "run_1", text: "ab" },
+      payload: { sequence: 2, run_id: "run_1", text: "b" },
     };
     const coalesced = appendRunEventCoalescing([reasoning1], reasoning2);
     expect(coalesced).toHaveLength(1);
-    expect(coalesced[0]).toBe(reasoning2);
+    expect((coalesced[0] as { payload: Record<string, unknown> }).payload.text).toBe("ab");
   });
 
   it("delegates non-reasoning events to appendUniqueRunEvent (dedup preserved)", () => {
@@ -201,5 +207,32 @@ describe("appendRunEventCoalescing", () => {
 
     const next = { event_kind: "tool_call.completed", payload: { sequence: 6, run_id: "run_1" } };
     expect(appendRunEventCoalescing(events, next)).toHaveLength(2);
+  });
+});
+
+describe("reasoningTextFromRunEvents", () => {
+  it("returns the accumulated reasoning text (trimmed), ignoring non-reasoning events", () => {
+    const events = [
+      { event_kind: "tool_call.started", payload: { sequence: 1 } },
+      {
+        event_kind: "trace.reasoning.delta",
+        payload: { sequence: 2, text: "  Step one. Step two.  " },
+      },
+    ];
+    expect(reasoningTextFromRunEvents(events)).toBe("Step one. Step two.");
+  });
+
+  it("sums any un-coalesced reasoning fragments in order", () => {
+    const events = [
+      { event_type: "trace.reasoning.delta", payload: { text: "part one " } },
+      { event_type: "trace.reasoning.delta", payload: { text: "part two" } },
+    ];
+    expect(reasoningTextFromRunEvents(events)).toBe("part one part two");
+  });
+
+  it("is empty when there is no reasoning", () => {
+    expect(
+      reasoningTextFromRunEvents([{ event_type: "message.delta", payload: { text: "hi" } }])
+    ).toBe("");
   });
 });

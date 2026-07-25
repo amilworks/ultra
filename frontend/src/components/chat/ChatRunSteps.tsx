@@ -417,6 +417,9 @@ export function ChatRunSteps({
                   {item.label}
                 </span>
               </div>
+              {item.id === "reasoning" && item.detail ? (
+                <div className="chat-run-step-reasoning">{item.detail}</div>
+              ) : null}
             </StepsItem>
           ))}
         </div>

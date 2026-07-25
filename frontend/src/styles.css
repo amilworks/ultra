@@ -11314,7 +11314,7 @@ details {
   font-size: 0.8125rem;
   color: var(--text-muted);
   user-select: none;
-  transition: color 140ms ease;
+  transition: color 140ms var(--motion-ease);
 }
 
 .reasoning-trace > summary::-webkit-details-marker {
@@ -11329,7 +11329,7 @@ details {
 .reasoning-trace-chevron {
   opacity: 0.7;
   transform: rotate(-90deg);
-  transition: transform 140ms ease;
+  transition: transform 140ms var(--motion-ease);
 }
 
 .reasoning-trace[open] .reasoning-trace-chevron {

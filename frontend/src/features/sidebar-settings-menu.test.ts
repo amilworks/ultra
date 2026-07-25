@@ -111,9 +111,19 @@ describe("sidebar settings menu", () => {
       /\.app-sidebar-account-button\s*\{[^}]*border-radius:\s*var\(--sidebar-radius-row\);/s
     );
     expect(styles).toMatch(/\.app-history-group \[data-slot="sidebar-group-label"\]/);
+    // One voice for every sidebar section label: type comes from the shared eyebrow
+    // tokens on the BASE group-label rule...
     expect(styles).toMatch(
-      /\.app-sidebar-content \.app-history-group \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*0\.875rem;[^}]*font-weight:\s*600;/s
+      /\.app-sidebar-content \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*var\(--sidebar-eyebrow-size\);[^}]*font-weight:\s*var\(--sidebar-eyebrow-weight\);[^}]*letter-spacing:\s*var\(--sidebar-eyebrow-tracking\);/s
     );
+    // ...and the history-group override stays LAYOUT-ONLY. It must never re-declare type:
+    // promoting it to 0.875rem/600 previously made "Recents" outrank the rows it labels
+    // while its sibling "Yesterday"/"Last 7 days" labels stayed quiet.
+    const historyLabelRule =
+      styles.match(
+        /\.app-sidebar-content \.app-history-group \[data-slot="sidebar-group-label"\]\s*\{([^}]*)\}/s
+      )?.[1] ?? "";
+    expect(historyLabelRule).not.toMatch(/font-size|font-weight|letter-spacing|(^|[^-])\bcolor:/);
     expect(styles).toMatch(
       /\.app-new-chat-button\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--sidebar-accent\) 74%, transparent\);/s
     );

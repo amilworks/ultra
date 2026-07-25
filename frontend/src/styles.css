@@ -7147,8 +7147,25 @@ details {
   padding-top: 7px;
 }
 
+/* Background telemetry, not an announcement. This line previously inherited the
+   composer's full-brightness foreground at body size, which made a raw token
+   count the loudest thing on screen while a turn was running — louder than the
+   placeholder and competing with the stop button.
+
+   Colour is set on the WRAPPER, not on .pk-loader-text: the loader's dots are
+   `background: currentColor`, so quieting the wrapper quiets the dots and the
+   text together and they can never drift apart. (Setting it deeper would also
+   lose to the .pk-loader-* rules ~4000 lines below at equal specificity —
+   inheritance sidesteps that entirely.)
+
+   tabular-nums matters here: the elapsed seconds and token total both tick
+   while running, and proportional digits reflow the line on every update. */
 .composer-running {
   padding: 0.8rem 1.15rem 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums;
 }
 
 .composer-preview-section {

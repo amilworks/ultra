@@ -7509,6 +7509,60 @@ export function App() {
         : null,
     [activeStreamingMessage]
   );
+  // Elapsed time for the in-flight turn. The completed-message footer shows
+  // "<tokens> tokens · <elapsed>"; the composer had only the token half, which
+  // left the loudest number on screen as the one users can least interpret.
+  // Ticks once a second — fast enough to read as live, slow enough to stay calm.
+  const [activeElapsedSeconds, setActiveElapsedSeconds] = useState(0);
+  const activeRunStartedAtRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!activeSending) {
+      activeRunStartedAtRef.current = null;
+      setActiveElapsedSeconds(0);
+      return;
+    }
+    // Anchor on the first tick of THIS run so a re-render mid-run (new tokens,
+    // new events) never restarts the clock.
+    if (activeRunStartedAtRef.current === null) {
+      activeRunStartedAtRef.current = Date.now();
+    }
+    const tick = () => {
+      const startedAt = activeRunStartedAtRef.current;
+      if (startedAt !== null) {
+        setActiveElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [activeSending]);
+  // Metrics ADD to the status line, they don't replace it: the plain-language
+  // "is processing" is what reassures during a long agentic turn, and it used to
+  // vanish the moment the first usage event landed.
+  const composerRunningLabel = useMemo(() => {
+    const parts = ["BisQue Ultra is processing"];
+    const elapsed = formatElapsedDuration(activeElapsedSeconds);
+    if (elapsed) {
+      parts.push(elapsed);
+    }
+    if (activeStreamingTokenUsage) {
+      parts.push(`${formatTokens(activeStreamingTokenUsage.total_tokens)} tokens`);
+    }
+    return parts.join(" · ");
+  }, [activeElapsedSeconds, activeStreamingTokenUsage]);
+  // The headline total is cumulative across every model call in the turn — each
+  // agentic step re-sends the conversation, so input is counted again each step.
+  // Without this breakdown a number like "616K tokens" reads as conversation
+  // size or context fullness, which it is not. Mirrors the message footer.
+  const composerRunningTitle = useMemo(
+    () =>
+      activeStreamingTokenUsage
+        ? `${activeStreamingTokenUsage.input_tokens.toLocaleString()} input · ${activeStreamingTokenUsage.output_tokens.toLocaleString()} output${
+            activeStreamingTokenUsage.model ? ` · ${activeStreamingTokenUsage.model}` : ""
+          }`
+        : undefined,
+    [activeStreamingTokenUsage]
+  );
   const shouldShowBlankChatUsage =
     authStatus === "authenticated" &&
     activePanel === "chat" &&
@@ -11925,15 +11979,8 @@ export function App() {
                       }}
                     />
                     {activeSending ? (
-                      <div className="composer-running">
-                        <Loader
-                          size="sm"
-                          text={
-                            activeStreamingTokenUsage
-                              ? `${formatTokens(activeStreamingTokenUsage.total_tokens)} tokens`
-                              : "BisQue Ultra is processing"
-                          }
-                        />
+                      <div className="composer-running" title={composerRunningTitle}>
+                        <Loader size="sm" text={composerRunningLabel} />
                       </div>
                     ) : null}
                     <PromptInputTextarea

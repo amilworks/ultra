@@ -84,6 +84,16 @@
   --sidebar-section-margin-top: 1.25rem;
   --sidebar-section-padding-x: 0.5rem;
   --sidebar-item-padding-x: 0.75rem;
+  /* One voice for EVERY sidebar section label — "BisQue", "Recents",
+     "Yesterday", "Last 7 days". A section label is the quietest thing in its
+     group; it must never outrank the rows it labels. Any group that needs to
+     feel more prominent buys that with space, not with louder type.
+     The 0.02em tracking is deliberate: at ~11px Inter needs positive tracking
+     to stay legible (see the tracking note in typography.css). */
+  --sidebar-eyebrow-size: 0.68rem;
+  --sidebar-eyebrow-weight: var(--font-weight-panel-heading);
+  --sidebar-eyebrow-color: var(--text-muted);
+  --sidebar-eyebrow-tracking: 0.02em;
   --sidebar-item-gap: 0.625rem;
   --radius: 0.75rem;
   --sidebar-radius-action: calc(var(--radius) + 0.05rem);
@@ -881,8 +891,11 @@ body {
   padding-bottom: 0.95rem;
 }
 
+/* The first history group ("Recents") reads as the start of a new region.
+   That separation is bought here, with space, rather than by shouting its
+   label — see the eyebrow note on the group-label rule. */
 .app-sidebar-history-scroll > .app-history-group:first-child {
-  margin-top: 0.75rem;
+  margin-top: 1.25rem;
 }
 
 .app-sidebar-user-menu {
@@ -1655,27 +1668,29 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-sidebar-content [data-slot="sidebar-group-label"] {
   padding-inline: var(--sidebar-item-padding-x);
-  font-size: 0.68rem;
-  font-weight: var(--font-weight-panel-heading);
-  color: var(--text-muted);
-  letter-spacing: 0.02em;
+  font-size: var(--sidebar-eyebrow-size);
+  font-weight: var(--sidebar-eyebrow-weight);
+  color: var(--sidebar-eyebrow-color);
+  letter-spacing: var(--sidebar-eyebrow-tracking);
 }
 
+/* History groups differ from the other sidebar groups only in LAYOUT — they
+   stack inside a scroll container and need their own vertical rhythm. Type is
+   inherited from the shared eyebrow tokens above; do NOT re-declare size,
+   weight, colour, or tracking here.
+
+   This previously promoted the first history group's label to 0.875rem/600 at
+   full --sidebar-foreground, which made "Recents" tie for the brightest text in
+   the sidebar and rendered it larger and heavier than the conversation rows it
+   labels — while "Yesterday" and "Last 7 days" directly beneath it, same
+   component and same role, stayed quiet muted eyebrows. A `:not(:first-child)`
+   rule then partially undid it, leaving three sizes (0.68 / 0.72 / 0.875rem)
+   for one role. The first group's prominence is bought with space instead —
+   see .app-sidebar-history-scroll > .app-history-group:first-child. */
 .app-sidebar-content .app-history-group [data-slot="sidebar-group-label"] {
   height: auto;
-  padding: 0 0.75rem 0.5rem;
-  color: var(--sidebar-foreground);
-  font-size: 0.875rem;
-  font-weight: 600;
+  padding-block: 0 0.5rem;
   line-height: 1.25;
-  letter-spacing: 0;
-}
-
-.app-sidebar-content .app-history-group:not(:first-child) [data-slot="sidebar-group-label"] {
-  padding-top: 0.2rem;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: var(--font-weight-panel-heading);
 }
 
 .app-sidebar-actions {

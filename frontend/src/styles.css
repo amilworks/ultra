@@ -10523,6 +10523,72 @@ details {
   }
 }
 
+/* ⌘F find bar: a quiet floating panel in the transcript's top-right. Its
+   buttons are .chat-message-action, so hover, focus, disabled and coarse-
+   pointer sizing are identical to every other icon control in the chat. */
+.chat-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-panel-strong);
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+  animation: chat-selection-ask-in 160ms var(--motion-ease);
+}
+
+.dark .chat-find-bar {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.chat-find-bar input {
+  width: 200px;
+  max-width: 42vw;
+  border: none;
+  background: transparent;
+  outline: none;
+  padding: 0 6px;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+.chat-find-bar input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Ticks while navigating — tabular figures keep the bar from reflowing. */
+.chat-find-count {
+  padding: 0 8px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-find-bar {
+    animation: none;
+  }
+}
+
+/* Find highlights ride the CSS Custom Highlight API — pure paint, no DOM
+   mutation, so streaming re-renders can never orphan a wrapper span. The tint
+   reuses the code-selection precedent (color-mix over --brand): a find match
+   IS data meaning, which is what the colour budget is reserved for. */
+::highlight(ultra-find-match) {
+  background-color: color-mix(in oklab, var(--brand) 20%, transparent);
+}
+
+::highlight(ultra-find-current) {
+  background-color: color-mix(in oklab, var(--brand) 45%, transparent);
+  color: var(--text-main);
+}
+
 .pk-markdown {
   display: flex;
   flex-direction: column;

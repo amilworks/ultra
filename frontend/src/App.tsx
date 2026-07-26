@@ -92,6 +92,14 @@ import {
   shouldAttachPastedText,
 } from "./lib/pasted-text";
 import {
+  applyTranscriptFindHighlights,
+  clearTranscriptFindHighlights,
+  computeTranscriptFindMatches,
+} from "./lib/transcript-find";
+import { TranscriptFindBar } from "./components/chat/TranscriptFindBar";
+// Type-only: erased at compile time, so react-virtuoso itself stays lazy.
+import type { VirtuosoHandle } from "react-virtuoso";
+import {
   collectDroppedFiles,
   isOsFileDrag,
   MAX_DROPPED_FILES,
@@ -1951,6 +1959,9 @@ const ConversationMessageRow = memo(
     if (!isAssistant) {
       return (
         <Message
+          /* Row identity for ⌘F: highlight painting and scroll-into-view find
+             mounted rows by this attribute, whichever transcript mode is live. */
+          data-message-id={message.id}
           className={cn(
             "chat-width-frame mx-auto w-full justify-end px-4 sm:px-6",
             isLastMessage && "pk-message-enter"
@@ -2023,6 +2034,7 @@ const ConversationMessageRow = memo(
 
     return (
       <Message
+        data-message-id={message.id}
         className={cn(
           "chat-width-frame mx-auto w-full justify-start px-4 sm:px-6",
           isLastMessage && "pk-message-enter"
@@ -2283,6 +2295,10 @@ type ConversationTranscriptProps = {
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
   actions: ConversationTranscriptActions;
+  /* ⌘F navigation: which message to bring into view. The nonce forces a
+     re-scroll when the user re-navigates to the same match after scrolling
+     away — identity alone would look unchanged. */
+  findTarget: { messageId: string; nonce: number } | null;
 };
 
 const ConversationTranscript = memo(
@@ -2301,6 +2317,7 @@ const ConversationTranscript = memo(
     bisqueLinksByFileId,
     apiClient,
     actions,
+    findTarget,
   }: ConversationTranscriptProps) {
     const conversationRunArtifacts = useMemo(
       () => collectConversationRunArtifacts(messages),
@@ -2328,6 +2345,39 @@ const ConversationTranscript = memo(
       messages,
       messageWindow
     );
+    const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+    /* ⌘F: bring the current match's message into view. Both transcript modes
+       hide messages from the DOM — Virtuoso virtualizes long chats, and the
+       windowed path hides the head behind "Show earlier messages" — so each
+       needs its own route there. Highlighting is NOT done here: App retries
+       paint until this scroll has actually mounted the row. */
+    useEffect(() => {
+      if (!findTarget) {
+        return;
+      }
+      const index = messages.findIndex((message) => message.id === findTarget.messageId);
+      if (index < 0) {
+        return;
+      }
+      if (shouldVirtualizeMessages) {
+        virtuosoRef.current?.scrollToIndex({ index, align: "center" });
+        return;
+      }
+      const hiddenCount = Math.max(messages.length - messageWindow, 0);
+      if (index < hiddenCount) {
+        // The match is behind the "Show earlier messages" fold — widen the
+        // window exactly far enough to include it.
+        setMessageWindow(messages.length - index);
+      }
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector(`[data-message-id="${CSS.escape(findTarget.messageId)}"]`)
+          ?.scrollIntoView({ block: "center" });
+      });
+      // Deliberately narrow: re-running on every messages identity change would
+      // yank the scroll position on each streaming delta while find is open.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [findTarget]);
     const renderMessageRow = useCallback(
       (message: UiMessage, index: number, totalMessages: number) => (
         <ErrorBoundary
@@ -2459,6 +2509,7 @@ const ConversationTranscript = memo(
           // then the bounded-window fallback below renders (already DOM-bounded), then it swaps in.
           <Suspense fallback={null}>
             <LazyVirtuoso
+              ref={virtuosoRef}
               className="w-full"
               customScrollParent={virtualizedScrollParent}
               data={messages}
@@ -2496,6 +2547,7 @@ const ConversationTranscript = memo(
     previousProps.welcomeName === nextProps.welcomeName &&
     previousProps.welcomeNonce === nextProps.welcomeNonce &&
     previousProps.messages === nextProps.messages &&
+    previousProps.findTarget === nextProps.findTarget &&
     previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
     previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
     previousProps.blankChatUsageError === nextProps.blankChatUsageError &&
@@ -10531,6 +10583,163 @@ export function App() {
     };
   }, [activePanel, authStatus, viewerOpen]);
 
+  /* ⌘F find-within-conversation. Browser find only sees mounted DOM, and both
+     transcript modes keep most of a long conversation out of the DOM (Virtuoso
+     virtualization; the windowed tail behind "Show earlier messages"). So
+     matching runs over the message DATA, navigation drives the virtualized
+     scroller, and highlights are painted onto whichever rows exist — retried
+     until the scroll has mounted the current match's row. */
+  const [transcriptFindOpen, setTranscriptFindOpen] = useState(false);
+  const [transcriptFindQuery, setTranscriptFindQuery] = useState("");
+  const [transcriptFindIndex, setTranscriptFindIndex] = useState(0);
+  const [transcriptFindNonce, setTranscriptFindNonce] = useState(0);
+  const transcriptFindInputRef = useRef<HTMLInputElement | null>(null);
+
+  const transcriptFindMatches = useMemo(
+    () =>
+      transcriptFindOpen
+        ? computeTranscriptFindMatches(activeMessages, transcriptFindQuery)
+        : [],
+    [activeMessages, transcriptFindOpen, transcriptFindQuery]
+  );
+  /* Clamped, not reset: matches shift while an answer streams in, and a stored
+     index past the end should degrade to the last match, not crash to zero. */
+  const clampedTranscriptFindIndex =
+    transcriptFindMatches.length > 0
+      ? Math.min(transcriptFindIndex, transcriptFindMatches.length - 1)
+      : 0;
+  const currentTranscriptFindMatch =
+    transcriptFindMatches[clampedTranscriptFindIndex] ?? null;
+  const currentFindMessageId = currentTranscriptFindMatch?.messageId ?? null;
+  const currentFindOccurrence = currentTranscriptFindMatch?.occurrence ?? 0;
+  /* Keyed on primitives, NOT on the match object: matches recompute on every
+     streaming delta, and a fresh object identity would re-fire the transcript's
+     scroll effect and yank the reading position once per token. */
+  const transcriptFindTarget = useMemo(
+    () =>
+      transcriptFindOpen && currentFindMessageId
+        ? { messageId: currentFindMessageId, nonce: transcriptFindNonce }
+        : null,
+    [currentFindMessageId, transcriptFindNonce, transcriptFindOpen]
+  );
+
+  const openTranscriptFind = useCallback((): void => {
+    setTranscriptFindOpen(true);
+    // Focus after the bar mounts; select so ⌘F with a previous query behaves
+    // like browser find (type to replace, Enter to reuse).
+    window.requestAnimationFrame(() => {
+      transcriptFindInputRef.current?.focus();
+      transcriptFindInputRef.current?.select();
+    });
+  }, []);
+
+  const closeTranscriptFind = useCallback((): void => {
+    setTranscriptFindOpen(false);
+    clearTranscriptFindHighlights();
+    focusComposerTextarea();
+  }, [focusComposerTextarea]);
+
+  const handleTranscriptFindQueryChange = useCallback((value: string): void => {
+    setTranscriptFindQuery(value);
+    // A new query restarts from its first match, live as you type.
+    setTranscriptFindIndex(0);
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, []);
+
+  const goToNextTranscriptFindMatch = useCallback((): void => {
+    if (transcriptFindMatches.length === 0) {
+      return;
+    }
+    setTranscriptFindIndex(
+      (clampedTranscriptFindIndex + 1) % transcriptFindMatches.length
+    );
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, [clampedTranscriptFindIndex, transcriptFindMatches.length]);
+
+  const goToPreviousTranscriptFindMatch = useCallback((): void => {
+    if (transcriptFindMatches.length === 0) {
+      return;
+    }
+    setTranscriptFindIndex(
+      (clampedTranscriptFindIndex - 1 + transcriptFindMatches.length) %
+        transcriptFindMatches.length
+    );
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, [clampedTranscriptFindIndex, transcriptFindMatches.length]);
+
+  /* ⌘F/^F opens (or refocuses) the bar. Interception is deliberate even while
+     an input is focused — that is how browser find behaves — but only on the
+     chat panel: Resources and the viewer render plain DOM where native find
+     works, so they keep it. */
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+      return;
+    }
+    const handleFindShortcut = (event: KeyboardEvent): void => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "f"
+      ) {
+        if (hasBlockingOverlay()) {
+          return;
+        }
+        event.preventDefault();
+        openTranscriptFind();
+      }
+    };
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, [activePanel, authStatus, openTranscriptFind, viewerOpen]);
+
+  /* Switching conversations closes find: the query may be worth keeping, but a
+     match list pointing into another conversation's messages is not. */
+  const activeConversationIdForFind = activeConversation?.id ?? null;
+  useEffect(() => {
+    setTranscriptFindOpen(false);
+    setTranscriptFindIndex(0);
+    clearTranscriptFindHighlights();
+  }, [activeConversationIdForFind]);
+
+  /* Paint highlights over mounted rows. Retries because the interesting case —
+     jumping to a match far up a virtualized transcript — mounts the row some
+     frames after scrollToIndex. Also re-runs on activeMessages so highlights
+     track content while an answer streams. */
+  useEffect(() => {
+    if (!transcriptFindOpen || !transcriptFindQuery.trim()) {
+      clearTranscriptFindHighlights();
+      return;
+    }
+    let cancelled = false;
+    let attempts = 0;
+    const apply = (): void => {
+      if (cancelled) {
+        return;
+      }
+      const { currentLocated } = applyTranscriptFindHighlights({
+        query: transcriptFindQuery,
+        currentMessageId: currentFindMessageId,
+        currentOccurrence: currentFindOccurrence,
+      });
+      if (!currentLocated && attempts < 12) {
+        attempts += 1;
+        window.setTimeout(apply, 90);
+      }
+    };
+    apply();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeMessages,
+    currentFindMessageId,
+    currentFindOccurrence,
+    transcriptFindNonce,
+    transcriptFindOpen,
+    transcriptFindQuery,
+  ]);
+
   /* Deleting a user message also removes every consecutive assistant reply that
      followed it (removeMessageWithPairedResponse). That is the right behaviour —
      an answer without its question is noise — but it is more than the button
@@ -12301,6 +12510,18 @@ export function App() {
                   scrollWriteBlockRef={conversationScrollWriteBlockRef}
                   onScrolledAwayChange={setComposerScrolledAway}
                 />
+                {transcriptFindOpen ? (
+                  <TranscriptFindBar
+                    ref={transcriptFindInputRef}
+                    query={transcriptFindQuery}
+                    matchCount={transcriptFindMatches.length}
+                    currentIndex={clampedTranscriptFindIndex}
+                    onQueryChange={handleTranscriptFindQueryChange}
+                    onNext={goToNextTranscriptFindMatch}
+                    onPrevious={goToPreviousTranscriptFindMatch}
+                    onClose={closeTranscriptFind}
+                  />
+                ) : null}
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
                   isPhoneView={isPhoneView}
@@ -12316,6 +12537,7 @@ export function App() {
                   bisqueLinksByFileId={activeBisqueLinksByFileId}
                   apiClient={apiClient}
                   actions={transcriptActions}
+                  findTarget={transcriptFindTarget}
                 />
                 <ChatContainerScrollAnchor />
                 <div className="app-scroll-button-shell absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-3 sm:px-5">

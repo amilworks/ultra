@@ -111,9 +111,31 @@ describe("sidebar settings menu", () => {
       /\.app-sidebar-account-button\s*\{[^}]*border-radius:\s*var\(--sidebar-radius-row\);/s
     );
     expect(styles).toMatch(/\.app-history-group \[data-slot="sidebar-group-label"\]/);
+
+    // This used to assert font-size: 0.875rem / font-weight: 600 on the history
+    // group label — it was pinning the defect. That promotion made "Recents"
+    // tie for the brightest text in the sidebar and rendered it larger and
+    // heavier than the 14px/400 conversation rows it labels, while "Yesterday"
+    // and "Last 7 days" directly beneath stayed quiet muted eyebrows.
+    //
+    // Every section label now speaks with one voice from shared tokens, and the
+    // history rule is LAYOUT ONLY.
+    expect(styles).toMatch(/--sidebar-eyebrow-size:\s*0\.68rem;/);
     expect(styles).toMatch(
-      /\.app-sidebar-content \.app-history-group \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*0\.875rem;[^}]*font-weight:\s*600;/s
+      /\.app-sidebar-content \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*var\(--sidebar-eyebrow-size\);[^}]*font-weight:\s*var\(--sidebar-eyebrow-weight\);/s
     );
+
+    const historyLabelSelector =
+      '.app-sidebar-content .app-history-group [data-slot="sidebar-group-label"] {';
+    const historyLabelStart = styles.indexOf(historyLabelSelector);
+    expect(historyLabelStart).toBeGreaterThan(-1);
+    const historyLabelRule = styles.slice(
+      historyLabelStart,
+      styles.indexOf("}", historyLabelStart)
+    );
+    expect(historyLabelRule).toMatch(/line-height:\s*1\.25;/);
+    // Re-declaring any of these here is what let the three voices diverge.
+    expect(historyLabelRule).not.toMatch(/font-size|font-weight|letter-spacing|color:/);
     expect(styles).toMatch(
       /\.app-new-chat-button\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--sidebar-accent\) 74%, transparent\);/s
     );

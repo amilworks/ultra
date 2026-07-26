@@ -125,6 +125,14 @@ describe("ask-about-selection", () => {
     expect(appSource).toMatch(/draftWithQuotedSelection\(previous, ask\.text\)/);
   });
 
+  it("captures selections KaTeX-aware — formulas quote as TeX, not glyph soup", () => {
+    // selection.toString() on rendered math yields the visible layer's glue
+    // characters; textFromSelection swaps each full render for the original
+    // TeX in its annotation node. Unit-tested in lib/selection-capture.test.ts.
+    expect(appSource).toMatch(/const text = textFromSelection\(selection\)/);
+    expect(stripComments(appSource)).not.toMatch(/const text = selection\.toString\(\)/);
+  });
+
   it("routes an oversized selection through the attachment path", () => {
     const callback = blockFrom("const askAboutSelection = useCallback", "focusComposerTextarea();");
     expect(callback).toMatch(/shouldAttachPastedText\(ask\.text\)/);

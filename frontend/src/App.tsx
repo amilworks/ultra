@@ -96,6 +96,7 @@ import {
   clearTranscriptFindHighlights,
   computeTranscriptFindMatches,
 } from "./lib/transcript-find";
+import { textFromSelection } from "./lib/selection-capture";
 import { TranscriptFindBar } from "./components/chat/TranscriptFindBar";
 // Type-only: erased at compile time, so react-virtuoso itself stays lazy.
 import type { VirtuosoHandle } from "react-virtuoso";
@@ -10534,7 +10535,10 @@ export function App() {
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
         return null;
       }
-      const text = selection.toString();
+      /* KaTeX-aware: a quoted formula carries its actual TeX source
+         ($O(n^3)$), not the visible glyph soup — the render embeds the
+         original in an annotation node, and the model reads TeX fluently. */
+      const text = textFromSelection(selection);
       if (!text.trim()) {
         return null;
       }
@@ -12554,6 +12558,21 @@ export function App() {
           ) : (
             <>
             <div className="relative min-h-0 flex-1 overflow-hidden">
+              {/* Anchored to this NON-scrolling wrapper, deliberately: the
+                  ChatContainerRoot below is the scroll container, and an
+                  absolute child there rides the scrolled coordinate space. */}
+              {transcriptFindOpen ? (
+                <TranscriptFindBar
+                  ref={transcriptFindInputRef}
+                  query={transcriptFindQuery}
+                  matchCount={transcriptFindMatches.length}
+                  currentIndex={clampedTranscriptFindIndex}
+                  onQueryChange={handleTranscriptFindQueryChange}
+                  onNext={goToNextTranscriptFindMatch}
+                  onPrevious={goToPreviousTranscriptFindMatch}
+                  onClose={closeTranscriptFind}
+                />
+              ) : null}
               <ChatContainerRoot
                 className="relative h-full min-h-0 flex-col"
               >
@@ -12566,18 +12585,6 @@ export function App() {
                   scrollWriteBlockRef={conversationScrollWriteBlockRef}
                   onScrolledAwayChange={setComposerScrolledAway}
                 />
-                {transcriptFindOpen ? (
-                  <TranscriptFindBar
-                    ref={transcriptFindInputRef}
-                    query={transcriptFindQuery}
-                    matchCount={transcriptFindMatches.length}
-                    currentIndex={clampedTranscriptFindIndex}
-                    onQueryChange={handleTranscriptFindQueryChange}
-                    onNext={goToNextTranscriptFindMatch}
-                    onPrevious={goToPreviousTranscriptFindMatch}
-                    onClose={closeTranscriptFind}
-                  />
-                ) : null}
                 <ConversationTranscript
                   conversationHydrated={activeConversationHydrated}
                   isPhoneView={isPhoneView}

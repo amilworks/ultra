@@ -129,4 +129,31 @@ describe("the bar itself", () => {
     expect(bar).toContain('aria-live="polite"');
     expect(styles).toMatch(/\.chat-find-count \{[^}]*font-variant-numeric: tabular-nums/s);
   });
+
+  it("is the slim composer's sibling: centered stadium pill on the panel surface", () => {
+    const rule = styles.slice(
+      styles.indexOf(".chat-find-bar {"),
+      styles.indexOf("}", styles.indexOf(".chat-find-bar {"))
+    );
+    expect(rule).toMatch(/border-radius: 999px/);
+    expect(rule).toMatch(/left: 50%/);
+    expect(rule).toMatch(/translateX\(-50%\)/);
+    expect(rule).toMatch(/background: var\(--bg-panel-strong\)/);
+  });
+
+  it("carries focus on the pill border and suppresses every inner ring", () => {
+    // The review screenshot showed a stray blue UA focus ring on the input.
+    expect(styles).toMatch(/\.chat-find-bar:focus-within \{\s*border-color: color-mix/);
+    expect(styles).toMatch(/\.chat-find-bar input:focus,\s*\.chat-find-bar input:focus-visible \{\s*outline: none;\s*box-shadow: none;/);
+  });
+
+  it("anchors OUTSIDE the scroll container so it cannot ride away with content", () => {
+    // ChatContainerRoot is the scroller (overflow-y-auto); the bar must be its
+    // sibling under the non-scrolling relative wrapper, rendered before it.
+    const wrapper = appSource.indexOf('className="relative min-h-0 flex-1 overflow-hidden"');
+    const barAt = appSource.indexOf("<TranscriptFindBar", wrapper);
+    const rootAt = appSource.indexOf("<ChatContainerRoot", wrapper);
+    expect(barAt).toBeGreaterThan(wrapper);
+    expect(barAt).toBeLessThan(rootAt);
+  });
 });

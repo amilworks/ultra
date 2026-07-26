@@ -10533,47 +10533,74 @@ details {
   user-select: none;
 }
 
-/* ⌘F find bar: a quiet floating panel in the transcript's top-right. Its
-   buttons are .chat-message-action, so hover, focus, disabled and coarse-
-   pointer sizing are identical to every other icon control in the chat. */
+/* ⌘F find bar: the slim composer's sibling. A centered stadium pill floating
+   at the top of the transcript — same surface, same hairline, same radius
+   grammar as the idle composer, so it reads as part of the family rather than
+   an afterthought pinned to a corner. Anchored to the non-scrolling chat
+   wrapper (the scroll container would carry it away with the content). */
 .chat-find-bar {
   position: absolute;
-  top: 10px;
-  right: 14px;
-  z-index: 30;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
   display: flex;
   align-items: center;
   gap: 2px;
-  padding: 4px 6px;
+  height: 44px;
+  padding: 0 6px 0 16px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 999px;
   background: var(--bg-panel-strong);
-  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+  box-shadow: 0 10px 28px rgba(12, 12, 12, 0.12);
   animation: chat-selection-ask-in 160ms var(--motion-ease);
+  transition: border-color 160ms var(--motion-ease);
+}
+
+/* Focus lives on the pill's border — the composer's grammar — never on a ring
+   around the input. */
+.chat-find-bar:focus-within {
+  border-color: color-mix(in oklab, var(--line) 76%, var(--text-muted) 24%);
 }
 
 .dark .chat-find-bar {
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+
+.chat-find-icon {
+  flex: none;
+  color: var(--text-muted);
 }
 
 .chat-find-bar input {
-  width: 200px;
-  max-width: 42vw;
+  width: 220px;
+  max-width: 40vw;
   border: none;
   background: transparent;
-  outline: none;
-  padding: 0 6px;
+  padding: 0 10px 0 8px;
   font-size: 0.85rem;
   color: var(--text-main);
+}
+
+/* Kill every focus treatment the browser or a global reset might paint on the
+   inner input — the review screenshot showed a stray blue UA ring here. The
+   pill's :focus-within border above is the one and only focus signal. */
+.chat-find-bar input:focus,
+.chat-find-bar input:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .chat-find-bar input::placeholder {
   color: var(--text-muted);
 }
 
-/* Ticks while navigating — tabular figures keep the bar from reflowing. */
+/* Ticks while navigating — tabular figures keep the pill from reflowing. A
+   hairline separates data from controls. */
 .chat-find-count {
-  padding: 0 8px;
+  margin-left: 6px;
+  padding: 0 10px;
+  border-left: 1px solid var(--line);
   font-size: 0.78rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
@@ -10583,6 +10610,7 @@ details {
 @media (prefers-reduced-motion: reduce) {
   .chat-find-bar {
     animation: none;
+    transition: none;
   }
 }
 

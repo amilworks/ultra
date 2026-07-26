@@ -1,5 +1,5 @@
 import { forwardRef } from "react";
-import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Search, X } from "lucide-react";
 
 type TranscriptFindBarProps = {
   query: string;
@@ -31,6 +31,7 @@ export const TranscriptFindBar = forwardRef<HTMLInputElement, TranscriptFindBarP
   ) {
     return (
       <div className="chat-find-bar" role="search" aria-label="Find in conversation">
+        <Search className="chat-find-icon size-4" aria-hidden="true" />
         <input
           ref={inputRef}
           type="text"

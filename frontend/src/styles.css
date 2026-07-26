@@ -3455,6 +3455,20 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-width: 0;
 }
 
+/* Only where the tile height is fixed: a thumbnail tile has room for exactly three
+   text rows there, so tag pills could only render as a clipped sliver of borders.
+   Tags are interactive filter buttons with a touch-target obligation, so they
+   can't join the corner overlay either — they stay on compact tiles (which have
+   slack), and in the table's name cell. The table has no tags column, so this
+   matches it. Mobile is deliberately excluded: below 721px the card is height:auto
+   and the table is downgraded to cards, so hiding tags there would make them
+   unreachable rather than merely tidy. */
+@media (min-width: 721px) {
+  .resource-browser-card[data-preview="true"] .resource-browser-resource-tags {
+    display: none;
+  }
+}
+
 .resource-browser-resource-tags > button,
 .resource-browser-resource-tags > span {
   display: inline-flex;
@@ -3748,6 +3762,36 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.05rem 0.42rem;
+}
+
+/* Single-slot status (duplicate / lifecycle / sharing) rides the preview's free
+   bottom-left corner instead of the meta stack. The meta track is a fixed
+   5.555rem that fits exactly three rows — name, type/size, date (79.7px of
+   79.7px + 9.2px slack) — while one chip row costs 26.6px, so any chip in that
+   flow could only be bought by crushing the primary lines. The other three
+   corners are taken: select top-left, quick-peek top-right, thumb-chip
+   bottom-right. */
+.resource-browser-status-overlay {
+  position: absolute;
+  bottom: 0.45rem;
+  left: 0.45rem;
+  z-index: 2;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.24rem;
+  min-width: 0;
+  max-width: calc(100% - 0.9rem);
+  overflow: hidden;
+}
+
+/* Overlaid on unpredictable thumbnail content — a black volume slice, a white
+   microscopy field — so unlike the in-flow chips it cannot be translucent: at the
+   92% wash the label measured 3.96:1 over a dark thumbnail in light theme, under
+   the 4.5:1 floor for 10.88px text. Opaque panel + primary ink instead, so the
+   contrast is the panel's own regardless of what is behind it. */
+.resource-browser-status-overlay > div > span {
+  background: var(--bg-panel-strong);
+  color: var(--text-main);
 }
 
 .resource-thumb-fallback {
@@ -4159,6 +4203,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-meta {
   display: grid;
   align-content: start;
+  /* Every row takes its own content height. Without this the implicit `auto`
+     rows shrink inside the card's fixed meta track: the name (min-height 2.5em)
+     and any chip (min-height 1.32rem) are effectively fixed, so grid stole the
+     leftover from the flexible text rows — the type/size and date lines were
+     squeezed to 7.7px against a 16px line box and clipped mid-glyph whenever a
+     chip was present. Content-sized rows keep the primary lines whole; if the
+     stack ever exceeds the track, overflow clips the trailing (least important)
+     row instead of mangling every line. */
+  grid-auto-rows: min-content;
   gap: 0.34rem;
   min-height: 0;
   overflow: hidden;
@@ -4173,6 +4226,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-name {
   margin: 0;
   min-height: 2.5em;
+  /* Filenames are unbreakable underscore tokens, so without this they overflow
+     the column horizontally with no ellipsis (measured 274px of text in a 213px
+     box at the 240px minimum column). The 2-line clamp still governs height, so
+     the meta budget is unchanged. */
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -4413,9 +4471,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 
   .resource-browser-header {
-    position: sticky;
-    top: 0;
-    z-index: 3;
+    /* Not pinned on mobile. This row used to be sticky, permanently spending
+       ~63px of a ~844px viewport and — being translucent — letting the list ghost
+       through it. The app nav bar now carries the persistent "Search resources"
+       action instead, so the row can simply scroll away and the whole viewport
+       below the nav bar belongs to the resources. */
+    position: static;
     margin: 0 -1px;
     /* Tighter than the desktop header: the leaked 1.25rem gap + tall padding
        wasted ~40px before the list. */
@@ -4649,6 +4710,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .resource-browser-card {
     height: auto;
     grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  /* The desktop grid uses `grid-auto-rows: 1fr` to keep the tile matrix uniform,
+     but `1fr` resolves as minmax(auto, 1fr): every row grows to the tallest row's
+     size. In one column that means each card inherits the height of the tallest
+     card on the page — a compact, thumbnail-less card that wants 92px was being
+     stretched to 315px of mostly empty panel. Content-sized rows put that space
+     back into the scroll area (measured ~2.7 -> ~5 cards per screen). */
+  .resource-browser-grid {
+    grid-auto-rows: min-content;
   }
 
   .resource-browser-preview {
@@ -11124,18 +11195,10 @@ details {
     padding: 0.65rem 0.95rem 0.15rem;
   }
 
-  .resource-browser-toolbar {
-    grid-template-columns: minmax(0, 1fr) 2.75rem 2.75rem;
-    gap: 0.45rem;
-  }
-
-  .resource-browser-search-field {
-    min-width: 0;
-  }
-
-  .resource-browser-filter-trigger {
-    padding-inline: 0;
-  }
+  /* The Resources toolbar rules that used to live here were duplicates of the
+     `max-width: 720px` block (which already covers every width this one does).
+     Being later in source order they silently won, so a future edit to the 720px
+     block would no-op below 640px. Deleted: 720px is the single source of truth. */
 
   .resource-browser-filter-sheet {
     gap: 0.9rem;

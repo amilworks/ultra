@@ -18,6 +18,8 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"io"
+	"io/fs"
+	"log/slog"
 	"math"
 	"mime"
 	"mime/multipart"
@@ -3306,9 +3308,20 @@ func (deps ServerDeps) handleDeleteThread(w http.ResponseWriter, r *http.Request
 		return
 	}
 	principal := deps.principalFromRequest(r, "")
-	if _, err := deps.Store.SoftDeleteThreadForUser(r.Context(), chi.URLParam(r, "thread_id"), principal.UserID, domain.Now()); err != nil {
+	// True erasure, not concealment. This used to soft delete, which removed no
+	// rows and left the whole transcript readable in metadata.frontend_state
+	// while the dialog told the user it had been removed from storage.
+	storageURIs, err := deps.Store.HardDeleteThreadForUser(r.Context(), chi.URLParam(r, "thread_id"), principal.UserID)
+	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	// Blobs are unlinked after the row deletion has committed, and failures are
+	// logged rather than surfaced: the conversation is already gone, and a
+	// blob-store hiccup must not tell the user their delete failed. Orphaned
+	// bytes are a storage-reclamation problem, not a correctness one.
+	if len(storageURIs) > 0 {
+		deps.deleteArtifactBlobs(r.Context(), storageURIs)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -11173,6 +11186,61 @@ func resolveArtifactDownloadPath(artifactRoot string, artifact domain.ArtifactRe
 }
 
 var errUnsafeArtifactPath = errors.New("artifact path escapes artifact root")
+
+// deleteArtifactBlobs unlinks the files behind a deleted conversation's
+// artifacts. The rows go with the cascade; the bytes have to be removed here or
+// a "permanent" delete leaves the user's figures on disk.
+//
+// Every path is re-validated against ArtifactRoot before a single unlink. These
+// URIs come out of the database, and a value that had ever been poisoned would
+// otherwise turn conversation deletion into an arbitrary-file-delete primitive;
+// pathIsUnderRoot is the same containment gate the download path uses. Non-file
+// URIs are skipped rather than guessed at — a future object-store backend needs
+// its own deliberate implementation, not a filepath heuristic.
+//
+// Best-effort by design, and called only after the row deletion has committed:
+// the conversation is already gone, so a failure here is reclaimable storage,
+// not a failed delete. Never surface it to the caller.
+func (deps ServerDeps) deleteArtifactBlobs(ctx context.Context, storageURIs []string) {
+	root := strings.TrimSpace(deps.ArtifactRoot)
+	if root == "" {
+		return
+	}
+	seen := make(map[string]struct{}, len(storageURIs))
+	removed, skipped, failed := 0, 0, 0
+	for _, uri := range storageURIs {
+		path := fileStoragePath(uri)
+		if path == "" {
+			skipped++
+			continue
+		}
+		resolved := filepath.Clean(path)
+		if !pathIsUnderRoot(root, resolved) {
+			// Outside the root we own: refuse, and say so — this is the shape a
+			// poisoned storage_uri would take.
+			slog.WarnContext(ctx, "refusing to unlink artifact outside artifact root",
+				"path", resolved, "artifact_root", root)
+			skipped++
+			continue
+		}
+		if _, dup := seen[resolved]; dup {
+			continue
+		}
+		seen[resolved] = struct{}{}
+		if err := os.Remove(resolved); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				failed++
+				slog.WarnContext(ctx, "artifact blob unlink failed", "path", resolved, "error", err)
+			}
+			continue
+		}
+		removed++
+	}
+	if removed > 0 || failed > 0 || skipped > 0 {
+		slog.InfoContext(ctx, "artifact blobs cleaned after conversation delete",
+			"removed", removed, "skipped", skipped, "failed", failed)
+	}
+}
 
 func fileStoragePath(storageURI string) string {
 	raw := strings.TrimSpace(storageURI)

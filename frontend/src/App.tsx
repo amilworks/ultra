@@ -598,6 +598,10 @@ type ConversationState = {
   historyPreview: string;
   historyMessageCount: number;
   historyRunning: boolean;
+  /* Runs the user deliberately removed. Persisted with the snapshot so hydration
+     stops rebuilding a deleted turn from control_runs.response_text — see
+     readDeletedRunIds in lib/api.ts for why the absence alone is not enough. */
+  deletedRunIds: string[];
   prompt: string;
   messages: UiMessage[];
   pendingFiles: File[];
@@ -1147,6 +1151,7 @@ const createConversationState = (): ConversationState => {
     historyPreview: "",
     historyMessageCount: 0,
     historyRunning: false,
+    deletedRunIds: [],
     prompt: "",
     messages: [],
     pendingFiles: [],
@@ -1530,6 +1535,13 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
       state.streamingMessageId.trim()
         ? state.streamingMessageId
         : null,
+    /* Read the tombstones back, or the delete un-sticks on the load AFTER the
+       one that persisted them. Read unconditionally rather than behind
+       `hydrated`: an unhydrated record still gets reconciled, which is exactly
+       when the push-back fires. */
+    deletedRunIds: Array.isArray(state.deletedRunIds)
+      ? state.deletedRunIds.filter((id): id is string => typeof id === "string" && Boolean(id))
+      : [],
   };
 };
 
@@ -1628,6 +1640,7 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
       sending: Boolean(conversation.sending),
       chatError: conversation.chatError,
       streamingMessageId: conversation.streamingMessageId,
+      deletedRunIds: conversation.deletedRunIds ?? [],
     },
   };
 };
@@ -10290,11 +10303,27 @@ export function App() {
         const streamingRemoved =
           Boolean(activeStreamingId) &&
           !nextMessages.some((item) => item.id === activeStreamingId);
+        /* Tombstone the runs that just went away. Without this, hydration sees
+           no assistant message tagged with thread.latest_run_id, decides the
+           snapshot is stale, and pushes the deleted answer back from
+           control_runs.response_text — so the delete silently undoes itself on
+           the next page load. Diffed against nextMessages rather than assumed,
+           so only runs actually removed are recorded. */
+        const survivingRunIds = new Set(
+          nextMessages.map((item) => item.runId).filter(Boolean) as string[]
+        );
+        const removedRunIds = conversation.messages
+          .map((item) => item.runId)
+          .filter((runId): runId is string => typeof runId === "string" && runId.length > 0)
+          .filter((runId) => !survivingRunIds.has(runId));
         return {
           ...conversation,
           updatedAt: Date.now(),
           messages: nextMessages,
           streamingMessageId: streamingRemoved ? null : activeStreamingId,
+          deletedRunIds: removedRunIds.length
+            ? [...new Set([...(conversation.deletedRunIds ?? []), ...removedRunIds])].slice(-200)
+            : conversation.deletedRunIds ?? [],
         };
       });
     },
@@ -10313,6 +10342,7 @@ export function App() {
     }
     const conversationId = conversation.id;
     const previousMessages = conversation.messages;
+    const previousDeletedRunIds = conversation.deletedRunIds ?? [];
     handleDeleteUserMessage(pending.messageId);
     showUndoToast(
       pending.repliesRemoved > 0 ? "Message and its reply deleted" : "Message deleted",
@@ -10321,6 +10351,9 @@ export function App() {
           ...current,
           updatedAt: Date.now(),
           messages: previousMessages,
+          // Restoring the messages must also lift their tombstones, or those run
+          // ids stay permanently excluded from reconciliation.
+          deletedRunIds: previousDeletedRunIds,
         }));
       }
     );
@@ -10349,6 +10382,7 @@ export function App() {
       }
       const conversationId = conversation.id;
       const previousMessages = conversation.messages;
+      const previousDeletedRunIds = conversation.deletedRunIds ?? [];
       const previousDraft = conversation.prompt;
       handleDeleteUserMessage(messageId);
       setActivePromptValue(content);
@@ -10358,6 +10392,7 @@ export function App() {
           ...current,
           updatedAt: Date.now(),
           messages: previousMessages,
+          deletedRunIds: previousDeletedRunIds,
         }));
         setActivePromptValue(previousDraft);
       });
@@ -12721,14 +12756,15 @@ export function App() {
                 <Trash className="size-7" />
               </AlertDialogMedia>
               <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
-              {/* This used to promise "remove its messages from storage". The
-                  backend runs `UPDATE control_threads SET status='deleted'` —
-                  not one row is removed, and the transcript stays in
-                  metadata.frontend_state. Never ship a deletion promise the
-                  storage layer does not keep. Restore the stronger wording in
-                  the same change that lands the hard delete, not before. */}
+              {/* The strong wording is back, and now it is true: the handler
+                  hard-deletes the thread row, the schema cascades take the
+                  messages, runs, events and artifacts with it, and the artifact
+                  blobs are unlinked afterwards. Between the audit and that
+                  change this read "removed from your history", because the
+                  backend was only flipping a status column. If deletion ever
+                  softens again, soften this sentence in the same commit. */}
               <AlertDialogDescription>
-                {`Delete "${pendingConversationDelete?.title ?? "this conversation"}"? It will be removed from your history.`}
+                {`Permanently delete "${pendingConversationDelete?.title ?? "this conversation"}"? Its messages, results, and files it produced are erased. This cannot be undone.`}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

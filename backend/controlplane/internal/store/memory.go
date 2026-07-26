@@ -830,6 +830,56 @@ func (s *MemoryStore) UpdateThreadForUser(ctx context.Context, input domain.Upda
 	return thread, nil
 }
 
+// HardDeleteThreadForUser mirrors the Postgres hard delete for the in-memory
+// store. Postgres gets its cascade from the schema; here every derived map has
+// to be swept by hand, which is exactly why this is worth a test — a map missed
+// here is an orphan that the Postgres path would never produce.
+//
+// Returns the artifact storage URIs so the caller can unlink the blobs, same
+// contract as the Postgres implementation.
+func (s *MemoryStore) HardDeleteThreadForUser(ctx context.Context, threadID string, userID string) ([]string, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	thread, ok := s.threads[threadID]
+	if !ok || thread.UserID != userID {
+		return nil, ErrNotFound
+	}
+
+	runIDs := make(map[string]struct{})
+	for runID, run := range s.runs {
+		if run.ThreadID == threadID {
+			runIDs[runID] = struct{}{}
+		}
+	}
+
+	storageURIs := make([]string, 0, 4)
+	for artifactID, artifact := range s.artifacts {
+		_, viaRun := runIDs[artifact.RunID]
+		if artifact.ThreadID != threadID && !viaRun {
+			continue
+		}
+		if uri := strings.TrimSpace(artifact.StorageURI); uri != "" {
+			storageURIs = append(storageURIs, uri)
+		}
+		delete(s.artifacts, artifactID)
+	}
+
+	for runID := range runIDs {
+		delete(s.runs, runID)
+		delete(s.events, runID)
+		delete(s.leases, runID)
+		delete(s.runTokenUsage, runID)
+		delete(s.runTokenUsageFinalized, runID)
+	}
+	delete(s.messages, threadID)
+	delete(s.threads, threadID)
+
+	// Uploaded files are deliberately untouched: control_resources has no thread
+	// FK and deleting a conversation must not delete the user's data.
+	return storageURIs, nil
+}
+
 func (s *MemoryStore) SoftDeleteThreadForUser(ctx context.Context, threadID string, userID string, deletedAt time.Time) (domain.ThreadRecord, error) {
 	_ = ctx
 	s.mu.Lock()

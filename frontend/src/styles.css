@@ -10545,7 +10545,9 @@ details {
 .chat-queued-followup-bubble {
   max-width: 88%;
   border: 1px solid var(--line);
-  border-radius: calc(var(--radius) + 0.35rem);
+  /* The user bubble's radius, so dispatch reads as the SAME object being
+     promoted into the record rather than morphing into a different one. */
+  border-radius: 1.5rem;
   /* A visible SURFACE, not a wash: panel-strong is white in light theme, where
      a transparent mix rendered the bubble nearly invisible (caught in a live
      screenshot). The reduced presence lives in the TEXT opacity instead. */
@@ -10566,7 +10568,10 @@ details {
   margin-bottom: 2px;
   font-size: 0.72rem;
   letter-spacing: 0.01em;
-  color: var(--text-muted);
+  /* Deepened past --text-muted: on this ink-mixed surface plain muted measured
+     3.94:1 in light theme — under WCAG AA for text this small. This mix lands
+     ~5.1:1 light and only improves dark. */
+  color: color-mix(in oklab, var(--text-muted) 72%, var(--text-main) 28%);
 }
 
 .chat-queued-followup-eyebrow .chat-message-action {

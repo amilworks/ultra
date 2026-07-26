@@ -76,7 +76,7 @@ describe("huge paste becomes an attachment", () => {
 
 describe("ArrowUp recalls the last prompt", () => {
   const branch = () =>
-    blockFrom("// ArrowUp in an EMPTY composer recalls the last prompt", "return;");
+    blockFrom("// ArrowUp in an EMPTY composer recalls the last prompt", "setActivePromptValue(lastPrompt);");
 
   it("fires only in a genuinely empty composer", () => {
     // Any drafted text means the user is cursoring, not recalling.

@@ -1608,8 +1608,10 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     deletedRunIds: Array.isArray(state.deletedRunIds)
       ? state.deletedRunIds.filter((id): id is string => typeof id === "string" && Boolean(id))
       : [],
-    /* Survives reload mid-run; if the run finished while the tab was away, the
-       dispatch effect honours the queue's promise on the next load. */
+    /* Survives reload mid-run. If the run finished while the tab was away,
+       the queued text returns to the DRAFT on load rather than auto-sending —
+       a reload cannot witness the completion, and hydrated state can disguise
+       a failed (or still-active) run as a clean one. */
     queuedFollowup: typeof state.queuedFollowup === "string" ? state.queuedFollowup : "",
   };
 };
@@ -11900,6 +11902,22 @@ export function App() {
     void handleSubmitRef.current(pending.prompt);
   }, [activeConversation]);
 
+  /* Conversations whose RUNNING state this session has witnessed. The
+     auto-dispatch arm requires this: a reload can hydrate a failed or even
+     still-active run as "settled and clean" (reconciliation rebuilds messages
+     without status markers, and a transiently failed run fetch reads as
+     inactive), so firing on hydrated state alone could spend a run into a
+     broken context — or double-text into a live one. Unarmed conversations
+     fall back to the draft-return arm: the text survives, and the user's own
+     Enter is the consent. */
+  const dispatchArmedConversationsRef = useRef<Set<string>>(new Set());
+  const dispatchInFlightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (activeConversation?.sending && activeConversation.id) {
+      dispatchArmedConversationsRef.current.add(activeConversation.id);
+    }
+  }, [activeConversation?.id, activeConversation?.sending]);
+
   /* Queue the current draft as a follow-up to the RUNNING turn. Repeated sends
      grow the one queued message (blank-line separated) rather than stacking a
      list — a queue of N messages would auto-fire N sequential agentic runs on
@@ -11907,7 +11925,8 @@ export function App() {
   const queueFollowup = useCallback((): void => {
     const conversation = activeConversation;
     const text = activePrompt.trim();
-    if (!conversation || !text) {
+    // The send path refuses these; queueing must not smuggle them past it.
+    if (!conversation || !text || slashMenuOpen || composerResourcePickerOpen) {
       return;
     }
     updateConversation(conversation.id, (current) => ({
@@ -11957,6 +11976,19 @@ export function App() {
     if (!queued || conversation.sending || conversation.streamingMessageId) {
       return;
     }
+    /* DEFER — do not clear — while any state that would make handleSubmit
+       refuse is up. Clearing first and letting handleSubmit silently decline
+       destroyed the queued text (review-confirmed: a "/"-prefixed draft
+       hydrating alongside a queue was enough). These states all re-render on
+       change, so the effect re-evaluates when they clear. */
+    if (slashMenuOpen || composerResourcePickerOpen || conversation.selectionImportPending) {
+      return;
+    }
+    if (dispatchInFlightRef.current.has(conversation.id)) {
+      // StrictMode double-invokes effects against the same state snapshot;
+      // clear-before-submit alone cannot see that.
+      return;
+    }
     const lastMessage = conversation.messages[conversation.messages.length - 1];
     const settled =
       lastMessage?.role === "assistant" || Boolean(conversation.chatError);
@@ -11967,19 +11999,32 @@ export function App() {
       !conversation.chatError &&
       lastMessage?.role === "assistant" &&
       lastMessage.status !== "stopped" &&
-      lastMessage.status !== "failed";
+      lastMessage.status !== "failed" &&
+      // Only a completion this session actually WITNESSED may spend a run.
+      dispatchArmedConversationsRef.current.has(conversation.id);
+    dispatchInFlightRef.current.add(conversation.id);
     updateConversation(conversation.id, (current) => ({
       ...current,
       queuedFollowup: "",
     }));
     if (cleanCompletion) {
-      void handleSubmitRef.current(queued);
+      dispatchArmedConversationsRef.current.delete(conversation.id);
+      void handleSubmitRef.current(queued).finally(() => {
+        dispatchInFlightRef.current.delete(conversation.id);
+      });
     } else {
+      dispatchInFlightRef.current.delete(conversation.id);
       setActivePromptValue((previous) =>
         previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${queued}` : queued
       );
     }
-  }, [activeConversation, setActivePromptValue, updateConversation]);
+  }, [
+    activeConversation,
+    composerResourcePickerOpen,
+    setActivePromptValue,
+    slashMenuOpen,
+    updateConversation,
+  ]);
 
   const historyItems: HistoryItem[] = useMemo(() => {
     return [...conversations]
@@ -12864,7 +12909,14 @@ export function App() {
                 allowDirectories
               >
                 <PromptInput
-                  isLoading={activeSending || !activeConversationHydrated}
+                  /* Hydration is the ONLY thing that disables typing. Folding
+                     activeSending in here disabled the textarea for the whole
+                     run — which made mid-run follow-ups unreachable for real
+                     keyboards (review-confirmed live: disabled=true, focus() a
+                     no-op; only script-dispatched events ever "worked").
+                     Mid-run SUBMISSION stays blocked elsewhere: Stop replaces
+                     the submit button, and handleSubmit guards sending. */
+                  isLoading={!activeConversationHydrated}
                   value={activePrompt}
                   onValueChange={(value) => setActivePromptValue(value)}
                   onSubmit={() => {
@@ -13019,6 +13071,14 @@ export function App() {
                           !composerResourcePickerOpen &&
                           !activePrompt.trim()
                         ) {
+                          // A pending queue outranks history: recalling the
+                          // OLDER sent message while a queue exists invites
+                          // queueing a duplicate. ArrowUp un-queues instead.
+                          if (activeConversation?.queuedFollowup) {
+                            event.preventDefault();
+                            cancelQueuedFollowup();
+                            return;
+                          }
                           let lastPrompt = "";
                           for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
                             if (activeMessages[index].role === "user") {
@@ -13409,13 +13469,13 @@ export function App() {
                           <>
                             {/* Queue sits LEFT of Stop; Stop never moves (the
                                 send-position jump was a bug once already). */}
-                            {activePrompt.trim() ? (
+                            {activePrompt.trim() && !slashMenuOpen && !composerResourcePickerOpen ? (
                               <PromptInputAction
                                 tooltip="Queue for after this run"
                                 side="top"
                                 sideOffset={8}
                                 delayDuration={350}
-                                className="app-composer-submit-tooltip"
+                                className="app-composer-tooltip"
                               >
                                 <Button
                                   size="icon"

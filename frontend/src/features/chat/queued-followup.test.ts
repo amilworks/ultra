@@ -41,6 +41,16 @@ describe("queueing", () => {
     expect(queue).toMatch(/current\.queuedFollowup\s*\?\s*`\$\{current\.queuedFollowup\}\\n\\n\$\{text\}`/);
   });
 
+  it("honours the slash-menu and picker contracts the send path enforces", () => {
+    const queue = blockFrom("const queueFollowup = useCallback", "setActivePromptValue(\"\");");
+    expect(queue).toMatch(/slashMenuOpen \|\| composerResourcePickerOpen/);
+    expect(appSource).toMatch(/activePrompt\.trim\(\) && !slashMenuOpen && !composerResourcePickerOpen \? \(/);
+  });
+
+  it("ArrowUp with a pending queue un-queues instead of recalling history", () => {
+    expect(appSource).toMatch(/if \(activeConversation\?\.queuedFollowup\) \{\s*event\.preventDefault\(\);\s*cancelQueuedFollowup\(\);/);
+  });
+
   it("offers a visible queue button beside Stop, with Stop anchored in place", () => {
     const running = blockFrom("{activeSending ? (", 'aria-label="Stop response"');
     expect(running).toMatch(/aria-label="Queue follow-up"/);
@@ -53,9 +63,19 @@ describe("queueing", () => {
   });
 });
 
+describe("the composer is typable during a run — the whole point", () => {
+  it("does not fold activeSending into the textarea's disabled state", () => {
+    // Review-critical: isLoading={activeSending || ...} disabled the textarea
+    // for the entire run, making mid-run follow-ups unreachable for real
+    // keyboards. Only script-dispatched events ever reached it.
+    expect(appSource).toMatch(/isLoading=\{!activeConversationHydrated\}/);
+    expect(appSource).not.toMatch(/isLoading=\{activeSending/);
+  });
+});
+
 describe("dispatch — when spending a run is allowed", () => {
   const dispatch = () =>
-    blockFrom("/* Dispatch: the enqueue contract.", "}, [activeConversation, setActivePromptValue, updateConversation]);");
+    blockFrom("/* Dispatch: the enqueue contract.", "slashMenuOpen,\n    updateConversation,\n  ]);");
 
   it("fires only when the conversation has fully settled", () => {
     const effect = dispatch();
@@ -71,6 +91,28 @@ describe("dispatch — when spending a run is allowed", () => {
     expect(effect).toMatch(/lastMessage\.status !== "failed"/);
     expect(effect).toMatch(/!conversation\.chatError/);
     expect(effect).toMatch(/setActivePromptValue\(\(previous\) =>/);
+  });
+
+  it("only a completion witnessed THIS SESSION may auto-spend a run", () => {
+    // A reload can hydrate a failed — or transiently even a still-active — run
+    // as settled-and-clean; unarmed conversations take the draft-return arm.
+    const effect = dispatch();
+    expect(effect).toMatch(/dispatchArmedConversationsRef\.current\.has\(conversation\.id\)/);
+    expect(appSource).toMatch(/dispatchArmedConversationsRef\.current\.add\(activeConversation\.id\)/);
+  });
+
+  it("defers — without clearing — while the send path would refuse", () => {
+    // Clearing first and letting handleSubmit silently decline destroyed the
+    // queued text (a "/"-prefixed draft hydrating alongside a queue sufficed).
+    const effect = dispatch();
+    const defer = effect.indexOf("slashMenuOpen || composerResourcePickerOpen || conversation.selectionImportPending");
+    const clear = effect.indexOf('queuedFollowup: "",');
+    expect(defer).toBeGreaterThan(-1);
+    expect(defer).toBeLessThan(clear);
+  });
+
+  it("is StrictMode-safe via an in-flight guard, not just clear-before-submit", () => {
+    expect(dispatch()).toMatch(/dispatchInFlightRef\.current\.has\(conversation\.id\)/);
   });
 
   it("clears the queue BEFORE submitting so a double-fire is impossible", () => {
@@ -111,6 +153,12 @@ describe("the queued bubble", () => {
     const anchor = appSource.indexOf("<ChatContainerScrollAnchor />");
     expect(wrapper).toBeGreaterThan(transcript);
     expect(wrapper).toBeLessThan(anchor);
+  });
+
+  it("uses the non-submit tooltip class and a WCAG-passing eyebrow", () => {
+    const running = blockFrom("{activeSending ? (", 'aria-label="Stop response"');
+    expect(running).toContain('className="app-composer-tooltip"');
+    expect(styles).toMatch(/\.chat-queued-followup-eyebrow \{[^}]*color: color-mix\(in oklab, var\(--text-muted\) 72%, var\(--text-main\) 28%\)/s);
   });
 
   it("dresses at reduced presence with the brand motion and its opt-out", () => {

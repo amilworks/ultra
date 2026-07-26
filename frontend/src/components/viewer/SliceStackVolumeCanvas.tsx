@@ -9,15 +9,19 @@ import {
   MAX_ACTIVE_SCALAR_VOLUME_GPU_BYTES,
   MAX_PREPARED_SCALAR_VOLUME_CACHE_BYTES,
   PreparedScalarVolumeResidencyManager,
+  SCALAR_MASK_NATIVE_POLICY,
   prepareScalarVolume,
   preparedScalarVolumeByteLength,
   resolveScalarVolumeWindow,
   type PreparedScalarVolume,
   type PreparedScalarVolumeLease,
   type PreparedScalarVolumeReservation,
+  type ScalarVolumePreparationEncoding,
   scalarVolumeApiNamespace,
   scalarVolumeIdentityKey,
   scalarVolumeSourceIdentity,
+  validateExactMaskSourcePreflight,
+  validateExactMaskVolume,
   validateScalarVolumeIdentity,
 } from "./scalarVolume";
 import { getPlaneDescriptor } from "./shared";
@@ -43,6 +47,7 @@ import {
   type VolumeViewPreset,
 } from "./volumeViewPreset";
 import { resolveVolumeOrientationCue } from "./volumeOrientation";
+import type { ResolvedScalarRendering } from "./scalarMask";
 
 export {
   scalarVolumePayloadToTextureBytes,
@@ -132,6 +137,7 @@ type SliceStackVolumeCanvasProps = {
   volumeCutaway?: boolean;
   featureMask?: boolean;
   cameraPersistenceKey?: string;
+  resolvedScalarRendering?: ResolvedScalarRendering | null;
 };
 
 export type CategoricalVolumeMode = "surface" | "xray";
@@ -229,6 +235,19 @@ const applyMultichannelChannelUniforms = (
 
 export const MAX_STEPS = 512;
 export const MAX_CATEGORICAL_SURFACE_STEPS = 768;
+// Shared with imaging/atlas.py. A native Mask volume is admitted only when its
+// worst-case X+Y+Z DDA crossings fit this compile-time shader bound.
+export const MAX_MASK_SURFACE_STEPS = 2048;
+
+export const resolveVolumePixelRatio = (
+  devicePixelRatio: number,
+  maskMode: boolean
+): number => {
+  const safeRatio = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0
+    ? devicePixelRatio
+    : 1;
+  return Math.min(safeRatio, maskMode ? 1 : 2);
+};
 export const CATEGORICAL_SURFACE_TIE_EPSILON = 1e-7;
 const MIN_INTERACTIVE_STEPS = 32;
 const SAMPLE_RAMP_FACTOR = 1.5;
@@ -261,6 +280,12 @@ export const resolveStrictVolumeIndex = (
   }
   return value;
 };
+
+export const classifyMaskDdaAxisStep = (
+  direction: number,
+  epsilon = 0.0000001
+): -1 | 0 | 1 =>
+  Math.abs(direction) <= epsilon ? 0 : direction < 0 ? -1 : 1;
 
 export const validateVolumeTextureGrid = (grid: VolumeGrid, max3DTextureSize: number): void => {
   const dimensions = [grid.width, grid.height, grid.depth];
@@ -576,16 +601,18 @@ export function shouldShowVolumeSliceCursorPlanes({
   cueVisible,
   interiorInspectionActive,
   cutawayActive = false,
+  maskMode = false,
 }: {
   cueVisible: boolean;
   interiorInspectionActive: boolean;
   cutawayActive?: boolean;
+  maskMode?: boolean;
 }): boolean {
   // Hide the flat translucent X/Y/Z cursor quads whenever the view is focused on
   // the interior — both the legacy fly-inside and the Z-cursor cutaway. In
   // cutaway the crisp opaque cut face IS the inspection surface, so the cursor
   // planes only tint/occlude it (the user sees red/green washes over the slice).
-  return cueVisible && !interiorInspectionActive && !cutawayActive;
+  return cueVisible && !interiorInspectionActive && !cutawayActive && !maskMode;
 }
 
 export function shouldShowVolumeContextEdges({
@@ -714,6 +741,186 @@ const VERTEX_SHADER = `
     gl_Position = projectionMatrix * modelViewMatrix * position4;
   }
 `;
+
+const MASK_VERTEX_SHADER = `
+  out vec3 vPosition;
+
+  void main() {
+    vec4 position4 = vec4(position, 1.0);
+    vPosition = position;
+    gl_Position = projectionMatrix * modelViewMatrix * position4;
+  }
+`;
+
+const createMaskFragmentShader = (samplerType: "usampler3D" | "isampler3D") => `
+  precision highp float;
+  precision highp int;
+  precision highp ${samplerType};
+
+  uniform ${samplerType} uData;
+  uniform int uMaskThreshold;
+  uniform vec3 uGridSize;
+  uniform vec3 uVoxelSpacing;
+  uniform vec3 uClipMin;
+  uniform vec3 uClipMax;
+  uniform vec3 uCameraPositionLocal;
+  uniform vec3 uCameraDirectionLocal;
+  uniform bool uOrthographicCamera;
+
+  in vec3 vPosition;
+  out vec4 outColor;
+
+  bool intersectBox(
+    vec3 rayOrigin,
+    vec3 rayDir,
+    vec3 boxMin,
+    vec3 boxMax,
+    out float tNear,
+    out float tFar
+  ) {
+    vec3 invDir = 1.0 / rayDir;
+    vec3 t0 = (boxMin - rayOrigin) * invDir;
+    vec3 t1 = (boxMax - rayOrigin) * invDir;
+    vec3 tsmaller = min(t0, t1);
+    vec3 tbigger = max(t0, t1);
+    tNear = max(max(tsmaller.x, tsmaller.y), tsmaller.z);
+    tFar = min(min(tbigger.x, tbigger.y), tbigger.z);
+    return tFar > max(tNear, 0.0);
+  }
+
+  bool occupied(ivec3 cell) {
+    ivec3 gridLimit = ivec3(uGridSize);
+    if (
+      cell.x < 0 || cell.y < 0 || cell.z < 0 ||
+      cell.x >= gridLimit.x || cell.y >= gridLimit.y || cell.z >= gridLimit.z
+    ) {
+      return false;
+    }
+    vec3 texelCenter = (vec3(cell) + vec3(0.5)) / uGridSize;
+    return int(texture(uData, texelCenter).r) > uMaskThreshold;
+  }
+
+  vec3 maskSurfaceColor(ivec3 cell, vec3 entryNormal, vec3 rayDir) {
+    vec3 occupancyGradient = vec3(
+      float(occupied(cell - ivec3(1, 0, 0))) - float(occupied(cell + ivec3(1, 0, 0))),
+      float(occupied(cell - ivec3(0, 1, 0))) - float(occupied(cell + ivec3(0, 1, 0))),
+      float(occupied(cell - ivec3(0, 0, 1))) - float(occupied(cell + ivec3(0, 0, 1)))
+    ) / max(uVoxelSpacing, vec3(0.000001));
+    vec3 normal = length(occupancyGradient) > 0.000001
+      ? normalize(occupancyGradient)
+      : normalize(entryNormal);
+    if (length(normal) < 0.000001) {
+      normal = -normalize(rayDir);
+    }
+    vec3 lightDirection = normalize(vec3(-0.42, 0.58, 0.70));
+    vec3 viewDirection = -normalize(rayDir);
+    float diffuse = max(0.0, dot(normal, lightDirection));
+    float facing = max(0.0, dot(normal, viewDirection));
+    float shade = clamp(0.62 + 0.30 * diffuse + 0.08 * facing, 0.58, 1.0);
+    return vec3(0.90, 0.94, 1.0) * shade;
+  }
+
+  void main() {
+    vec3 rayDir = uOrthographicCamera
+      ? normalize(uCameraDirectionLocal)
+      : normalize(vPosition - uCameraPositionLocal);
+    vec3 rayOrigin = uOrthographicCamera
+      ? vPosition - rayDir * 2.0
+      : uCameraPositionLocal;
+    vec3 boxMin = uClipMin - vec3(0.5);
+    vec3 boxMax = uClipMax - vec3(0.5);
+    float tNear = 0.0;
+    float tFar = 0.0;
+    if (!intersectBox(rayOrigin, rayDir, boxMin, boxMax, tNear, tFar)) {
+      discard;
+    }
+
+    vec3 front = rayOrigin + rayDir * max(tNear, 0.0);
+    vec3 back = rayOrigin + rayDir * tFar;
+    vec3 gridOrigin = clamp(
+      (front + vec3(0.5)) * uGridSize,
+      vec3(0.0),
+      uGridSize - vec3(0.0001)
+    );
+    vec3 gridDirection = rayDir * uGridSize;
+    ivec3 cell = ivec3(floor(gridOrigin));
+    ivec3 gridLimit = ivec3(uGridSize);
+    ivec3 cellStep = ivec3(
+      abs(gridDirection.x) <= 0.0000001 ? 0 : (gridDirection.x < 0.0 ? -1 : 1),
+      abs(gridDirection.y) <= 0.0000001 ? 0 : (gridDirection.y < 0.0 ? -1 : 1),
+      abs(gridDirection.z) <= 0.0000001 ? 0 : (gridDirection.z < 0.0 ? -1 : 1)
+    );
+    vec3 safeDirection = vec3(
+      cellStep.x == 0 ? 1.0 : gridDirection.x,
+      cellStep.y == 0 ? 1.0 : gridDirection.y,
+      cellStep.z == 0 ? 1.0 : gridDirection.z
+    );
+    vec3 nextBoundary = vec3(
+      cellStep.x > 0 ? cell.x + 1 : cell.x,
+      cellStep.y > 0 ? cell.y + 1 : cell.y,
+      cellStep.z > 0 ? cell.z + 1 : cell.z
+    );
+    vec3 tMax = (nextBoundary - gridOrigin) / safeDirection;
+    vec3 tDelta = abs(vec3(1.0) / safeDirection);
+    if (cellStep.x == 0) {
+      tMax.x = 1e30;
+      tDelta.x = 1e30;
+    }
+    if (cellStep.y == 0) {
+      tMax.y = 1e30;
+      tDelta.y = 1e30;
+    }
+    if (cellStep.z == 0) {
+      tMax.z = 1e30;
+      tDelta.z = 1e30;
+    }
+
+    vec3 entryDistance = min(abs(front - boxMin), abs(front - boxMax));
+    vec3 entryNormal =
+      entryDistance.x <= entryDistance.y && entryDistance.x <= entryDistance.z
+        ? vec3(rayDir.x > 0.0 ? -1.0 : 1.0, 0.0, 0.0)
+        : entryDistance.y <= entryDistance.z
+          ? vec3(0.0, rayDir.y > 0.0 ? -1.0 : 1.0, 0.0)
+          : vec3(0.0, 0.0, rayDir.z > 0.0 ? -1.0 : 1.0);
+
+    for (int iter = 0; iter < ${MAX_MASK_SURFACE_STEPS}; iter++) {
+      if (
+        cell.x < 0 || cell.y < 0 || cell.z < 0 ||
+        cell.x >= gridLimit.x || cell.y >= gridLimit.y || cell.z >= gridLimit.z
+      ) {
+        break;
+      }
+      if (occupied(cell)) {
+        outColor = vec4(maskSurfaceColor(cell, entryNormal, rayDir), 1.0);
+        return;
+      }
+      float nextT = min(tMax.x, min(tMax.y, tMax.z));
+      if (nextT > distance(front, back) + 0.000001) {
+        break;
+      }
+      entryNormal = vec3(0.0);
+      if (tMax.x <= nextT + 0.0000001) {
+        cell.x += cellStep.x;
+        tMax.x += tDelta.x;
+        entryNormal.x = -float(cellStep.x);
+      }
+      if (tMax.y <= nextT + 0.0000001) {
+        cell.y += cellStep.y;
+        tMax.y += tDelta.y;
+        entryNormal.y = -float(cellStep.y);
+      }
+      if (tMax.z <= nextT + 0.0000001) {
+        cell.z += cellStep.z;
+        tMax.z += tDelta.z;
+        entryNormal.z = -float(cellStep.z);
+      }
+    }
+    discard;
+  }
+`;
+
+const UNSIGNED_MASK_FRAGMENT_SHADER = createMaskFragmentShader("usampler3D");
+const SIGNED_MASK_FRAGMENT_SHADER = createMaskFragmentShader("isampler3D");
 
 const ATLAS_FRAGMENT_SHADER = `
   precision highp float;
@@ -1530,6 +1737,12 @@ const preparedScalarToVolumeTexture = (
   prepared: PreparedScalarVolume,
   texturePolicy: "linear" | "nearest"
 ): THREE.Data3DTexture => {
+  if (
+    prepared.textureEncoding !== "normalized-half" &&
+    prepared.textureEncoding !== "raw-float"
+  ) {
+    throw new RangeError("Integer Mask data requires the dedicated integer texture path.");
+  }
   const texture = new THREE.Data3DTexture(
     prepared.textureData,
     prepared.width,
@@ -1537,11 +1750,56 @@ const preparedScalarToVolumeTexture = (
     prepared.depth
   );
   texture.format = THREE.RedFormat;
-  texture.type = THREE.HalfFloatType;
-  texture.unpackAlignment = 2;
+  texture.type =
+    prepared.textureEncoding === "raw-float"
+      ? THREE.FloatType
+      : THREE.HalfFloatType;
+  texture.unpackAlignment =
+    prepared.textureEncoding === "raw-float"
+      ? Float32Array.BYTES_PER_ELEMENT
+      : Uint16Array.BYTES_PER_ELEMENT;
   texture.generateMipmaps = false;
   texture.minFilter = texturePolicy === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
   texture.magFilter = texturePolicy === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
+  texture.needsUpdate = true;
+  return texture;
+};
+
+const preparedMaskToIntegerTexture = (
+  prepared: PreparedScalarVolume
+): THREE.Data3DTexture => {
+  const texture = new THREE.Data3DTexture(
+    prepared.textureData,
+    prepared.width,
+    prepared.height,
+    prepared.depth
+  );
+  texture.format = THREE.RedIntegerFormat;
+  if (
+    prepared.textureEncoding === "raw-uint8" &&
+    prepared.textureData instanceof Uint8Array
+  ) {
+    texture.type = THREE.UnsignedByteType;
+    texture.internalFormat = "R8UI";
+  } else if (
+    prepared.textureEncoding === "raw-uint16" &&
+    prepared.textureData instanceof Uint16Array
+  ) {
+    texture.type = THREE.UnsignedShortType;
+    texture.internalFormat = "R16UI";
+  } else if (
+    prepared.textureEncoding === "raw-int16" &&
+    prepared.textureData instanceof Int16Array
+  ) {
+    texture.type = THREE.ShortType;
+    texture.internalFormat = "R16I";
+  } else {
+    throw new RangeError("Prepared Mask texture dtype does not match its integer encoding.");
+  }
+  texture.unpackAlignment = 1;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.NearestFilter;
+  texture.magFilter = THREE.NearestFilter;
   texture.needsUpdate = true;
   return texture;
 };
@@ -1775,10 +2033,12 @@ export function SliceStackVolumeCanvas({
   volumeCutaway,
   featureMask = false,
   cameraPersistenceKey,
+  resolvedScalarRendering,
 }: SliceStackVolumeCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   const requestInteractiveRenderRef = useRef<(() => void) | null>(null);
+  const requestRenderRef = useRef<(() => void) | null>(null);
   const scalarUniformsRef = useRef<{
     uWindowLow: { value: number };
     uWindowHigh: { value: number };
@@ -1789,6 +2049,7 @@ export function SliceStackVolumeCanvas({
     uLightingEnabled: { value: boolean };
     uLightingStrength: { value: number };
   } | null>(null);
+  const maskThresholdUniformRef = useRef<{ value: number } | null>(null);
   const clipUniformsRef = useRef<{
     uClipMin: { value: THREE.Vector3 };
     uClipMax: { value: THREE.Vector3 };
@@ -1804,6 +2065,7 @@ export function SliceStackVolumeCanvas({
     lightingEnabled: false,
     lightingStrength: 0.65,
   });
+  const scalarMaskConfigRef = useRef({ enabled: false, rawThreshold: 0 });
   const sliceCursorCueRef = useRef<VolumeSliceCursorCue | null>(null);
   const cameraRigRef = useRef<{
     camera: VolumeCamera;
@@ -1881,9 +2143,6 @@ export function SliceStackVolumeCanvas({
   );
 
   const displayChannels = displayState?.channels;
-  const explicitVolumeChannel = displayState?.volume_channel;
-  const viewerSelectedChannel = viewerInfo?.selected_indices.C;
-  const viewerSelectedTime = viewerInfo?.selected_indices.T;
   const volumeSelection = useMemo(() => {
     try {
       if (!Number.isSafeInteger(axisSizes.C) || axisSizes.C <= 0) {
@@ -1892,37 +2151,43 @@ export function SliceStackVolumeCanvas({
       if (!Number.isSafeInteger(axisSizes.T) || axisSizes.T <= 0) {
         throw new RangeError("Manifest time count must be a positive safe integer.");
       }
+      if (
+        resolvedScalarRendering === undefined &&
+        viewerInfo &&
+        !volumeSource &&
+        viewerInfo.kind !== "hdf5" &&
+        viewerInfo.viewer.render_policy !== "categorical"
+      ) {
+        throw new RangeError("Resolved scalar rendering identity is required.");
+      }
+      if (resolvedScalarRendering === null) {
+        throw new RangeError("Resolved scalar rendering identity is unavailable.");
+      }
       const requestedTime = resolveStrictVolumeIndex(
-        tIndex ?? viewerSelectedTime ?? 0,
+        resolvedScalarRendering?.time ?? tIndex ?? 0,
         axisSizes.T,
         "time"
       );
-      let requestedChannel: number;
-      if (explicitVolumeChannel != null) {
-        requestedChannel = resolveStrictVolumeIndex(
-          explicitVolumeChannel,
-          axisSizes.C,
-          "channel"
-        );
-      } else if (Array.isArray(displayChannels) && displayChannels.length === 1) {
-        requestedChannel = resolveStrictVolumeIndex(
-          displayChannels[0] as number,
-          axisSizes.C,
-          "channel"
-        );
-      } else {
-        requestedChannel = resolveStrictVolumeIndex(
-          viewerSelectedChannel ?? 0,
-          axisSizes.C,
-          "channel"
-        );
+      const requestedChannel = resolveStrictVolumeIndex(
+        resolvedScalarRendering?.channel ?? 0,
+        axisSizes.C,
+        "channel"
+      );
+      if (
+        resolvedScalarRendering?.effectiveMode === "mask" &&
+        !Number.isFinite(resolvedScalarRendering.threshold)
+      ) {
+        throw new RangeError("Resolved mask threshold is unavailable.");
       }
       const rawChannels = Array.isArray(displayChannels) && displayChannels.length > 0
         ? displayChannels
         : [requestedChannel];
-      const enabledChannels = rawChannels.map((value) =>
-        resolveStrictVolumeIndex(value, axisSizes.C, "channel")
-      );
+      const enabledChannels =
+        resolvedScalarRendering?.effectiveMode === "mask"
+          ? [requestedChannel]
+          : rawChannels.map((value) =>
+              resolveStrictVolumeIndex(value, axisSizes.C, "channel")
+            );
       if (new Set(enabledChannels).size !== enabledChannels.length) {
         throw new RangeError("Duplicate channel indices are not allowed for volume rendering.");
       }
@@ -1940,10 +2205,13 @@ export function SliceStackVolumeCanvas({
         error: error instanceof Error ? error.message : "Invalid volume selection.",
       };
     }
-  }, [axisSizes.C, axisSizes.T, displayChannels, explicitVolumeChannel, tIndex, viewerSelectedChannel, viewerSelectedTime]);
+  }, [axisSizes.C, axisSizes.T, displayChannels, resolvedScalarRendering, tIndex, viewerInfo, volumeSource]);
   const scalarChannel = volumeSelection.scalarChannel;
   const enabledVolumeChannels = volumeSelection.enabledChannels;
   const requestedTime = volumeSelection.requestedTime;
+  const effectiveMaskMode =
+    resolvedScalarRendering?.effectiveMode === "mask";
+  const rawMaskThreshold = Number(resolvedScalarRendering?.threshold);
 
   // Any NON-MEDICAL 3D volume (single- or multi-channel microscopy / scientific
   // scalar) renders through the full-res per-channel quality path — auto-contrast
@@ -1955,6 +2223,7 @@ export function SliceStackVolumeCanvas({
     apiClient &&
       fileId &&
       viewerInfo?.is_volume &&
+      !effectiveMaskMode &&
       viewerInfo?.viewer.volume_mode !== "scalar" &&
       Boolean(viewerInfo?.viewer.available_surfaces?.includes("volume")) &&
       Boolean(viewerInfo?.viewer.service_urls?.scalar_volume ?? viewerInfo?.service_urls?.scalar_volume)
@@ -1969,7 +2238,9 @@ export function SliceStackVolumeCanvas({
       enhancement: displayState?.enhancement,
       fusionMethod: displayState?.fusion_method,
       negative: displayState?.negative,
-      channels: displayState?.channels,
+      channels: effectiveMaskMode
+        ? enabledVolumeChannels
+        : displayState?.channels,
       channelColors: displayState?.channel_colors,
       t: requestedTime,
     });
@@ -1980,6 +2251,8 @@ export function SliceStackVolumeCanvas({
     displayState?.enhancement,
     displayState?.fusion_method,
     displayState?.negative,
+    effectiveMaskMode,
+    enabledVolumeChannels,
     fileId,
     requestedTime,
     viewerInfo?.service_urls?.atlas,
@@ -1989,7 +2262,7 @@ export function SliceStackVolumeCanvas({
 
   const nativeScalarSource = useMemo<ScalarVolumeSource | null>(() => {
     if (
-      viewerInfo?.viewer.volume_mode === "scalar" &&
+      (viewerInfo?.viewer.volume_mode === "scalar" || effectiveMaskMode) &&
       Boolean(viewerInfo?.viewer.service_urls?.scalar_volume ?? viewerInfo?.service_urls?.scalar_volume) &&
       apiClient &&
       fileId &&
@@ -2003,6 +2276,7 @@ export function SliceStackVolumeCanvas({
           const payload = await apiClient.getUploadScalarVolume(fileId, {
             t: requestedTime,
             channel: scalarChannel,
+            sampling: effectiveMaskMode ? "nearest" : "box",
             signal,
           });
           validateScalarVolumeIdentity(payload, {
@@ -2017,10 +2291,11 @@ export function SliceStackVolumeCanvas({
         axisSizes,
         plane,
         physicalSpacing: spacing,
+        texturePolicy: effectiveMaskMode ? "nearest" : undefined,
       };
     }
     return null;
-  }, [apiClient, axisSizes, fileId, plane, requestedTime, scalarChannel, spacing, viewerInfo?.service_urls?.scalar_volume, viewerInfo?.viewer.service_urls?.scalar_volume, viewerInfo?.viewer.volume_mode, volumeSelection.error]);
+  }, [apiClient, axisSizes, effectiveMaskMode, fileId, plane, requestedTime, scalarChannel, spacing, viewerInfo?.service_urls?.scalar_volume, viewerInfo?.viewer.service_urls?.scalar_volume, viewerInfo?.viewer.volume_mode, volumeSelection.error]);
 
   const nativeMultichannelSource = useMemo<MultichannelVolumeSource | null>(() => {
     // Multichannel fluorescence z-stack: composite the enabled channels' full-res
@@ -2105,6 +2380,7 @@ export function SliceStackVolumeCanvas({
           ? []
           : [scalarChannel],
     atlas: resolvedSource?.kind === "atlas" ? resolvedSource.atlasUrl : "",
+    sampling: effectiveMaskMode ? "nearest" : "box",
   });
   const renderError = renderFailure?.sourceKey === renderSourceKey ? renderFailure.message : null;
   const activeRenderError = volumeSelection.error ?? renderError;
@@ -2124,8 +2400,13 @@ export function SliceStackVolumeCanvas({
       enhancement: displayState?.enhancement,
       fusionMethod: displayState?.fusion_method,
       negative: displayState?.negative,
-      channels: displayState?.channels,
+      channels: effectiveMaskMode
+        ? enabledVolumeChannels
+        : displayState?.channels,
       channelColors: displayState?.channel_colors,
+      scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
+      scalarThresholdValue: effectiveMaskMode ? rawMaskThreshold : undefined,
+      scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
     });
   }, [
     apiClient,
@@ -2134,7 +2415,10 @@ export function SliceStackVolumeCanvas({
     displayState?.enhancement,
     displayState?.fusion_method,
     displayState?.negative,
+    enabledVolumeChannels,
+    effectiveMaskMode,
     fileId,
+    rawMaskThreshold,
     requestedTime,
     volumeSource,
     volumeSelection.error,
@@ -2352,7 +2636,9 @@ export function SliceStackVolumeCanvas({
   const volumeEdgeStrength = scalarOpacityPolicy.edgeStrength;
   const volumeInteriorOpacity = scalarOpacityPolicy.interiorOpacity;
   const texturePolicy: "linear" | "nearest" =
-    resolvedSource?.texturePolicy === "nearest" || resolvedSource?.texturePolicy === "linear"
+    effectiveMaskMode
+      ? "nearest"
+      : resolvedSource?.texturePolicy === "nearest" || resolvedSource?.texturePolicy === "linear"
       ? resolvedSource.texturePolicy
       : viewerInfo?.viewer.texture_policy === "nearest" || viewerInfo?.viewer.texture_policy === "linear"
         ? viewerInfo.viewer.texture_policy
@@ -2405,6 +2691,13 @@ export function SliceStackVolumeCanvas({
     scalarRenderConfigRef.current = scalarRenderConfig;
   }, [scalarRenderConfig]);
 
+  useEffect(() => {
+    scalarMaskConfigRef.current = {
+      enabled: effectiveMaskMode,
+      rawThreshold: rawMaskThreshold,
+    };
+  }, [effectiveMaskMode, rawMaskThreshold]);
+
   const multichannelRenderConfig = useMemo<MultichannelRenderConfig>(
     () => ({
       channels: enabledVolumeChannels.map((index) => {
@@ -2455,6 +2748,13 @@ export function SliceStackVolumeCanvas({
   }, [sliceCursorCue]);
 
   useEffect(() => {
+    if (effectiveMaskMode) {
+      if (maskThresholdUniformRef.current) {
+        maskThresholdUniformRef.current.value = Math.trunc(rawMaskThreshold);
+        requestRenderRef.current?.();
+      }
+      return;
+    }
     const scalarRange = scalarRangeRef.current;
     const scalarUniforms = scalarUniformsRef.current;
     if (!scalarRange || !scalarUniforms) {
@@ -2473,8 +2773,8 @@ export function SliceStackVolumeCanvas({
     scalarUniforms.uDensityScale.value = scalarRenderConfig.densityScale;
     scalarUniforms.uLightingEnabled.value = scalarRenderConfig.lightingEnabled;
     scalarUniforms.uLightingStrength.value = scalarRenderConfig.lightingStrength;
-    requestInteractiveRenderRef.current?.();
-  }, [scalarRenderConfig]);
+    requestRenderRef.current?.();
+  }, [effectiveMaskMode, rawMaskThreshold, scalarRenderConfig]);
 
   useEffect(() => {
     const clipUniforms = clipUniformsRef.current;
@@ -2612,9 +2912,31 @@ export function SliceStackVolumeCanvas({
         };
       }
     }
+    if (resolvedSource.kind === "scalar" && effectiveMaskMode) {
+      try {
+        validateExactMaskSourcePreflight({
+          sourceGrid: {
+            width: resolvedSource.axisSizes.X,
+            height: resolvedSource.axisSizes.Y,
+            depth: resolvedSource.axisSizes.Z,
+          },
+          dtype: String(viewerInfo?.scalar_mask_capability?.dtype ?? ""),
+          max3DTextureSize,
+        });
+      } catch (error) {
+        renderer.dispose();
+        commitRenderError(error instanceof Error ? error.message : "Exact Mask source is unsupported");
+        return () => {
+          disposed = true;
+          volumeLoadController.abort();
+        };
+      }
+    }
 
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setPixelRatio(
+      resolveVolumePixelRatio(window.devicePixelRatio || 1, effectiveMaskMode)
+    );
     renderer.setClearColor(clearColor, 1);
     renderer.domElement.className = "viewer-webgl-canvas";
     canvasHost.appendChild(renderer.domElement);
@@ -2660,9 +2982,54 @@ export function SliceStackVolumeCanvas({
     // renderer rebuild.
     const initialClip = effectiveClipBoundsRef.current;
     const mcConfig = multichannelRenderConfigRef.current;
+    const signedMaskTexture =
+      String(viewerInfo?.scalar_mask_capability?.dtype ?? "").trim().toLowerCase() ===
+      "int16";
     const material =
       resolvedSource.kind === "scalar"
-        ? new THREE.ShaderMaterial({
+        ? effectiveMaskMode
+          ? new THREE.ShaderMaterial({
+              uniforms: {
+                uData: { value: null },
+                uMaskThreshold: { value: Math.trunc(scalarMaskConfigRef.current.rawThreshold) },
+                uGridSize: {
+                  value: new THREE.Vector3(axisSizes.X, axisSizes.Y, axisSizes.Z),
+                },
+                uVoxelSpacing: {
+                  value: new THREE.Vector3(
+                    voxelSpacingRatio.x,
+                    voxelSpacingRatio.y,
+                    voxelSpacingRatio.z
+                  ),
+                },
+                uClipMin: {
+                  value: new THREE.Vector3(
+                    initialClip.min.x,
+                    initialClip.min.y,
+                    initialClip.min.z
+                  ),
+                },
+                uClipMax: {
+                  value: new THREE.Vector3(
+                    initialClip.max.x,
+                    initialClip.max.y,
+                    initialClip.max.z
+                  ),
+                },
+                uCameraPositionLocal: { value: new THREE.Vector3(0, 0, 2) },
+                uCameraDirectionLocal: { value: new THREE.Vector3(0, 0, -1) },
+                uOrthographicCamera: { value: volumeCameraMode.isOrthographic },
+              },
+              vertexShader: MASK_VERTEX_SHADER,
+              fragmentShader: signedMaskTexture
+                ? SIGNED_MASK_FRAGMENT_SHADER
+                : UNSIGNED_MASK_FRAGMENT_SHADER,
+              glslVersion: THREE.GLSL3,
+              side: THREE.BackSide,
+              transparent: true,
+              depthWrite: false,
+            })
+          : new THREE.ShaderMaterial({
             uniforms: {
               uData: { value: null },
               uSteps: { value: rendererSampleBudget.interactiveSteps },
@@ -2777,6 +3144,9 @@ export function SliceStackVolumeCanvas({
             depthWrite: false,
           });
     const mesh = new THREE.Mesh(geometry, material);
+    mesh.visible = !effectiveMaskMode;
+    container.dataset.viewerMaskTextureReady =
+      effectiveMaskMode ? "false" : "not-applicable";
     mesh.scale.set(normalizedScale.x, normalizedScale.y, normalizedScale.z);
     scene.add(mesh);
 
@@ -2866,6 +3236,7 @@ export function SliceStackVolumeCanvas({
           // Hide the flat cursor quads for the multichannel volume too — they wash
           // out the fluorescence render (the light cross-bands).
           cutawayActive: cutawayActiveRef.current || resolvedSource.kind === "multichannel",
+          maskMode: effectiveMaskMode,
         }),
       });
     }
@@ -2878,7 +3249,9 @@ export function SliceStackVolumeCanvas({
     const cameraPositionUniform = volumeUniforms.uCameraPositionLocal as { value: THREE.Vector3 };
     const cameraDirectionUniform = volumeUniforms.uCameraDirectionLocal as { value: THREE.Vector3 };
     const stepsUniform = (material.uniforms as Record<string, { value: number }>).uSteps;
-    let currentSteps = rendererSampleBudget.interactiveSteps;
+    let currentSteps = effectiveMaskMode
+      ? rendererSampleBudget.settledSteps
+      : rendererSampleBudget.interactiveSteps;
     let lastInteractionAt = window.performance.now();
     let interactionActive = false;
     let animationFrame = 0;
@@ -2889,8 +3262,13 @@ export function SliceStackVolumeCanvas({
         return;
       }
       currentSteps = nextSteps;
-      stepsUniform.value = nextSteps;
+      if (stepsUniform) {
+        stepsUniform.value = nextSteps;
+      }
     };
+    if (stepsUniform) {
+      stepsUniform.value = currentSteps;
+    }
     const updateDeliveredSampleBudget = (grid: VolumeGrid) => {
       const deliveredBudget = computeVolumeSampleBudget({
         sourceKind: resolvedSource.kind,
@@ -2902,7 +3280,9 @@ export function SliceStackVolumeCanvas({
       rendererSampleBudget.interactiveSteps = deliveredBudget.interactiveSteps;
       rendererSampleBudget.settledSteps = deliveredBudget.settledSteps;
       rendererSampleBudget.rampFactor = deliveredBudget.rampFactor;
-      setSamplingSteps(deliveredBudget.interactiveSteps);
+      setSamplingSteps(
+        effectiveMaskMode ? deliveredBudget.settledSteps : deliveredBudget.interactiveSteps
+      );
     };
 
     const cameraWorldDirection = new THREE.Vector3();
@@ -2927,6 +3307,7 @@ export function SliceStackVolumeCanvas({
       }
       controls.update();
       if (
+        !effectiveMaskMode &&
         window.performance.now() - lastInteractionAt >= 120 &&
         currentSteps < rendererSampleBudget.settledSteps
       ) {
@@ -2935,7 +3316,7 @@ export function SliceStackVolumeCanvas({
       render();
       if (interactionActive) {
         scheduleRender();
-      } else {
+      } else if (!effectiveMaskMode) {
         scheduleProgressiveRamp();
       }
     };
@@ -2946,6 +3327,9 @@ export function SliceStackVolumeCanvas({
       animationFrame = window.requestAnimationFrame(renderFrame);
     };
     const scheduleProgressiveRamp = () => {
+      if (effectiveMaskMode) {
+        return;
+      }
       if (rampTimer) {
         window.clearTimeout(rampTimer);
         rampTimer = 0;
@@ -2965,9 +3349,15 @@ export function SliceStackVolumeCanvas({
     };
     const resetInteractiveSampling = () => {
       lastInteractionAt = window.performance.now();
-      setSamplingSteps(rendererSampleBudget.interactiveSteps);
+      if (effectiveMaskMode) {
+        setSamplingSteps(rendererSampleBudget.settledSteps);
+      } else {
+        setSamplingSteps(rendererSampleBudget.interactiveSteps);
+      }
       scheduleRender();
-      scheduleProgressiveRamp();
+      if (!effectiveMaskMode) {
+        scheduleProgressiveRamp();
+      }
     };
     const beginInteraction = () => {
       interactionActive = true;
@@ -2977,12 +3367,15 @@ export function SliceStackVolumeCanvas({
       interactionActive = false;
       lastInteractionAt = window.performance.now();
       scheduleRender();
-      scheduleProgressiveRamp();
+      if (!effectiveMaskMode) {
+        scheduleProgressiveRamp();
+      }
     };
     controls.addEventListener("start", beginInteraction);
     controls.addEventListener("change", resetInteractiveSampling);
     controls.addEventListener("end", markInteractionSettled);
     requestInteractiveRenderRef.current = resetInteractiveSampling;
+    requestRenderRef.current = scheduleRender;
     clipUniformsRef.current = {
       uClipMin: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMin,
       uClipMax: (material.uniforms as Record<string, { value: THREE.Vector3 }>).uClipMax,
@@ -3257,96 +3650,160 @@ export function SliceStackVolumeCanvas({
     } else {
       const loadPromise =
       resolvedSource.kind === "scalar"
-        ? resolvedSource.loadScalarVolume(volumeLoadController.signal).then(async (payload) => {
-            throwIfVolumeLoadAborted(volumeLoadController.signal);
-            validateVolumeTextureGrid(payload, max3DTextureSize);
+        ? (async () => {
             const sourceGrid = {
               width: resolvedSource.axisSizes.X,
               height: resolvedSource.axisSizes.Y,
               depth: resolvedSource.axisSizes.Z,
             };
-            if (scalarChannel != null) {
-              validateScalarVolumeIdentity(payload, {
-                channel: scalarChannel,
-                time: requestedTime,
-                sourceGrid,
-                policy: payload.previewPolicy,
-              });
+            if (scalarChannel == null) {
+              throw new RangeError("Scalar volume channel identity is unavailable.");
             }
-            const predictedPreparedBytes = preparedScalarVolumeByteLength(payload);
-            validateSelectedChannelPreparedBudget(predictedPreparedBytes, 1);
-            validateActiveScalarGpuBudget(predictedPreparedBytes, 1);
-            updateDeliveredSampleBudget({
-              width: payload.width,
-              height: payload.height,
-              depth: payload.depth,
-            });
+            const textureEncoding: ScalarVolumePreparationEncoding =
+              effectiveMaskMode ? "raw-integer" : "normalized-half";
+            const expectedPreviewPolicy = effectiveMaskMode
+              ? SCALAR_MASK_NATIVE_POLICY
+              : null;
             const preparedKey = scalarVolumeIdentityKey({
               apiNamespace: volumeApiNamespace,
               fileId: fileId ?? viewerInfo?.file_id ?? "external",
               sourceIdentity: volumeSourceIdentity,
               sourceGrid,
-              channel: payload.channel,
-              time: payload.time,
+              channel: scalarChannel,
+              time: requestedTime,
               channelCount: resolvedSource.axisSizes.C,
               timeCount: resolvedSource.axisSizes.T,
-              policy: payload.previewPolicy,
+              policy: `${
+                expectedPreviewPolicy ?? SCALAR_PREVIEW_POLICY
+              }:${String(viewerInfo?.metadata.array_dtype ?? "")}:${textureEncoding}`,
             });
-            preparedResidencyReservation = scalarVolumeResidency.reserve(
-              [preparedKey],
-              predictedPreparedBytes
-            );
             let preparedLease = scalarVolumeResidency.acquire(preparedKey);
             if (preparedLease) {
               validateScalarVolumeIdentity(preparedLease.value, {
-                channel: payload.channel,
-                time: payload.time,
+                channel: scalarChannel,
+                time: requestedTime,
                 sourceGrid,
-                policy: payload.previewPolicy,
+                policy: expectedPreviewPolicy ?? preparedLease.value.previewPolicy,
               });
-              if (preparedLease.value.textureData.byteLength !== predictedPreparedBytes) {
-                preparedLease.release();
-                throw new RangeError("Cached scalar volume byte size does not match its identity.");
+              validateVolumeTextureGrid(preparedLease.value, max3DTextureSize);
+              if (effectiveMaskMode) {
+                validateExactMaskVolume(preparedLease.value, {
+                  sourceGrid,
+                  dtype: String(viewerInfo?.scalar_mask_capability?.dtype ?? ""),
+                  max3DTextureSize,
+                });
               }
-            } else {
-              const prepared = await prepareScalarVolume(payload, volumeLoadController.signal);
-              throwIfVolumeLoadAborted(volumeLoadController.signal);
-              preparedLease = scalarVolumeResidency.publishAndAcquire(
-                preparedResidencyReservation,
-                preparedKey,
-                prepared
+              validateSelectedChannelPreparedBudget(
+                preparedLease.value.textureData.byteLength,
+                1
               );
+              validateActiveScalarGpuBudget(
+                preparedLease.value.textureData.byteLength,
+                1
+              );
+              updateDeliveredSampleBudget({
+                width: preparedLease.value.width,
+                height: preparedLease.value.height,
+                depth: preparedLease.value.depth,
+              });
+            } else {
+              const payload = await resolvedSource.loadScalarVolume(
+                volumeLoadController.signal
+              );
+              throwIfVolumeLoadAborted(volumeLoadController.signal);
+              validateVolumeTextureGrid(payload, max3DTextureSize);
+              validateScalarVolumeIdentity(payload, {
+                channel: scalarChannel,
+                time: requestedTime,
+                sourceGrid,
+                policy: expectedPreviewPolicy ?? payload.previewPolicy,
+              });
+              if (effectiveMaskMode) {
+                validateExactMaskVolume(payload, {
+                  sourceGrid,
+                  dtype: String(viewerInfo?.scalar_mask_capability?.dtype ?? ""),
+                  max3DTextureSize,
+                });
+              }
+              if (
+                effectiveMaskMode &&
+                String(payload.dtype).trim().toLowerCase() !==
+                  String(viewerInfo?.scalar_mask_capability?.dtype ?? "")
+                    .trim()
+                    .toLowerCase()
+              ) {
+                throw new RangeError("Exact Mask volume dtype does not match its advertised capability.");
+              }
+              const predictedPreparedBytes = preparedScalarVolumeByteLength(
+                payload,
+                effectiveMaskMode
+                  ? payload.bytesPerVoxel
+                  : Uint16Array.BYTES_PER_ELEMENT
+              );
+              validateSelectedChannelPreparedBudget(predictedPreparedBytes, 1);
+              validateActiveScalarGpuBudget(predictedPreparedBytes, 1);
+              updateDeliveredSampleBudget({
+                width: payload.width,
+                height: payload.height,
+                depth: payload.depth,
+              });
+              preparedResidencyReservation = scalarVolumeResidency.reserve(
+                [preparedKey],
+                predictedPreparedBytes
+              );
+              preparedLease = scalarVolumeResidency.acquire(preparedKey);
+              if (preparedLease) {
+                validateScalarVolumeIdentity(preparedLease.value, {
+                  channel: scalarChannel,
+                  time: requestedTime,
+                  sourceGrid,
+                  policy: expectedPreviewPolicy ?? preparedLease.value.previewPolicy,
+                });
+                if (effectiveMaskMode) {
+                  validateExactMaskVolume(preparedLease.value, {
+                    sourceGrid,
+                    dtype: String(viewerInfo?.scalar_mask_capability?.dtype ?? ""),
+                    max3DTextureSize,
+                  });
+                }
+                if (
+                  preparedLease.value.textureData.byteLength !==
+                  predictedPreparedBytes
+                ) {
+                  preparedLease.release();
+                  throw new RangeError(
+                    "Cached scalar volume byte size does not match its identity."
+                  );
+                }
+              } else {
+                const prepared = await prepareScalarVolume(
+                  payload,
+                  volumeLoadController.signal,
+                  textureEncoding
+                );
+                throwIfVolumeLoadAborted(volumeLoadController.signal);
+                if (effectiveMaskMode) {
+                  validateExactMaskVolume(prepared, {
+                    sourceGrid,
+                    dtype: String(viewerInfo?.scalar_mask_capability?.dtype ?? ""),
+                    max3DTextureSize,
+                  });
+                }
+                preparedLease = scalarVolumeResidency.publishAndAcquire(
+                  preparedResidencyReservation,
+                  preparedKey,
+                  prepared
+                );
+              }
+              preparedResidencyReservation.release();
+              preparedResidencyReservation = null;
             }
             preparedResidencyLeases.push(preparedLease);
-            preparedResidencyReservation.release();
-            preparedResidencyReservation = null;
             const prepared = preparedLease.value;
-            const texture = preparedScalarToVolumeTexture(prepared, texturePolicy);
+            const texture = effectiveMaskMode
+              ? preparedMaskToIntegerTexture(prepared)
+              : preparedScalarToVolumeTexture(prepared, texturePolicy);
             throwIfVolumeLoadAborted(volumeLoadController.signal);
-            const latestScalarRenderConfig = scalarRenderConfigRef.current;
-            const normalizedWindow = resolveScalarVolumeWindow(
-              prepared,
-              latestScalarRenderConfig.enhancement,
-              latestScalarRenderConfig.negative
-            );
-            const nextScalarUniforms = {
-              uWindowLow: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowLow as { value: number },
-              uWindowHigh: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowHigh as { value: number },
-              uInvert: (material.uniforms as Record<string, { value: number | boolean | null }>).uInvert as { value: boolean },
-              uColorMap: (material.uniforms as Record<string, { value: number | boolean | null }>).uColorMap as { value: number },
-              uSignalFloor: (material.uniforms as Record<string, { value: number | boolean | null }>).uSignalFloor as { value: number },
-              uDensityScale: (material.uniforms as Record<string, { value: number | boolean | null }>).uDensityScale as { value: number },
-              uLightingEnabled: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingEnabled as { value: boolean },
-              uLightingStrength: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingStrength as { value: number },
-            };
-            nextScalarUniforms.uWindowLow.value = normalizedWindow.low;
-            nextScalarUniforms.uWindowHigh.value = normalizedWindow.high;
-            nextScalarUniforms.uInvert.value = normalizedWindow.invert;
-            nextScalarUniforms.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
-            nextScalarUniforms.uSignalFloor.value = latestScalarRenderConfig.signalFloor;
-            nextScalarUniforms.uDensityScale.value = latestScalarRenderConfig.densityScale;
-            nextScalarUniforms.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
-            nextScalarUniforms.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
             const scalarMaterialUniforms = material.uniforms as Record<
               string,
               { value: THREE.Vector3 }
@@ -3355,16 +3812,6 @@ export function SliceStackVolumeCanvas({
               prepared.width,
               prepared.height,
               prepared.depth
-            );
-            const deliveredVoxelStep = computeVolumeVoxelStep({
-              width: prepared.width,
-              height: prepared.height,
-              depth: prepared.depth,
-            });
-            scalarMaterialUniforms.uVoxelStep.value.set(
-              deliveredVoxelStep.x,
-              deliveredVoxelStep.y,
-              deliveredVoxelStep.z
             );
             const deliveredSpacing = computeDeliveredVoxelSpacing({
               sourceGrid: {
@@ -3390,6 +3837,50 @@ export function SliceStackVolumeCanvas({
               deliveredSpacing.y / maxSpacing,
               deliveredSpacing.z / maxSpacing
             );
+            if (effectiveMaskMode) {
+              const thresholdUniform = (
+                material.uniforms as Record<string, { value: number }>
+              ).uMaskThreshold;
+              thresholdUniform.value = Math.trunc(
+                scalarMaskConfigRef.current.rawThreshold
+              );
+              maskThresholdUniformRef.current = thresholdUniform;
+              return texture;
+            }
+            const latestScalarRenderConfig = scalarRenderConfigRef.current;
+            const normalizedWindow = resolveScalarVolumeWindow(
+              prepared,
+              latestScalarRenderConfig.enhancement,
+              latestScalarRenderConfig.negative
+            );
+            const nextScalarUniforms = {
+              uWindowLow: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowLow as { value: number },
+              uWindowHigh: (material.uniforms as Record<string, { value: number | boolean | null }>).uWindowHigh as { value: number },
+              uInvert: (material.uniforms as Record<string, { value: number | boolean | null }>).uInvert as { value: boolean },
+              uColorMap: (material.uniforms as Record<string, { value: number | boolean | null }>).uColorMap as { value: number },
+              uSignalFloor: (material.uniforms as Record<string, { value: number | boolean | null }>).uSignalFloor as { value: number },
+              uDensityScale: (material.uniforms as Record<string, { value: number | boolean | null }>).uDensityScale as { value: number },
+              uLightingEnabled: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingEnabled as { value: boolean },
+              uLightingStrength: (material.uniforms as Record<string, { value: number | boolean | null }>).uLightingStrength as { value: number },
+            };
+            nextScalarUniforms.uWindowLow.value = normalizedWindow.low;
+            nextScalarUniforms.uWindowHigh.value = normalizedWindow.high;
+            nextScalarUniforms.uInvert.value = normalizedWindow.invert;
+            nextScalarUniforms.uColorMap.value = latestScalarRenderConfig.colorMapShaderValue;
+            nextScalarUniforms.uSignalFloor.value = latestScalarRenderConfig.signalFloor;
+            nextScalarUniforms.uDensityScale.value = latestScalarRenderConfig.densityScale;
+            nextScalarUniforms.uLightingEnabled.value = latestScalarRenderConfig.lightingEnabled;
+            nextScalarUniforms.uLightingStrength.value = latestScalarRenderConfig.lightingStrength;
+            const deliveredVoxelStep = computeVolumeVoxelStep({
+              width: prepared.width,
+              height: prepared.height,
+              depth: prepared.depth,
+            });
+            scalarMaterialUniforms.uVoxelStep.value.set(
+              deliveredVoxelStep.x,
+              deliveredVoxelStep.y,
+              deliveredVoxelStep.z
+            );
             throwIfVolumeLoadAborted(volumeLoadController.signal);
             scalarRangeRef.current = {
               rawMin: prepared.rawMin,
@@ -3399,7 +3890,7 @@ export function SliceStackVolumeCanvas({
             };
             scalarUniformsRef.current = nextScalarUniforms;
             return texture;
-          })
+          })()
         : atlasToVolumeTexture(
             resolvedSource.atlasUrl,
             resolvedSource.atlasScheme,
@@ -3418,6 +3909,9 @@ export function SliceStackVolumeCanvas({
           renderer.initTexture(decodedTexture);
         }
         material.uniforms.uData.value = decodedTexture;
+        mesh.visible = true;
+        container.dataset.viewerMaskTextureReady =
+          effectiveMaskMode ? "true" : "not-applicable";
         material.needsUpdate = true;
         resize({ resetQuality: true });
       })
@@ -3454,7 +3948,9 @@ export function SliceStackVolumeCanvas({
           }
         : null;
       requestInteractiveRenderRef.current = null;
+      requestRenderRef.current = null;
       scalarUniformsRef.current = null;
+      maskThresholdUniformRef.current = null;
       multichannelUniformsRef.current = null;
       clipUniformsRef.current = null;
       atlasRenderModeUniformRef.current = null;
@@ -3489,6 +3985,7 @@ export function SliceStackVolumeCanvas({
     };
   }, [
     activeRenderError,
+    effectiveMaskMode,
     resolvedSource,
     texturePolicy,
     clearColor,
@@ -3539,6 +4036,8 @@ export function SliceStackVolumeCanvas({
     volumeApiNamespace,
     volumeSourceIdentity,
     viewerInfo?.file_id,
+    viewerInfo?.metadata.array_dtype,
+    viewerInfo?.scalar_mask_capability?.dtype,
     isPerChannelVolume,
     retryGeneration,
     renderSourceKey,
@@ -3557,10 +4056,18 @@ export function SliceStackVolumeCanvas({
         cueVisible: sliceCursorCue.visible,
         interiorInspectionActive: volumeInteriorInspectionActive,
         cutawayActive: cutawayActive || isPerChannelVolume,
+        maskMode: effectiveMaskMode,
       }),
     });
     requestInteractiveRenderRef.current?.();
-  }, [normalizedScale, sliceCursorCue, volumeInteriorInspectionActive, cutawayActive, isPerChannelVolume]);
+  }, [
+    normalizedScale,
+    sliceCursorCue,
+    volumeInteriorInspectionActive,
+    cutawayActive,
+    isPerChannelVolume,
+    effectiveMaskMode,
+  ]);
 
   const backendLabel = resolvedSource?.kind ?? "atlas";
   const renderVolumeOrientationOverlay = (variant?: "fallback") => (
@@ -3717,6 +4224,7 @@ export function SliceStackVolumeCanvas({
             cueVisible: sliceCursorCue.visible,
             interiorInspectionActive: volumeInteriorInspectionActive,
             cutawayActive: cutawayActive || isPerChannelVolume,
+            maskMode: effectiveMaskMode,
           })
             ? "true"
             : "false"
@@ -3837,6 +4345,7 @@ export function SliceStackVolumeCanvas({
           cueVisible: sliceCursorCue.visible,
           interiorInspectionActive: volumeInteriorInspectionActive,
           cutawayActive: cutawayActive || isPerChannelVolume,
+          maskMode: effectiveMaskMode,
         })
           ? "true"
           : "false"

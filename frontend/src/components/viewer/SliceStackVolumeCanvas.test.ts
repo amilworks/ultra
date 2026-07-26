@@ -8,8 +8,10 @@ import type { UploadViewerInfo } from "../../types";
 
 import {
   advanceProgressiveVolumeSteps,
+  classifyMaskDdaAxisStep,
   atlasToVolumeTexture,
   MAX_CATEGORICAL_SURFACE_STEPS,
+  MAX_MASK_SURFACE_STEPS,
   computeVolumeInteriorCameraFrame,
   computePhysicalVolumeGeometry,
   computeVolumeCameraFit,
@@ -23,6 +25,7 @@ import {
   resolveScalarVolumeColorMap,
   resolveScalarVolumeLighting,
   resolveScalarVolumeTransferFunction,
+  resolveVolumePixelRatio,
   resolveVolumeClipCue,
   resolveVolumeCameraMode,
   resolveVolumeSliceCursorCue,
@@ -46,6 +49,22 @@ import {
   volumeCameraSnapshotKey,
 } from "./SliceStackVolumeCanvas";
 
+describe("mask interaction quality", () => {
+  it("caps mask rendering at one device pixel per CSS pixel without changing exact traversal", () => {
+    expect(resolveVolumePixelRatio(3, true)).toBe(1);
+    expect(resolveVolumePixelRatio(3, false)).toBe(2);
+    expect(resolveVolumePixelRatio(0, true)).toBe(1);
+  });
+
+  it("classifies near-zero DDA axes as stationary before assigning a sign", () => {
+    expect(classifyMaskDdaAxisStep(-0.00000001)).toBe(0);
+    expect(classifyMaskDdaAxisStep(0)).toBe(0);
+    expect(classifyMaskDdaAxisStep(0.00000001)).toBe(0);
+    expect(classifyMaskDdaAxisStep(-0.000001)).toBe(-1);
+    expect(classifyMaskDdaAxisStep(0.000001)).toBe(1);
+  });
+});
+
 describe("physical volume unit authority", () => {
   it("uses the normalized metadata unit for physical extents", () => {
     const info = {
@@ -68,6 +87,11 @@ describe("physical volume unit authority", () => {
 });
 
 describe("volume delivery authority", () => {
+  it("budgets hard mask traversal above every crossing in the maximum mask grid", () => {
+    expect(MAX_MASK_SURFACE_STEPS).toBe(2048);
+    expect(MAX_MASK_SURFACE_STEPS).toBeGreaterThanOrEqual(924 + 624 + 70);
+  });
+
   it("checks the delivered texture grid, not the native source axes", () => {
     expect(() =>
       validateVolumeTextureGrid({ width: 512, height: 347, depth: 80 }, 512)
@@ -273,6 +297,20 @@ describe("categorical atlas render mode", () => {
     expect(source).toContain(`for (int iter = 0; iter < \${MAX_CATEGORICAL_SURFACE_STEPS}; iter++)`);
     expect(source).toContain("abs(nextCrossing.x - crossing) <= tieTolerance");
     expect(source).not.toContain("texture(uData, clamp(location, vec3(0.0), vec3(1.0)));\n        bool occupied");
+  });
+
+  it("renders exact Mask entry faces from the back side only", () => {
+    const source = readFileSync(
+      path.join(process.cwd(), "src/components/viewer/SliceStackVolumeCanvas.tsx"),
+      "utf-8"
+    );
+    const maskMaterial = source.slice(
+      source.indexOf("vertexShader: MASK_VERTEX_SHADER"),
+      source.indexOf("vertexShader: VERTEX_SHADER", source.indexOf("vertexShader: MASK_VERTEX_SHADER"))
+    );
+    expect(maskMaterial).toContain("side: THREE.BackSide");
+    expect(source).toContain("mesh.visible = !effectiveMaskMode");
+    expect(source).toContain("mesh.visible = true");
   });
 
   it("cancels a stale atlas load before fetch, canvas decode, or volume allocation", async () => {
@@ -498,6 +536,16 @@ describe("volume interior inspection camera", () => {
     ).toBe(true);
     // Context edges stay — they are thin extent lines, not footprint-filling quads.
     expect(shouldShowVolumeContextEdges({ cueVisible: true, interiorInspectionActive: false })).toBe(true);
+  });
+
+  it("removes translucent cursor planes throughout Mask Volume while retaining overlay badges", () => {
+    expect(
+      shouldShowVolumeSliceCursorPlanes({
+        cueVisible: true,
+        interiorInspectionActive: false,
+        maskMode: true,
+      })
+    ).toBe(false);
   });
 
   it("keeps wireframe context out of the center-inside inspection view", () => {
@@ -984,7 +1032,23 @@ describe("scalar volume boundary-emphasis transfer function", () => {
 
   it("uploads medical scalar volumes as 16-bit half-float to preserve soft-tissue contrast", () => {
     expect(source).toContain("prepareScalarVolume(payload, volumeLoadController.signal)");
-    expect(source).toContain("texture.type = THREE.HalfFloatType;");
+    expect(source).toContain("preparedMaskToIntegerTexture");
+    expect(source).toContain("THREE.RedIntegerFormat");
+    expect(source).toContain("THREE.UnsignedByteType");
+    expect(source).toContain("THREE.UnsignedShortType");
+    expect(source).toContain("THREE.ShortType");
+    expect(source).toContain("THREE.NearestFilter");
+  });
+
+  it("uses a dedicated exact integer Mask shader with RGB-only occupancy shading", () => {
+    expect(source).toContain("uniform ${samplerType} uData;");
+    expect(source).toContain('createMaskFragmentShader("usampler3D")');
+    expect(source).toContain('createMaskFragmentShader("isampler3D")');
+    expect(source).toContain("int(texture(uData, texelCenter).r) > uMaskThreshold");
+    expect(source).toContain("vec3 maskSurfaceColor");
+    expect(source).toContain("outColor = vec4(maskSurfaceColor");
+    expect(source).toContain(", 1.0);");
+    expect(source).not.toContain("smoothstep(uMaskThreshold");
   });
 
   it("retains spacing-aware boundary emphasis only for generic scalar volumes", () => {
@@ -1092,7 +1156,9 @@ describe("scalar volume boundary-emphasis transfer function", () => {
   });
 
   it("threads one generation AbortSignal through scalar fetch and half-float conversion", () => {
-    expect(source).toContain("resolvedSource.loadScalarVolume(volumeLoadController.signal)");
+    expect(source).toMatch(
+      /resolvedSource\.loadScalarVolume\(\s*volumeLoadController\.signal\s*\)/
+    );
     expect(source).toContain("prepareScalarVolume(payload, volumeLoadController.signal)");
     expect(source).toContain("multichannelSource.loadChannel(channel, volumeLoadController.signal)");
     expect(source).toContain("throwIfVolumeLoadAborted(volumeLoadController.signal)");

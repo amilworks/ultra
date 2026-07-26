@@ -404,7 +404,10 @@ export const DirectPlaneImage = forwardRef<ViewerCanvasHandle, DirectPlaneImageP
           return;
         }
 
-        const texture = sliceBitmapToTexture(bitmap);
+        const texture = sliceBitmapToTexture(
+          bitmap,
+          scalarSlice?.payload.sampling === "nearest" ? "nearest" : "linear"
+        );
         const nextPixelSize = getLoadedImageSize(texture, descriptor);
         const nextWorldSize = getPlaneWorldSize(descriptor, nextPixelSize);
         const previousTexture = textureRef.current;

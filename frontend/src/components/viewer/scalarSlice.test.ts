@@ -2,7 +2,16 @@ import { describe, expect, it } from "vitest";
 
 import type { ScalarVolumePayload } from "@/lib/api";
 
-import { extractScalarSlice, scalarSliceAxisExtent, scalarSliceDimensions } from "./scalarSlice";
+import {
+  extractScalarSlice,
+  mapNearestDeliveryPlanePointToSource,
+  mapSourcePlanePointToNearestDelivery,
+  mapSourceSliceToNearestDelivery,
+  mapSourceVoxelToNearestDelivery,
+  scalarPayloadUsesNativeGrid,
+  scalarSliceAxisExtent,
+  scalarSliceDimensions,
+} from "./scalarSlice";
 
 // 2x2x2 volume; value at (x,y,z) follows the row-major order (z*H + y)*W + x.
 //   (0,0,0)=10 (1,0,0)=20 (0,1,0)=30 (1,1,0)=40
@@ -25,6 +34,7 @@ const makePayload = (): ScalarVolumePayload => ({
   downsampleY: 1,
   downsampleZ: 1,
   previewPolicy: "exact-v1",
+  sampling: "box",
   sclSlope: 1,
   sclInter: 0,
 });
@@ -80,6 +90,53 @@ describe("extractScalarSlice", () => {
     const narrow = extractScalarSlice(makePayload(), { axis: "z", sliceIndex: 0, windowLow: 20, windowHigh: 30 });
     expect(px(narrow, 0, 0)).toBe(0); // value 10 < low
     expect(px(narrow, 1, 1)).toBe(255); // value 40 > high
+  });
+
+  it("renders exact > threshold membership on every MPR axis for the selected C/T payload", () => {
+    const payload: ScalarVolumePayload = {
+      ...makePayload(),
+      data: new Uint16Array([120, 121, 119, 122, 121, 120, 123, 118]).buffer,
+      channel: 2,
+      time: 2,
+      rawMin: 118,
+      rawMax: 123,
+      sampling: "nearest",
+    };
+    const renderMask = (axis: "x" | "y" | "z", sliceIndex: number) =>
+      extractScalarSlice(payload, {
+        axis,
+        sliceIndex,
+        windowLow: 120,
+        windowHigh: 121,
+        invert: false,
+      });
+
+    expect([payload.channel, payload.time, payload.sampling]).toEqual([
+      2,
+      2,
+      "nearest",
+    ]);
+    const axial = renderMask("z", 0);
+    expect([px(axial, 0, 0), px(axial, 0, 1), px(axial, 1, 0), px(axial, 1, 1)]).toEqual([
+      0,
+      255,
+      0,
+      255,
+    ]);
+    const coronal = renderMask("y", 0);
+    expect([px(coronal, 0, 0), px(coronal, 0, 1), px(coronal, 1, 0), px(coronal, 1, 1)]).toEqual([
+      0,
+      255,
+      255,
+      0,
+    ]);
+    const sagittal = renderMask("x", 0);
+    expect([px(sagittal, 0, 0), px(sagittal, 0, 1), px(sagittal, 1, 0), px(sagittal, 1, 1)]).toEqual([
+      0,
+      0,
+      255,
+      255,
+    ]);
   });
 
   it("applies a non-unit NIfTI rescale before the physical display window", () => {
@@ -173,5 +230,90 @@ describe("extractScalarSlice", () => {
         windowHigh: 100,
       })
     ).toThrow(/slice.*limit/i);
+  });
+
+  it("maps a 1024 source grid onto 512 nearest samples using source-cell centres", () => {
+    const payload: ScalarVolumePayload = {
+      ...makePayload(),
+      width: 512,
+      height: 512,
+      depth: 2,
+      sourceWidth: 1024,
+      sourceHeight: 1024,
+      sourceDepth: 4,
+      downsampleX: 2,
+      downsampleY: 2,
+      downsampleZ: 2,
+      sampling: "nearest",
+    };
+
+    expect(mapSourceSliceToNearestDelivery(payload, "x", 0)).toEqual({
+      deliveryIndex: 0,
+      sampledSourceIndex: 1,
+      exact: false,
+    });
+    expect(mapSourceSliceToNearestDelivery(payload, "x", 1)).toEqual({
+      deliveryIndex: 0,
+      sampledSourceIndex: 1,
+      exact: true,
+    });
+    expect(mapSourceSliceToNearestDelivery(payload, "x", 1023)).toEqual({
+      deliveryIndex: 511,
+      sampledSourceIndex: 1023,
+      exact: true,
+    });
+    expect(mapSourceVoxelToNearestDelivery(payload, { x: 513, y: 512, z: 3 })).toEqual({
+      delivery: { x: 256, y: 256, z: 1 },
+      sampledSource: { x: 513, y: 513, z: 3 },
+      exact: false,
+    });
+    expect(scalarPayloadUsesNativeGrid(payload)).toBe(false);
+    expect(scalarPayloadUsesNativeGrid(makePayload())).toBe(true);
+  });
+
+  it("maps downsampled MPR overlays and clicks through delivery texel centres", () => {
+    const payload: ScalarVolumePayload = {
+      ...makePayload(),
+      data: new Uint16Array(3 * 3 * 3).buffer,
+      width: 3,
+      height: 3,
+      depth: 3,
+      sourceWidth: 9,
+      sourceHeight: 9,
+      sourceDepth: 9,
+      downsampleX: 4,
+      downsampleY: 4,
+      downsampleZ: 4,
+      sampling: "nearest",
+    };
+
+    expect(
+      mapSourcePlanePointToNearestDelivery(payload, "z", {
+        row: 6,
+        col: 8,
+      })
+    ).toEqual({
+      delivery: { row: 1, col: 2 },
+      sampledSource: { row: 6, col: 8 },
+      exact: true,
+    });
+    expect(
+      mapNearestDeliveryPlanePointToSource(payload, "z", {
+        row: 1,
+        col: 2,
+      })
+    ).toEqual({ row: 6, col: 8 });
+    expect(
+      mapNearestDeliveryPlanePointToSource(payload, "y", {
+        row: 1,
+        col: 2,
+      })
+    ).toEqual({ row: 6, col: 8 });
+    expect(
+      mapNearestDeliveryPlanePointToSource(payload, "x", {
+        row: 1,
+        col: 2,
+      })
+    ).toEqual({ row: 6, col: 8 });
   });
 });

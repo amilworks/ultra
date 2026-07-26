@@ -18,16 +18,19 @@ import { extractScalarSlice, type ScalarSliceAxis } from "./scalarSlice";
  */
 
 const MAX_ENTRIES = 80;
+const MAX_BITMAP_BYTES = 64 * 1024 * 1024;
 
 // Insertion order doubles as recency (Map preserves it), so the first key is the
 // least-recently-used entry.
-const bitmapCache = new Map<string, ImageBitmap>();
+type BitmapCacheEntry = { bitmap: ImageBitmap; bytes: number };
+const bitmapCache = new Map<string, BitmapCacheEntry>();
 const inflight = new Map<string, Promise<ImageBitmap>>();
 
 const promote = (url: string, bitmap: ImageBitmap): void => {
   bitmapCache.delete(url);
-  bitmapCache.set(url, bitmap);
-  while (bitmapCache.size > MAX_ENTRIES) {
+  const bytes = Math.max(1, bitmap.width) * Math.max(1, bitmap.height) * 4;
+  bitmapCache.set(url, { bitmap, bytes });
+  while (bitmapCache.size > MAX_ENTRIES || sliceCacheByteSize() > MAX_BITMAP_BYTES) {
     const oldest = bitmapCache.keys().next().value as string | undefined;
     if (oldest === undefined) {
       break;
@@ -40,6 +43,13 @@ const promote = (url: string, bitmap: ImageBitmap): void => {
 };
 
 export const sliceCacheSize = (): number => bitmapCache.size;
+export const sliceCacheByteSize = (): number => {
+  let bytes = 0;
+  bitmapCache.forEach((entry) => {
+    bytes += entry.bytes;
+  });
+  return bytes;
+};
 
 export const clearSliceCache = (): void => {
   bitmapCache.clear();
@@ -57,7 +67,7 @@ export const clearSliceCache = (): void => {
 export type SliceLoadProgress = (fraction: number | null) => void;
 
 export const loadSliceBitmap = (url: string, onProgress?: SliceLoadProgress): Promise<ImageBitmap> => {
-  const cached = bitmapCache.get(url);
+  const cached = bitmapCache.get(url)?.bitmap;
   if (cached) {
     promote(url, cached);
     onProgress?.(1);
@@ -191,6 +201,7 @@ export type ScalarSliceSource = {
  */
 export const buildScalarSliceSource = (params: {
   fileId: string;
+  sourceIdentity?: string;
   payload: ScalarVolumePayload;
   axis: ScalarSliceAxis;
   sliceIndex: number;
@@ -201,7 +212,14 @@ export const buildScalarSliceSource = (params: {
   cacheKey: [
     "scalar",
     params.fileId,
+    params.sourceIdentity ?? "",
     params.payload.channel ?? 0,
+    params.payload.time ?? 0,
+    params.payload.sampling,
+    params.payload.previewPolicy,
+    `${params.payload.sourceWidth}x${params.payload.sourceHeight}x${params.payload.sourceDepth}`,
+    `${params.payload.width}x${params.payload.height}x${params.payload.depth}`,
+    `${params.payload.downsampleX}x${params.payload.downsampleY}x${params.payload.downsampleZ}`,
     params.axis,
     params.sliceIndex,
     params.windowLow.toFixed(3),
@@ -223,7 +241,7 @@ export const buildScalarSliceSource = (params: {
  * slice — same display, same crosshair/measurement alignment.
  */
 export const loadScalarSliceBitmap = (source: ScalarSliceSource): Promise<ImageBitmap> => {
-  const cached = bitmapCache.get(source.cacheKey);
+  const cached = bitmapCache.get(source.cacheKey)?.bitmap;
   if (cached) {
     promote(source.cacheKey, cached);
     return Promise.resolve(cached);
@@ -266,11 +284,15 @@ export const prefetchScalarSliceBitmaps = (sources: Iterable<ScalarSliceSource>)
   }
 };
 
-export const sliceBitmapToTexture = (bitmap: ImageBitmap): THREE.Texture => {
+export const sliceBitmapToTexture = (
+  bitmap: ImageBitmap,
+  filtering: "linear" | "nearest" = "linear"
+): THREE.Texture => {
   const texture = new THREE.Texture(bitmap);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.minFilter = THREE.LinearFilter;
-  texture.magFilter = THREE.LinearFilter;
+  const filter = filtering === "nearest" ? THREE.NearestFilter : THREE.LinearFilter;
+  texture.minFilter = filter;
+  texture.magFilter = filter;
   texture.generateMipmaps = false;
   // The vertical flip is already baked into the bitmap (createImageBitmap with
   // imageOrientation: "flipY"); don't let the GPU flip it a second time.

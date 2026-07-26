@@ -36,7 +36,9 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
+import { normalizeViewerCalibrations } from "@/lib/viewerManifest";
 import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
 import { DeepZoomCanvas } from "./DeepZoomCanvas";
@@ -49,14 +51,27 @@ import {
   exportFileStem,
   type ViewerCanvasHandle,
 } from "./captureView";
-import { scalarVolumePayloadValueAt } from "./scalarVolume";
+import {
+  SCALAR_MASK_NATIVE_POLICY,
+  scalarVolumePayloadValueAt,
+  validateScalarVolumeIdentity,
+} from "./scalarVolume";
 import { SlicePlaneCanvas } from "./SlicePlaneCanvas";
 import {
   buildScalarSliceSource,
+  cancelPendingSlicePrefetches,
   prefetchSliceBitmaps,
   type ScalarSliceSource,
 } from "./sliceImageCache";
-import type { ScalarSliceAxis } from "./scalarSlice";
+import {
+  mapNearestDeliveryPlanePointToSource,
+  mapSourcePlanePointToNearestDelivery,
+  mapSourceSliceToNearestDelivery,
+  mapSourceVoxelToNearestDelivery,
+  scalarPayloadUsesNativeGrid,
+  scalarSliceDimensions,
+  type ScalarSliceAxis,
+} from "./scalarSlice";
 import { SliceStackVolumeCanvas } from "./SliceStackVolumeCanvas";
 import {
   formatViewerSurfaceLabel,
@@ -74,6 +89,12 @@ import { resolveScalarVolumeTransferFunction, type ScalarVolumeTransferFunction 
 import { VOLUME_VIEW_PRESETS } from "./volumeViewPreset";
 import { isTypingTarget, keyToFullscreenAction } from "./fullscreenState";
 import { createChromeFadeController, prefersReducedMotionSafe } from "./chromeVisibility";
+import {
+  canonicalMaskThreshold,
+  isExactMaskDtype,
+  isMaskCapableScalarVolume,
+  resolveScalarRendering,
+} from "./scalarMask";
 
 type ViewerDisplayState = NonNullable<UploadViewerInfo["display_defaults"]>;
 
@@ -85,9 +106,69 @@ type UploadHistogramState = {
 
 type ScalarProbeState = {
   key: string;
+  client: ApiClient | null;
   volume: ScalarVolumePayload | null;
   error: string | null;
 };
+
+type SavedMaskCalibration = {
+  selectionKey: string;
+  revision: number;
+  channel: number;
+  time: number;
+  renderMode: "auto" | "intensity" | "mask";
+  thresholdMethod: "otsu-256-v1" | "manual";
+  thresholdValue: number;
+  thresholdProvenance:
+    | NonNullable<
+        NonNullable<
+          UploadViewerInfo["viewer_calibrations"]
+        >["selections"][string]
+      >["threshold_provenance"]
+    | null;
+};
+
+const sameMaskThresholdProvenance = (
+  left: SavedMaskCalibration["thresholdProvenance"],
+  right: SavedMaskCalibration["thresholdProvenance"]
+): boolean =>
+  Boolean(
+    left &&
+      right &&
+      left.method === right.method &&
+      left.value === right.value &&
+      left.domain === right.domain &&
+      left.foreground === right.foreground &&
+      left.channel === right.channel &&
+      left.t === right.t &&
+      left.sample_scope === right.sample_scope &&
+      left.sample_count === right.sample_count &&
+      left.sampling_algorithm === right.sampling_algorithm &&
+      left.sampling_strategy === right.sampling_strategy &&
+      left.source_sha256 === right.source_sha256 &&
+      left.bins === right.bins &&
+      left.z_samples.length === right.z_samples.length &&
+      left.z_samples.every((value, index) => value === right.z_samples[index])
+  );
+
+const sameMaskCalibrationContent = (
+  left: SavedMaskCalibration | undefined,
+  right: SavedMaskCalibration
+): boolean =>
+  Boolean(
+    left &&
+      left.selectionKey === right.selectionKey &&
+      left.revision === right.revision &&
+      left.channel === right.channel &&
+      left.time === right.time &&
+      left.renderMode === right.renderMode &&
+      left.thresholdMethod === right.thresholdMethod &&
+      left.thresholdValue === right.thresholdValue &&
+      sameMaskThresholdProvenance(
+        left.thresholdProvenance,
+        right.thresholdProvenance
+      )
+  );
 
 type ImageViewerShellProps = {
   viewerInfo: UploadViewerInfo;
@@ -108,6 +189,9 @@ type ImageViewerShellProps = {
   setSelectedIndex: (axis: keyof ViewerIndices, value: number) => void;
   selectedCaption: string;
   captionLoading: boolean;
+  onViewerCalibrationsChange?: (
+    calibrations: UploadViewerInfo["viewer_calibrations"] | undefined
+  ) => void;
 };
 
 type MetadataCard = {
@@ -687,6 +771,7 @@ export function ImageViewerShell({
   zAxisSize,
   tAxisSize,
   setSelectedIndex,
+  onViewerCalibrationsChange,
 }: ImageViewerShellProps) {
   const [measurementMode, setMeasurementMode] = useState(false);
   const [measurementDraft, setMeasurementDraft] = useState<MeasurementDraft>(null);
@@ -701,10 +786,40 @@ export function ImageViewerShell({
   });
   const [scalarProbeState, setScalarProbeState] = useState<ScalarProbeState>({
     key: "",
+    client: null,
     volume: null,
     error: null,
   });
-
+  const uploadHistogramRequestRef = useRef<{
+    key: string;
+    controller: AbortController;
+    abortTimer: number | null;
+  } | null>(null);
+  const scalarProbeRequestRef = useRef<{
+    key: string;
+    client: ApiClient;
+    controller: AbortController;
+    abortTimer: number | null;
+  } | null>(null);
+  const [maskDrafts, setMaskDrafts] = useState(
+    () => new Map<string, SavedMaskCalibration>()
+  );
+  const maskDraftsRef = useRef(maskDrafts);
+  useEffect(() => {
+    maskDraftsRef.current = maskDrafts;
+  }, [maskDrafts]);
+  const [savedMaskBaselines, setSavedMaskBaselines] = useState(
+    () => new Map<string, SavedMaskCalibration>()
+  );
+  const [maskCalibrationSaveRecord, setMaskCalibrationSaveRecord] = useState<{
+    selectionKey: string;
+    status: "idle" | "saving" | "saved" | "error";
+  }>({ selectionKey: "", status: "idle" });
+  const [maskThresholdEditing, setMaskThresholdEditing] = useState(false);
+  const [serverMaskThresholdState, setServerMaskThresholdState] = useState<{
+    selectionKey: string;
+    value: number;
+  }>({ selectionKey: "", value: 0 });
   // --- Immersive fullscreen (native Fullscreen API on the shell wrapper) ---------
   const shellRef = useRef<HTMLDivElement | null>(null);
   // Imperative handle from whichever 2D canvas is mounted (direct-plane or deep-zoom),
@@ -1237,14 +1352,51 @@ export function ImageViewerShell({
       displayCapabilities.has("channel_mix") ||
       displayCapabilities.has("channel_color"));
   const canControlChannelColor = displayCapabilities.has("channel_color");
+  const sourceSha256 = String(viewerInfo.metadata.sha256 ?? "").trim();
+  const scalarIdentity = resolveScalarRendering({
+    viewerInfo,
+    displayState: selectedDisplayState,
+    settledTime: debouncedT,
+    requestedMode: "intensity",
+    threshold: null,
+  });
+  const maskHistogramChannel = scalarIdentity?.channel ?? -1;
+  const resolvedScalarTime = scalarIdentity?.time ?? -1;
+  const maskSelectionId = `c${maskHistogramChannel}:t${resolvedScalarTime}`;
+  const maskSelectionKey = [
+    viewerInfo.file_id,
+    sourceSha256,
+    maskSelectionId,
+  ].join("\u0000");
+  const persistedMaskSelection =
+    isMaskCapableScalarVolume(viewerInfo) &&
+    viewerInfo.viewer_calibrations?.source_sha256 === sourceSha256
+      ? viewerInfo.viewer_calibrations.selections[maskSelectionId]
+      : undefined;
+  const viewerMaskCapable = isMaskCapableScalarVolume(viewerInfo);
   const canLoadScalarVolumeHistogram =
-    viewerInfo.is_volume && viewerInfo.viewer.volume_mode === "scalar";
+    viewerInfo.is_volume &&
+    (viewerInfo.viewer.volume_mode === "scalar" ||
+      viewerInfo.viewer.volume_mode === "slice_stack");
+  const volumeHistogramDemand =
+    viewerMaskCapable &&
+    (selectedDisplayState?.scalar_render_mode === "mask" ||
+      persistedMaskSelection?.render_mode === "mask");
   const canLoadUploadHistogram =
     Boolean(viewerInfo.service_urls?.histogram) &&
-    (displayCapabilities.has("histogram") || displayCapabilities.has("intensity_window")) &&
-    (!viewerInfo.is_volume || canLoadScalarVolumeHistogram);
+    (!viewerInfo.is_volume || scalarIdentity != null) &&
+    (viewerMaskCapable ||
+      displayCapabilities.has("histogram") ||
+      displayCapabilities.has("intensity_window")) &&
+    (!viewerInfo.is_volume ||
+      (canLoadScalarVolumeHistogram && volumeHistogramDemand));
   const uploadHistogramRequestKey = canLoadUploadHistogram
-    ? [viewerInfo.file_id, canControlChannels ? selectedChannelKey : "all"].join("\u0000")
+    ? [
+        viewerInfo.file_id,
+        viewerInfo.is_volume ? maskHistogramChannel : canControlChannels ? selectedChannelKey : "all",
+        viewerInfo.is_volume ? resolvedScalarTime : "still",
+        viewerInfo.is_volume ? "volume" : "plane",
+      ].join("\u0000")
     : "";
   const currentUploadHistogramState =
     uploadHistogramState.key === uploadHistogramRequestKey
@@ -1253,27 +1405,67 @@ export function ImageViewerShell({
   const uploadHistogram = currentUploadHistogramState.histogram;
   const uploadHistogramError = currentUploadHistogramState.error;
   useEffect(() => {
+    const existingRequest = uploadHistogramRequestRef.current;
+    if (
+      existingRequest?.key === uploadHistogramRequestKey &&
+      !existingRequest.controller.signal.aborted
+    ) {
+      if (existingRequest.abortTimer !== null) {
+        window.clearTimeout(existingRequest.abortTimer);
+        existingRequest.abortTimer = null;
+      }
+      return;
+    }
     if (!uploadHistogramRequestKey || uploadHistogramState.key === uploadHistogramRequestKey) {
       return;
     }
-    let active = true;
+    if (existingRequest) {
+      if (existingRequest.abortTimer !== null) {
+        window.clearTimeout(existingRequest.abortTimer);
+      }
+      existingRequest.controller.abort();
+    }
+    const requestController = new AbortController();
+    const request = {
+      key: uploadHistogramRequestKey,
+      controller: requestController,
+      abortTimer: null as number | null,
+    };
+    uploadHistogramRequestRef.current = request;
     const histogramChannels = selectedChannelKey
       ? selectedChannelKey.split(",").map((value) => Number(value)).filter((value) => Number.isFinite(value))
       : [];
-    const histogramConfig =
-      canControlChannels && histogramChannels.length > 0
-        ? { bins: 256, channels: histogramChannels }
-        : { bins: 256 };
+    const histogramConfig = viewerInfo.is_volume
+      ? {
+          bins: 256,
+          channel: maskHistogramChannel,
+          t: resolvedScalarTime,
+          scope: "volume" as const,
+          signal: requestController.signal,
+        }
+      : canControlChannels && histogramChannels.length > 0
+        ? {
+            bins: 256,
+            channels: histogramChannels,
+            signal: requestController.signal,
+          }
+        : { bins: 256, signal: requestController.signal };
     apiClient
       .getUploadHistogram(viewerInfo.file_id, histogramConfig)
       .then((response) => {
-        if (!active) {
+        if (
+          uploadHistogramRequestRef.current !== request ||
+          requestController.signal.aborted
+        ) {
           return;
         }
         setUploadHistogramState({ key: uploadHistogramRequestKey, histogram: response, error: null });
       })
       .catch((error: unknown) => {
-        if (!active) {
+        if (
+          uploadHistogramRequestRef.current !== request ||
+          requestController.signal.aborted
+        ) {
           return;
         }
         setUploadHistogramState({
@@ -1283,15 +1475,25 @@ export function ImageViewerShell({
         });
       });
     return () => {
-      active = false;
+      request.abortTimer = window.setTimeout(() => {
+        if (
+          uploadHistogramRequestRef.current === request &&
+          request.abortTimer !== null
+        ) {
+          requestController.abort();
+          uploadHistogramRequestRef.current = null;
+        }
+      }, 0);
     };
   }, [
     apiClient,
     canControlChannels,
+    maskHistogramChannel,
+    resolvedScalarTime,
     selectedChannelKey,
     uploadHistogramRequestKey,
-    uploadHistogramState.key,
     viewerInfo.file_id,
+    viewerInfo.is_volume,
   ]);
   const isScalarMpr =
     viewerInfo.viewer.render_policy === "scalar" && viewerInfo.viewer.diagnostic_surface === "mpr";
@@ -1307,12 +1509,6 @@ export function ImageViewerShell({
     viewerInfo.viewer.volume_mode === "scalar" &&
     Boolean(viewerInfo.service_urls?.scalar_volume) &&
     displayCapabilities.has("scalar_probe");
-  // Load the full volume for any scalar surface (2D or MPR) so slices can be
-  // rendered client-side (instant scrub + window); the probe readout stays MPR-only.
-  const canLoadScalarVolume =
-    viewerInfo.viewer.volume_mode === "scalar" &&
-    (selectedSurface === "2d" || selectedSurface === "mpr") &&
-    Boolean(viewerInfo.service_urls?.scalar_volume);
   const histogramMin = Number(uploadHistogram?.histogram.min);
   const histogramMax = Number(uploadHistogram?.histogram.max);
   const metadataArrayMin = Number(viewerInfo.metadata.array_min ?? viewerInfo.metadata.intensity_stats?.min ?? 0);
@@ -1350,6 +1546,259 @@ export function ImageViewerShell({
   const directIntensityReady = Boolean(!viewerInfo.is_volume && sourceIntensityReady);
   const volumeIntensityReady = Boolean(viewerInfo.is_volume && sourceIntensityReady);
   const histogramMaxCount = Math.max(1, ...(uploadHistogram?.histogram.bins ?? [1]));
+  const scalarDtype = String(
+    uploadHistogram?.dtype ?? viewerInfo.metadata.array_dtype ?? ""
+  ).toLowerCase();
+  const canonicalHistogramThreshold = canonicalMaskThreshold(
+    uploadHistogram?.threshold?.value,
+    scalarDtype
+  );
+  const exactMaskHistogram = Boolean(
+    uploadHistogram &&
+      uploadHistogram.channel === maskHistogramChannel &&
+      uploadHistogram.t === resolvedScalarTime &&
+      uploadHistogram.scope === "volume" &&
+      uploadHistogram.threshold?.method === "otsu-256-v1" &&
+      uploadHistogram.threshold.domain === "raw" &&
+      uploadHistogram.threshold.foreground === "above" &&
+      uploadHistogram.threshold.channel === maskHistogramChannel &&
+      uploadHistogram.threshold.t === resolvedScalarTime &&
+      canonicalHistogramThreshold !== null &&
+      String(uploadHistogram.threshold.sampling_algorithm ?? "").trim() &&
+      (uploadHistogram.threshold.sampling_strategy === "exact" ||
+        uploadHistogram.threshold.sampling_strategy ===
+          "stratified-z-spatial") &&
+      uploadHistogram.threshold.sample_scope ===
+        (uploadHistogram.threshold.sampling_strategy === "exact"
+          ? "volume"
+          : "stratified_z") &&
+      uploadHistogram.threshold.source_sha256 === sourceSha256 &&
+      Number.isSafeInteger(uploadHistogram.threshold.bins) &&
+      (uploadHistogram.threshold.bins ?? 0) >= 8 &&
+      Array.isArray(uploadHistogram.threshold.z_samples) &&
+      uploadHistogram.threshold.z_samples.length > 0
+  );
+  const exactHistogramThreshold =
+    exactMaskHistogram && uploadHistogram?.threshold
+      ? uploadHistogram.threshold
+      : null;
+  const viewerThreshold = viewerInfo.data_semantics?.threshold;
+  const canonicalViewerThreshold = canonicalMaskThreshold(
+    viewerThreshold?.value,
+    scalarDtype
+  );
+  const matchingViewerThreshold =
+    viewerThreshold?.channel === maskHistogramChannel &&
+    viewerThreshold.t === resolvedScalarTime &&
+    canonicalViewerThreshold !== null
+      ? viewerThreshold
+      : null;
+  const histogramSemanticsThreshold = canonicalMaskThreshold(
+    uploadHistogram?.data_semantics?.threshold?.value,
+    scalarDtype
+  );
+  const histogramSelectionSemantics =
+    exactMaskHistogram &&
+    uploadHistogram?.data_semantics?.threshold?.channel === maskHistogramChannel &&
+    uploadHistogram.data_semantics.threshold.t === resolvedScalarTime &&
+    histogramSemanticsThreshold !== null &&
+    histogramSemanticsThreshold === canonicalHistogramThreshold
+      ? uploadHistogram.data_semantics
+      : undefined;
+  const viewerSelectionSemantics =
+    matchingViewerThreshold && viewerInfo.data_semantics
+      ? viewerInfo.data_semantics
+      : undefined;
+  const selectionSemantics =
+    histogramSelectionSemantics ?? viewerSelectionSemantics;
+  const persistedThresholdValue = canonicalMaskThreshold(
+    persistedMaskSelection?.threshold_value,
+    scalarDtype
+  );
+  const persistedProvenanceValue = canonicalMaskThreshold(
+    persistedMaskSelection?.threshold_provenance.value,
+    scalarDtype
+  );
+  const validPersistedMaskSelection =
+    persistedMaskSelection &&
+    persistedMaskSelection.channel === maskHistogramChannel &&
+    persistedMaskSelection.t === resolvedScalarTime &&
+    persistedThresholdValue !== null &&
+    persistedProvenanceValue !== null &&
+    (persistedMaskSelection.threshold_method !== "otsu-256-v1" ||
+      persistedThresholdValue === persistedProvenanceValue)
+      ? persistedMaskSelection
+      : undefined;
+  const inferredOtsuThreshold =
+    canonicalHistogramThreshold ??
+    persistedProvenanceValue ??
+    canonicalViewerThreshold;
+  const histogramSamplingAlgorithm = String(
+    exactHistogramThreshold?.sampling_algorithm ??
+      (uploadHistogram?.sampling?.algorithm as string | undefined) ??
+      ""
+  ).trim();
+  const exactThresholdProvenance =
+    exactHistogramThreshold && canonicalHistogramThreshold !== null
+    ? {
+        method: "otsu-256-v1" as const,
+        value: canonicalHistogramThreshold,
+        domain: "raw" as const,
+        foreground: "above" as const,
+        channel: maskHistogramChannel,
+        t: resolvedScalarTime,
+        sample_scope: exactHistogramThreshold.sample_scope as
+          | "volume"
+          | "stratified_z",
+        sample_count: Number(
+          exactHistogramThreshold.sample_count ?? uploadHistogram?.sample_count ?? 0
+        ),
+        sampling_algorithm: histogramSamplingAlgorithm,
+        sampling_strategy: exactHistogramThreshold.sampling_strategy as
+          | "exact"
+          | "stratified-z-spatial",
+        z_samples: [...(exactHistogramThreshold.z_samples ?? [])],
+        source_sha256: sourceSha256,
+        bins: exactHistogramThreshold.bins as number,
+      }
+    : null;
+  const storedBaseline: SavedMaskCalibration | null = validPersistedMaskSelection
+    ? {
+        selectionKey: maskSelectionKey,
+        revision: validPersistedMaskSelection.revision,
+        channel: validPersistedMaskSelection.channel,
+        time: validPersistedMaskSelection.t,
+        renderMode: validPersistedMaskSelection.render_mode,
+        thresholdMethod: validPersistedMaskSelection.threshold_method,
+        thresholdValue: persistedThresholdValue as number,
+        thresholdProvenance: {
+          ...validPersistedMaskSelection.threshold_provenance,
+          value: persistedProvenanceValue as number,
+        },
+      }
+    : null;
+  const inferredBaseline: SavedMaskCalibration | null =
+    inferredOtsuThreshold !== null &&
+        (exactThresholdProvenance || matchingViewerThreshold)
+      ? {
+          selectionKey: maskSelectionKey,
+          revision: 0,
+          channel: maskHistogramChannel,
+          time: resolvedScalarTime,
+          renderMode: "auto",
+          thresholdMethod: "otsu-256-v1",
+          thresholdValue: inferredOtsuThreshold,
+          thresholdProvenance: exactThresholdProvenance,
+        }
+      : null;
+  const locallySavedBaseline = savedMaskBaselines.get(maskSelectionKey);
+  const savedBaseline =
+    locallySavedBaseline ?? storedBaseline ?? inferredBaseline;
+  const maskDraft = maskDrafts.get(maskSelectionKey);
+  const requestedScalarRenderMode =
+    maskDraft?.renderMode ?? savedBaseline?.renderMode ?? "auto";
+  const maskThresholdMethod =
+    maskDraft?.thresholdMethod ??
+    savedBaseline?.thresholdMethod ??
+    "otsu-256-v1";
+  const canonicalDraftThreshold = canonicalMaskThreshold(
+    maskDraft?.thresholdProvenance || maskDraft?.thresholdMethod === "manual"
+      ? maskDraft?.thresholdValue
+      : null,
+    scalarDtype
+  );
+  const maskThresholdValue =
+    canonicalDraftThreshold ??
+    savedBaseline?.thresholdValue ??
+    inferredOtsuThreshold ??
+    canonicalMaskThreshold(arrayMin, scalarDtype) ??
+    arrayMin;
+  const maskCapable =
+    viewerMaskCapable &&
+    scalarIdentity != null &&
+    isExactMaskDtype(viewerInfo.scalar_mask_capability?.dtype);
+  const scalarModeViewer = {
+    ...viewerInfo,
+    data_semantics: selectionSemantics,
+  };
+  const hasMaskRenderThresholdEvidence = Boolean(
+    exactThresholdProvenance ||
+      maskDraft?.thresholdProvenance ||
+      savedBaseline?.thresholdProvenance ||
+      matchingViewerThreshold
+  );
+  const resolvedScalarRendering = resolveScalarRendering({
+    viewerInfo: scalarModeViewer,
+    displayState: selectedDisplayState,
+    settledTime: resolvedScalarTime,
+    requestedMode: requestedScalarRenderMode,
+    threshold: hasMaskRenderThresholdEvidence ? maskThresholdValue : null,
+  });
+  const effectiveScalarRenderMode =
+    resolvedScalarRendering?.effectiveMode ?? "intensity";
+  const effectiveMaskMode =
+    maskCapable && resolvedScalarRendering?.effectiveMode === "mask";
+  // Raw nearest scalar data is also the semantic authority for microscopy Mask
+  // MPR, even when the ordinary intensity volume mode is a slice stack.
+  const canLoadScalarVolume =
+    (viewerInfo.viewer.volume_mode === "scalar" ||
+      (viewerMaskCapable && effectiveMaskMode)) &&
+    (selectedSurface === "mpr" ||
+      (selectedSurface === "2d" && !effectiveMaskMode)) &&
+    Boolean(viewerInfo.service_urls?.scalar_volume) &&
+    typeof apiClient.getUploadScalarVolume === "function";
+  const maskThresholdSpan = Math.max(0.000001, arrayMax - arrayMin);
+  const maskThresholdStep =
+    scalarDtype.includes("float") || scalarDtype.includes("double")
+      ? Math.max(maskThresholdSpan / 1000, 0.0001)
+      : 1;
+  const maskThresholdMarker = Math.max(
+    0,
+    Math.min(100, ((maskThresholdValue - arrayMin) / maskThresholdSpan) * 100)
+  );
+  const baselineForDirty = savedBaseline ?? storedBaseline;
+  const maskCalibrationDirty =
+    maskCapable &&
+    Boolean(
+      maskDraft &&
+        (!baselineForDirty ||
+          requestedScalarRenderMode !== baselineForDirty.renderMode ||
+          maskThresholdMethod !== baselineForDirty.thresholdMethod ||
+          Math.abs(maskThresholdValue - baselineForDirty.thresholdValue) > 1e-9)
+    );
+  const maskCalibrationSaveState =
+    maskCalibrationSaveRecord.selectionKey === maskSelectionKey
+      ? maskCalibrationSaveRecord.status
+      : "idle";
+  const maskCalibrationProvenance =
+    exactThresholdProvenance ??
+    maskDraft?.thresholdProvenance ??
+    savedBaseline?.thresholdProvenance ??
+    null;
+  const hasSavableMaskCalibrationEvidence = Boolean(
+    maskCalibrationProvenance &&
+      maskCalibrationProvenance.channel === maskHistogramChannel &&
+      maskCalibrationProvenance.t === resolvedScalarTime &&
+      maskCalibrationProvenance.sample_count > 0 &&
+      maskCalibrationProvenance.sampling_algorithm &&
+      maskCalibrationProvenance.source_sha256 === sourceSha256 &&
+      maskCalibrationProvenance.bins >= 8 &&
+      maskCalibrationProvenance.z_samples.length > 0
+  );
+  const serverMaskThresholdValue =
+    serverMaskThresholdState.selectionKey === maskSelectionKey
+      ? canonicalMaskThreshold(serverMaskThresholdState.value, scalarDtype) ??
+        maskThresholdValue
+      : maskThresholdValue;
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setServerMaskThresholdState({
+        selectionKey: maskSelectionKey,
+        value: maskThresholdValue,
+      });
+    }, 160);
+    return () => window.clearTimeout(timeoutId);
+  }, [maskSelectionKey, maskThresholdValue]);
   const clipBounds = normalizeClipBounds(selectedDisplayState);
   const channelNames =
     viewerInfo.metadata.microscopy?.channel_names?.length || viewerInfo.phys?.channel_names?.length
@@ -1445,53 +1894,187 @@ export function ImageViewerShell({
     return rows;
   })();
   const scalarProbeChannelIndex =
-    selectedSurface === "mpr" && selectedChannelIndices.length === 1
-      ? Math.max(0, Math.min(selectedChannelIndices[0] ?? 0, Math.max(0, channelNames.length - 1)))
-      : volumeChannelIndex;
+    resolvedScalarRendering?.channel ?? scalarIdentity?.channel ?? volumeChannelIndex;
+  const scalarProbeTime =
+    resolvedScalarRendering?.time ?? scalarIdentity?.time ?? resolvedScalarTime;
+  const scalarProbeSampling = effectiveMaskMode ? "nearest" : "box";
+  const scalarProbeExpectedPolicy = effectiveMaskMode
+    ? SCALAR_MASK_NATIVE_POLICY
+    : null;
+  const scalarProbeExpectedMaskDtype = effectiveMaskMode
+    ? viewerInfo.scalar_mask_capability?.dtype
+    : null;
+  const scalarProbeSourceWidth = viewerInfo.axis_sizes.X;
+  const scalarProbeSourceHeight = viewerInfo.axis_sizes.Y;
+  const scalarProbeSourceDepth = viewerInfo.axis_sizes.Z;
   const scalarProbeRequestKey = canLoadScalarVolume
-    ? [viewerInfo.file_id, debouncedT, scalarProbeChannelIndex].join("\u0000")
+    ? [
+        viewerInfo.file_id,
+        sourceSha256,
+        scalarProbeTime,
+        scalarProbeChannelIndex,
+        scalarProbeSampling,
+        scalarProbeSourceWidth,
+        scalarProbeSourceHeight,
+        scalarProbeSourceDepth,
+        scalarProbeExpectedPolicy ?? "box-policy:any",
+        scalarProbeExpectedMaskDtype ?? "mask-dtype:none",
+      ].join("\u0000")
     : "";
   const currentScalarProbeState =
-    scalarProbeState.key === scalarProbeRequestKey
+    scalarProbeState.key === scalarProbeRequestKey &&
+    scalarProbeState.client === apiClient
       ? scalarProbeState
-      : { key: scalarProbeRequestKey, volume: null, error: null };
+      : {
+          key: scalarProbeRequestKey,
+          client: apiClient,
+          volume: null,
+          error: null,
+        };
   const scalarProbeVolume = currentScalarProbeState.volume;
   const scalarProbeError = currentScalarProbeState.error;
   useEffect(() => {
-    if (!scalarProbeRequestKey || scalarProbeState.key === scalarProbeRequestKey) {
+    const existingRequest = scalarProbeRequestRef.current;
+    if (!scalarProbeRequestKey) {
+      if (existingRequest) {
+        if (existingRequest.abortTimer !== null) {
+          window.clearTimeout(existingRequest.abortTimer);
+        }
+        existingRequest.controller.abort();
+        scalarProbeRequestRef.current = null;
+      }
+      if (
+        scalarProbeState.key ||
+        scalarProbeState.volume ||
+        scalarProbeState.error
+      ) {
+        const clearTimer = window.setTimeout(() => {
+          setScalarProbeState({
+            key: "",
+            client: null,
+            volume: null,
+            error: null,
+          });
+        }, 0);
+        return () => window.clearTimeout(clearTimer);
+      }
       return;
     }
-    let active = true;
+    if (
+      existingRequest?.key === scalarProbeRequestKey &&
+      existingRequest.client === apiClient &&
+      !existingRequest.controller.signal.aborted
+    ) {
+      if (existingRequest.abortTimer !== null) {
+        window.clearTimeout(existingRequest.abortTimer);
+        existingRequest.abortTimer = null;
+      }
+      return;
+    }
+    if (
+      scalarProbeState.key === scalarProbeRequestKey &&
+      scalarProbeState.client === apiClient
+    ) {
+      return;
+    }
+    if (existingRequest) {
+      if (existingRequest.abortTimer !== null) {
+        window.clearTimeout(existingRequest.abortTimer);
+      }
+      existingRequest.controller.abort();
+    }
+    const requestController = new AbortController();
+    const request = {
+      key: scalarProbeRequestKey,
+      client: apiClient,
+      controller: requestController,
+      abortTimer: null as number | null,
+    };
+    scalarProbeRequestRef.current = request;
     apiClient
       .getUploadScalarVolume(viewerInfo.file_id, {
-        t: debouncedT,
+        t: scalarProbeTime,
         channel: scalarProbeChannelIndex,
+        sampling: scalarProbeSampling,
+        signal: requestController.signal,
       })
       .then((payload) => {
-        if (!active) {
+        if (
+          scalarProbeRequestRef.current !== request ||
+          requestController.signal.aborted
+        ) {
           return;
         }
-        setScalarProbeState({ key: scalarProbeRequestKey, volume: payload, error: null });
+        validateScalarVolumeIdentity(payload, {
+          channel: scalarProbeChannelIndex,
+          time: scalarProbeTime,
+          sourceGrid: {
+            width: scalarProbeSourceWidth,
+            height: scalarProbeSourceHeight,
+            depth: scalarProbeSourceDepth,
+          },
+          policy: scalarProbeExpectedPolicy ?? payload.previewPolicy,
+        });
+        if (payload.sampling !== scalarProbeSampling) {
+          throw new RangeError(
+            `Scalar volume sampling mismatch: expected ${scalarProbeSampling}, received ${String(payload.sampling)}.`
+          );
+        }
+        if (
+          scalarProbeExpectedMaskDtype &&
+          payload.dtype !== scalarProbeExpectedMaskDtype
+        ) {
+          throw new RangeError(
+            `Scalar Mask dtype mismatch: expected ${scalarProbeExpectedMaskDtype}, received ${String(payload.dtype)}.`
+          );
+        }
+        setScalarProbeState({
+          key: scalarProbeRequestKey,
+          client: apiClient,
+          volume: payload,
+          error: null,
+        });
       })
       .catch((error: unknown) => {
-        if (!active) {
+        if (
+          scalarProbeRequestRef.current !== request ||
+          requestController.signal.aborted
+        ) {
           return;
         }
         setScalarProbeState({
           key: scalarProbeRequestKey,
+          client: apiClient,
           volume: null,
           error: error instanceof Error ? error.message : "Scalar probe unavailable.",
         });
       });
     return () => {
-      active = false;
+      request.abortTimer = window.setTimeout(() => {
+        if (
+          scalarProbeRequestRef.current === request &&
+          request.abortTimer !== null
+        ) {
+          requestController.abort();
+          scalarProbeRequestRef.current = null;
+        }
+      }, 0);
     };
   }, [
     apiClient,
-    debouncedT,
     scalarProbeChannelIndex,
-    scalarProbeRequestKey,
+    scalarProbeExpectedMaskDtype,
+    scalarProbeExpectedPolicy,
+    scalarProbeState.client,
+    scalarProbeState.error,
     scalarProbeState.key,
+    scalarProbeState.volume,
+    scalarProbeSampling,
+    scalarProbeSourceDepth,
+    scalarProbeSourceHeight,
+    scalarProbeSourceWidth,
+    scalarProbeTime,
+    scalarProbeRequestKey,
     viewerInfo.file_id,
   ]);
   const displayTransformKey = [
@@ -1499,10 +2082,14 @@ export function ImageViewerShell({
     selectedDisplayState?.negative ? "negative" : "positive",
     canControlChannels ? selectedChannelKey || "channels-default" : "channels-all",
     canControlChannelColor ? selectedChannelColorKey || "colors-default" : "colors-source",
+    effectiveMaskMode ? "mask" : "intensity",
+    effectiveMaskMode ? serverMaskThresholdValue : "no-threshold",
   ].join(":");
-  const previewCacheKey = `windowed-v2:${
-    String(viewerInfo.metadata.sha256 ?? viewerInfo.file_id).trim() || viewerInfo.file_id
-  }:${displayTransformKey}`;
+  const previewSourceIdentity = effectiveMaskMode
+    ? sourceSha256
+    : String(viewerInfo.metadata.sha256 ?? viewerInfo.file_id).trim() ||
+      viewerInfo.file_id;
+  const previewCacheKey = `windowed-v2:${previewSourceIdentity}:${displayTransformKey}`;
 
   const buildMprSliceUrl = useCallback(
     (axis: "x" | "y" | "z", indices: { x: number; y: number; z: number }) =>
@@ -1511,18 +2098,26 @@ export function ImageViewerShell({
         x: indices.x,
         y: indices.y,
         z: indices.z,
-        t: debouncedT,
+        t: resolvedScalarRendering?.time,
         enhancement: selectedDisplayState?.enhancement,
         fusionMethod: selectedDisplayState?.fusion_method,
         negative: selectedDisplayState?.negative,
-        channels: selectedDisplayState?.channels,
+        channels: effectiveMaskMode
+          ? [resolvedScalarRendering?.channel ?? -1]
+          : selectedDisplayState?.channels,
         channelColors: selectedDisplayState?.channel_colors,
+        scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
+        scalarThresholdValue: effectiveMaskMode ? serverMaskThresholdValue : undefined,
+        scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
         cacheKey: previewCacheKey,
       }),
     [
       apiClient,
-      debouncedT,
       previewCacheKey,
+      effectiveMaskMode,
+      resolvedScalarRendering?.channel,
+      resolvedScalarRendering?.time,
+      serverMaskThresholdValue,
       selectedDisplayState?.channel_colors,
       selectedDisplayState?.channels,
       selectedDisplayState?.enhancement,
@@ -1532,7 +2127,7 @@ export function ImageViewerShell({
     ]
   );
   const buildDirect2dSliceUrl = useCallback(
-    (z: number, t: number = debouncedT) =>
+    (z: number, t: number = resolvedScalarRendering?.time ?? resolvedScalarTime) =>
       apiClient.uploadSliceUrl(viewerInfo.file_id, {
         axis: "z",
         z,
@@ -1540,15 +2135,24 @@ export function ImageViewerShell({
         enhancement: selectedDisplayState?.enhancement,
         fusionMethod: selectedDisplayState?.fusion_method,
         negative: selectedDisplayState?.negative,
-        channels: selectedDisplayState?.channels,
+        channels: effectiveMaskMode
+          ? [resolvedScalarRendering?.channel ?? -1]
+          : selectedDisplayState?.channels,
         channelColors: selectedDisplayState?.channel_colors,
+        scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
+        scalarThresholdValue: effectiveMaskMode ? serverMaskThresholdValue : undefined,
+        scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
         fullResolution: true,
         cacheKey: previewCacheKey,
       }),
     [
       apiClient,
-      debouncedT,
       previewCacheKey,
+      effectiveMaskMode,
+      resolvedScalarRendering?.channel,
+      resolvedScalarRendering?.time,
+      resolvedScalarTime,
+      serverMaskThresholdValue,
       selectedDisplayState?.channel_colors,
       selectedDisplayState?.channels,
       selectedDisplayState?.enhancement,
@@ -1558,9 +2162,15 @@ export function ImageViewerShell({
     ]
   );
   const mprSliceUrls = {
-    z: buildMprSliceUrl("z", { x: debouncedX, y: debouncedY, z: debouncedZ }),
-    y: buildMprSliceUrl("y", { x: debouncedX, y: debouncedY, z: debouncedZ }),
-    x: buildMprSliceUrl("x", { x: debouncedX, y: debouncedY, z: debouncedZ }),
+    z: effectiveMaskMode
+      ? ""
+      : buildMprSliceUrl("z", { x: debouncedX, y: debouncedY, z: debouncedZ }),
+    y: effectiveMaskMode
+      ? ""
+      : buildMprSliceUrl("y", { x: debouncedX, y: debouncedY, z: debouncedZ }),
+    x: effectiveMaskMode
+      ? ""
+      : buildMprSliceUrl("x", { x: debouncedX, y: debouncedY, z: debouncedZ }),
   };
   const direct2dSliceUrl = buildDirect2dSliceUrl(debouncedZ);
 
@@ -1570,44 +2180,101 @@ export function ImageViewerShell({
   // Hounsfield window (the medical case); anything else uses the cached PNG path.
   // Uses the immediate (non-debounced) indices, since there is no network to gate.
   const enhancementIsHounsfield = String(selectedDisplayState?.enhancement ?? "").startsWith("hounsfield:");
-  const clientSliceEnabled =
-    Boolean(scalarProbeVolume) && enhancementIsHounsfield && viewerInfo.axis_sizes.C <= 1;
+  const clientMaskSliceEnabled =
+    effectiveMaskMode &&
+    scalarProbeVolume?.sampling === "nearest" &&
+    scalarProbeVolume.channel === scalarProbeChannelIndex &&
+    scalarProbeVolume.time === scalarProbeTime;
+  const clientIntensitySliceEnabled =
+    !effectiveMaskMode &&
+    Boolean(scalarProbeVolume) &&
+    enhancementIsHounsfield &&
+    viewerInfo.axis_sizes.C <= 1;
+  const clientMprSliceEnabled =
+    clientMaskSliceEnabled || clientIntensitySliceEnabled;
+  const clientDirect2dSliceEnabled =
+    !effectiveMaskMode && clientIntensitySliceEnabled;
   const scalarWindowLow = parsedWindow.center - parsedWindow.width / 2;
   const scalarWindowHigh = parsedWindow.center + parsedWindow.width / 2;
   const scalarInvert = Boolean(selectedDisplayState?.negative);
   const makeScalarSlice = useCallback(
-    (axis: ScalarSliceAxis, sliceIndex: number): ScalarSliceSource | null =>
-      clientSliceEnabled && scalarProbeVolume
-        ? buildScalarSliceSource({
-            fileId: viewerInfo.file_id,
-            payload: scalarProbeVolume,
-            axis,
-            sliceIndex,
-            windowLow: scalarWindowLow,
-            windowHigh: scalarWindowHigh,
-            invert: scalarInvert,
-          })
-        : null,
-    [clientSliceEnabled, scalarProbeVolume, scalarWindowLow, scalarWindowHigh, scalarInvert, viewerInfo.file_id]
+    (
+      axis: ScalarSliceAxis,
+      sourceSliceIndex: number,
+      enabled: boolean
+    ): ScalarSliceSource | null => {
+      if (!enabled || !scalarProbeVolume) {
+        return null;
+      }
+      const sliceIndex = mapSourceSliceToNearestDelivery(
+        scalarProbeVolume,
+        axis,
+        sourceSliceIndex
+      ).deliveryIndex;
+      return buildScalarSliceSource({
+        fileId: viewerInfo.file_id,
+        sourceIdentity: sourceSha256,
+        payload: scalarProbeVolume,
+        axis,
+        sliceIndex,
+        windowLow: clientMaskSliceEnabled
+          ? serverMaskThresholdValue
+          : scalarWindowLow,
+        windowHigh: clientMaskSliceEnabled
+          ? serverMaskThresholdValue + 1
+          : scalarWindowHigh,
+        invert: clientMaskSliceEnabled ? false : scalarInvert,
+      });
+    },
+    [
+      clientMaskSliceEnabled,
+      scalarInvert,
+      scalarProbeVolume,
+      scalarWindowHigh,
+      scalarWindowLow,
+      serverMaskThresholdValue,
+      sourceSha256,
+      viewerInfo.file_id,
+    ]
   );
   const direct2dScalarSlice = useMemo(
-    () => makeScalarSlice("z", clampedIndices.z),
-    [makeScalarSlice, clampedIndices.z]
+    () => makeScalarSlice("z", clampedIndices.z, clientDirect2dSliceEnabled),
+    [makeScalarSlice, clampedIndices.z, clientDirect2dSliceEnabled]
   );
   const mprScalarSlices = useMemo(
     () => ({
-      z: makeScalarSlice("z", clampedIndices.z),
-      y: makeScalarSlice("y", clampedIndices.y),
-      x: makeScalarSlice("x", clampedIndices.x),
+      z: makeScalarSlice("z", clampedIndices.z, clientMprSliceEnabled),
+      y: makeScalarSlice("y", clampedIndices.y, clientMprSliceEnabled),
+      x: makeScalarSlice("x", clampedIndices.x, clientMprSliceEnabled),
     }),
-    [makeScalarSlice, clampedIndices.x, clampedIndices.y, clampedIndices.z]
+    [
+      makeScalarSlice,
+      clampedIndices.x,
+      clampedIndices.y,
+      clampedIndices.z,
+      clientMprSliceEnabled,
+    ]
   );
 
   // Warm neighbouring slices so moving through the stack hits the cache instead of
   // a fresh ~150ms backend round-trip per slice. Skipped when slices render
   // client-side (extraction is instant, so there is nothing to warm).
   useEffect(() => {
-    if (!viewerInfo.is_volume || clientSliceEnabled) {
+    const activeClientSliceEnabled =
+      selectedSurface === "mpr" ? clientMprSliceEnabled : clientDirect2dSliceEnabled;
+    if (
+      !viewerInfo.is_volume ||
+      activeClientSliceEnabled ||
+      (effectiveMaskMode && selectedSurface === "mpr")
+    ) {
+      return;
+    }
+    if (
+      effectiveMaskMode &&
+      (maskThresholdEditing ||
+        Math.abs(serverMaskThresholdValue - maskThresholdValue) > 1e-9)
+    ) {
+      cancelPendingSlicePrefetches();
       return;
     }
     const urls: string[] = [];
@@ -1618,7 +2285,7 @@ export function ImageViewerShell({
         if (debouncedZ - step >= 0) urls.push(buildDirect2dSliceUrl(debouncedZ - step));
         // ...and T neighbors at the current plane, so time scrubbing is as smooth as
         // Z scrubbing (the cache key includes t, so these resolve instantly on arrival).
-        if (tAxisSize > 1) {
+        if (tAxisSize > 1 && !effectiveMaskMode) {
           if (debouncedT + step < tAxisSize) urls.push(buildDirect2dSliceUrl(debouncedZ, debouncedT + step));
           if (debouncedT - step >= 0) urls.push(buildDirect2dSliceUrl(debouncedZ, debouncedT - step));
         }
@@ -1639,12 +2306,17 @@ export function ImageViewerShell({
   }, [
     buildDirect2dSliceUrl,
     buildMprSliceUrl,
-    clientSliceEnabled,
+    clientDirect2dSliceEnabled,
+    clientMprSliceEnabled,
     debouncedX,
     debouncedY,
     debouncedZ,
     debouncedT,
+    effectiveMaskMode,
+    maskThresholdEditing,
+    maskThresholdValue,
     selectedSurface,
+    serverMaskThresholdValue,
     viewerInfo.is_volume,
     xAxisSize,
     yAxisSize,
@@ -1666,7 +2338,7 @@ export function ImageViewerShell({
   // frame. Driving the slice URL makes the main plane track the time/z scrubber. libbioimage
   // keeps its optimized /display.
   const direct2dImageUrl =
-    viewerInfo.metadata.reader === "ngff"
+    effectiveMaskMode || viewerInfo.metadata.reader === "ngff"
       ? direct2dSliceUrl
       : (direct2dDisplayUrl ?? direct2dSliceUrl);
   const direct2dPreviewUrl = apiClient.uploadPreviewUrl(viewerInfo.file_id);
@@ -1677,14 +2349,68 @@ export function ImageViewerShell({
       viewerInfo.viewer.delivery_mode === "deferred_multiscale") &&
     viewerInfo.viewer.tile_scheme.levels.length > 0;
 
-  const scalarProbeValue =
-    canLoadScalarProbe && scalarProbeVolume
-      ? scalarVolumePayloadValueAt(scalarProbeVolume, clampedIndices)
+  const validatedNearestMaskMapping =
+    effectiveMaskMode && clientMaskSliceEnabled;
+  const nativeExactIntensityMapping =
+    !effectiveMaskMode &&
+    canLoadScalarProbe &&
+    scalarProbeVolume?.sampling === "box" &&
+    scalarPayloadUsesNativeGrid(scalarProbeVolume) &&
+    (scalarProbeVolume.previewPolicy === "native-exact-v1" ||
+      scalarProbeVolume.previewPolicy === "exact-v1");
+  const scalarProbeMapping =
+    scalarProbeVolume && (validatedNearestMaskMapping || nativeExactIntensityMapping)
+      ? mapSourceVoxelToNearestDelivery(scalarProbeVolume, clampedIndices)
       : null;
+  const scalarProbeValue =
+    scalarProbeVolume && scalarProbeMapping?.exact
+      ? scalarVolumePayloadValueAt(scalarProbeVolume, scalarProbeMapping.delivery)
+      : null;
+  const mprCrosshairIndices =
+    scalarProbeMapping
+      ? { ...clampedIndices, ...scalarProbeMapping.sampledSource }
+      : clampedIndices;
+  const mprUsesDeliveryCoordinates = Boolean(
+    clientMprSliceEnabled && scalarProbeVolume
+  );
+  const mprCoordinateGrid = (axis: PlaneAxis) =>
+    mprUsesDeliveryCoordinates && scalarProbeVolume
+      ? scalarSliceDimensions(scalarProbeVolume, axis)
+      : null;
+  const mapMprSourcePointToDisplay = (
+    axis: PlaneAxis,
+    point: PlanePoint
+  ): PlanePoint =>
+    mprUsesDeliveryCoordinates && scalarProbeVolume
+      ? mapSourcePlanePointToNearestDelivery(
+          scalarProbeVolume,
+          axis,
+          point
+        ).delivery
+      : point;
+  const mapMprDisplayPointToSource = (
+    axis: PlaneAxis,
+    point: PlanePoint
+  ): PlanePoint =>
+    mprUsesDeliveryCoordinates && scalarProbeVolume
+      ? mapNearestDeliveryPlanePointToSource(
+          scalarProbeVolume,
+          axis,
+          point
+        )
+      : point;
   const cursorReadoutRows = [
     ...computeCursorWorldPosition(viewerInfo, clampedIndices),
     ...(scalarProbeValue != null
       ? [{ label: "Voxel value", value: formatIntensityValue(scalarProbeValue) }]
+      : scalarProbeMapping && !scalarProbeMapping.exact
+        ? [
+            { label: "Voxel value", value: "Unavailable (not sampled in preview)" },
+            {
+              label: "Preview sample",
+              value: `x=${scalarProbeMapping.sampledSource.x}, y=${scalarProbeMapping.sampledSource.y}, z=${scalarProbeMapping.sampledSource.z}`,
+            },
+          ]
       : scalarProbeError
         ? [{ label: "Voxel value", value: "Unavailable" }]
         : []),
@@ -1914,6 +2640,224 @@ export function ImageViewerShell({
     );
   };
 
+  const updateMaskDisplay = (patch: Partial<ViewerDisplayState>) => {
+    const nextThresholdValue =
+      canonicalMaskThreshold(
+        patch.scalar_threshold_value ?? maskThresholdValue,
+        scalarDtype
+      ) ?? maskThresholdValue;
+    const nextCalibration: SavedMaskCalibration = {
+      selectionKey: maskSelectionKey,
+      revision: savedBaseline?.revision ?? 0,
+      channel: maskHistogramChannel,
+      time: resolvedScalarTime,
+      renderMode: patch.scalar_render_mode ?? requestedScalarRenderMode,
+      thresholdMethod: patch.scalar_threshold_method ?? maskThresholdMethod,
+      thresholdValue: nextThresholdValue,
+      thresholdProvenance: maskCalibrationProvenance,
+    };
+    setMaskDrafts((current) => {
+      const next = new Map(current);
+      next.set(maskSelectionKey, nextCalibration);
+      maskDraftsRef.current = next;
+      return next;
+    });
+    setMaskCalibrationSaveRecord({ selectionKey: maskSelectionKey, status: "idle" });
+    updateSelectedDisplay(patch);
+  };
+
+  const saveMaskCalibration = async () => {
+    if (
+      !maskCapable ||
+      !maskCalibrationDirty ||
+      !sourceSha256 ||
+      !Number.isFinite(maskThresholdValue) ||
+      !maskCalibrationProvenance ||
+      !hasSavableMaskCalibrationEvidence
+    ) {
+      return;
+    }
+    const canonicalThresholdValue = canonicalMaskThreshold(
+      maskThresholdValue,
+      scalarDtype
+    );
+    if (canonicalThresholdValue === null) {
+      return;
+    }
+    const snapshot: SavedMaskCalibration = {
+      selectionKey: maskSelectionKey,
+      revision: savedBaseline?.revision ?? 0,
+      channel: maskHistogramChannel,
+      time: resolvedScalarTime,
+      renderMode: requestedScalarRenderMode,
+      thresholdMethod: maskThresholdMethod,
+      thresholdValue: canonicalThresholdValue,
+      thresholdProvenance: maskCalibrationProvenance,
+    };
+    setMaskCalibrationSaveRecord({ selectionKey: maskSelectionKey, status: "saving" });
+    try {
+      const response = await apiClient.patchResourceMetadata(viewerInfo.file_id, {
+        ultra_viewer_calibration_v1: {
+          version: 1,
+          source_sha256: sourceSha256,
+          selections: {
+            [maskSelectionId]: {
+              channel: snapshot.channel,
+              t: snapshot.time,
+              render_mode: snapshot.renderMode,
+              threshold_method: snapshot.thresholdMethod,
+              threshold_value: snapshot.thresholdValue,
+              threshold_foreground: "above",
+              expected_revision: snapshot.revision,
+              threshold_provenance: snapshot.thresholdProvenance,
+            },
+          },
+        },
+      });
+      const returnedCalibrations = normalizeViewerCalibrations(
+        response.resource?.metadata?.ultra_viewer_calibration_v1,
+        sourceSha256
+      );
+      if (!returnedCalibrations) {
+        throw new Error("calibration PATCH response omitted the persisted selection");
+      }
+      const echoedSelection = returnedCalibrations.selections[maskSelectionId];
+      if (
+        !echoedSelection ||
+        echoedSelection.channel !== snapshot.channel ||
+        echoedSelection.t !== snapshot.time ||
+        echoedSelection.render_mode !== snapshot.renderMode ||
+        echoedSelection.threshold_method !== snapshot.thresholdMethod ||
+        echoedSelection.threshold_value !== snapshot.thresholdValue ||
+        echoedSelection.threshold_foreground !== "above" ||
+        echoedSelection.revision !== snapshot.revision + 1 ||
+        !sameMaskThresholdProvenance(
+          echoedSelection.threshold_provenance,
+          snapshot.thresholdProvenance
+        )
+      ) {
+        throw new Error("calibration PATCH response did not echo the submitted selection");
+      }
+      const acknowledged: SavedMaskCalibration = {
+        ...snapshot,
+        revision: echoedSelection.revision,
+        thresholdProvenance: echoedSelection.threshold_provenance,
+      };
+      const snapshotStillCurrent = sameMaskCalibrationContent(
+        maskDraftsRef.current.get(maskSelectionKey),
+        snapshot
+      );
+      onViewerCalibrationsChange?.(returnedCalibrations);
+      setSavedMaskBaselines((current) => {
+        const existing = current.get(maskSelectionKey);
+        if (existing && existing.revision > acknowledged.revision) {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(maskSelectionKey, acknowledged);
+        return next;
+      });
+      setMaskDrafts((current) => {
+        const existing = current.get(maskSelectionKey);
+        if (!sameMaskCalibrationContent(existing, snapshot)) {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(maskSelectionKey, acknowledged);
+        maskDraftsRef.current = next;
+        return next;
+      });
+      if (snapshotStillCurrent) {
+        setMaskCalibrationSaveRecord({
+          selectionKey: maskSelectionKey,
+          status: "saved",
+        });
+      }
+    } catch {
+      // The edited values intentionally stay in display state so a failed save
+      // remains dirty and can be retried without reconstructing the calibration.
+      if (
+        sameMaskCalibrationContent(
+          maskDraftsRef.current.get(maskSelectionKey),
+          snapshot
+        )
+      ) {
+        setMaskCalibrationSaveRecord({
+          selectionKey: maskSelectionKey,
+          status: "error",
+        });
+      }
+    }
+  };
+
+  const renderScalarRenderingControl = () => (
+    <TooltipProvider delayDuration={120}>
+      <div className="viewer-inline-control-group">
+        <div className="viewer-inline-control" data-viewer-scalar-render-mode="true">
+          <Select
+            value={requestedScalarRenderMode}
+            onValueChange={(value) =>
+              updateMaskDisplay({
+                scalar_render_mode: value as ViewerDisplayState["scalar_render_mode"],
+              })
+            }
+          >
+            <SelectTrigger aria-label="Scalar rendering" className="viewer-select-trigger">
+              <SelectValue placeholder="Scalar rendering" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="auto">
+                  Auto · {effectiveScalarRenderMode === "mask" ? "Mask" : "Intensity"}
+                </SelectItem>
+                <SelectItem value="intensity">Intensity</SelectItem>
+                <SelectItem value="mask">Mask</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="About scalar rendering"
+              >
+                <Info />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Auto follows source semantics. Mask uses raw values above the threshold.
+            </TooltipContent>
+          </Tooltip>
+        </div>
+        {channelNames.length > 1 ? (
+          <div className="viewer-inline-control" data-viewer-mask-channel="true">
+            <Select
+              value={String(maskHistogramChannel)}
+              onValueChange={(value) =>
+                updateSelectedDisplay({ volume_channel: Number(value) })
+              }
+            >
+              <SelectTrigger aria-label="Mask channel" className="viewer-select-trigger">
+                <SelectValue placeholder="Mask channel" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {channelNames.map((label, index) => (
+                    <SelectItem key={`mask-${label}-${index}`} value={String(index)}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        ) : null}
+      </div>
+    </TooltipProvider>
+  );
+
   const renderIntensityHistogramPanel = () => (
     <div className="viewer-intensity-histogram-panel">
       <div className="viewer-intensity-histogram" aria-label="Source histogram">
@@ -1929,6 +2873,148 @@ export function ImageViewerShell({
       </strong>
       <span>{histogramSampleLabel(uploadHistogram)}</span>
     </div>
+  );
+
+  const renderMaskCalibrationPanel = () => (
+    <section
+      className="viewer-volume-intensity-panel"
+      data-viewer-mask-calibration="true"
+      aria-label="Mask threshold calibration"
+    >
+      {volumeIntensityReady ? (
+        <div className="viewer-intensity-histogram-panel">
+          <div
+            className="viewer-intensity-histogram"
+            aria-label="Source volume histogram with mask threshold"
+            style={{ position: "relative" }}
+          >
+            {uploadHistogram?.histogram.bins.map((count, index) => (
+              <span
+                key={`mask-histogram-bin-${index}`}
+                style={{ height: `${Math.max(4, (count / histogramMaxCount) * 100)}%` }}
+              />
+            ))}
+            <i
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                insetBlock: 0,
+                left: `${maskThresholdMarker}%`,
+                width: 2,
+                background: "currentColor",
+                opacity: 0.9,
+              }}
+            />
+          </div>
+          <strong>
+            {formatIntensityValue(arrayMin)}-{formatIntensityValue(arrayMax)}
+          </strong>
+          <span>{histogramSampleLabel(uploadHistogram)}</span>
+        </div>
+      ) : uploadHistogramError ? (
+        <div className="viewer-metadata-note" data-viewer-mask-histogram-error="true">
+          <strong>Histogram unavailable</strong>
+          <span>{uploadHistogramError}</span>
+        </div>
+      ) : null}
+      <label className="viewer-inline-control viewer-inline-control-wide">
+        <span>Raw threshold</span>
+        <input
+          type="range"
+          aria-label="Mask raw threshold"
+          min={arrayMin}
+          max={arrayMax}
+          step={maskThresholdStep}
+          value={maskThresholdValue}
+          onPointerDown={() => {
+            cancelPendingSlicePrefetches();
+            setMaskThresholdEditing(true);
+          }}
+          onPointerUp={() => setMaskThresholdEditing(false)}
+          onPointerCancel={() => setMaskThresholdEditing(false)}
+          onKeyDown={() => {
+            cancelPendingSlicePrefetches();
+            setMaskThresholdEditing(true);
+          }}
+          onKeyUp={() => setMaskThresholdEditing(false)}
+          onBlur={() => setMaskThresholdEditing(false)}
+          onChange={(event) =>
+            updateMaskDisplay({
+              scalar_threshold_method: "manual",
+              scalar_threshold_value: Number(event.target.value),
+              scalar_threshold_foreground: "above",
+            })
+          }
+        />
+        <strong>{formatIntensityValue(maskThresholdValue)}</strong>
+      </label>
+      <TooltipProvider delayDuration={120}>
+        <div
+          className="viewer-volume-inspection-actions"
+          style={{ flexWrap: "wrap" }}
+        >
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={!Number.isFinite(inferredOtsuThreshold)}
+            onClick={() =>
+              updateMaskDisplay({
+                scalar_threshold_method: "otsu-256-v1",
+                scalar_threshold_value: inferredOtsuThreshold,
+                scalar_threshold_foreground: "above",
+              })
+            }
+          >
+            Use Otsu
+          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="About Otsu threshold"
+              >
+                <Info />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              Otsu computes one deterministic raw-value threshold from this exact
+              channel and timepoint. It is unavailable until matching histogram
+              evidence loads.
+            </TooltipContent>
+          </Tooltip>
+          <Button
+            type="button"
+            size="sm"
+            disabled={
+              !maskCalibrationDirty ||
+              !sourceSha256 ||
+              !hasSavableMaskCalibrationEvidence ||
+              maskCalibrationSaveState === "saving"
+            }
+            onClick={() => void saveMaskCalibration()}
+          >
+            {maskCalibrationSaveState === "saving" ? "Saving…" : "Save resource default"}
+          </Button>
+          <span aria-live="polite">
+            {maskCalibrationSaveState === "error"
+              ? "Save failed; changes remain unsaved."
+              : maskCalibrationSaveState === "saved" && !maskCalibrationDirty
+                ? "Saved."
+                : maskCalibrationDirty
+                  ? "Unsaved changes"
+                  : ""}
+          </span>
+        </div>
+      </TooltipProvider>
+      {!sourceSha256 ? (
+        <div className="viewer-metadata-note">
+          Source identity is unavailable, so this calibration cannot be saved safely.
+        </div>
+      ) : null}
+    </section>
   );
 
   const renderVolumeGeometryPanel = () => {
@@ -1998,6 +3084,15 @@ export function ImageViewerShell({
     selectedSurface === "mpr" && (xAxisSize > 1 || yAxisSize > 1 || zAxisSize > 1 || tAxisSize > 1);
   const has2DIndexControls =
     selectedSurface === "2d" && !showSliceStack2DControls && (zAxisSize > 1 || tAxisSize > 1);
+  const effectiveVolumeDisplayState: ViewerDisplayState | null = selectedDisplayState
+    ? {
+        ...selectedDisplayState,
+        scalar_render_mode: effectiveMaskMode ? "mask" : "intensity",
+        scalar_threshold_method: maskThresholdMethod,
+        scalar_threshold_value: maskThresholdValue,
+        scalar_threshold_foreground: "above" as const,
+      }
+    : null;
 
   return (
     <div
@@ -2021,6 +3116,9 @@ export function ImageViewerShell({
               </TabsTrigger>
             ))}
           </TabsList>
+          {maskCapable && selectedDisplayState
+            ? renderScalarRenderingControl()
+            : null}
           <Button
             type="button"
             variant="outline"
@@ -2150,19 +3248,55 @@ export function ImageViewerShell({
                   <span>{viewerInfo.viewer.planes[axis]?.label ?? axis.toUpperCase()}</span>
                   <span>{viewerInfo.viewer.planes[axis]?.axes.join("/")}</span>
                 </div>
-                <SlicePlaneCanvas
-                  imageUrl={mprSliceUrls[axis]}
-                  descriptor={viewerInfo.viewer.planes[axis]}
-                  title={`${axis}-plane`}
-                  className="viewer-canvas-root viewer-mpr-canvas"
-                  orientationLabels={getPlaneOrientationLabels(viewerInfo, axis)}
-                  crosshair={getPlaneCursor(axis, clampedIndices)}
-                  measurement={measurementsByAxis[axis] ?? null}
-                  onSelectPoint={(point) => handlePlaneSelect(axis, point)}
-                  onMeasurePoint={(point) => handlePlaneMeasure(axis, point)}
-                  measureMode={measurementMode}
-                  scalarSlice={mprScalarSlices[axis]}
-                />
+                {effectiveMaskMode && !clientMaskSliceEnabled ? (
+                  <div
+                    className="viewer-canvas-root viewer-mpr-canvas viewer-empty-state"
+                    data-viewer-mpr-mask-unavailable={axis}
+                  >
+                    Mask Slice Views unavailable until the nearest scalar preview is ready.
+                  </div>
+                ) : (
+                  <SlicePlaneCanvas
+                    imageUrl={mprSliceUrls[axis]}
+                    descriptor={viewerInfo.viewer.planes[axis]}
+                    title={`${axis}-plane`}
+                    className="viewer-canvas-root viewer-mpr-canvas"
+                    orientationLabels={getPlaneOrientationLabels(viewerInfo, axis)}
+                    crosshair={mapMprSourcePointToDisplay(
+                      axis,
+                      getPlaneCursor(axis, mprCrosshairIndices)
+                    )}
+                    measurement={
+                      measurementsByAxis[axis]
+                        ? {
+                            start: mapMprSourcePointToDisplay(
+                              axis,
+                              measurementsByAxis[axis].start
+                            ),
+                            end: mapMprSourcePointToDisplay(
+                              axis,
+                              measurementsByAxis[axis].end
+                            ),
+                          }
+                        : null
+                    }
+                    onSelectPoint={(point) =>
+                      handlePlaneSelect(
+                        axis,
+                        mapMprDisplayPointToSource(axis, point)
+                      )
+                    }
+                    onMeasurePoint={(point) =>
+                      handlePlaneMeasure(
+                        axis,
+                        mapMprDisplayPointToSource(axis, point)
+                      )
+                    }
+                    measureMode={measurementMode}
+                    coordinateGrid={mprCoordinateGrid(axis)}
+                    scalarSlice={mprScalarSlices[axis]}
+                  />
+                )}
               </article>
             ))}
           </div>
@@ -2178,8 +3312,9 @@ export function ImageViewerShell({
                 xIndex={clampedIndices.x}
                 yIndex={clampedIndices.y}
                 zIndex={clampedIndices.z}
-                tIndex={debouncedT}
-                displayState={selectedDisplayState}
+                tIndex={resolvedScalarRendering?.time ?? resolvedScalarTime}
+                displayState={effectiveVolumeDisplayState}
+                resolvedScalarRendering={resolvedScalarRendering}
               />
             </div>
             {selectedDisplayState ? (
@@ -2407,17 +3542,18 @@ export function ImageViewerShell({
           <CollapsibleContent data-viewer-advanced-content="true">
             <div className="viewer-display-controls viewer-display-controls-volume">
               {selectedSurface === "mpr" ? renderVolumeGeometryPanel() : null}
-              {volumeIntensityReady ? (
+              {effectiveMaskMode ? renderMaskCalibrationPanel() : null}
+              {!effectiveMaskMode && volumeIntensityReady ? (
                 <div className="viewer-volume-intensity-panel" data-viewer-volume-intensity-summary="true">
                   {renderIntensityHistogramPanel()}
                 </div>
-              ) : uploadHistogramError ? (
+              ) : !effectiveMaskMode && uploadHistogramError ? (
                 <div className="viewer-metadata-note" data-viewer-intensity-error="true">
                   <strong>Histogram unavailable</strong>
                   <span>{uploadHistogramError}</span>
                 </div>
               ) : null}
-              {isScalarMpr ? (
+              {!effectiveMaskMode && isScalarMpr ? (
                 <>
                   {showCtWindowPresets ? (
                     <div
@@ -2489,7 +3625,7 @@ export function ImageViewerShell({
                     <strong>{parsedWindow.width.toFixed(1)}</strong>
                   </label>
                 </>
-              ) : (
+              ) : !effectiveMaskMode ? (
                 <div className="viewer-inline-control">
                   <span>Enhancement</span>
                   <Select
@@ -2512,8 +3648,9 @@ export function ImageViewerShell({
                     </SelectContent>
                   </Select>
                 </div>
-              )}
-              <div className="viewer-inline-control">
+              ) : null}
+              {!effectiveMaskMode ? (
+                <div className="viewer-inline-control">
                 <span>{selectedSurface === "volume" ? "Projection" : "Fusion"}</span>
                 {selectedSurface === "volume" ? (
                   // 3D ray-projection — its OWN setting, decoupled from the 2D
@@ -2557,7 +3694,8 @@ export function ImageViewerShell({
                     </SelectContent>
                   </Select>
                 )}
-              </div>
+                </div>
+              ) : null}
               {selectedSurface === "volume" ? (
                 <div className="viewer-inline-control" data-viewer-volume-view-control="true">
                   <span>Volume view</span>
@@ -2610,7 +3748,7 @@ export function ImageViewerShell({
                   </Select>
                 </div>
               ) : null}
-              {canControlScalarVolumeColorMap ? (
+              {canControlScalarVolumeColorMap && !effectiveMaskMode ? (
                 <div className="viewer-inline-control" data-viewer-scalar-colormap-control="true">
                   <span>Scalar colormap</span>
                   <Select
@@ -2636,7 +3774,7 @@ export function ImageViewerShell({
                   </Select>
                 </div>
               ) : null}
-              {canControlScalarVolumeColorMap ? (
+              {canControlScalarVolumeColorMap && !effectiveMaskMode ? (
                 <>
                   <div className="viewer-inline-control" data-viewer-transfer-preset-control="true">
                     <span>Transfer preset</span>
@@ -2765,13 +3903,15 @@ export function ImageViewerShell({
                   ) : null}
                 </>
               ) : null}
-              <label className="viewer-inline-control viewer-inline-control-switch">
-                <span>Negative</span>
-                <Switch
-                  checked={selectedDisplayState.negative}
-                  onCheckedChange={(checked) => updateSelectedDisplay({ negative: checked })}
-                />
-              </label>
+              {!effectiveMaskMode ? (
+                <label className="viewer-inline-control viewer-inline-control-switch">
+                  <span>Negative</span>
+                  <Switch
+                    checked={selectedDisplayState.negative}
+                    onCheckedChange={(checked) => updateSelectedDisplay({ negative: checked })}
+                  />
+                </label>
+              ) : null}
               {viewerInfo.viewer.volume_mode === "scalar" && canControlChannels && channelNames.length > 1 ? (
                 <div className="viewer-inline-control" data-viewer-volume-channel-control="true">
                   <span>Volume channel</span>

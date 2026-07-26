@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { ApiClient } from "@/lib/api";
 import type { UploadedFileRecord, UploadViewerInfo } from "@/types";
 
-import { normalizeSurface, resolveDefaultEnhancement, UploadViewerWorkspace } from "./UploadViewerSheet";
+import {
+  mergeViewerCalibrations,
+  normalizeSurface,
+  resolveDefaultEnhancement,
+  UploadViewerWorkspace,
+} from "./UploadViewerSheet";
 
 vi.mock("./viewer/ImageViewerShell", () => ({
   ImageViewerShell: ({ selectedDisplayState }: { selectedDisplayState: UploadViewerInfo["display_defaults"] }) => (
@@ -30,6 +35,58 @@ const pdfUpload: UploadedFileRecord = {
   sha256: "sha-pdf",
   created_at: "2026-06-07T12:30:00Z",
 };
+
+describe("mergeViewerCalibrations", () => {
+  it("unions selection deltas without allowing an older revision to win", () => {
+    const provenance = {
+      method: "otsu-256-v1" as const,
+      value: 120,
+      domain: "raw" as const,
+      foreground: "above" as const,
+      channel: 0,
+      t: 0,
+      sample_scope: "volume" as const,
+      sample_count: 8,
+      sampling_algorithm: "scalar-profile-otsu-256-v1",
+      sampling_strategy: "exact" as const,
+      z_samples: [0, 1],
+      source_sha256: "source-sha",
+      bins: 256,
+    };
+    const selection = (revision: number, threshold: number, t = 0) => ({
+      revision,
+      channel: 0,
+      t,
+      render_mode: "mask" as const,
+      threshold_method: "manual" as const,
+      threshold_value: threshold,
+      threshold_foreground: "above" as const,
+      threshold_provenance: { ...provenance, t },
+    });
+    const current = {
+      version: 1 as const,
+      source_sha256: "source-sha",
+      selections: { "c0:t0": selection(2, 140) },
+    };
+    const merged = mergeViewerCalibrations(current, {
+      version: 1,
+      source_sha256: "source-sha",
+      selections: {
+        "c0:t0": selection(1, 130),
+        "c0:t1": selection(1, 220, 1),
+      },
+    });
+
+    expect(merged?.selections["c0:t0"]).toMatchObject({
+      revision: 2,
+      threshold_value: 140,
+    });
+    expect(merged?.selections["c0:t1"]).toMatchObject({
+      revision: 1,
+      threshold_value: 220,
+    });
+  });
+});
 
 describe("UploadViewerWorkspace PDF uploads", () => {
   const renderWorkspace = (file: UploadedFileRecord) => {

@@ -10448,6 +10448,81 @@ details {
   background: color-mix(in oklab, var(--destructive) 10%, transparent);
 }
 
+/* Ask-about-selection chip: floats above a transcript selection and quotes it
+   into the composer. Quiet by design — muted ink on the panel surface, the
+   house raised-hover, no colour. It is an offer, not an announcement.
+
+   The lift rides a custom property because the base transform already carries
+   the centring translate: hover raises --selection-ask-lift instead of
+   re-declaring (and breaking) translate(-50%, -100%). */
+.chat-selection-ask {
+  --selection-ask-lift: 0px;
+  position: fixed;
+  z-index: 60;
+  transform: translate(-50%, calc(-100% - 8px - var(--selection-ask-lift)));
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-panel-strong);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+  animation: chat-selection-ask-in 160ms var(--motion-ease);
+  transition:
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
+}
+
+.chat-selection-ask:hover {
+  --selection-ask-lift: 1px;
+  color: var(--text-main);
+  border-color: color-mix(in oklab, var(--text-main) 18%, var(--line));
+  box-shadow: 0 8px 20px rgba(12, 12, 12, 0.14);
+}
+
+.chat-selection-ask:active {
+  --selection-ask-lift: 0px;
+}
+
+.chat-selection-ask:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 42%, transparent);
+  outline-offset: 2px;
+  color: var(--text-main);
+}
+
+.dark .chat-selection-ask {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.dark .chat-selection-ask:hover {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes chat-selection-ask-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-selection-ask {
+    animation: none;
+    transition: none;
+  }
+}
+
 .pk-markdown {
   display: flex;
   flex-direction: column;

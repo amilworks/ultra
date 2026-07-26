@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import {
   ChatContainerContent,
   ChatContainerRoot,
@@ -86,6 +86,11 @@ import {
 } from "./lib/figureLightbox";
 import { bundleRootForRelativePath, groupPendingUploads } from "./lib/pendingBundles";
 import { filesFromClipboard } from "./lib/clipboardFiles";
+import {
+  draftWithQuotedSelection,
+  pastedTextFile,
+  shouldAttachPastedText,
+} from "./lib/pasted-text";
 import {
   collectDroppedFiles,
   isOsFileDrag,
@@ -284,6 +289,7 @@ import {
   Square,
   SquarePen,
   Table2,
+  TextQuote,
   Trash,
   X,
 } from "lucide-react";
@@ -6359,6 +6365,18 @@ export function App() {
     [activeConversation, updateActiveConversation]
   );
 
+  /* A paste that reads as data rather than prompt (see shouldAttachPastedText)
+     becomes a .txt attachment instead of flooding the composer. The chip IS the
+     feedback — no toast: it appears where the text would have gone, and
+     removing it is the escape hatch for anyone who truly wanted the text
+     inline. */
+  const attachPastedText = useCallback(
+    (text: string): void => {
+      attachFilesToActiveConversation([pastedTextFile(text)]);
+    },
+    [attachFilesToActiveConversation]
+  );
+
   // Window-level file-drag tracking: (a) preventDefault on dragover/drop so a
   // drop that misses every target never navigates the tab away from the app,
   // and (b) a depth counter (dragenter/dragleave fire once per element
@@ -6608,7 +6626,7 @@ export function App() {
 
   // Type-to-focus: start typing anywhere in a chat and the composer takes it.
   useEffect(() => {
-    if (authStatus !== "authenticated" || activePanel !== "chat") {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
       return;
     }
     const handleTypeToFocus = (event: KeyboardEvent): void => {
@@ -6637,7 +6655,8 @@ export function App() {
     };
     window.addEventListener("keydown", handleTypeToFocus);
     return () => window.removeEventListener("keydown", handleTypeToFocus);
-  }, [activePanel, authStatus]);
+  }, [activePanel, authStatus, viewerOpen]);
+
 
   const isChatStopRequested = useCallback((conversationId: string): boolean => {
     const normalizedConversationId = conversationId.trim();
@@ -10340,6 +10359,178 @@ export function App() {
     }
   }, [activeConversation, dismissedSlashPrompt]);
 
+  /* Paste-to-focus: ⌘V anywhere in a chat routes the clipboard to the composer,
+     the paste sibling of type-to-focus above and of the Resources-panel
+     paste-to-upload. Unlike a keydown, a paste's default action targets the
+     event's own target — focusing mid-flight redirects nothing — and on an
+     uneditable target that default action is a no-op. So this handler does the
+     work itself: clipboardData is fully readable here, files attach through the
+     same path as the composer's own onPaste, and text lands in the draft (or
+     becomes an attachment when it reads as data). No double-insert risk: when
+     the composer IS focused this never runs (its target is editable), and when
+     it is not, nothing else would have consumed the paste. */
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+      return;
+    }
+    const handleChatPaste = (event: ClipboardEvent): void => {
+      const textarea = composerTextareaRef.current;
+      if (!textarea || textarea.disabled || !event.clipboardData) {
+        return;
+      }
+      if (isEditableEventTarget(event.target) || hasBlockingOverlay()) {
+        return;
+      }
+      const pastedFiles = filesFromClipboard(event.clipboardData);
+      if (pastedFiles.length > 0) {
+        event.preventDefault();
+        attachFilesToActiveConversation(pastedFiles);
+        return;
+      }
+      const pastedText = event.clipboardData.getData("text/plain");
+      if (!pastedText) {
+        return;
+      }
+      event.preventDefault();
+      if (shouldAttachPastedText(pastedText)) {
+        attachPastedText(pastedText);
+      } else {
+        setActivePromptValue((previous) =>
+          previous ? `${previous}${pastedText}` : pastedText
+        );
+      }
+      // rAF focus is fine here (unlike type-to-focus): there is no default
+      // action left to catch, and it runs after React commits the new draft,
+      // so the caret lands at the true end.
+      focusComposerTextarea();
+    };
+    window.addEventListener("paste", handleChatPaste);
+    return () => window.removeEventListener("paste", handleChatPaste);
+  }, [
+    activePanel,
+    attachFilesToActiveConversation,
+    attachPastedText,
+    authStatus,
+    focusComposerTextarea,
+    setActivePromptValue,
+    viewerOpen,
+  ]);
+
+  /* Ask-about-selection: highlight transcript text, get a quiet chip that
+     quotes it into the composer. The text is captured at show time, not at
+     click time — the chip's own mousedown would otherwise collapse the
+     selection before click fires (belt: stored text; braces: the chip also
+     preventDefaults its mousedown). */
+  const [selectionAsk, setSelectionAsk] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const askAboutSelection = useCallback((): void => {
+    const ask = selectionAsk;
+    setSelectionAsk(null);
+    if (!ask) {
+      return;
+    }
+    // A selection large enough to read as data gets the same treatment as a
+    // large paste: attachment chip, not a hundred quoted lines.
+    if (shouldAttachPastedText(ask.text)) {
+      attachPastedText(ask.text);
+    } else {
+      // Markdown blockquote, visible and editable — the user sees exactly the
+      // context the model will see, and can trim it line by line.
+      setActivePromptValue((previous) => draftWithQuotedSelection(previous, ask.text));
+    }
+    focusComposerTextarea();
+  }, [attachPastedText, focusComposerTextarea, selectionAsk, setActivePromptValue]);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+      setSelectionAsk(null);
+      return;
+    }
+    /* Reads the live selection and produces the chip's anchor, or null.
+       Restricted to `.pk-message` at BOTH ends so sidebar titles, composer
+       internals and stray UI text never grow a chip. */
+    const measureSelection = (): { text: string; x: number; y: number } | null => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+        return null;
+      }
+      const text = selection.toString();
+      if (!text.trim()) {
+        return null;
+      }
+      const withinMessage = (node: Node | null): boolean => {
+        const element =
+          node instanceof Element ? node : (node?.parentElement ?? null);
+        return Boolean(element?.closest(".pk-message"));
+      };
+      if (!withinMessage(selection.anchorNode) || !withinMessage(selection.focusNode)) {
+        return null;
+      }
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        return null;
+      }
+      return {
+        text,
+        // Clamped so the chip never slides off-viewport on selections that
+        // start at the edge; it renders translate(-50%, -100%) from this point.
+        x: Math.min(Math.max(rect.left + rect.width / 2, 72), window.innerWidth - 72),
+        y: Math.max(rect.top, 44),
+      };
+    };
+    // Shown on mouseup/keyup rather than selectionchange, so the chip does not
+    // flicker alongside the pointer mid-drag. selectionchange only ever hides.
+    const reveal = (): void => {
+      window.requestAnimationFrame(() => setSelectionAsk(measureSelection()));
+    };
+    const collapseWatch = (): void => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) {
+        setSelectionAsk(null);
+      }
+    };
+    const dismissOnKey = (event: KeyboardEvent): void => {
+      // Escape dismisses outright; typing (which type-to-focus routes to the
+      // composer) means the moment has passed — the highlight may linger as an
+      // inactive selection, but the chip should not.
+      if (event.key === "Escape" || isEditableEventTarget(event.target)) {
+        setSelectionAsk(null);
+      }
+    };
+    // Track the transcript while it scrolls under a live selection: recompute
+    // from the same DOM range, rAF-throttled; hide if it left the viewport.
+    let repositionFrame = 0;
+    const reposition = (): void => {
+      if (repositionFrame) {
+        return;
+      }
+      repositionFrame = window.requestAnimationFrame(() => {
+        repositionFrame = 0;
+        setSelectionAsk((current) => (current ? measureSelection() : current));
+      });
+    };
+    window.addEventListener("mouseup", reveal);
+    window.addEventListener("keyup", reveal);
+    document.addEventListener("selectionchange", collapseWatch);
+    window.addEventListener("keydown", dismissOnKey);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("mouseup", reveal);
+      window.removeEventListener("keyup", reveal);
+      document.removeEventListener("selectionchange", collapseWatch);
+      window.removeEventListener("keydown", dismissOnKey);
+      window.removeEventListener("scroll", reposition, true);
+      if (repositionFrame) {
+        window.cancelAnimationFrame(repositionFrame);
+      }
+      setSelectionAsk(null);
+    };
+  }, [activePanel, authStatus, viewerOpen]);
+
   /* Deleting a user message also removes every consecutive assistant reply that
      followed it (removeMessageWithPairedResponse). That is the right behaviour —
      an answer without its question is noise — but it is more than the button
@@ -12258,15 +12449,24 @@ export function App() {
                       disabled={!activeConversationHydrated}
                       onPaste={(event) => {
                         // File-bearing pastes (screenshots, Finder-copied
-                        // files) attach instead of pasting; text-only pastes
-                        // fall through untouched. Files win over rich text —
-                        // paste-without-formatting is the text escape hatch.
+                        // files) attach instead of pasting; ordinary text
+                        // pastes fall through untouched. Files win over rich
+                        // text — paste-without-formatting is the text escape
+                        // hatch.
                         const pastedFiles = filesFromClipboard(event.clipboardData);
-                        if (pastedFiles.length === 0) {
+                        if (pastedFiles.length > 0) {
+                          event.preventDefault();
+                          attachFilesToActiveConversation(pastedFiles);
                           return;
                         }
-                        event.preventDefault();
-                        attachFilesToActiveConversation(pastedFiles);
+                        // Text that reads as data (logs, tables, sequences —
+                        // see shouldAttachPastedText) becomes an attachment
+                        // chip instead of burying the prompt.
+                        const pastedText = event.clipboardData.getData("text/plain");
+                        if (pastedText && shouldAttachPastedText(pastedText)) {
+                          event.preventDefault();
+                          attachPastedText(pastedText);
+                        }
                       }}
                       onKeyDown={(event) => {
                         if (
@@ -12315,6 +12515,39 @@ export function App() {
                             setActiveSlashWorkflowId(null);
                             return;
                           }
+                        }
+                        // ArrowUp in an EMPTY composer recalls the last prompt
+                        // for refinement — shell/Slack/Discord muscle memory.
+                        // Recall only, never edit: the message-level Edit
+                        // removes a turn and its reply, which is far too much
+                        // consequence to hang off an arrow key. Any drafted
+                        // text disables it, so cursoring around a multi-line
+                        // draft is untouched.
+                        if (
+                          event.key === "ArrowUp" &&
+                          !event.nativeEvent.isComposing &&
+                          !event.metaKey &&
+                          !event.ctrlKey &&
+                          !event.altKey &&
+                          !event.shiftKey &&
+                          !composerResourcePickerOpen &&
+                          !activePrompt.trim()
+                        ) {
+                          let lastPrompt = "";
+                          for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
+                            if (activeMessages[index].role === "user") {
+                              lastPrompt = activeMessages[index].content;
+                              break;
+                            }
+                          }
+                          if (lastPrompt.trim()) {
+                            event.preventDefault();
+                            setActivePromptValue(lastPrompt);
+                            // Caret to the end once the value commits; the
+                            // rAF inside runs after React paints.
+                            focusComposerTextarea();
+                          }
+                          return;
                         }
                         if (
                           event.key === "Enter" &&
@@ -12787,6 +13020,28 @@ export function App() {
             />
           </Suspense>
         ) : null}
+        {/* Ask-about-selection chip. Portaled to body: the transcript sits in
+            transformed/overflow ancestors that would trap or clip a
+            position:fixed child. Text was captured at show time, so the click
+            works even if the browser collapses the selection first. */}
+        {selectionAsk
+          ? createPortal(
+              <button
+                type="button"
+                className="chat-selection-ask"
+                style={{ left: selectionAsk.x, top: selectionAsk.y }}
+                aria-label="Ask about the selected text"
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                }}
+                onClick={askAboutSelection}
+              >
+                <TextQuote className="size-3.5" aria-hidden="true" />
+                Ask about this
+              </button>,
+              document.body
+            )
+          : null}
         {/* Message delete. Deliberately the same dialog grammar as conversation
             delete: the two differ in scope, not in kind, and a lighter-weight
             confirmation here would imply this one is safe to fire blind. */}

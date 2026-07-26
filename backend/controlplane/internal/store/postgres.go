@@ -1156,12 +1156,77 @@ func (s *PostgresStore) HardDeleteThreadForUser(ctx context.Context, threadID st
 		return nil, mapPgError(err)
 	}
 
+	// Tables with NO foreign key at all. Nothing in the catalog points at these,
+	// so they cannot be discovered below — they must be listed. They key on
+	// run_id and would simply be orphaned, invisibly.
 	if len(runIDs) > 0 {
 		for _, table := range []string{"control_run_token_usage", "control_run_token_usage_finalized"} {
 			// Fixed identifiers from a literal slice, never user input.
 			if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE run_id = ANY($1::text[])`, runIDs); err != nil {
 				return nil, mapPgError(err)
 			}
+		}
+	}
+
+	// Tables that DO reference us but without ON DELETE CASCADE. These are worse
+	// than orphans: a NO ACTION foreign key makes Postgres raise on the parent
+	// delete, so the transaction aborts and the user's delete fails outright.
+	//
+	// Discovered from the catalog rather than hardcoded, because the set is not
+	// knowable from the checked-in schema and differs per deployment. schema.sql
+	// declares none of them; the local compose database has two
+	// (control_run_specs, control_calphad_validation_events) while the real
+	// application database has nine, including several control_ultra_admission_*
+	// tables that reference threads by thread_id rather than runs by run_id. A
+	// hardcoded list was wrong the moment it was written and would rot again.
+	//
+	// Identifiers come from pg_class/pg_attribute — the catalog, never user
+	// input — and are quoted with quote_ident before interpolation.
+	refRows, err := tx.Query(ctx, `
+SELECT quote_ident(src.relname), quote_ident(a.attname), tgt.relname
+FROM pg_constraint c
+JOIN pg_class src ON src.oid = c.conrelid
+JOIN pg_class tgt ON tgt.oid = c.confrelid
+JOIN unnest(c.conkey) AS k(attnum) ON true
+JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+WHERE c.contype = 'f'
+  AND tgt.relname IN ('control_runs', 'control_threads')
+  -- Only NO ACTION ('a') and RESTRICT ('r') actually block the parent delete.
+  -- CASCADE ('c') and SET NULL ('n') resolve themselves, and trying to DELETE
+  -- from a SET NULL referencer would be actively wrong here: several of these
+  -- tables are append-only ledgers whose triggers raise on DELETE, so a sweep
+  -- that touched them would abort the whole transaction.
+  AND c.confdeltype IN ('a', 'r')`)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	type dependent struct{ table, column, parent string }
+	dependents := make([]dependent, 0, 8)
+	for refRows.Next() {
+		var d dependent
+		if err := refRows.Scan(&d.table, &d.column, &d.parent); err != nil {
+			refRows.Close()
+			return nil, mapPgError(err)
+		}
+		dependents = append(dependents, d)
+	}
+	refRows.Close()
+	if err := refRows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	for _, d := range dependents {
+		var err error
+		if d.parent == "control_threads" {
+			_, err = tx.Exec(ctx, `DELETE FROM `+d.table+` WHERE `+d.column+` = $1`, threadID)
+		} else {
+			if len(runIDs) == 0 {
+				continue
+			}
+			_, err = tx.Exec(ctx, `DELETE FROM `+d.table+` WHERE `+d.column+` = ANY($1::text[])`, runIDs)
+		}
+		if err != nil {
+			return nil, mapPgError(err)
 		}
 	}
 

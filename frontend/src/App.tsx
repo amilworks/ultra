@@ -969,6 +969,51 @@ const RESOURCES_SHORTCUT_KEY = "e";
 const TRAINING_SHORTCUT_KEY = "t";
 const GO_TO_BISQUE_SHORTCUT_KEY = "o";
 
+/**
+ * Should this keystroke pull focus into the composer?
+ *
+ * The pain being fixed: you look at a chat, start typing your next prompt, and
+ * discover several words later that nothing was focused and the text went
+ * nowhere. Slack, Linear and Discord all solve it the same way — any ordinary
+ * character types into the message box no matter where focus happens to be.
+ *
+ * Everything here is about NOT stealing a keystroke that meant something else:
+ *
+ * - `key.length === 1` admits printable characters and nothing else. Enter,
+ *   Tab, Escape, Backspace, arrows and F-keys all report longer names, so
+ *   navigation and shortcuts are untouched.
+ * - Space is deliberately excluded even though it is printable: it scrolls the
+ *   transcript, and a prompt essentially never begins with a space.
+ * - Any Meta/Ctrl/Alt combination belongs to a shortcut (⌘K, ⌘C, ⌘⇧E…), so it
+ *   passes straight through. Plain Shift is allowed — capitals start sentences.
+ * - `isComposing` protects IME input; hijacking focus mid-composition would
+ *   destroy in-progress CJK text.
+ */
+const shouldTypingFocusComposer = (event: KeyboardEvent): boolean => {
+  if (event.metaKey || event.ctrlKey || event.altKey) {
+    return false;
+  }
+  if (event.isComposing || event.defaultPrevented) {
+    return false;
+  }
+  if (event.key.length !== 1 || event.key === " ") {
+    return false;
+  }
+  return true;
+};
+
+/**
+ * A dialog, sheet or popover is open, so the transcript is not what the user is
+ * typing into. Radix marks its open overlays with `data-state="open"`, and locks
+ * the body while a modal is up; either signal is enough to stand down.
+ */
+const hasBlockingOverlay = (): boolean =>
+  Boolean(
+    document.querySelector(
+      '[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"], [role="menu"][data-state="open"], [data-slot="popover-content"][data-state="open"]'
+    )
+  ) || document.body.hasAttribute("data-scroll-locked");
+
 const isEditableEventTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof Element)) {
     return false;
@@ -6560,6 +6605,39 @@ export function App() {
     openResourcesPanel,
     openTrainingPanel,
   ]);
+
+  // Type-to-focus: start typing anywhere in a chat and the composer takes it.
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat") {
+      return;
+    }
+    const handleTypeToFocus = (event: KeyboardEvent): void => {
+      if (!shouldTypingFocusComposer(event)) {
+        return;
+      }
+      const textarea = composerTextareaRef.current;
+      if (!textarea || textarea.disabled || textarea === document.activeElement) {
+        return;
+      }
+      if (isEditableEventTarget(event.target) || hasBlockingOverlay()) {
+        return;
+      }
+      // Focus SYNCHRONOUSLY and let the event run its course. The keystroke's
+      // default action inserts into whatever holds focus when it fires, which
+      // is after this handler returns — so focusing here means the character
+      // lands in the composer on its own.
+      //
+      // Deliberately no preventDefault and no manual insertion: doing either
+      // would either drop the character or type it twice. This is also why
+      // focusComposerTextarea is not reused — it focuses inside a
+      // requestAnimationFrame, a whole frame too late to catch the keystroke.
+      textarea.focus({ preventScroll: true });
+      const caret = textarea.value.length;
+      textarea.setSelectionRange(caret, caret);
+    };
+    window.addEventListener("keydown", handleTypeToFocus);
+    return () => window.removeEventListener("keydown", handleTypeToFocus);
+  }, [activePanel, authStatus]);
 
   const isChatStopRequested = useCallback((conversationId: string): boolean => {
     const normalizedConversationId = conversationId.trim();

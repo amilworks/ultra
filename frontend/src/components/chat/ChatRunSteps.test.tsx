@@ -41,27 +41,29 @@ describe("ChatRunSteps", () => {
     expect(screen.queryByText("Execute")).not.toBeInTheDocument();
   });
 
-  it("keeps steps collapsed until opened, then reveals humanized steps without raw detail", () => {
+  it("keeps steps collapsed until opened, then reveals humanized steps and the reasoning trace", () => {
+    // In production the reasoning deltas are pre-coalesced into a single accumulating event before
+    // reaching ChatRunSteps (appendRunEventCoalescing), so the "Thinking" step carries the full trace.
     const runEvents = [
-      reasoning("Weighing the variance.", "running", 1),
-      reasoning("Settled on an approach.", "completed", 2),
-      toolCall("execute", 3),
+      reasoning("Weighing the variance. Settled on an approach.", "completed", 1),
+      toolCall("execute", 2),
     ];
     render(
       <ChatRunSteps runEvents={runEvents} progressEvents={[]} isStreaming statusText={null} />
     );
 
-    // Collapsed: neither the list nor the raw reasoning detail is shown.
+    // Collapsed: neither the list nor the reasoning trace is shown.
     expect(screen.queryByText("Thinking")).not.toBeInTheDocument();
-    expect(screen.queryByText("Weighing the variance.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Weighing the variance/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Running code"));
 
-    // Expanded: humanized steps appear; reasoning detail text never renders.
+    // Expanded: humanized steps appear AND the reasoning chain-of-thought is now revealed.
     expect(screen.getByText("Thinking")).toBeInTheDocument();
     expect(screen.getAllByText("Running code").length).toBeGreaterThanOrEqual(1);
-    expect(screen.queryByText("Weighing the variance.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Settled on an approach.")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Weighing the variance. Settled on an approach.")
+    ).toBeInTheDocument();
   });
 
   it("collapses repeated identical tool steps into one calm line", () => {

@@ -146,6 +146,7 @@ import { extractRunTokenUsage } from "./features/chat/token-usage";
 import {
   appendRunEventCoalescing,
   isEphemeralDeltaEvent,
+  reasoningTextFromRunEvents,
   runHasToolActivity,
 } from "./features/chat/run-events";
 import { MESSAGE_WINDOW_SIZE, windowTailMessages } from "./features/chat/message-window";
@@ -230,6 +231,7 @@ import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
+import { ReasoningTrace } from "./components/chat/ReasoningTrace";
 import {
   composeComposerWorkflowPromptForModel,
   slashWorkflowSearchQuery,
@@ -568,6 +570,10 @@ type UiMessage = {
   durationSeconds?: number;
   progressEvents?: ProgressEvent[];
   runEvents?: RunEvent[];
+  // The coordinator's accumulated thinking trace (chain-of-thought), surfaced under the collapsible
+  // "Thinking" expansion. Derived from the coalesced trace.reasoning.delta run event and persisted
+  // separately so it survives the turn (the reasoning deltas themselves are stripped from snapshots).
+  reasoning?: string;
   responseMetadata?: Record<string, unknown> | null;
   uploadedFileNames?: string[];
   liveStream?: AsyncIterable<string>;
@@ -610,6 +616,22 @@ type ConversationState = {
 const EMPTY_UI_MESSAGES: UiMessage[] = [];
 const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
 const EMPTY_RUN_EVENTS: RunEvent[] = [];
+
+// Fold a run event into a message: append to runEvents (coalescing reasoning) AND capture the
+// accumulated reasoning stickily on message.reasoning. Reasoning must be captured as it streams
+// because the post-completion runEvents replacement (final server events are pruned/ephemeral) would
+// otherwise drop it — leaving the "Thought process" expansion nothing durable to read.
+const foldRunEventIntoMessage = <M extends { runEvents?: RunEvent[]; reasoning?: string }>(
+  message: M,
+  runEvent: RunEvent
+): M => {
+  const runEvents = appendRunEventCoalescing(message.runEvents ?? [], runEvent);
+  return {
+    ...message,
+    runEvents,
+    reasoning: reasoningTextFromRunEvents(runEvents) || message.reasoning,
+  };
+};
 const EMPTY_RUN_IMAGE_ARTIFACTS: RunImageArtifact[] = [];
 const EMPTY_RUN_DOCUMENTS: RunDocumentArtifact[] = [];
 const EMPTY_FILES: File[] = [];
@@ -1108,10 +1130,6 @@ const promptExplicitlyRequestsReuseLoad = (promptText: string): boolean => {
   );
 };
 
-// Poll-side counterpart of appendRunEventCoalescing's reasoning-delta rule.
-const isReasoningDeltaRunEvent = (event: RunEvent): boolean =>
-  String(event.event_type || "").trim() === "trace.reasoning.delta";
-
 const makeId = (): string =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -1414,6 +1432,10 @@ const toUiMessages = (value: unknown, fallbackTime: number): UiMessage[] => {
         durationSeconds: toNumber(row.durationSeconds ?? row.duration_seconds) ?? undefined,
         progressEvents: toProgressEvents(row.progressEvents),
         runEvents: toRunEvents(row.runEvents),
+        reasoning:
+          typeof row.reasoning === "string" && row.reasoning.trim()
+            ? row.reasoning
+            : undefined,
         responseMetadata: toRecord(row.responseMetadata),
         uploadedFileNames: Array.isArray(row.uploadedFileNames)
           ? row.uploadedFileNames.map((item) => String(item))
@@ -1585,6 +1607,11 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
         runEvents: (message.runEvents ?? []).filter(
           (event) => String(event.event_type || "").trim() !== "trace.reasoning.delta"
         ),
+        // The reasoning-delta events are stripped above (live scaffolding), so persist the
+        // ACCUMULATED thinking text as its own durable field — this is what the post-turn
+        // "Thinking" expansion reads back after reload.
+        reasoning:
+          (message.reasoning ?? reasoningTextFromRunEvents(message.runEvents ?? [])) || undefined,
         responseMetadata: message.responseMetadata ?? null,
         uploadedFileNames: message.uploadedFileNames ?? [],
         runArtifacts: message.runArtifacts ?? [],
@@ -1850,6 +1877,12 @@ const ConversationMessageRow = memo(
     // disclosure — so a scientist watching a long run sees structured progress, not a monologue.
     // A plain text reply keeps streaming inline (responsive). Monotonic, so no flip-flop mid-run.
     const isAgenticRun = useMemo(() => runHasToolActivity(runEvents), [runEvents]);
+    // The turn's chain-of-thought for the post-completion "Thought process" disclosure: message.reasoning
+    // once persisted/rehydrated, else derived from the (still-in-memory) coalesced reasoning run event.
+    const persistedReasoning = useMemo(
+      () => (message.reasoning ?? "").trim() || reasoningTextFromRunEvents(runEvents),
+      [message.reasoning, runEvents]
+    );
     const showAssistantMetadataLine = Boolean(elapsedLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
       return (
@@ -1978,6 +2011,12 @@ const ConversationMessageRow = memo(
                   stopLabel="Stop"
                 />
               </Suspense>
+            </div>
+          ) : persistedReasoning ? (
+            // Turn complete: the live step timeline is gone, so offer the persisted reasoning as a
+            // collapsed-by-default disclosure the reader can open.
+            <div className="mb-1">
+              <ReasoningTrace text={persistedReasoning} />
             </div>
           ) : null}
           {showLeadingToolResultCards ? (
@@ -7669,24 +7708,13 @@ export function App() {
         if (fresh.length === 0) {
           return;
         }
-        // Coalesce reasoning deltas: every consumer renders only the LATEST
-        // trace.reasoning.delta, so the accumulator keeps at most one (replaced in
-        // place to preserve step order). Without this the periodic wholesale replace
-        // below would re-inflate message.runEvents with the full delta history and
-        // defeat the live path's appendRunEventCoalescing.
-        const next = [...collectedEvents];
-        fresh.forEach((event) => {
-          if (isReasoningDeltaRunEvent(event)) {
-            for (let index = next.length - 1; index >= 0; index -= 1) {
-              if (isReasoningDeltaRunEvent(next[index])) {
-                next[index] = event;
-                return;
-              }
-            }
-          }
-          next.push(event);
-        });
-        collectedEvents = next;
+        // Coalesce reasoning deltas into a single accumulating event via the same reducer as the live
+        // SSE path (appendRunEventCoalescing): the poll's wholesale replace neither re-inflates
+        // message.runEvents with the full delta history nor drops the accumulated thinking text.
+        collectedEvents = fresh.reduce<RunEvent[]>(
+          (acc, event) => appendRunEventCoalescing(acc, event),
+          [...collectedEvents]
+        );
         const snapshot = collectedEvents;
         updateConversation(conversationId, (current) => ({
           ...current,
@@ -7695,6 +7723,7 @@ export function App() {
               ? {
                   ...item,
                   runEvents: snapshot,
+                  reasoning: reasoningTextFromRunEvents(snapshot) || item.reasoning,
                 }
               : item
           ),
@@ -10033,10 +10062,7 @@ export function App() {
                     ...conversation,
                     messages: conversation.messages.map((message) =>
                       message.id === target.messageId
-                        ? {
-                            ...message,
-                            runEvents: appendRunEventCoalescing(message.runEvents ?? [], runEvent),
-                          }
+                        ? foldRunEventIntoMessage(message, runEvent)
                         : message
                     ),
                   }));
@@ -10911,10 +10937,7 @@ export function App() {
             ...current,
             messages: current.messages.map((item) =>
               item.id === assistantMessageId
-                ? {
-                    ...item,
-                    runEvents: appendRunEventCoalescing(item.runEvents ?? [], runEvent),
-                  }
+                ? foldRunEventIntoMessage(item, runEvent)
                 : item
             ),
           }));

@@ -111,31 +111,26 @@ describe("sidebar settings menu", () => {
       /\.app-sidebar-account-button\s*\{[^}]*border-radius:\s*var\(--sidebar-radius-row\);/s
     );
     expect(styles).toMatch(/\.app-history-group \[data-slot="sidebar-group-label"\]/);
-
-    // This used to assert font-size: 0.875rem / font-weight: 600 on the history
-    // group label — it was pinning the defect. That promotion made "Recents"
-    // tie for the brightest text in the sidebar and rendered it larger and
-    // heavier than the 14px/400 conversation rows it labels, while "Yesterday"
-    // and "Last 7 days" directly beneath stayed quiet muted eyebrows.
-    //
-    // Every section label now speaks with one voice from shared tokens, and the
-    // history rule is LAYOUT ONLY.
+    // One voice for every sidebar section label: type comes from the shared eyebrow
+    // tokens on the BASE group-label rule. This block previously asserted the
+    // opposite — font-size: 0.875rem / font-weight: 600 on the history label — which
+    // was pinning the defect that made "Recents" outrank the rows it labels.
     expect(styles).toMatch(/--sidebar-eyebrow-size:\s*0\.68rem;/);
     expect(styles).toMatch(
-      /\.app-sidebar-content \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*var\(--sidebar-eyebrow-size\);[^}]*font-weight:\s*var\(--sidebar-eyebrow-weight\);/s
+      /\.app-sidebar-content \[data-slot="sidebar-group-label"\]\s*\{[^}]*font-size:\s*var\(--sidebar-eyebrow-size\);[^}]*font-weight:\s*var\(--sidebar-eyebrow-weight\);[^}]*letter-spacing:\s*var\(--sidebar-eyebrow-tracking\);/s
     );
 
-    const historyLabelSelector =
-      '.app-sidebar-content .app-history-group [data-slot="sidebar-group-label"] {';
-    const historyLabelStart = styles.indexOf(historyLabelSelector);
-    expect(historyLabelStart).toBeGreaterThan(-1);
-    const historyLabelRule = styles.slice(
-      historyLabelStart,
-      styles.indexOf("}", historyLabelStart)
+    // ...and the history-group override stays LAYOUT-ONLY. Matched explicitly rather
+    // than with `?? ""` so that deleting the rule fails here instead of silently
+    // satisfying the negative assertion below.
+    const historyLabelMatch = styles.match(
+      /\.app-sidebar-content \.app-history-group \[data-slot="sidebar-group-label"\]\s*\{([^}]*)\}/s
     );
+    expect(historyLabelMatch, "history group-label rule is missing").not.toBeNull();
+    const historyLabelRule = historyLabelMatch?.[1] ?? "";
     expect(historyLabelRule).toMatch(/line-height:\s*1\.25;/);
-    // Re-declaring any of these here is what let the three voices diverge.
-    expect(historyLabelRule).not.toMatch(/font-size|font-weight|letter-spacing|color:/);
+    // The `[^-]` guard keeps this from false-matching `border-color:`.
+    expect(historyLabelRule).not.toMatch(/font-size|font-weight|letter-spacing|(^|[^-])\bcolor:/);
     expect(styles).toMatch(
       /\.app-new-chat-button\s*\{[^}]*background:\s*color-mix\(in oklab, var\(--sidebar-accent\) 74%, transparent\);/s
     );

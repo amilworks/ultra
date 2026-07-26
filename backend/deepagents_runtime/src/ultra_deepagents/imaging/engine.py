@@ -428,6 +428,12 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
         if _lower_ext(path) not in TIFF_EXTENSIONS:
             return None
+        normalized = os.path.normpath(os.fspath(path))
+        if (
+            os.path.basename(os.path.dirname(normalized)) == "derived"
+            and os.path.basename(normalized).endswith("__pyramid.tif")
+        ):
+            return None
         if self._semantic_tiff_engine is None:
             self._semantic_tiff_engine = BioioEngine()
         return self._semantic_tiff_engine

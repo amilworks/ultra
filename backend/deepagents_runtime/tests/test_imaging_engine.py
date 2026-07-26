@@ -127,6 +127,83 @@ def test_libbioimage_scalar_plan_keeps_bounded_nonintegral_source_eligible():
     assert (plan["channel"], plan["t"]) == (1, 1)
 
 
+def test_libbioimage_keeps_ultra_derived_pyramids_on_the_native_axis_path(
+    monkeypatch,
+):
+    class FakeBim:
+        def meta(self, path, cache):
+            assert path == "/cache/derived/sample__pyramid.tif"
+            return {
+                "image_num_x": 32,
+                "image_num_y": 24,
+                "image_num_z": 7,
+                "image_num_t": 2,
+                "image_num_c": 3,
+                "image_num_p": 0,
+            }
+
+    class ForbiddenSemanticEngine:
+        def __init__(self):
+            raise AssertionError("Ultra-owned pyramids must stay on libbioimage")
+
+    from ultra_deepagents.imaging import bioio_engine
+
+    monkeypatch.setattr(bioio_engine, "BioioEngine", ForbiddenSemanticEngine)
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+    engine._semantic_tiff_engine = None
+
+    plan = engine.scalar_plan(
+        "/cache/derived/sample__pyramid.tif",
+        channel=2,
+        t=1,
+    )
+
+    assert (plan["source_depth"], plan["channel"], plan["t"]) == (7, 2, 1)
+
+
+def test_localized_owned_pyramid_retains_native_libbioimage_routing(
+    tmp_path,
+    monkeypatch,
+):
+    from ultra_deepagents.imaging import service as service_module
+
+    derived = tmp_path / "uploads" / "derived"
+    derived.mkdir(parents=True)
+    source = derived / "sample__pyramid.tif"
+    source.write_bytes(b"owned pyramid")
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(
+        service_module,
+        "_PYRAMID_CACHE_DIR",
+        str(tmp_path / "local-cache"),
+    )
+    localized = service_module.localize_pyramid(str(source))
+    engine = object.__new__(LibBioImageEngine)
+    engine._semantic_tiff_engine = object()
+
+    assert localized != str(source)
+    assert engine._tiff_scalar_engine(localized) is None
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/cache/source/sample.ome.tiff",
+        "/cache/not-derived/sample__pyramid.tif",
+        "/cache/derived/sample.tif",
+        "/cache/derived/nested/sample__pyramid.tif",
+    ],
+)
+def test_libbioimage_routes_every_other_tiff_to_the_semantic_decoder(path):
+    semantic = object()
+    engine = object.__new__(LibBioImageEngine)
+    engine._semantic_tiff_engine = semantic
+
+    assert engine._tiff_scalar_engine(path) is semantic
+
+
 def test_libbioimage_scalar_plan_rejects_native_float_nearest_before_meta_or_read():
     class FakeBim:
         def __init__(self) -> None:

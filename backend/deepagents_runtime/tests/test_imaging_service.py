@@ -50,6 +50,8 @@ def test_warm_localized_pyramid_recency_does_not_mutate_source_generation(
     monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(cache))
 
     localized = service_module.localize_pyramid(str(source))
+    assert os.path.basename(os.path.dirname(localized)) == "derived"
+    assert os.path.basename(localized).endswith("__pyramid.tif")
     initial = os.stat(localized)
     generation_before = (
         initial.st_dev,
@@ -77,6 +79,44 @@ def test_warm_localized_pyramid_recency_does_not_mutate_source_generation(
 
     assert localized_paths == [localized] * 8
     assert generation_after == generation_before
+
+
+def test_pyramid_cache_eviction_covers_owned_subdir_and_legacy_root(
+    tmp_path,
+    monkeypatch,
+):
+    cache = tmp_path / "cache"
+    derived = cache / "derived"
+    derived.mkdir(parents=True)
+    legacy = cache / "legacy.tif"
+    owned = derived / "owned__pyramid.tif"
+    legacy.write_bytes(b"12")
+    owned.write_bytes(b"34")
+    service_module._touch_pyramid_access_marker(str(legacy))
+    service_module._touch_pyramid_access_marker(str(owned))
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(cache))
+    monkeypatch.setenv("ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE_BYTES", "1")
+
+    service_module._evict_pyramid_cache(incoming=1)
+
+    assert not legacy.exists()
+    assert not owned.exists()
+    assert not os.path.exists(service_module._pyramid_access_marker(str(legacy)))
+    assert not os.path.exists(service_module._pyramid_access_marker(str(owned)))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/cache/not-derived/sample__pyramid.tif",
+        "/cache/derived/nested/sample__pyramid.tif",
+        "/cache/derived/sample.tif",
+        "/cache/derived/sample__pyramid.tiff",
+    ],
+)
+def test_localize_pyramid_does_not_promote_ordinary_tiffs_to_owned_identity(path):
+    assert service_module._is_derived_pyramid(path) is False
+    assert service_module.localize_pyramid(path) == path
 
 
 def test_tile_returns_png(client):

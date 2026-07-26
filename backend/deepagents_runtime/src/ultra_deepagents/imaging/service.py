@@ -185,7 +185,13 @@ def _pyramid_cache_budget_bytes() -> int:
 
 
 def _is_derived_pyramid(path: str) -> bool:
-    return isinstance(path, str) and "/derived/" in path and path.endswith("__pyramid.tif")
+    if not isinstance(path, str):
+        return False
+    normalized = os.path.normpath(path)
+    return (
+        os.path.basename(os.path.dirname(normalized)) == "derived"
+        and os.path.basename(normalized).endswith("__pyramid.tif")
+    )
 
 
 def _pyramid_access_marker(path: str) -> str:
@@ -206,20 +212,29 @@ def _evict_pyramid_cache(incoming: int) -> None:
         budget = _pyramid_cache_budget_bytes()
         entries: list[tuple[float, int, str]] = []
         total = 0
-        for name in os.listdir(_PYRAMID_CACHE_DIR):
-            if not name.endswith(".tif"):
-                continue
-            fp = os.path.join(_PYRAMID_CACHE_DIR, name)
+        cache_directories = (
+            _PYRAMID_CACHE_DIR,
+            os.path.join(_PYRAMID_CACHE_DIR, "derived"),
+        )
+        for directory in cache_directories:
             try:
-                s = os.stat(fp)
+                names = os.listdir(directory)
             except OSError:
                 continue
-            try:
-                recency = os.stat(_pyramid_access_marker(fp)).st_mtime
-            except OSError:
-                recency = s.st_atime
-            entries.append((recency, s.st_size, fp))
-            total += s.st_size
+            for name in names:
+                if not name.endswith(".tif"):
+                    continue
+                fp = os.path.join(directory, name)
+                try:
+                    s = os.stat(fp)
+                except OSError:
+                    continue
+                try:
+                    recency = os.stat(_pyramid_access_marker(fp)).st_mtime
+                except OSError:
+                    recency = s.st_atime
+                entries.append((recency, s.st_size, fp))
+                total += s.st_size
         entries.sort()  # least-recently-accessed first
         while total + incoming > budget and entries:
             _, sz, fp = entries.pop(0)
@@ -246,7 +261,11 @@ def localize_pyramid(path: str) -> str:
     except OSError:
         return path
     key = hashlib.sha256(f"{path}|{st.st_size}|{int(st.st_mtime_ns)}".encode()).hexdigest()
-    local = os.path.join(_PYRAMID_CACHE_DIR, key + ".tif")
+    local = os.path.join(
+        _PYRAMID_CACHE_DIR,
+        "derived",
+        f"{key}__pyramid.tif",
+    )
     try:
         if os.path.exists(local):
             try:
@@ -257,7 +276,7 @@ def localize_pyramid(path: str) -> str:
             except OSError:
                 pass
             return local
-        os.makedirs(_PYRAMID_CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
         _evict_pyramid_cache(st.st_size)
         tmp = f"{local}.tmp.{os.getpid()}"
         shutil.copyfile(path, tmp)  # whole-file sequential read: fast even over NFS
@@ -287,37 +306,41 @@ def _parse_fusion_request(channels: str | None, channel_colors: str | None):
 
     ``channels`` is a comma list of 0-based channel indices (the engine's -remap
     is 1-based, so they are shifted). ``channel_colors`` is a comma list of hex LUT
-    colors indexed by channel; they are realigned to the selected channels.
+    colors already projected into the same selected-channel order.
 
     Additive fusion is enabled ONLY for genuine multi-channel composites (2+
     selected channels with at least one color): single-channel and grayscale
-    views keep the fast native display path. Returns
-    (remap_channels_1based | None, aligned_colors | None).
+    views keep the fast native display path. Composite channel/color cardinality
+    must match exactly. Returns (remap_channels_1based | None, selected_colors | None).
     """
     from ultra_deepagents.imaging import fusion
 
     requested: list[int] | None = None
     if channels:
         requested = [int(part) for part in channels.split(",") if part.strip() != ""]
-    by_channel: list | None = None
+    selected_colors: list | None = None
     if channel_colors:
-        by_channel = [fusion.parse_hex_color(part) for part in channel_colors.split(",")]
+        selected_colors = [
+            fusion.parse_hex_color(part) for part in channel_colors.split(",")
+        ]
 
     remap = [c + 1 for c in requested] if requested else None
+    if (
+        requested is not None
+        and len(requested) >= 2
+        and selected_colors is not None
+        and len(selected_colors) != len(requested)
+    ):
+        raise ValueError("channel colors must match the selected channel count")
     fuse = (
         requested is not None
         and len(requested) >= 2
-        and by_channel is not None
-        and any(c is not None for c in by_channel)
+        and selected_colors is not None
+        and any(color is not None for color in selected_colors)
     )
     if not fuse:
         return remap, None
-    # Realign colors to the selected channel order (channel_colors is indexed by
-    # absolute channel; the remapped read returns the selected channels in order).
-    aligned = [by_channel[ch] if 0 <= ch < len(by_channel) else None for ch in requested]
-    if not any(c is not None for c in aligned):
-        aligned = [fusion.convention_channel_color(i) for i in range(len(requested))]
-    return remap, aligned
+    return remap, selected_colors
 
 
 def _parse_histogram_channels(

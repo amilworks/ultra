@@ -127,6 +127,31 @@ def test_libbioimage_scalar_plan_keeps_bounded_nonintegral_source_eligible():
     assert (plan["channel"], plan["t"]) == (1, 1)
 
 
+def test_libbioimage_scalar_plan_rejects_native_float_nearest_before_meta_or_read():
+    class FakeBim:
+        def __init__(self) -> None:
+            self.meta_reads = 0
+            self.pixel_reads = 0
+
+        def meta(self, path, cache):
+            self.meta_reads += 1
+            raise AssertionError("native non-exact nearest must reject before metadata")
+
+        def read(self, path, pipeline, cache):
+            self.pixel_reads += 1
+            raise AssertionError("native non-exact nearest must reject before pixels")
+
+    engine = object.__new__(LibBioImageEngine)
+    engine._bim = FakeBim()
+    engine._cache = object()
+    engine._tiff_scalar_engine = lambda _path: None
+
+    with pytest.raises(ValueError, match="nearest.*exact Mask"):
+        engine.scalar_plan("float.nii", sampling="nearest")
+    assert engine._bim.meta_reads == 0
+    assert engine._bim.pixel_reads == 0
+
+
 def test_libbioimage_z_downsample_is_iterative_without_retaining_factor_planes(monkeypatch):
     np = pytest.importorskip("numpy")
 
@@ -159,9 +184,7 @@ def test_libbioimage_z_downsample_is_iterative_without_retaining_factor_planes(m
 
     plan = engine.scalar_plan("deep.czi")
     assert (plan["source_depth"], plan["depth"], plan["downsample_z"]) == (513, 257, 2)
-    planes = engine.scalar_planes(
-        "deep.czi", zs=[0, 256], channel=0, t=0, pages=plan["pages"]
-    )
+    planes = engine.scalar_planes("deep.czi", zs=[0, 256], channel=0, t=0, pages=plan["pages"])
     assert float(planes[0][0, 0]) == pytest.approx(0.5)
     assert float(planes[1][0, 0]) == pytest.approx(512.0)
 
@@ -274,8 +297,8 @@ def test_thumbnail_drops_level_on_final_attempt():
     engine = _engine_with_render(_HUGE_META, render)
     assert engine.thumbnail("/huge.tif", max_size=512) == _PNG_MAGIC
     assert len(pipelines_seen) == 3
-    assert "-res-level 7" in pipelines_seen[0]       # computed bounded level
-    assert "-res-level" not in pipelines_seen[2]     # level dropped on the last attempt
+    assert "-res-level 7" in pipelines_seen[0]  # computed bounded level
+    assert "-res-level" not in pipelines_seen[2]  # level dropped on the last attempt
 
 
 def test_thumbnail_raises_when_region_stays_empty():
@@ -337,7 +360,9 @@ def test_libbioimage_slice_scrub_reads_bounded_level_but_settled_reads_native():
     # pyramid level; the settled view (full_resolution=True) reads the native plane
     # so pixel measurements stay exact. Small planes stay native even when scrubbing.
     big = {
-        "image_num_x": 4096, "image_num_y": 4096, "image_num_z": 40,
+        "image_num_x": 4096,
+        "image_num_y": 4096,
+        "image_num_z": 40,
         "image_num_resolution_levels": 4,
         "image_resolution_level_scales": "1.000000,0.500000,0.250000,0.125000",
     }
@@ -386,7 +411,12 @@ def test_atlas_plan_tolerates_none_colors():
     # atlas_plan must preserve None (composite_channels skips it), not tuple(None).
     import numpy as np
 
-    meta = {"image_num_x": 100, "image_num_y": 80, "image_num_z": 10, "image_num_resolution_levels": 1}
+    meta = {
+        "image_num_x": 100,
+        "image_num_y": 80,
+        "image_num_z": 10,
+        "image_num_resolution_levels": 1,
+    }
 
     class FakeBim:
         def meta(self, path, cache):
@@ -397,46 +427,73 @@ def test_atlas_plan_tolerates_none_colors():
     engine._cache = object()
     engine._np = np
 
-    plan = engine.atlas_plan("/v.tif", channels=[1, 3, 5], colors=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), None])
+    plan = engine.atlas_plan(
+        "/v.tif", channels=[1, 3, 5], colors=[(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), None]
+    )
     assert plan["read_channels"] == [1, 3, 5]
     assert plan["cell_colors"] == [(1.0, 0.0, 0.0), (0.0, 0.0, 1.0), None]
     assert plan["depth"] == 10 and plan["columns"] >= 1
 
 
-def test_libbioimage_histogram_auto_selects_bounded_level_for_large_pyramid():
+def test_libbioimage_histogram_preserves_exact_non_tiff_channel_and_time_identity():
     import numpy as np
 
     meta = {
-        "image_num_x": 95174,
-        "image_num_y": 91416,
-        "image_num_resolution_levels": 11,
-        "image_resolution_level_scales": (
-            "1.000000,0.500000,0.249995,0.124992,0.062496,0.031248,"
-            "0.015624,0.007807,0.003898,0.001944,0.000967"
-        ),
+        "image_num_x": 4,
+        "image_num_y": 3,
+        "image_num_z": 2,
+        "image_num_t": 3,
+        "image_num_c": 3,
+        "image_num_p": 0,
+        "image_num_scenes": 1,
     }
-    seen: dict[str, str] = {}
+    seen: list[str] = []
 
     class FakeBim:
         def meta(self, path, cache):
-            assert path == "/huge.tif"
+            assert path == "/exact.czi"
             return meta
 
         def read(self, path, pipeline, cache):
-            seen["path"] = path
-            seen["pipeline"] = pipeline
-            return np.zeros((4, 8, 8), dtype=np.uint8)
+            seen.append(pipeline)
+            z_index = int(pipeline.split("-slice z:", 1)[1].split(",", 1)[0])
+            time_index = int(pipeline.split(",t:", 1)[1].split()[0])
+            one_based_channel = int(pipeline.split("-remap ", 1)[1].split()[0])
+            value = time_index * 100 + one_based_channel * 10 + z_index
+            return np.full((3, 4), value, dtype="float32")
 
     engine = object.__new__(LibBioImageEngine)
     engine._np = np
     engine._bim = FakeBim()
     engine._cache = object()
+    engine._semantic_tiff_engine = None
 
-    hist = engine.histogram("/huge.tif", bins=16)
+    hist = engine.histogram("/exact.czi", bins=4, channels=[2], t=2)
 
-    assert hist["bins"] == 16
-    assert len(hist["channels"]) == 4
-    assert seen == {"path": "/huge.tif", "pipeline": "-res-level 6"}
+    assert hist["bins"] == 4
+    assert hist["channel"] == 1
+    assert hist["t"] == 2
+    assert hist["scope"] == "volume"
+    assert [entry["index"] for entry in hist["channels"]] == [1]
+    assert hist["channels"][0]["min"] == pytest.approx(220)
+    assert hist["channels"][0]["max"] == pytest.approx(221)
+    assert sum(hist["channels"][0]["counts"]) == 24
+    assert hist["sample_count"] == 24
+    assert hist["threshold"]["channel"] == 1
+    assert hist["threshold"]["t"] == 2
+    assert hist["data_semantics"]["kind"] == "intensity"
+    assert hist["data_semantics"]["strength"] == "unknown"
+    assert hist["data_semantics"]["recommended_view"] == "intensity"
+    assert len(seen) == 4
+    assert all("-remap 2" in pipeline and ",t:2" in pipeline for pipeline in seen)
+
+    seen.clear()
+    display = engine.histogram("/exact.czi", bins=4, channels=[1, 2], t=2, scope="display")
+    assert display["scope"] == "display"
+    assert [entry["index"] for entry in display["channels"]] == [0, 1]
+    assert display["channels"][0]["edges"] == display["channels"][1]["edges"]
+    assert len(seen) == 2
+    assert all(",t:2" in pipeline for pipeline in seen)
 
 
 def _engine_with_meta(meta):
@@ -455,15 +512,21 @@ def test_display_out_depth_full_range_for_rgba_photo():
     # colors show AND the (constant) alpha survives — data-range would zero a fully-
     # opaque alpha and render native tiles blank.
     photo = {
-        "image_pixel_format": "unsigned integer", "image_pixel_depth": 8,
-        "image_num_c": 4, "image_mode": "RGBA",
+        "image_pixel_format": "unsigned integer",
+        "image_pixel_depth": 8,
+        "image_num_c": 4,
+        "image_mode": "RGBA",
     }
     assert _engine_with_meta(photo)._display_out_depth("/x.tif") == "8,F,U"
 
     # RGB photo recognized by channel names too (no explicit mode).
     rgb_named = {
-        "image_pixel_format": "unsigned integer", "image_pixel_depth": 8, "image_num_c": 3,
-        "channels/channel:0/name": "Red", "channels/channel:1/name": "Green", "channels/channel:2/name": "Blue",
+        "image_pixel_format": "unsigned integer",
+        "image_pixel_depth": 8,
+        "image_num_c": 3,
+        "channels/channel:0/name": "Red",
+        "channels/channel:1/name": "Green",
+        "channels/channel:2/name": "Blue",
     }
     assert _engine_with_meta(rgb_named)._display_out_depth("/x.tif") == "8,F,U"
 
@@ -481,7 +544,12 @@ def test_display_out_depth_data_range_for_scientific():
 
 def test_tile_uses_full_range_depth_for_photo():
     # The deep-zoom fix: a photo's tile read carries the full-range depth into the pipeline.
-    photo = {"image_pixel_format": "unsigned integer", "image_pixel_depth": 8, "image_num_c": 4, "image_mode": "RGBA"}
+    photo = {
+        "image_pixel_format": "unsigned integer",
+        "image_pixel_depth": 8,
+        "image_num_c": 4,
+        "image_mode": "RGBA",
+    }
     engine = _engine_with_meta(photo)
     seen = {}
 
@@ -606,8 +674,13 @@ def test_tile_level0_fallback_fused_branch_composites_crop():
     engine = _fallback_engine(width=600, height=600, plane=plane)
 
     png = engine.tile(
-        "/planar.tif", level=0, col=0, row=0, tile_size=512,
-        channels=[1, 2], colors=[(255, 0, 0), (0, 255, 0)],
+        "/planar.tif",
+        level=0,
+        col=0,
+        row=0,
+        tile_size=512,
+        channels=[1, 2],
+        colors=[(255, 0, 0), (0, 255, 0)],
     )
 
     img = Image.open(_io.BytesIO(png))

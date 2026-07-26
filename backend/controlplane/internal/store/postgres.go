@@ -3564,6 +3564,9 @@ FOR UPDATE`, resourceID, userID, orgID))
 		return domain.ResourceRecord{}, mapPgError(err)
 	}
 	resource := resourceFromRow(selected)
+	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
+	}
 	updatedAt := input.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = domain.Now()

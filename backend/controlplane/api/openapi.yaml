@@ -1192,6 +1192,48 @@ paths:
             application/json:
               schema:
                 type: object
+                properties:
+                  scalar_mask_capability:
+                    type: object
+                    description: >-
+                      Sanitized source-authoritative delivery capability. Present only
+                      for single-scene non-photo TIFF/OME-TIFF sources whose raw
+                      uint8/uint16/int16 samples can be served consistently
+                      across every listed scalar surface. Absence means Mask is
+                      unavailable regardless of data_semantics or saved metadata.
+                    required:
+                      - version
+                      - source_authority
+                      - source_format
+                      - source_sha256
+                      - dtype
+                      - threshold_domain
+                      - threshold_foreground
+                      - slice_delivery
+                      - volume_delivery
+                      - volume_sampling
+                      - channel_selection
+                      - time_selection
+                      - surfaces
+                    properties:
+                      version: { type: integer, enum: [1] }
+                      source_authority: { type: string, enum: [original] }
+                      source_format: { type: string, enum: [tiff, ome-tiff] }
+                      source_sha256: { type: string, minLength: 1 }
+                      dtype: { type: string, enum: [uint8, uint16, int16] }
+                      threshold_domain: { type: string, enum: [raw] }
+                      threshold_foreground: { type: string, enum: [above] }
+                      slice_delivery: { type: string, enum: [thresholded_png] }
+                      volume_delivery: { type: string, enum: [raw_scalar] }
+                      volume_sampling: { type: string, enum: [nearest] }
+                      channel_selection: { type: string, enum: [single] }
+                      time_selection: { type: string, enum: [single] }
+                      surfaces:
+                        type: array
+                        minItems: 3
+                        maxItems: 3
+                        uniqueItems: true
+                        items: { type: string, enum: [2d, mpr, volume] }
   /v2/uploads/{file_id}/display:
     get:
       operationId: getUploadDisplay
@@ -1252,7 +1294,16 @@ paths:
           schema: { type: integer, minimum: 0 }
         - name: c
           in: query
+          description: Alias of channel. Mask rendering accepts only one unambiguous channel selector.
           schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          description: Zero-based authoritative source channel. Alias of c; do not mix aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: channels
+          in: query
+          description: Comma-separated zero-based source channels. Mask rendering requires exactly one.
+          schema: { type: string }
         - name: t
           in: query
           schema: { type: integer, minimum: 0 }
@@ -1276,6 +1327,18 @@ paths:
           in: query
           description: Explicit source-value upper window bound for grayscale preview output.
           schema: { type: number }
+        - name: scalar_render_mode
+          in: query
+          description: Scalar slice rendering mode. Mask thresholds the raw source plane before display mapping.
+          schema: { type: string, enum: [intensity, mask], default: intensity }
+        - name: scalar_threshold_value
+          in: query
+          description: Raw source-unit threshold used when scalar_render_mode is mask.
+          schema: { type: number }
+        - name: scalar_threshold_foreground
+          in: query
+          description: Strict foreground comparison for mask rendering.
+          schema: { type: string, enum: [above], default: above }
       responses:
         "200":
           description: Upload slice bytes
@@ -1297,6 +1360,10 @@ paths:
           in: query
           description: Zero-based channel index in the authoritative source image.
           schema: { type: integer, minimum: 0 }
+        - name: sampling
+          in: query
+          description: BOX averaging for intensity previews or source-grid nearest decimation for mask previews.
+          schema: { type: string, enum: [box, nearest], default: box }
       responses:
         "200":
           description: Source-authoritative upload scalar volume payload
@@ -1355,6 +1422,10 @@ paths:
             x-volume-preview-policy:
               required: true
               schema: { type: string, minLength: 1 }
+            x-volume-sampling:
+              required: false
+              description: Explicit scalar-volume sampling policy. Older box-sampling responses may omit it.
+              schema: { type: string, enum: [box, nearest] }
           content:
             application/octet-stream:
               schema:
@@ -1457,21 +1528,42 @@ paths:
       operationId: getUploadHistogram
       parameters:
         - $ref: "#/components/parameters/FileID"
+        - name: channel
+          in: query
+          description: Exact zero-based source channel for scope=volume.
+          schema: { type: integer, minimum: 0 }
+        - name: c
+          in: query
+          description: Alias of channel for scope=volume. Do not mix selectors.
+          schema: { type: integer, minimum: 0 }
         - name: channels
           in: query
-          description: Comma-separated image channel indices to summarize; grayscale uploads always use channel 0.
-          schema: { type: string }
+          description: >-
+            Comma-separated zero-based channels for the ordinary display histogram.
+            Arrays are preserved (for example channels=0,2). With scope=volume this
+            selector must contain exactly one value and cannot be mixed with channel/c.
+          schema: { type: string, example: "0,2" }
         - name: t
           in: query
-          description: Time index to report in the histogram payload for direct-image uploads.
+          description: Exact zero-based source time index to profile.
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: scope
+          in: query
+          description: >-
+            Omit for the ordinary display/composite histogram response. Set to volume
+            only for source-authoritative single-C/T calibration with raw edges,
+            threshold, and sampling provenance.
+          schema: { type: string, enum: [volume] }
         - name: bins
           in: query
           description: Number of histogram bins. Values are clamped by the control plane.
           schema: { type: integer, minimum: 8, maximum: 4096, default: 256 }
       responses:
         "200":
-          description: Upload histogram payload computed from the decoded direct-image upload.
+          description: >-
+            Without scope, an ordinary display histogram preserving the requested
+            channels array. With scope=volume, a source-authoritative single-C/T
+            calibration histogram with raw-bin edges and threshold provenance.
           content:
             application/json:
               schema:
@@ -1484,8 +1576,59 @@ paths:
                   channels:
                     type: array
                     items: { type: integer }
+                  channel: { type: integer, minimum: 0 }
+                  t: { type: integer, minimum: 0 }
                   source: { type: string, example: decoded-image }
+                  scope: { type: string, enum: [volume] }
                   sample_count: { type: integer }
+                  sampling:
+                    type: object
+                    required: [algorithm, scope, strategy, sample_count, z_samples]
+                    properties:
+                      algorithm: { type: string, minLength: 1 }
+                      scope: { type: string, enum: [volume] }
+                      strategy: { type: string, enum: [exact, stratified-z-spatial] }
+                      sample_count: { type: integer, minimum: 1 }
+                      z_samples:
+                        type: array
+                        minItems: 1
+                        items: { type: integer, minimum: 0 }
+                  threshold:
+                    type: object
+                    required:
+                      - method
+                      - value
+                      - domain
+                      - foreground
+                      - sample_scope
+                      - sample_count
+                      - channel
+                      - t
+                      - sampling_algorithm
+                      - sampling_strategy
+                      - z_samples
+                      - source_sha256
+                      - bins
+                    properties:
+                      method: { type: string, enum: [otsu-256-v1] }
+                      value: { type: number, format: double }
+                      domain: { type: string, enum: [raw] }
+                      foreground: { type: string, enum: [above] }
+                      sample_scope: { type: string, enum: [volume, stratified_z] }
+                      sample_count: { type: integer, minimum: 1 }
+                      channel: { type: integer, minimum: 0 }
+                      t: { type: integer, minimum: 0 }
+                      sampling_algorithm: { type: string, minLength: 1 }
+                      sampling_strategy: { type: string, enum: [exact, stratified-z-spatial] }
+                      z_samples:
+                        type: array
+                        minItems: 1
+                        items: { type: integer, minimum: 0 }
+                      source_sha256: { type: string, minLength: 1 }
+                      bins: { type: integer, minimum: 8, maximum: 4096 }
+                  data_semantics:
+                    type: object
+                    additionalProperties: true
                   histogram:
                     type: object
                     required: [bins, edges, min, max, channel_indices, time_index]
@@ -1495,13 +1638,19 @@ paths:
                         items: { type: integer }
                       edges:
                         type: array
-                        items: { type: number }
-                      min: { type: number }
-                      max: { type: number }
+                        items: { type: number, format: double }
+                      min: { type: number, format: double }
+                      max: { type: number, format: double }
                       channel_indices:
                         type: array
                         items: { type: integer }
                       time_index: { type: integer }
+                      sampling:
+                        type: object
+                        additionalProperties: true
+                      threshold:
+                        type: object
+                        additionalProperties: true
         "415":
           description: Upload histogram could not be decoded for this resource
           content:
@@ -5377,6 +5526,12 @@ components:
         metadata:
           type: object
           minProperties: 1
+          description: >-
+            Arbitrary resource metadata merge. For ultra_viewer_calibration_v1,
+            source_sha256 must match the active resource and each submitted
+            selection must include expected_revision. Successful writes replace
+            expected_revision with a monotonically increasing revision; stale
+            revisions return 409 without overwriting newer calibration state.
           additionalProperties: true
     V2ResourceTextHeadResponse:
       type: object

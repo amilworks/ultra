@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -11,7 +15,9 @@ import pytest
 
 pytest.importorskip("fastapi")
 pytest.importorskip("PIL")
+np = pytest.importorskip("numpy")
 from fastapi.testclient import TestClient  # noqa: E402
+from ultra_deepagents.imaging import service as service_module  # noqa: E402
 from ultra_deepagents.imaging.pool import InlineRunner  # noqa: E402
 from ultra_deepagents.imaging.service import _scalar_volume_envelope, create_app  # noqa: E402
 
@@ -31,6 +37,48 @@ def test_healthz(client):
     assert r.json()["status"] == "ok"
 
 
+def test_warm_localized_pyramid_recency_does_not_mutate_source_generation(
+    tmp_path,
+    monkeypatch,
+):
+    derived = tmp_path / "derived"
+    derived.mkdir()
+    source = derived / "fixture__pyramid.tif"
+    source.write_bytes(b"stable pyramid bytes")
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(cache))
+
+    localized = service_module.localize_pyramid(str(source))
+    initial = os.stat(localized)
+    generation_before = (
+        initial.st_dev,
+        initial.st_ino,
+        initial.st_size,
+        initial.st_mtime_ns,
+        initial.st_ctime_ns,
+    )
+    time.sleep(0.002)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        localized_paths = list(
+            executor.map(
+                service_module.localize_pyramid,
+                [str(source)] * 8,
+            )
+        )
+    final = os.stat(localized)
+    generation_after = (
+        final.st_dev,
+        final.st_ino,
+        final.st_size,
+        final.st_mtime_ns,
+        final.st_ctime_ns,
+    )
+
+    assert localized_paths == [localized] * 8
+    assert generation_after == generation_before
+
+
 def test_tile_returns_png(client):
     r = client.get("/tile", params={"path": "a.czi", "level": 0, "col": 1, "row": 2, "size": 64})
     assert r.status_code == 200
@@ -43,8 +91,12 @@ def test_slice_full_resolution_param_is_threaded_through(client):
     # output by it, so the two responses differ — proving the param reaches the engine.
     r = client.get("/slice", params={"path": "a.czi", "z": 2, "full_resolution": "true"})
     assert r.status_code == 200 and r.content.startswith(b"\x89PNG\r\n\x1a\n")
-    settled = client.get("/slice", params={"path": "a.czi", "z": 2, "full_resolution": "true"}).content
-    scrub = client.get("/slice", params={"path": "a.czi", "z": 2, "full_resolution": "false"}).content
+    settled = client.get(
+        "/slice", params={"path": "a.czi", "z": 2, "full_resolution": "true"}
+    ).content
+    scrub = client.get(
+        "/slice", params={"path": "a.czi", "z": 2, "full_resolution": "false"}
+    ).content
     assert settled != scrub
 
 
@@ -60,8 +112,25 @@ def test_meta_and_formats(client):
 
 
 def test_histogram(client):
-    r = client.get("/histogram", params={"path": "a.czi", "bins": 16})
+    r = client.get(
+        "/histogram",
+        params={"path": "a.czi", "bins": 16, "channel": 0, "t": 0, "scope": "volume"},
+    )
     assert r.json()["bins"] == 16
+
+
+def test_display_histogram_preserves_composite_channels_with_common_edges(client):
+    r = client.get(
+        "/histogram",
+        params={"path": "a.czi", "bins": 16, "channels": "0,2", "t": 1},
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["scope"] == "display"
+    assert payload["t"] == 1
+    assert [entry["index"] for entry in payload["channels"]] == [0, 2]
+    assert payload["channels"][0]["edges"] == payload["channels"][1]["edges"]
+    assert all(sum(entry["counts"]) == entry["sample_count"] for entry in payload["channels"])
 
 
 def test_viewerinfo_has_tile_scheme(client):
@@ -74,7 +143,10 @@ def test_viewerinfo_has_tile_scheme(client):
 
 
 def test_scalar_volume_octet_stream_and_headers(client):
-    r = client.get("/scalar-volume", params={"path": "a.nii", "channel": 0})
+    r = client.get(
+        "/scalar-volume",
+        params={"path": "a.nii", "channel": 0, "sampling": "box"},
+    )
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["x-volume-dtype"] == "float32"
@@ -82,11 +154,273 @@ def test_scalar_volume_octet_stream_and_headers(client):
     assert float(r.headers["x-volume-scl-slope"]) == 1.0
     assert float(r.headers["x-volume-scl-inter"]) == 0.0
     assert int(r.headers["x-volume-time"]) == 0
+    assert r.headers["x-volume-sampling"] == "box"
     w = int(r.headers["x-volume-width"])
     h = int(r.headers["x-volume-height"])
     d = int(r.headers["x-volume-depth"])
     assert d >= 1
     assert len(r.content) == w * h * d * 4
+
+
+def test_scalar_volume_local_weighted_budget_rejects_before_second_decode_and_releases(
+    monkeypatch,
+):
+    plan = {
+        "width": 2,
+        "height": 1,
+        "depth": 1,
+        "dtype": "uint16",
+        "bytes_per_voxel": 2,
+        "channel": 0,
+        "t": 0,
+        "pages": 0,
+        "source_width": 2,
+        "source_height": 1,
+        "source_depth": 1,
+        "downsample_x": 1,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "native-exact-v1",
+        "sampling": "box",
+    }
+    volume = {
+        **plan,
+        "raw_min": 1,
+        "raw_max": 2,
+        "scl_slope": 1,
+        "scl_inter": 0,
+        "data": b"\x01\x00\x02\x00",
+    }
+
+    class BlockingRunner:
+        workers = 1
+
+        def __init__(self):
+            self.scalar_reads = 0
+            self.first_started = threading.Event()
+            self.release_first = threading.Event()
+
+        async def call(self, method, _path, **_kwargs):
+            if method == "scalar_plan":
+                return dict(plan)
+            if method != "scalar_volume":
+                raise AssertionError(method)
+            self.scalar_reads += 1
+            if self.scalar_reads == 1:
+                self.first_started.set()
+                assert await asyncio.to_thread(self.release_first.wait, 5)
+            return dict(volume)
+
+    # One response requires 4 body bytes + one 4-byte plane array + one 4-byte
+    # contiguous stack. The second request must fail before any scalar-plane work.
+    monkeypatch.setenv("ULTRA_IMGSVC_SCALAR_VOLUME_INFLIGHT_BYTES", "12")
+    runner = BlockingRunner()
+    app = create_app(runner=runner)
+    first_result: list[object] = []
+    with TestClient(app) as local_client:
+        first = threading.Thread(
+            target=lambda: first_result.append(
+                local_client.get(
+                    "/scalar-volume",
+                    params={"path": "mask.tif", "sampling": "box"},
+                )
+            )
+        )
+        first.start()
+        assert runner.first_started.wait(timeout=5)
+
+        rejected = local_client.get(
+            "/scalar-volume",
+            params={"path": "mask.tif", "sampling": "box"},
+        )
+        assert rejected.status_code == 503
+        assert runner.scalar_reads == 1
+
+        runner.release_first.set()
+        first.join(timeout=5)
+        assert not first.is_alive()
+        assert first_result[0].status_code == 200
+
+        admitted_after_release = local_client.get(
+            "/scalar-volume",
+            params={"path": "mask.tif", "sampling": "box"},
+        )
+        assert admitted_after_release.status_code == 200
+        assert runner.scalar_reads == 2
+
+
+def test_scalar_volume_local_weighted_budget_releases_after_decode_error(monkeypatch):
+    plan = {
+        "width": 1,
+        "height": 1,
+        "depth": 1,
+        "dtype": "uint8",
+        "bytes_per_voxel": 1,
+        "channel": 0,
+        "t": 0,
+        "pages": 0,
+        "source_width": 1,
+        "source_height": 1,
+        "source_depth": 1,
+        "downsample_x": 1,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "native-exact-v1",
+        "sampling": "box",
+    }
+
+    class FailingOnceRunner:
+        workers = 1
+
+        def __init__(self):
+            self.scalar_reads = 0
+
+        async def call(self, method, _path, **_kwargs):
+            if method == "scalar_plan":
+                return dict(plan)
+            self.scalar_reads += 1
+            if self.scalar_reads == 1:
+                raise RuntimeError("synthetic decode failure")
+            return {
+                **plan,
+                "data": b"\x07",
+                "raw_min": 7,
+                "raw_max": 7,
+                "scl_slope": 1,
+                "scl_inter": 0,
+            }
+
+    monkeypatch.setenv("ULTRA_IMGSVC_SCALAR_VOLUME_INFLIGHT_BYTES", "3")
+    runner = FailingOnceRunner()
+    app = create_app(runner=runner)
+    with TestClient(app) as local_client:
+        with pytest.raises(RuntimeError, match="synthetic decode failure"):
+            local_client.get(
+                "/scalar-volume",
+                params={"path": "mask.tif", "sampling": "box"},
+            )
+        recovered = local_client.get(
+            "/scalar-volume",
+            params={"path": "mask.tif", "sampling": "box"},
+        )
+    assert recovered.status_code == 200
+    assert recovered.content == b"\x07"
+
+
+@pytest.mark.parametrize(
+    "failure_message",
+    [
+        "exact Mask source generation changed",
+        "exact Mask decode work does not match its admission plan",
+        "exact Mask read count does not match its admission plan",
+    ],
+)
+def test_exact_mask_admission_refusal_is_422_and_releases_budget(
+    monkeypatch,
+    failure_message,
+):
+    plan = {
+        "width": 1,
+        "height": 1,
+        "depth": 1,
+        "dtype": "uint8",
+        "bytes_per_voxel": 1,
+        "channel": 0,
+        "t": 0,
+        "pages": 0,
+        "source_width": 1,
+        "source_height": 1,
+        "source_depth": 1,
+        "downsample_x": 1,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "mask-native-integer-v1",
+        "sampling": "nearest",
+        "decode_admission": "complete-selected-scalar-v1",
+        "admitted_decode_work_bytes": 1,
+        "admitted_decode_read_count": 1,
+        "admitted_source_dtype": "uint8",
+        "admitted_source_bytes_per_voxel": 1,
+        "source_generation": (1, 1, 2, 3, 4, 5),
+    }
+
+    class RefusingOnceRunner:
+        workers = 2
+
+        def __init__(self):
+            self.plane_calls = 0
+
+        async def call(self, method, _path, **_kwargs):
+            if method == "scalar_plan":
+                return dict(plan)
+            if method != "scalar_planes":
+                raise AssertionError(method)
+            self.plane_calls += 1
+            if self.plane_calls == 1:
+                raise ValueError(failure_message)
+            return [np.array([[7]], dtype="uint8")]
+
+    monkeypatch.setenv("ULTRA_IMGSVC_SCALAR_VOLUME_INFLIGHT_BYTES", "3")
+    runner = RefusingOnceRunner()
+    app = create_app(runner=runner)
+    with TestClient(app) as local_client:
+        refused = local_client.get(
+            "/scalar-volume",
+            params={"path": "mask.tif", "sampling": "nearest"},
+        )
+        recovered = local_client.get(
+            "/scalar-volume",
+            params={"path": "mask.tif", "sampling": "nearest"},
+        )
+
+    assert refused.status_code == 422
+    assert recovered.status_code == 200
+    assert recovered.content == b"\x07"
+    assert runner.plane_calls == 2
+
+
+def test_scalar_volume_service_rejects_nonexact_nearest_before_decode_or_fanout():
+    plan = {
+        "width": 1,
+        "height": 1,
+        "depth": 1,
+        "dtype": "float32",
+        "bytes_per_voxel": 4,
+        "channel": 0,
+        "t": 0,
+        "pages": 0,
+        "source_width": 1,
+        "source_height": 1,
+        "source_depth": 1,
+        "downsample_x": 1,
+        "downsample_y": 1,
+        "downsample_z": 1,
+        "preview_policy": "nearest-source-grid-v1",
+        "sampling": "nearest",
+    }
+
+    class RejectingRunner:
+        workers = 4
+
+        def __init__(self):
+            self.decode_calls = 0
+
+        async def call(self, method, _path, **_kwargs):
+            if method == "scalar_plan":
+                return dict(plan)
+            self.decode_calls += 1
+            raise AssertionError("non-exact nearest must reject before decode")
+
+    runner = RejectingRunner()
+    app = create_app(runner=runner)
+    with TestClient(app) as local_client:
+        response = local_client.get(
+            "/scalar-volume",
+            params={"path": "float.tif", "sampling": "nearest"},
+        )
+
+    assert response.status_code == 422
+    assert runner.decode_calls == 0
 
 
 def test_scalar_volume_envelope_exposes_preview_provenance_and_actual_time():
@@ -120,6 +454,7 @@ def test_scalar_volume_envelope_exposes_preview_provenance_and_actual_time():
     assert headers["x-volume-source-width"] == "4"
     assert headers["x-volume-downsample-x"] == "2"
     assert headers["x-volume-preview-policy"] == "auto-v1"
+    assert headers["x-volume-sampling"] == "box"
 
 
 def test_scalar_volume_envelope_requires_explicit_consistent_identity_provenance():
@@ -282,9 +617,9 @@ def hdf5_path(tmp_path):
         zz, yy, xx = np.indices((12, 24, 30))
         vol.create_dataset(
             "euler",
-            data=np.stack(
-                [xx + zz, yy * 2 + zz, ((xx + yy + zz) % 5) * 10], axis=-1
-            ).astype("float32"),
+            data=np.stack([xx + zz, yy * 2 + zz, ((xx + yy + zz) % 5) * 10], axis=-1).astype(
+                "float32"
+            ),
         )
         f.create_dataset("series", data=rng.random(120).astype("float64"))
     return path
@@ -325,7 +660,9 @@ def test_plain_viewerinfo_detects_hdf5_by_path_extension(client, hdf5_path):
 
 
 def test_hdf5_dataset_route(client, hdf5_path):
-    r = client.get("/hdf5/dataset", params={"path": hdf5_path, "dataset_path": "/volume/ct", "file_id": "fid"})
+    r = client.get(
+        "/hdf5/dataset", params={"path": hdf5_path, "dataset_path": "/volume/ct", "file_id": "fid"}
+    )
     assert r.status_code == 200
     s = r.json()
     assert s["preview_kind"] == "scalar_volume"
@@ -339,7 +676,10 @@ def test_hdf5_dataset_unknown_is_404(client, hdf5_path):
 
 
 def test_hdf5_slice_png(client, hdf5_path):
-    r = client.get("/hdf5/preview/slice", params={"path": hdf5_path, "dataset_path": "/volume/ct", "axis": "z", "index": 3})
+    r = client.get(
+        "/hdf5/preview/slice",
+        params={"path": hdf5_path, "dataset_path": "/volume/ct", "axis": "z", "index": 3},
+    )
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
@@ -347,12 +687,17 @@ def test_hdf5_slice_png(client, hdf5_path):
 
 def test_hdf5_slice_bad_index_type_is_422(client, hdf5_path):
     # FastAPI query validation: a non-int index → 422 automatically.
-    r = client.get("/hdf5/preview/slice", params={"path": hdf5_path, "dataset_path": "/volume/ct", "index": "abc"})
+    r = client.get(
+        "/hdf5/preview/slice",
+        params={"path": hdf5_path, "dataset_path": "/volume/ct", "index": "abc"},
+    )
     assert r.status_code == 422
 
 
 def test_hdf5_atlas_png(client, hdf5_path):
-    r = client.get("/hdf5/preview/atlas", params={"path": hdf5_path, "dataset_path": "/volume/labels"})
+    r = client.get(
+        "/hdf5/preview/atlas", params={"path": hdf5_path, "dataset_path": "/volume/labels"}
+    )
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
@@ -395,9 +740,7 @@ def test_hdf5_service_threads_feature_ids_to_slice_and_atlas(client, hdf5_featur
         "feature_ids": "25",
     }
     atlas = client.get("/hdf5/preview/atlas", params=params)
-    slice_response = client.get(
-        "/hdf5/preview/slice", params={**params, "axis": "z", "index": 0}
-    )
+    slice_response = client.get("/hdf5/preview/slice", params={**params, "axis": "z", "index": 0})
     assert atlas.status_code == 200
     assert slice_response.status_code == 200
     for response in (atlas, slice_response):
@@ -407,7 +750,9 @@ def test_hdf5_service_threads_feature_ids_to_slice_and_atlas(client, hdf5_featur
 
 
 def test_hdf5_scalar_volume_headers(client, hdf5_path):
-    r = client.get("/hdf5/preview/scalar-volume", params={"path": hdf5_path, "dataset_path": "/volume/ct"})
+    r = client.get(
+        "/hdf5/preview/scalar-volume", params={"path": hdf5_path, "dataset_path": "/volume/ct"}
+    )
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["x-volume-dtype"] == "float32"
@@ -433,7 +778,10 @@ def test_hdf5_scalar_volume_headers(client, hdf5_path):
 
 
 def test_hdf5_histogram_route(client, hdf5_path):
-    r = client.get("/hdf5/preview/histogram", params={"path": hdf5_path, "dataset_path": "/volume/ct", "bins": 24})
+    r = client.get(
+        "/hdf5/preview/histogram",
+        params={"path": hdf5_path, "dataset_path": "/volume/ct", "bins": 24},
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["discrete"] is False
@@ -441,7 +789,10 @@ def test_hdf5_histogram_route(client, hdf5_path):
 
 
 def test_hdf5_table_route(client, hdf5_path):
-    r = client.get("/hdf5/preview/table", params={"path": hdf5_path, "dataset_path": "/series", "offset": 0, "limit": 5})
+    r = client.get(
+        "/hdf5/preview/table",
+        params={"path": hdf5_path, "dataset_path": "/series", "offset": 0, "limit": 5},
+    )
     assert r.status_code == 200
     body = r.json()
     assert body["preview_kind"] == "series"

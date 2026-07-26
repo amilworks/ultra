@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -40,6 +42,58 @@ func writeImageServiceUpstreamError(ctx context.Context, w http.ResponseWriter, 
 //     service — excess tile requests block on a free connection (backpressure) rather
 //     than piling decode work onto the engine. Sized by ULTRA_CONTROL_IMAGE_SERVICE_MAX_CONNS.
 var imageServiceHTTPClient = newImageServiceHTTPClient()
+
+const defaultScalarVolumeInFlightBytes int64 = 256 << 20
+
+type byteAdmissionBudget struct {
+	mu       sync.Mutex
+	maxBytes int64
+	used     int64
+}
+
+func newByteAdmissionBudget(maxBytes int64) *byteAdmissionBudget {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	return &byteAdmissionBudget{maxBytes: maxBytes}
+}
+
+func (budget *byteAdmissionBudget) tryAcquire(size int64) bool {
+	if budget == nil || size <= 0 {
+		return false
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if size > budget.maxBytes-budget.used {
+		return false
+	}
+	budget.used += size
+	return true
+}
+
+func (budget *byteAdmissionBudget) release(size int64) {
+	if budget == nil || size <= 0 {
+		return
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	budget.used -= size
+	if budget.used < 0 {
+		budget.used = 0
+	}
+}
+
+func newScalarVolumeInFlightBudgetFromEnv() *byteAdmissionBudget {
+	maxBytes := defaultScalarVolumeInFlightBytes
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_SCALAR_VOLUME_INFLIGHT_BYTES")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed >= 0 {
+			maxBytes = parsed
+		}
+	}
+	return newByteAdmissionBudget(maxBytes)
+}
+
+var scalarVolumeInFlightBudget = newScalarVolumeInFlightBudgetFromEnv()
 
 func newImageServiceHTTPClient() *http.Client {
 	maxConns := 32
@@ -213,6 +267,28 @@ func (deps ServerDeps) proxyImageService(w http.ResponseWriter, r *http.Request,
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		writeImageServiceUpstreamError(r.Context(), w, endpoint, resp.StatusCode, detail)
 		return
+	}
+	var admittedScalarBytes int64
+	if endpoint == "/scalar-volume" {
+		admittedScalarBytes = resp.ContentLength
+		if admittedScalarBytes <= 0 {
+			writeError(
+				w,
+				http.StatusBadGateway,
+				errors.New("image service scalar volume omitted its content length"),
+			)
+			return
+		}
+		if !scalarVolumeInFlightBudget.tryAcquire(admittedScalarBytes) {
+			w.Header().Set("Retry-After", "1")
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				errors.New("scalar volume in-flight byte budget is exhausted"),
+			)
+			return
+		}
+		defer scalarVolumeInFlightBudget.release(admittedScalarBytes)
 	}
 	if contentType := resp.Header.Get("Content-Type"); contentType != "" {
 		w.Header().Set("Content-Type", contentType)

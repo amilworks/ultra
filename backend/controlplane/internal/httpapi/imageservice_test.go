@@ -236,3 +236,30 @@ func TestV2DeriveUploadPyramidNotConfigured(t *testing.T) {
 		t.Fatalf("derive-pyramid (no queue) status = %d, want 501", rec.Code)
 	}
 }
+
+func TestByteAdmissionBudgetRejectsAggregateInFlightOverflow(t *testing.T) {
+	t.Parallel()
+
+	budget := newByteAdmissionBudget(10)
+	if !budget.tryAcquire(6) {
+		t.Fatal("first in-flight body was rejected")
+	}
+	if budget.tryAcquire(5) {
+		t.Fatal("aggregate overflow was admitted")
+	}
+	if !budget.tryAcquire(4) {
+		t.Fatal("request fitting the remaining aggregate budget was rejected")
+	}
+	if budget.tryAcquire(1) {
+		t.Fatal("request was admitted while the aggregate budget was full")
+	}
+	budget.release(6)
+	if !budget.tryAcquire(5) {
+		t.Fatal("released aggregate capacity was not reusable")
+	}
+	budget.release(4)
+	budget.release(5)
+	if budget.used != 0 {
+		t.Fatalf("budget used bytes = %d, want 0", budget.used)
+	}
+}

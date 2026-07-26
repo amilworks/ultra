@@ -19,6 +19,8 @@ type Store interface {
 	CreateThread(context.Context, domain.CreateThreadInput) (domain.ThreadRecord, error)
 	UpdateThreadForUser(context.Context, domain.UpdateThreadInput) (domain.ThreadRecord, error)
 	SoftDeleteThreadForUser(context.Context, string, string, time.Time) (domain.ThreadRecord, error)
+	// Returns artifact storage URIs to unlink after the row deletion commits.
+	HardDeleteThreadForUser(context.Context, string, string) ([]string, error)
 	ApplyGeneratedThreadTitle(context.Context, domain.ApplyGeneratedThreadTitleInput) (domain.ThreadRecord, error)
 	GetThread(context.Context, string) (domain.ThreadRecord, error)
 	GetThreadForUser(context.Context, string, string) (domain.ThreadRecord, error)

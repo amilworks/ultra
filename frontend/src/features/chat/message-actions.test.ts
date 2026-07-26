@@ -141,10 +141,14 @@ describe("message actions are labelled and honest", () => {
     expect(appSource).toContain("Delete this message?");
   });
 
-  it("does not promise storage deletion the backend does not perform", () => {
-    // The handler runs UPDATE control_threads SET status='deleted' — no row is
-    // removed. Restore stronger wording only alongside the hard delete.
+  it("promises exactly the deletion the backend performs", () => {
+    // The old copy said "remove its messages from storage" while the handler ran
+    // UPDATE control_threads SET status='deleted' and removed no row at all.
+    // The handler now hard-deletes, so the strong wording is honest again — but
+    // this pair must move together. If deletion ever softens back to a status
+    // flip, this assertion is the thing that should fail.
     expect(appCode).not.toContain("remove its messages from storage");
+    expect(appCode).toContain("This cannot be undone.");
   });
 
   it("has no unwired decoration left in the row", () => {

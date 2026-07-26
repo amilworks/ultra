@@ -282,15 +282,13 @@ import {
   Square,
   SquarePen,
   Table2,
-  ThumbsDown,
-  ThumbsUp,
   Trash,
   X,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { toNumber, toRecord } from "./lib/coerce";
 import { queueEffectUpdate } from "./lib/queueEffectUpdate";
-import { showErrorToast, showSuccessToast } from "./lib/toast";
+import { showErrorToast, showSuccessToast, showUndoToast } from "./lib/toast";
 import { useThemePreference } from "./lib/useThemePreference";
 import {
   MISSING_REQUESTED_CONVERSATION_MESSAGE,
@@ -1756,8 +1754,15 @@ type ConversationTranscriptActions = {
     }
   ) => Promise<BisqueImportedSelection>;
   onCopyBisqueResourceUri: (resourceUri: string) => Promise<void>;
-  onEditUserMessage: (content: string) => void;
-  onDeleteUserMessage: (messageId: string) => void;
+  /* Takes the id as well as the text: editing now truncates the turn and
+     re-runs from that point, so it has to know WHICH message it is editing —
+     the old signature only carried content, which is why "Edit" could do
+     nothing but overwrite the composer draft. */
+  onEditUserMessage: (messageId: string, content: string) => void;
+  /* "Request" rather than "do": destructive actions route through a
+     confirmation that names the blast radius, since deleting a user message
+     also removes the reply it produced. */
+  onRequestDeleteUserMessage: (messageId: string) => void;
   onRetryAssistant: (assistantMessageId: string, options: { edit: boolean }) => void;
 };
 
@@ -1863,51 +1868,55 @@ const ConversationMessageRow = memo(
                 Attached: {message.uploadedFileNames.join(", ")}
               </p>
             ) : null}
+            {/* data-pinned keeps the last turn's actions visible without a hover:
+                it is the one row a user reaches for repeatedly. Everything else
+                about the reveal — touch, keyboard, motion — is owned by
+                .chat-message-actions in styles.css. */}
             <MessageActions
-              className={cn(
-                "gap-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100"
-              )}
+              className="chat-message-actions"
+              data-role="user"
+              data-pinned={isLastMessage || undefined}
             >
               <MessageAction tooltip="Edit">
-                <Button
+                <button
                   type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="rounded-full"
-                  onClick={() => actions.onEditUserMessage(message.content)}
+                  className="chat-message-action"
+                  aria-label="Edit message"
+                  onClick={() => actions.onEditUserMessage(message.id, message.content)}
                 >
-                  <Pencil className="size-4" />
-                </Button>
+                  <Pencil className="size-4" aria-hidden="true" />
+                </button>
               </MessageAction>
               <MessageAction tooltip="Delete">
-                <Button
+                <button
                   type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="rounded-full"
-                  onClick={() => actions.onDeleteUserMessage(message.id)}
+                  className="chat-message-action"
+                  data-tone="destructive"
+                  aria-label="Delete message"
+                  onClick={() => actions.onRequestDeleteUserMessage(message.id)}
                 >
-                  <Trash className="size-4" />
-                </Button>
+                  <Trash className="size-4" aria-hidden="true" />
+                </button>
               </MessageAction>
+              {/* The accessible name carries the confirmation too, so the state
+                  change is announced and not only drawn. */}
               <MessageAction tooltip={isCopied ? "Copied!" : "Copy"}>
-                <Button
+                <button
                   type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className={cn(
-                    "rounded-full transition-colors duration-150",
-                    isCopied &&
-                      "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 dark:text-emerald-400"
-                  )}
+                  className="chat-message-action"
+                  data-state={isCopied ? "copied" : undefined}
+                  aria-label={isCopied ? "Message copied" : "Copy message"}
                   onClick={() => void actions.onCopy(message.content, message.id)}
                 >
                   {isCopied ? (
-                    <Check className="size-4 animate-in zoom-in-50 fade-in-0 duration-200" />
+                    <Check
+                      className="size-4 animate-in zoom-in-50 fade-in-0 duration-200"
+                      aria-hidden="true"
+                    />
                   ) : (
-                    <Copy className="size-4" />
+                    <Copy className="size-4" aria-hidden="true" />
                   )}
-                </Button>
+                </button>
               </MessageAction>
             </MessageActions>
           </div>
@@ -2079,50 +2088,37 @@ const ConversationMessageRow = memo(
               onEdit={() => actions.onRetryAssistant(message.id, { edit: true })}
             />
           ) : null}
+          {/* Upvote/Downvote used to sit here. They were pure decoration — no
+              onClick, no state, no endpoint behind them at any layer. Once the
+              row became visible on touch (see .chat-message-actions) they would
+              have been two permanently-visible controls that do nothing on every
+              phone, and a control that hovers and tooltips but never responds
+              costs more trust than an absent one. They come back with the
+              feedback slice: keyed on run_id, not message.id, because the
+              live-turn id here is a client UUID the server replaces on persist. */}
           <MessageActions
-            className={cn(
-              "-ml-2.5 gap-0 opacity-0 transition-opacity duration-150 group-hover:opacity-100",
-              isLastMessage && "opacity-100"
-            )}
+            className="chat-message-actions"
+            data-role="assistant"
+            data-pinned={isLastMessage || undefined}
           >
             <MessageAction tooltip={isCopied ? "Copied!" : "Copy"}>
-              <Button
+              <button
                 type="button"
-                variant="ghost"
-                size="icon-sm"
-                className={cn(
-                  "rounded-full transition-colors duration-150",
-                  isCopied &&
-                    "bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 dark:text-emerald-400"
-                )}
+                className="chat-message-action"
+                data-state={isCopied ? "copied" : undefined}
+                aria-label={isCopied ? "Response copied" : "Copy response"}
+                disabled={isStreamingAssistant}
                 onClick={() => void actions.onCopy(message.content, message.id)}
               >
                 {isCopied ? (
-                  <Check className="size-4 animate-in zoom-in-50 fade-in-0 duration-200" />
+                  <Check
+                    className="size-4 animate-in zoom-in-50 fade-in-0 duration-200"
+                    aria-hidden="true"
+                  />
                 ) : (
-                  <Copy className="size-4" />
+                  <Copy className="size-4" aria-hidden="true" />
                 )}
-              </Button>
-            </MessageAction>
-            <MessageAction tooltip="Upvote">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="rounded-full"
-              >
-                <ThumbsUp className="size-4" />
-              </Button>
-            </MessageAction>
-            <MessageAction tooltip="Downvote">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="rounded-full"
-              >
-                <ThumbsDown className="size-4" />
-              </Button>
+              </button>
             </MessageAction>
           </MessageActions>
         </div>
@@ -4930,6 +4926,13 @@ export function App() {
   >({});
   const [pendingConversationRename, setPendingConversationRename] =
     useState<PendingConversationRename | null>(null);
+  /* repliesRemoved is captured at request time so the confirmation can state the
+     real blast radius ("this also removes the reply it produced") rather than
+     leaving the user to discover it. */
+  const [pendingMessageDeletion, setPendingMessageDeletion] = useState<{
+    messageId: string;
+    repliesRemoved: number;
+  } | null>(null);
   const [resourceViewerContext, setResourceViewerContext] = useState<ResourceViewerContext | null>(
     null
   );
@@ -5536,10 +5539,15 @@ export function App() {
           return mergedConversations[0].id;
         });
         setConversationsHydrated(true);
-      } catch {
+      } catch (error) {
         if (isCancelled) {
           return;
         }
+        // A failed bootstrap must be visible: silently seeding a blank draft
+        // presented a populated account as "No history yet" until a manual
+        // reload (list hydration is per-row resilient now, so reaching this
+        // means the thread list itself failed).
+        setUiErrorBanner(`Failed to load conversations: ${normalizeApiError(error)}`);
         const seed = createConversationState();
         optimisticConversationIdsRef.current.add(seed.id);
         setConversations([seed]);
@@ -10215,6 +10223,36 @@ export function App() {
     }
   }, [activeConversation, dismissedSlashPrompt]);
 
+  /* Deleting a user message also removes every consecutive assistant reply that
+     followed it (removeMessageWithPairedResponse). That is the right behaviour —
+     an answer without its question is noise — but it is more than the button
+     says, so the confirmation names it and the result is undoable. */
+  const requestDeleteUserMessage = useCallback(
+    (messageId: string): void => {
+      const conversation = activeConversation;
+      if (!conversation) {
+        return;
+      }
+      const index = conversation.messages.findIndex((item) => item.id === messageId);
+      if (index < 0) {
+        return;
+      }
+      let repliesRemoved = 0;
+      for (let i = index + 1; i < conversation.messages.length; i += 1) {
+        if (conversation.messages[i].role !== "assistant") {
+          break;
+        }
+        repliesRemoved += 1;
+      }
+      setPendingMessageDeletion({ messageId, repliesRemoved });
+    },
+    [activeConversation]
+  );
+
+  const cancelDeleteUserMessage = useCallback((): void => {
+    setPendingMessageDeletion(null);
+  }, []);
+
   const handleDeleteUserMessage = useCallback(
     (messageId: string): void => {
       updateActiveConversation((conversation) => {
@@ -10235,6 +10273,76 @@ export function App() {
       });
     },
     [updateActiveConversation]
+  );
+
+  /* Confirmed delete. Snapshots the exact messages being removed first so Undo
+     restores that set and nothing else — restoring "the last N messages" would
+     resurrect the wrong ones if anything streamed in meanwhile. */
+  const confirmDeleteUserMessage = useCallback((): void => {
+    const pending = pendingMessageDeletion;
+    const conversation = activeConversation;
+    setPendingMessageDeletion(null);
+    if (!pending || !conversation) {
+      return;
+    }
+    const conversationId = conversation.id;
+    const previousMessages = conversation.messages;
+    handleDeleteUserMessage(pending.messageId);
+    showUndoToast(
+      pending.repliesRemoved > 0 ? "Message and its reply deleted" : "Message deleted",
+      () => {
+        updateConversation(conversationId, (current) => ({
+          ...current,
+          updatedAt: Date.now(),
+          messages: previousMessages,
+        }));
+      }
+    );
+  }, [
+    activeConversation,
+    handleDeleteUserMessage,
+    pendingMessageDeletion,
+    updateConversation,
+  ]);
+
+  /* Edit a user turn.
+     Previously this only wrote the composer draft: the original message stayed,
+     its reply stayed, nothing re-ran, the composer was never focused, and it
+     silently clobbered whatever the user had already typed. Sending afterwards
+     produced a duplicated turn.
+
+     It now means what the assistant card's "Edit" has always meant twelve lines
+     below — remove the turn and its reply, put the prompt back in a focused
+     composer — so the same word finally denotes the same thing in one
+     transcript. Undoable, because it removes content. */
+  const handleEditUserMessage = useCallback(
+    (messageId: string, content: string): void => {
+      const conversation = activeConversation;
+      if (!conversation) {
+        return;
+      }
+      const conversationId = conversation.id;
+      const previousMessages = conversation.messages;
+      const previousDraft = conversation.prompt;
+      handleDeleteUserMessage(messageId);
+      setActivePromptValue(content);
+      focusComposerTextarea();
+      showUndoToast("Editing — the turn was removed", () => {
+        updateConversation(conversationId, (current) => ({
+          ...current,
+          updatedAt: Date.now(),
+          messages: previousMessages,
+        }));
+        setActivePromptValue(previousDraft);
+      });
+    },
+    [
+      activeConversation,
+      focusComposerTextarea,
+      handleDeleteUserMessage,
+      setActivePromptValue,
+      updateConversation,
+    ]
   );
 
   // Retry / Edit a stopped or failed assistant turn. Both remove the stale
@@ -10328,13 +10436,14 @@ export function App() {
       onOpenConversationFilesInViewer: openConversationFilesInViewer,
       onImportBisqueResourcesIntoConversation: importBisqueResourcesIntoConversation,
       onCopyBisqueResourceUri: copyBisqueResourceUri,
-      onEditUserMessage: setActivePromptValue,
-      onDeleteUserMessage: handleDeleteUserMessage,
+      onEditUserMessage: handleEditUserMessage,
+      onRequestDeleteUserMessage: requestDeleteUserMessage,
       onRetryAssistant: retryAssistantResponse,
     }),
     [
       copyBisqueResourceUri,
-      handleDeleteUserMessage,
+      handleEditUserMessage,
+      requestDeleteUserMessage,
       handleCopy,
       handleStreamingRenderComplete,
       importBisqueResourcesIntoConversation,
@@ -11470,7 +11579,25 @@ export function App() {
           </div>
 
           <div className="app-sidebar-history-scroll">
-            {historyGroups.length === 0 ? (
+            {historyGroups.length === 0 && !conversationsHydrated ? (
+              // Bootstrap still in flight (or failed and retriable): claiming
+              // "No history yet" here reads as an empty account while the
+              // list is simply not loaded yet.
+              <SidebarGroup className="app-history-group">
+                <SidebarGroupLabel>
+                  {"Recents"}
+                </SidebarGroupLabel>
+                <SidebarMenu>
+                  <SidebarMenuItem>
+                    <SidebarMenuButton className="app-history-button" disabled>
+                      <span>
+                        {"Loading conversations…"}
+                      </span>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                </SidebarMenu>
+              </SidebarGroup>
+            ) : historyGroups.length === 0 ? (
               <SidebarGroup className="app-history-group">
                 <SidebarGroupLabel>
                   {"Recents"}
@@ -12524,6 +12651,39 @@ export function App() {
             />
           </Suspense>
         ) : null}
+        {/* Message delete. Deliberately the same dialog grammar as conversation
+            delete: the two differ in scope, not in kind, and a lighter-weight
+            confirmation here would imply this one is safe to fire blind. */}
+        <AlertDialog
+          open={Boolean(pendingMessageDeletion)}
+          onOpenChange={(open) => {
+            if (!open) {
+              cancelDeleteUserMessage();
+            }
+          }}
+        >
+          <AlertDialogContent size="default">
+            <AlertDialogHeader>
+              <AlertDialogMedia className="bg-destructive/12 text-destructive">
+                <Trash className="size-7" />
+              </AlertDialogMedia>
+              <AlertDialogTitle>Delete this message?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {pendingMessageDeletion && pendingMessageDeletion.repliesRemoved > 0
+                  ? pendingMessageDeletion.repliesRemoved === 1
+                    ? "This also removes the reply it produced."
+                    : `This also removes the ${pendingMessageDeletion.repliesRemoved} replies it produced.`
+                  : "This removes it from the conversation."}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel onClick={cancelDeleteUserMessage}>Cancel</AlertDialogCancel>
+              <AlertDialogAction variant="destructive" onClick={confirmDeleteUserMessage}>
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         <AlertDialog
           open={Boolean(pendingConversationDelete)}
           onOpenChange={(open) => {
@@ -12538,8 +12698,14 @@ export function App() {
                 <Trash className="size-7" />
               </AlertDialogMedia>
               <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+              {/* This used to promise "remove its messages from storage". The
+                  backend runs `UPDATE control_threads SET status='deleted'` —
+                  not one row is removed, and the transcript stays in
+                  metadata.frontend_state. Never ship a deletion promise the
+                  storage layer does not keep. Restore the stronger wording in
+                  the same change that lands the hard delete, not before. */}
               <AlertDialogDescription>
-                {`Delete "${pendingConversationDelete?.title ?? "this conversation"}" and remove its messages from storage?`}
+                {`Delete "${pendingConversationDelete?.title ?? "this conversation"}"? It will be removed from your history.`}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

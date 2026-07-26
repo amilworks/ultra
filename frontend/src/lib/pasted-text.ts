@@ -52,9 +52,12 @@ export const shouldAttachPastedText = (text: string): boolean => {
  */
 export const pastedTextFileName = (now: Date): string => {
   const pad = (value: number): string => String(value).padStart(2, "0");
+  // Millisecond suffix: a double-⌘V lands twice inside the same second, and
+  // second-resolution names collided (review finding).
+  const millis = String(now.getMilliseconds()).padStart(3, "0");
   return (
     `pasted-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
-    `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`
+    `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${millis}.txt`
   );
 };
 

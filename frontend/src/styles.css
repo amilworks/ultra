@@ -10458,7 +10458,9 @@ details {
 .chat-selection-ask {
   --selection-ask-lift: 0px;
   position: fixed;
-  z-index: 60;
+  /* Below every Radix overlay (dialogs, sheets, menus are z-50): the chip only
+     needs to clear in-transcript stacking, and must never float over a modal. */
+  z-index: 40;
   transform: translate(-50%, calc(-100% - 8px - var(--selection-ask-lift)));
   display: inline-flex;
   align-items: center;
@@ -10521,6 +10523,14 @@ details {
     animation: none;
     transition: none;
   }
+}
+
+/* KaTeX renders math twice — visible HTML plus an accessibility MathML layer —
+   and a DOM selection captures BOTH, so quoting a selected formula garbled it
+   doubled (review finding). Selection sticks to the visible layer only; screen
+   readers still see the MathML, which does not depend on selectability. */
+.katex-mathml {
+  user-select: none;
 }
 
 /* ⌘F find bar: a quiet floating panel in the transcript's top-right. Its

@@ -10447,9 +10447,14 @@ export function App() {
       if (shouldAttachPastedText(pastedText)) {
         attachPastedText(pastedText);
       } else {
-        setActivePromptValue((previous) =>
-          previous ? `${previous}${pastedText}` : pastedText
-        );
+        setActivePromptValue((previous) => {
+          if (!previous) {
+            return pastedText;
+          }
+          // A paste aimed at nothing in particular lands after the draft; a
+          // newline keeps it from gluing onto the last drafted word.
+          return /\s$/.test(previous) ? `${previous}${pastedText}` : `${previous}\n${pastedText}`;
+        });
       }
       // rAF focus is fine here (unlike type-to-focus): there is no default
       // action left to catch, and it runs after React commits the new draft,
@@ -10485,6 +10490,12 @@ export function App() {
     if (!ask) {
       return;
     }
+    /* Collapse the DOM selection the moment it is consumed. Review-confirmed:
+       without this, the click's own mouseup (and Escape's keyup) re-measured
+       the still-live selection and resurrected the chip a frame after every
+       dismissal — and the grey inactive highlight lingered over the quoted
+       text. One line fixes all three. */
+    window.getSelection()?.removeAllRanges();
     // A selection large enough to read as data gets the same treatment as a
     // large paste: attachment chip, not a hundred quoted lines.
     if (shouldAttachPastedText(ask.text)) {
@@ -10498,7 +10509,15 @@ export function App() {
   }, [attachPastedText, focusComposerTextarea, selectionAsk, setActivePromptValue]);
 
   useEffect(() => {
-    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+    if (
+      authStatus !== "authenticated" ||
+      activePanel !== "chat" ||
+      viewerOpen ||
+      // Fine pointers only: on touch the OS selection callout owns this
+      // interaction, and a 30px chip would fight it while breaking the 44px
+      // target law. Gating the whole effect keeps touch entirely native.
+      !window.matchMedia("(pointer: fine)").matches
+    ) {
       setSelectionAsk(null);
       return;
     }
@@ -10506,6 +10525,11 @@ export function App() {
        Restricted to `.pk-message` at BOTH ends so sidebar titles, composer
        internals and stray UI text never grow a chip. */
     const measureSelection = (): { text: string; x: number; y: number } | null => {
+      // A dialog above the transcript, or a composer that cannot accept a
+      // quote yet (conversation still hydrating), means no offer.
+      if (hasBlockingOverlay() || composerTextareaRef.current?.disabled) {
+        return null;
+      }
       const selection = window.getSelection();
       if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
         return null;
@@ -10526,6 +10550,17 @@ export function App() {
       if (rect.width === 0 && rect.height === 0) {
         return null;
       }
+      // Scrolled out of the viewport: stand down instead of pinning to the
+      // clamped edge over unrelated UI (review finding — the clamps below are
+      // for PARTIALLY visible selections, not gone ones).
+      if (
+        rect.bottom < 0 ||
+        rect.top > window.innerHeight ||
+        rect.right < 0 ||
+        rect.left > window.innerWidth
+      ) {
+        return null;
+      }
       return {
         text,
         // Clamped so the chip never slides off-viewport on selections that
@@ -10536,8 +10571,26 @@ export function App() {
     };
     // Shown on mouseup/keyup rather than selectionchange, so the chip does not
     // flicker alongside the pointer mid-drag. selectionchange only ever hides.
-    const reveal = (): void => {
-      window.requestAnimationFrame(() => setSelectionAsk(measureSelection()));
+    // The guards mirror dismissOnKey — review-confirmed that an unguarded
+    // keyup re-showed the chip one frame after Escape dismissed it (Escape
+    // does not collapse a browser selection).
+    let revealFrame = 0;
+    const reveal = (event: Event): void => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key === "Escape" || isEditableEventTarget(event.target)) {
+          return;
+        }
+      }
+      if (event.target instanceof Element && event.target.closest(".chat-selection-ask")) {
+        return;
+      }
+      if (revealFrame) {
+        window.cancelAnimationFrame(revealFrame);
+      }
+      revealFrame = window.requestAnimationFrame(() => {
+        revealFrame = 0;
+        setSelectionAsk(measureSelection());
+      });
     };
     const collapseWatch = (): void => {
       const selection = window.getSelection();
@@ -10578,6 +10631,9 @@ export function App() {
       window.removeEventListener("scroll", reposition, true);
       if (repositionFrame) {
         window.cancelAnimationFrame(repositionFrame);
+      }
+      if (revealFrame) {
+        window.cancelAnimationFrame(revealFrame);
       }
       setSelectionAsk(null);
     };
@@ -13252,7 +13308,6 @@ export function App() {
                 type="button"
                 className="chat-selection-ask"
                 style={{ left: selectionAsk.x, top: selectionAsk.y }}
-                aria-label="Ask about the selected text"
                 onMouseDown={(event) => {
                   event.preventDefault();
                 }}

@@ -41,8 +41,9 @@ describe("paste-to-focus", () => {
     expect(effect()).toMatch(/attachFilesToActiveConversation\(pastedFiles\)/);
   });
 
-  it("appends pasted text to the draft rather than replacing it", () => {
-    expect(effect()).toMatch(/previous \? `\$\{previous\}\$\{pastedText\}` : pastedText/);
+  it("appends pasted text below the draft, never glued onto the last word", () => {
+    expect(effect()).toMatch(/\\s\$\/\.test\(previous\)/);
+    expect(effect()).toMatch(/`\$\{previous\}\\n\$\{pastedText\}`/);
   });
 
   it("stays inside the chat panel and out of the viewer", () => {
@@ -130,10 +131,46 @@ describe("ask-about-selection", () => {
     expect(callback).toMatch(/attachPastedText\(ask\.text\)/);
   });
 
-  it("is portaled, labelled, and dismissed by Escape", () => {
+  it("is portaled, named by its visible text, and dismissed by Escape", () => {
     expect(appSource).toMatch(/createPortal\(/);
-    expect(appSource).toContain('aria-label="Ask about the selected text"');
+    // WCAG 2.5.3: the visible "Ask about this" IS the accessible name — an
+    // aria-label overriding visible text breaks voice-control users.
+    expect(stripComments(appSource)).not.toContain('aria-label="Ask about the selected text"');
     expect(appSource).toMatch(/event\.key === "Escape" \|\| isEditableEventTarget\(event\.target\)/);
+  });
+
+  it("collapses the selection when consumed — the resurrection fix", () => {
+    // Review-confirmed: without this, Escape's own keyup (and the chip click's
+    // own mouseup) re-measured the still-live selection and re-showed the chip
+    // one frame after every dismissal.
+    const callback = blockFrom("const askAboutSelection = useCallback", "focusComposerTextarea();");
+    expect(callback).toMatch(/window\.getSelection\(\)\?\.removeAllRanges\(\)/);
+  });
+
+  it("guards the keyup reveal symmetrically with the keydown dismiss", () => {
+    const reveal = blockFrom("const reveal = (event: Event): void =>", "window.requestAnimationFrame");
+    expect(reveal).toMatch(/event\.key === "Escape" \|\| isEditableEventTarget\(event\.target\)/);
+    expect(reveal).toMatch(/closest\("\.chat-selection-ask"\)/);
+  });
+
+  it("offers itself on fine pointers only — touch keeps the native callout", () => {
+    expect(appSource).toMatch(/!window\.matchMedia\("\(pointer: fine\)"\)\.matches/);
+  });
+
+  it("stands down off-viewport, under overlays, and against a disabled composer", () => {
+    const measure = blockFrom("const measureSelection = ", "const reveal =");
+    expect(measure).toMatch(/rect\.bottom < 0/);
+    expect(measure).toMatch(/hasBlockingOverlay\(\)/);
+    expect(measure).toMatch(/composerTextareaRef\.current\?\.disabled/);
+  });
+
+  it("sits below every Radix overlay and selects only KaTeX's visible layer", () => {
+    const chipRule = styles.slice(
+      styles.indexOf(".chat-selection-ask {"),
+      styles.indexOf("}", styles.indexOf(".chat-selection-ask {"))
+    );
+    expect(chipRule).toMatch(/z-index: 40/);
+    expect(styles).toMatch(/\.katex-mathml \{\s*user-select: none/);
   });
 
   it("dresses in the house language: quiet rest, brand motion, dark shadow, reduced-motion opt-out", () => {

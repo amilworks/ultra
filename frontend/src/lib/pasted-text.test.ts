@@ -48,15 +48,15 @@ describe("shouldAttachPastedText", () => {
 });
 
 describe("pastedTextFile", () => {
-  it("names the file with a full timestamp so consecutive pastes never collide", () => {
-    const name = pastedTextFileName(new Date(2026, 6, 26, 8, 5, 9));
-    expect(name).toBe("pasted-2026-07-26-080509.txt");
+  it("names the file to millisecond precision so even a double-paste never collides", () => {
+    const name = pastedTextFileName(new Date(2026, 6, 26, 8, 5, 9, 142));
+    expect(name).toBe("pasted-2026-07-26-080509-142.txt");
   });
 
   it("produces a plain-text File carrying the exact pasted bytes", async () => {
-    const file = pastedTextFile("line one\nline two", new Date(2026, 0, 2, 3, 4, 5));
+    const file = pastedTextFile("line one\nline two", new Date(2026, 0, 2, 3, 4, 5, 6));
     expect(file.type).toBe("text/plain");
-    expect(file.name).toBe("pasted-2026-01-02-030405.txt");
+    expect(file.name).toBe("pasted-2026-01-02-030405-006.txt");
     expect(await file.text()).toBe("line one\nline two");
   });
 });

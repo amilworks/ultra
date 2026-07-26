@@ -353,7 +353,6 @@ def profile_scalar_volume(
         or decoded_chunk_bytes <= 0
     ):
         raise ValueError("scalar profile decoded chunk geometry is unavailable")
-    planned_reads = len(z_indices) * len(regions)
     estimate_read_work = getattr(source, "estimate_read_work", None)
     if not callable(estimate_read_work):
         raise ValueError("scalar profile decoded chunk geometry is unavailable")

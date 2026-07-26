@@ -2299,7 +2299,7 @@ type ConversationTranscriptProps = {
   /* ⌘F navigation: which message to bring into view. The nonce forces a
      re-scroll when the user re-navigates to the same match after scrolling
      away — identity alone would look unchanged. */
-  findTarget: { messageId: string; nonce: number } | null;
+  findTarget: { messageId: string; messageIndex: number; nonce: number } | null;
 };
 
 const ConversationTranscript = memo(
@@ -2356,7 +2356,10 @@ const ConversationTranscript = memo(
       if (!findTarget) {
         return;
       }
-      const index = messages.findIndex((message) => message.id === findTarget.messageId);
+      const index =
+        messages[findTarget.messageIndex]?.id === findTarget.messageId
+          ? findTarget.messageIndex
+          : messages.findIndex((message) => message.id === findTarget.messageId);
       if (index < 0) {
         return;
       }
@@ -10653,14 +10656,26 @@ export function App() {
   const [transcriptFindQuery, setTranscriptFindQuery] = useState("");
   const [transcriptFindIndex, setTranscriptFindIndex] = useState(0);
   const [transcriptFindNonce, setTranscriptFindNonce] = useState(0);
+  /* Which conversation this find session belongs to. On a conversation switch
+     the close-on-switch effect races the child transcript's scroll effect
+     (child effects run first), so for one render a stale query could compute
+     matches against the NEW conversation and yank its scroll. Gating on the
+     captured id makes the switch render inert with no effect-ordering luck. */
+  const [transcriptFindConversationId, setTranscriptFindConversationId] =
+    useState<string | null>(null);
   const transcriptFindInputRef = useRef<HTMLInputElement | null>(null);
+
+  const activeConversationIdForFind = activeConversation?.id ?? null;
+  const transcriptFindActive =
+    transcriptFindOpen &&
+    transcriptFindConversationId === activeConversationIdForFind;
 
   const transcriptFindMatches = useMemo(
     () =>
-      transcriptFindOpen
+      transcriptFindActive
         ? computeTranscriptFindMatches(activeMessages, transcriptFindQuery)
         : [],
-    [activeMessages, transcriptFindOpen, transcriptFindQuery]
+    [activeMessages, transcriptFindActive, transcriptFindQuery]
   );
   /* Clamped, not reset: matches shift while an answer streams in, and a stored
      index past the end should degrade to the last match, not crash to zero. */
@@ -10672,26 +10687,51 @@ export function App() {
     transcriptFindMatches[clampedTranscriptFindIndex] ?? null;
   const currentFindMessageId = currentTranscriptFindMatch?.messageId ?? null;
   const currentFindOccurrence = currentTranscriptFindMatch?.occurrence ?? 0;
+  const currentFindMessageIndex = currentTranscriptFindMatch?.messageIndex ?? -1;
+  /* Write the clamp back when it engages. Left stale, a large index silently
+     re-extends when matches shrink then grow again (deletion, then a streaming
+     answer), teleporting the current match with no user action. */
+  useEffect(() => {
+    if (transcriptFindIndex !== clampedTranscriptFindIndex) {
+      setTranscriptFindIndex(clampedTranscriptFindIndex);
+    }
+  }, [clampedTranscriptFindIndex, transcriptFindIndex]);
   /* Keyed on primitives, NOT on the match object: matches recompute on every
      streaming delta, and a fresh object identity would re-fire the transcript's
      scroll effect and yank the reading position once per token. */
   const transcriptFindTarget = useMemo(
     () =>
-      transcriptFindOpen && currentFindMessageId
-        ? { messageId: currentFindMessageId, nonce: transcriptFindNonce }
+      transcriptFindActive && currentFindMessageId
+        ? {
+            messageId: currentFindMessageId,
+            /* Index travels with the id: duplicate message ids exist in real
+               data (React key warnings prove it), and an id-only findIndex
+               would always land on the first duplicate. */
+            messageIndex: currentFindMessageIndex,
+            nonce: transcriptFindNonce,
+          }
         : null,
-    [currentFindMessageId, transcriptFindNonce, transcriptFindOpen]
+    [
+      currentFindMessageId,
+      currentFindMessageIndex,
+      transcriptFindNonce,
+      transcriptFindActive,
+    ]
   );
 
   const openTranscriptFind = useCallback((): void => {
-    setTranscriptFindOpen(true);
-    // Focus after the bar mounts; select so ⌘F with a previous query behaves
-    // like browser find (type to replace, Enter to reuse).
-    window.requestAnimationFrame(() => {
-      transcriptFindInputRef.current?.focus();
-      transcriptFindInputRef.current?.select();
+    // flushSync + synchronous focus, NOT an rAF: in the frame between ⌘F and a
+    // deferred focus, type-to-focus would route the user's next keystrokes
+    // into the composer draft. Mount the bar and take focus before the
+    // handler returns; select so ⌘F with a previous query behaves like
+    // browser find (type to replace, Enter to reuse).
+    flushSync(() => {
+      setTranscriptFindOpen(true);
+      setTranscriptFindConversationId(activeConversation?.id ?? null);
     });
-  }, []);
+    transcriptFindInputRef.current?.focus();
+    transcriptFindInputRef.current?.select();
+  }, [activeConversation?.id]);
 
   const closeTranscriptFind = useCallback((): void => {
     setTranscriptFindOpen(false);
@@ -10735,14 +10775,29 @@ export function App() {
     if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
       return;
     }
+    // ⌘F on Apple platforms, Ctrl+F elsewhere — NOT both. On macOS Ctrl+F is
+    // the system-wide caret-forward binding in every text field; hijacking it
+    // breaks readline muscle memory inside the composer and the find input
+    // itself. event.code keeps the chord working on non-Latin layouts, where
+    // event.key reports the local script.
+    const isApplePlatform = /Mac|iP(hone|ad|od)/.test(window.navigator.platform);
     const handleFindShortcut = (event: KeyboardEvent): void => {
+      const chordModifier = isApplePlatform
+        ? event.metaKey && !event.ctrlKey
+        : event.ctrlKey && !event.metaKey;
       if (
-        (event.metaKey || event.ctrlKey) &&
+        chordModifier &&
         !event.altKey &&
         !event.shiftKey &&
-        event.key.toLowerCase() === "f"
+        (event.key.toLowerCase() === "f" || event.code === "KeyF")
       ) {
         if (hasBlockingOverlay()) {
+          return;
+        }
+        // A zero-message chat has nothing for data-layer find to search, but
+        // the welcome screen DOES have on-screen text — let native find keep
+        // it rather than suppressing both.
+        if (activeMessages.length === 0) {
           return;
         }
         event.preventDefault();
@@ -10751,11 +10806,12 @@ export function App() {
     };
     window.addEventListener("keydown", handleFindShortcut);
     return () => window.removeEventListener("keydown", handleFindShortcut);
-  }, [activePanel, authStatus, openTranscriptFind, viewerOpen]);
+  }, [activeMessages.length, activePanel, authStatus, openTranscriptFind, viewerOpen]);
 
   /* Switching conversations closes find: the query may be worth keeping, but a
-     match list pointing into another conversation's messages is not. */
-  const activeConversationIdForFind = activeConversation?.id ?? null;
+     match list pointing into another conversation's messages is not. The
+     transcriptFindActive gate above already made this render-safe; this effect
+     just tidies the state. */
   useEffect(() => {
     setTranscriptFindOpen(false);
     setTranscriptFindIndex(0);
@@ -10767,7 +10823,7 @@ export function App() {
      frames after scrollToIndex. Also re-runs on activeMessages so highlights
      track content while an answer streams. */
   useEffect(() => {
-    if (!transcriptFindOpen || !transcriptFindQuery.trim()) {
+    if (!transcriptFindActive || !transcriptFindQuery.trim()) {
       clearTranscriptFindHighlights();
       return;
     }
@@ -10788,15 +10844,40 @@ export function App() {
       }
     };
     apply();
+    /* Repaint as the user scrolls: Virtuoso mounts and unmounts rows, and a
+       highlight registered on an unmounted row's text nodes collapses with
+       them. Counts and navigation live in the data layer, so repainting is
+       idempotent decoration — rAF-throttled, passive. */
+    let repaintFrame = 0;
+    const repaintOnScroll = (): void => {
+      if (repaintFrame) {
+        return;
+      }
+      repaintFrame = window.requestAnimationFrame(() => {
+        repaintFrame = 0;
+        if (!cancelled) {
+          applyTranscriptFindHighlights({
+            query: transcriptFindQuery,
+            currentMessageId: currentFindMessageId,
+            currentOccurrence: currentFindOccurrence,
+          });
+        }
+      });
+    };
+    window.addEventListener("scroll", repaintOnScroll, { capture: true, passive: true });
     return () => {
       cancelled = true;
+      window.removeEventListener("scroll", repaintOnScroll, true);
+      if (repaintFrame) {
+        window.cancelAnimationFrame(repaintFrame);
+      }
     };
   }, [
     activeMessages,
     currentFindMessageId,
     currentFindOccurrence,
     transcriptFindNonce,
-    transcriptFindOpen,
+    transcriptFindActive,
     transcriptFindQuery,
   ]);
 
@@ -12561,7 +12642,7 @@ export function App() {
               {/* Anchored to this NON-scrolling wrapper, deliberately: the
                   ChatContainerRoot below is the scroll container, and an
                   absolute child there rides the scrolled coordinate space. */}
-              {transcriptFindOpen ? (
+              {transcriptFindActive ? (
                 <TranscriptFindBar
                   ref={transcriptFindInputRef}
                   query={transcriptFindQuery}

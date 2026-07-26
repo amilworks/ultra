@@ -10543,6 +10543,9 @@ details {
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
+  /* The pill yields to the pane, not the reverse — measured 428px wide with a
+     three-digit count, which clipped a 375px viewport. */
+  max-width: calc(100% - 24px);
   z-index: 40;
   display: flex;
   align-items: center;
@@ -10558,9 +10561,16 @@ details {
 }
 
 /* Focus lives on the pill's border — the composer's grammar — never on a ring
-   around the input. */
+   around the input. The shadow deepens one step alongside it: the review
+   measured the border shift alone at 1.46:1 focused-vs-not, too subtle to
+   locate the keyboard. */
 .chat-find-bar:focus-within {
-  border-color: color-mix(in oklab, var(--line) 76%, var(--text-muted) 24%);
+  border-color: color-mix(in oklab, var(--line) 40%, var(--text-muted) 60%);
+  box-shadow: 0 12px 32px rgba(12, 12, 12, 0.16);
+}
+
+.dark .chat-find-bar:focus-within {
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
 }
 
 .dark .chat-find-bar {
@@ -10573,8 +10583,9 @@ details {
 }
 
 .chat-find-bar input {
-  width: 220px;
-  max-width: 40vw;
+  flex: 1 1 220px;
+  min-width: 72px;
+  width: auto;
   border: none;
   background: transparent;
   padding: 0 10px 0 8px;
@@ -10625,6 +10636,14 @@ details {
 ::highlight(ultra-find-current) {
   background-color: color-mix(in oklab, var(--brand) 45%, transparent);
   color: var(--text-main);
+}
+
+/* Dark theme runs a lighter wash: --brand IS the ink colour in this palette,
+   so at 45% over the dark panel the current match's own text fell to ~4.3:1 —
+   under WCAG AA. 32% measures ~6:1. (The current range is also excluded from
+   the match set in code, so the two tints can never stack.) */
+.dark ::highlight(ultra-find-current) {
+  background-color: color-mix(in oklab, var(--brand) 32%, transparent);
 }
 
 .pk-markdown {

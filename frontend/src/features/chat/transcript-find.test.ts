@@ -14,6 +14,9 @@ import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
 const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
+const stripCommentsLocal = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+
 const bar = readFileSync(
   path.join(process.cwd(), "src/components/chat/TranscriptFindBar.tsx"),
   "utf8"
@@ -36,7 +39,7 @@ describe("⌘F interception", () => {
     // Resources and the viewer render plain DOM where native find works.
     const effect = appSource.slice(
       appSource.indexOf("/* ⌘F/^F opens (or refocuses) the bar."),
-      appSource.indexOf("[activePanel, authStatus, openTranscriptFind, viewerOpen]")
+      appSource.indexOf("[activeMessages.length, activePanel, authStatus, openTranscriptFind, viewerOpen]")
     );
     expect(effect).toMatch(/activePanel !== "chat" \|\| viewerOpen/);
     expect(effect).toMatch(/hasBlockingOverlay\(\)/);
@@ -64,9 +67,9 @@ describe("navigation defeats virtualization", () => {
   it("keys the scroll target on primitives so streaming deltas cannot yank the scroll", () => {
     const memo = appSource.slice(
       appSource.indexOf("const transcriptFindTarget = useMemo"),
-      appSource.indexOf("]", appSource.indexOf("[currentFindMessageId, transcriptFindNonce, transcriptFindOpen]"))
+      appSource.indexOf("transcriptFindActive,\n    ]")
     );
-    expect(memo).toMatch(/currentFindMessageId, transcriptFindNonce, transcriptFindOpen/);
+    expect(memo).toMatch(/currentFindMessageId,\s*currentFindMessageIndex,\s*transcriptFindNonce,/);
   });
 
   it("clamps the index while matches shift under a streaming answer", () => {
@@ -145,6 +148,44 @@ describe("the bar itself", () => {
     // The review screenshot showed a stray blue UA focus ring on the input.
     expect(styles).toMatch(/\.chat-find-bar:focus-within \{\s*border-color: color-mix/);
     expect(styles).toMatch(/\.chat-find-bar input:focus,\s*\.chat-find-bar input:focus-visible \{\s*outline: none;\s*box-shadow: none;/);
+  });
+
+  it("hardens per the second adversarial review", () => {
+    // ⌘F on Apple, Ctrl+F elsewhere — never both; layout-independent via code.
+    expect(appSource).toMatch(/isApplePlatform\s*\? event\.metaKey && !event\.ctrlKey\s*: event\.ctrlKey && !event\.metaKey/);
+    expect(appSource).toMatch(/event\.code === "KeyF"/);
+    // The welcome screen keeps native find — nothing for data find to search.
+    expect(appSource).toMatch(/activeMessages\.length === 0/);
+    // flushSync focus: an rAF gap would let type-to-focus steal keystrokes.
+    const openStart = appSource.indexOf("const openTranscriptFind");
+    const open = appSource.slice(
+      openStart,
+      appSource.indexOf("}, [activeConversation?.id]);", openStart)
+    );
+    expect(open).toMatch(/flushSync/);
+    expect(stripCommentsLocal(open)).not.toMatch(/requestAnimationFrame/);
+    // Highlights repaint as virtualized rows mount on scroll.
+    expect(appSource).toMatch(/window\.addEventListener\("scroll", repaintOnScroll, \{ capture: true, passive: true \}\)/);
+    // The clamp writes back, so a shrunk-then-grown match list cannot teleport.
+    expect(appSource).toMatch(/setTranscriptFindIndex\(clampedTranscriptFindIndex\)/);
+    // Find is gated to the conversation it was opened in.
+    expect(appSource).toMatch(/transcriptFindConversationId === activeConversationIdForFind/);
+  });
+
+  it("keeps the current match out of the ambient tint and readable in the dark", () => {
+    const lib = readFileSync(path.join(process.cwd(), "src/lib/transcript-find.ts"), "utf8");
+    // Stacked tints dropped the current match below WCAG AA in both themes.
+    expect(lib).toMatch(/ranges\.splice\(currentIndex, 1\)/);
+    expect(styles).toMatch(/\.dark ::highlight\(ultra-find-current\) \{\s*background-color: color-mix\(in oklab, var\(--brand\) 32%, transparent\)/);
+  });
+
+  it("yields to small viewports and keeps its live region mounted", () => {
+    expect(styles).toMatch(/\.chat-find-bar \{[^}]*max-width: calc\(100% - 24px\)/s);
+    // A live region inserted with its content is not reliably announced.
+    expect(bar).not.toMatch(/query\.trim\(\) \? \(\s*<span/);
+    expect(bar).toMatch(/aria-live="polite"/);
+    // Escape closes from the buttons too — the handler lives on the container.
+    expect(bar).toMatch(/<div\s*\n\s*className="chat-find-bar"[\s\S]{0,900}onKeyDown/);
   });
 
   it("anchors OUTSIDE the scroll container so it cannot ride away with content", () => {

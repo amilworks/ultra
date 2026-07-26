@@ -15,6 +15,29 @@
  * rendered view does not show — an accepted, documented edge.
  */
 
+const escapeRegExp = (value: string): string =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * One matcher for counting AND painting, so the two can never disagree.
+ *
+ * Case-insensitivity comes from the regex engine, not toLowerCase — this is a
+ * correctness requirement, not style. Lowercasing can CHANGE STRING LENGTH
+ * (Turkish İ becomes i + a combining dot, two code units), so offsets found in
+ * a lowered haystack misalign against the original string: highlights shift,
+ * and a match near a node boundary produces an end offset past the node's
+ * length, which makes Range.setEnd throw — inside App's paint effect, where
+ * the error boundary would take down the whole app. Regex case-insensitive
+ * matching reports indices native to the original string.
+ */
+export const buildFindMatcher = (query: string): RegExp | null => {
+  const needle = query.trim();
+  if (!needle) {
+    return null;
+  }
+  return new RegExp(escapeRegExp(needle), "giu");
+};
+
 export type TranscriptFindMatch = {
   messageId: string;
   messageIndex: number;
@@ -28,24 +51,23 @@ export const computeTranscriptFindMatches = (
   messages: readonly FindableMessage[],
   query: string
 ): TranscriptFindMatch[] => {
-  const needle = query.trim().toLowerCase();
-  if (!needle) {
+  const matcher = buildFindMatcher(query);
+  if (!matcher) {
     return [];
   }
   const matches: TranscriptFindMatch[] = [];
   messages.forEach((message, messageIndex) => {
-    const haystack = message.content.toLowerCase();
-    let from = 0;
+    matcher.lastIndex = 0;
     let occurrence = 0;
-    while (true) {
-      const at = haystack.indexOf(needle, from);
-      if (at === -1) {
-        break;
-      }
+    let hit: RegExpExecArray | null;
+    // exec's lastIndex advance is non-overlapping, matching browser find
+    // semantics ("aa" in "aaa" is one).
+    while ((hit = matcher.exec(message.content)) !== null) {
       matches.push({ messageId: message.id, messageIndex, occurrence });
       occurrence += 1;
-      // Non-overlapping, matching browser find semantics ("aa" in "aaa" is one).
-      from = at + needle.length;
+      if (hit.index === matcher.lastIndex) {
+        matcher.lastIndex += 1;
+      }
     }
   });
   return matches;
@@ -61,8 +83,8 @@ export const computeTranscriptFindMatches = (
  * (node, offset) pairs for the Range endpoints.
  */
 export const collectFindRanges = (root: Node, query: string): Range[] => {
-  const needle = query.trim().toLowerCase();
-  if (!needle) {
+  const matcher = buildFindMatcher(query);
+  if (!matcher) {
     return [];
   }
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -78,7 +100,6 @@ export const collectFindRanges = (root: Node, query: string): Range[] => {
   if (!nodes.length) {
     return [];
   }
-  const haystack = flat.toLowerCase();
 
   // Binary search: which node owns this global offset?
   const locate = (globalIndex: number): { node: Text; offset: number } => {
@@ -96,22 +117,23 @@ export const collectFindRanges = (root: Node, query: string): Range[] => {
   };
 
   const ranges: Range[] = [];
-  let from = 0;
-  while (true) {
-    const at = haystack.indexOf(needle, from);
-    if (at === -1) {
-      break;
-    }
+  matcher.lastIndex = 0;
+  let hit: RegExpExecArray | null;
+  while ((hit = matcher.exec(flat)) !== null) {
+    const at = hit.index;
+    const length = hit[0].length;
     const start = locate(at);
     // Locate the LAST character then extend by one: an end offset equal to a
     // node's length is valid, but locating `at + length` directly would jump
     // into the next node and produce a zero-width tail there.
-    const last = locate(at + needle.length - 1);
+    const last = locate(at + length - 1);
     const range = document.createRange();
     range.setStart(start.node, start.offset);
     range.setEnd(last.node, last.offset + 1);
     ranges.push(range);
-    from = at + needle.length;
+    if (hit.index === matcher.lastIndex) {
+      matcher.lastIndex += 1;
+    }
   }
   return ranges;
 };
@@ -167,13 +189,26 @@ export const applyTranscriptFindHighlights = (input: {
   const matchRanges: Range[] = [];
   let currentRange: Range | null = null;
   for (const root of document.querySelectorAll("[data-message-id]")) {
-    const ranges = collectFindRanges(root, needle);
+    let ranges: Range[];
+    try {
+      ranges = collectFindRanges(root, needle);
+    } catch {
+      // One pathological row degrades to "no tint there", never to an
+      // exception inside App's paint effect — the error boundary above it
+      // would replace the entire app.
+      continue;
+    }
     if (
       input.currentMessageId &&
       root.getAttribute("data-message-id") === input.currentMessageId &&
       ranges.length > 0
     ) {
-      currentRange = ranges[Math.min(input.currentOccurrence, ranges.length - 1)];
+      // The current match lives ONLY in its own highlight set. Registered in
+      // both, the two tints stack — and with --brand ≡ the ink colour, the
+      // stacked wash dropped the current match below WCAG AA in both themes.
+      const currentIndex = Math.min(input.currentOccurrence, ranges.length - 1);
+      currentRange = ranges[currentIndex];
+      ranges.splice(currentIndex, 1);
     }
     matchRanges.push(...ranges);
   }

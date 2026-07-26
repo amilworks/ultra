@@ -30,7 +30,33 @@ export const TranscriptFindBar = forwardRef<HTMLInputElement, TranscriptFindBarP
     inputRef
   ) {
     return (
-      <div className="chat-find-bar" role="search" aria-label="Find in conversation">
+      <div
+        className="chat-find-bar"
+        role="search"
+        aria-label="Find in conversation"
+        /* On the container, not the input: Escape must close the bar from the
+           chevrons and close button too (keydown bubbles here). Enter is only
+           honoured from the input — from a button it would run onNext while
+           the button's own click ran something else. */
+        onKeyDown={(event) => {
+          if (event.nativeEvent.isComposing) {
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+            return;
+          }
+          if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
+            event.preventDefault();
+            if (event.shiftKey) {
+              onPrevious();
+            } else {
+              onNext();
+            }
+          }
+        }}
+      >
         <Search className="chat-find-icon size-4" aria-hidden="true" />
         <input
           ref={inputRef}
@@ -41,28 +67,16 @@ export const TranscriptFindBar = forwardRef<HTMLInputElement, TranscriptFindBarP
           spellCheck={false}
           autoComplete="off"
           onChange={(event) => onQueryChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.nativeEvent.isComposing) {
-              return;
-            }
-            if (event.key === "Enter") {
-              event.preventDefault();
-              if (event.shiftKey) {
-                onPrevious();
-              } else {
-                onNext();
-              }
-            } else if (event.key === "Escape") {
-              event.preventDefault();
-              onClose();
-            }
-          }}
         />
-        {query.trim() ? (
-          <span className="chat-find-count" aria-live="polite">
-            {matchCount > 0 ? `${currentIndex + 1} of ${matchCount}` : "Not found"}
-          </span>
-        ) : null}
+        {/* Mounted unconditionally: a live region inserted WITH its content is
+            not reliably announced — it must exist before its first update. */}
+        <span className="chat-find-count" aria-live="polite">
+          {query.trim()
+            ? matchCount > 0
+              ? `${currentIndex + 1} of ${matchCount}`
+              : "Not found"
+            : ""}
+        </span>
         <button
           type="button"
           className="chat-message-action"

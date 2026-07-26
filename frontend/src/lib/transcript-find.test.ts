@@ -38,6 +38,49 @@ describe("computeTranscriptFindMatches", () => {
   });
 });
 
+describe("Unicode-safety — the İstanbul regression", () => {
+  // toLowerCase can CHANGE STRING LENGTH ('İ' → 'i' + combining dot), which
+  // skewed every later highlight offset and made Range.setEnd throw inside the
+  // paint effect — unmounting the whole app through the error boundary.
+  const mount = (html: string): HTMLElement => {
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    document.body.appendChild(root);
+    return root;
+  };
+
+  it("paints the right characters after a length-changing letter", () => {
+    const root = mount("<p>İstanbul matrix here</p>");
+    const ranges = collectFindRanges(root, "matrix");
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].toString()).toBe("matrix");
+    root.remove();
+  });
+
+  it("does not throw when the skew would run past the node's end", () => {
+    const root = mount("<p>İİİİ test</p>");
+    expect(() => collectFindRanges(root, "test")).not.toThrow();
+    const ranges = collectFindRanges(root, "test");
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].toString()).toBe("test");
+    root.remove();
+  });
+
+  it("counts with the same matcher it paints with", () => {
+    const content = "İstanbul matrix and MATRIX again";
+    const matches = computeTranscriptFindMatches([{ id: "m", content }], "matrix");
+    const root = mount(`<p>${content}</p>`);
+    expect(collectFindRanges(root, "matrix")).toHaveLength(matches.length);
+    root.remove();
+  });
+
+  it("treats regex metacharacters in the query as literal text", () => {
+    const messages = [{ id: "m", content: "cost is a+b(x) here" }];
+    expect(() => computeTranscriptFindMatches(messages, "a+b(")).not.toThrow();
+    expect(computeTranscriptFindMatches(messages, "a+b(")).toHaveLength(1);
+  });
+});
+
 describe("collectFindRanges", () => {
   const mount = (html: string): HTMLElement => {
     const root = document.createElement("div");

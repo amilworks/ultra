@@ -10789,7 +10789,12 @@ export function App() {
         chordModifier &&
         !event.altKey &&
         !event.shiftKey &&
-        (event.key.toLowerCase() === "f" || event.code === "KeyF")
+        // The code fallback ONLY fires when key is not a basic Latin letter
+        // (Cyrillic/Greek/Hebrew layouts). On Latin non-QWERTY layouts the
+        // physical F key carries another letter — on Turkish-F, ⌘A lives on
+        // KeyF, and an unconditional code match would steal select-all.
+        (event.key.toLowerCase() === "f" ||
+          (event.code === "KeyF" && !/^[a-z]$/i.test(event.key)))
       ) {
         if (hasBlockingOverlay()) {
           return;

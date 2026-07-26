@@ -35,17 +35,15 @@ const BLOCK_TAGS = new Set([
   "PRE",
   "SECTION",
   "TABLE",
-  "TR",
   "UL",
 ]);
 
-export const textFromSelection = (selection: Selection): string => {
-  if (selection.rangeCount === 0 || selection.isCollapsed) {
-    return "";
-  }
-  const fragment = selection.getRangeAt(0).cloneContents();
+type Piece = { text: string; verbatim: boolean };
 
-  // Full KaTeX renders → their TeX source, fenced for the composer.
+const serializeFragment = (fragment: DocumentFragment): Piece[] => {
+  // Full KaTeX renders → their TeX source, fenced for the composer. Display
+  // math gets its own line: two adjacent display equations otherwise glue into
+  // "$$a$$$$b$$" because .katex-display is a SPAN with no whitespace between.
   fragment.querySelectorAll(".katex").forEach((katex) => {
     const tex = katex
       .querySelector('annotation[encoding="application/x-tex"]')
@@ -57,40 +55,120 @@ export const textFromSelection = (selection: Selection): string => {
       Boolean(katex.closest(".katex-display")) ||
       katex.parentElement?.classList.contains("katex-display");
     katex.replaceWith(
-      document.createTextNode(display ? `$$${tex}$$` : `$${tex}$`)
+      document.createTextNode(display ? `\n$$${tex}$$\n` : `$${tex}$`)
     );
   });
   // Partially selected formulas carry no annotation; drop their MathML half so
   // the visible glyphs appear once instead of twice.
   fragment.querySelectorAll(".katex-mathml").forEach((node) => node.remove());
 
-  const pieces: string[] = [];
+  const pieces: Piece[] = [];
+  let preDepth = 0;
+  const push = (text: string, verbatim = false): void => {
+    pieces.push({ text, verbatim });
+  };
   const walk = (node: Node): void => {
     if (node.nodeType === Node.TEXT_NODE) {
-      pieces.push((node as Text).data);
+      // Inside PRE the whitespace IS the content — indentation-mangled Python
+      // presented as a faithful quote is worse than no quote.
+      push((node as Text).data, preDepth > 0);
       return;
     }
     if (!(node instanceof Element)) {
       return;
     }
     if (node.tagName === "BR") {
-      pieces.push("\n");
+      push("\n", preDepth > 0);
+      return;
+    }
+    if (node.tagName === "PRE") {
+      // Re-fence so the quote survives as code downstream.
+      push("\n", false);
+      push("```\n", true);
+      preDepth += 1;
+      node.childNodes.forEach(walk);
+      preDepth -= 1;
+      push("\n```", true);
+      push("\n", false);
+      return;
+    }
+    if (node.tagName === "CODE" && preDepth === 0) {
+      // Backticks make inline code inert to any math parser downstream — a
+      // literal $ inside code can never read as a TeX fence.
+      push("`", true);
+      node.childNodes.forEach(walk);
+      push("`", true);
+      return;
+    }
+    if (node.tagName === "TR") {
+      // Newline AFTER only: a block treatment's leading newline would put a
+      // blank line between rows, which breaks a markdown table.
+      node.childNodes.forEach(walk);
+      push("\n", false);
+      return;
+    }
+    if (node.tagName === "TD" || node.tagName === "TH") {
+      node.childNodes.forEach(walk);
+      // Cells glued without separators mutilate data rows; the trailing
+      // separator before a row break is cleaned up in normalization.
+      push(" | ", false);
       return;
     }
     const isBlock = BLOCK_TAGS.has(node.tagName);
     if (isBlock) {
-      pieces.push("\n");
+      push("\n", preDepth > 0);
     }
     node.childNodes.forEach(walk);
     if (isBlock) {
-      pieces.push("\n");
+      push("\n", preDepth > 0);
     }
   };
   fragment.childNodes.forEach(walk);
+  return pieces;
+};
 
-  return pieces
-    .join("")
-    .replace(/[ \t]*\n[ \t]*/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/^\n+|\n+$/g, "");
+/** Normalize ONLY outside verbatim (PRE/fence) spans, where whitespace is content. */
+const assemble = (pieces: Piece[]): string => {
+  const out: string[] = [];
+  let run = "";
+  const flushRun = (): void => {
+    if (!run) {
+      return;
+    }
+    out.push(
+      run
+        .replace(/[ \t]*\n[ \t]*/g, "\n")
+        // Trailing cell separator at a row break; runs AFTER the normalizer,
+        // which has already eaten the separator's trailing space.
+        .replace(/ \|\n/g, "\n")
+        .replace(/\n{3,}/g, "\n\n")
+    );
+    run = "";
+  };
+  for (const piece of pieces) {
+    if (piece.verbatim) {
+      flushRun();
+      out.push(piece.text);
+    } else {
+      run += piece.text;
+    }
+  }
+  flushRun();
+  return out.join("").replace(/^\s*\n/, "").replace(/\n\s*$/, "");
+};
+
+export const textFromSelection = (selection: Selection): string => {
+  if (selection.rangeCount === 0 || selection.isCollapsed) {
+    return "";
+  }
+  // Firefox produces multi-range selections (Ctrl+select, table columns);
+  // reading only range 0 would silently drop regions the user sees selected.
+  const captures: string[] = [];
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const text = assemble(serializeFragment(selection.getRangeAt(index).cloneContents()));
+    if (text) {
+      captures.push(text);
+    }
+  }
+  return captures.join("\n");
 };

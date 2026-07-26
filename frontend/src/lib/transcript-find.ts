@@ -87,7 +87,32 @@ export const collectFindRanges = (root: Node, query: string): Range[] => {
   if (!matcher) {
     return [];
   }
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  /* Walk only text the USER CAN SEE. Two invisible layers live inside message
+     rows and both shifted ordinals until the current-match tint landed on the
+     wrong (or an invisible) instance — review-measured: "gamma" counted 15,
+     all 15 painted ranges inside KaTeX's 1×1px clipped MathML layer.
+     - .katex-mathml: the accessibility double of every formula.
+     - closed <details> (the reasoning trace): body text is in the DOM while
+       collapsed; its <summary> stays visible and stays searchable.
+     Matches that exist only in invisible source (\gamma) remain COUNTED by
+     the data layer — the documented source-vs-render edge — but they no
+     longer corrupt which visible occurrence is painted as current. */
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      const parent = node.parentElement;
+      if (!parent) {
+        return NodeFilter.FILTER_ACCEPT;
+      }
+      if (parent.closest(".katex-mathml")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      const closedDetails = parent.closest("details:not([open])");
+      if (closedDetails && !parent.closest("summary")) {
+        return NodeFilter.FILTER_REJECT;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
   const nodes: Text[] = [];
   const starts: number[] = [];
   let flat = "";

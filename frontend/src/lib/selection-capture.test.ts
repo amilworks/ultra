@@ -61,8 +61,9 @@ describe("textFromSelection", () => {
     const selection = selectAll(
       `<p>Recall:</p>${katexMarkup("Q^{\\pi}_g(s,a)", "Qgπ(s,a)", true)}<p>as defined.</p>`
     );
+    // Blank lines around display math: proper markdown block separation.
     expect(textFromSelection(selection)).toBe(
-      "Recall:\n$$Q^{\\pi}_g(s,a)$$\nas defined."
+      "Recall:\n\n$$Q^{\\pi}_g(s,a)$$\n\nas defined."
     );
   });
 
@@ -86,6 +87,58 @@ describe("textFromSelection", () => {
   it("honours explicit line breaks", () => {
     const selection = selectAll("<p>above<br>below</p>");
     expect(textFromSelection(selection)).toBe("above\nbelow");
+  });
+
+  it("preserves indentation inside code blocks and re-fences them", () => {
+    // The whitespace normalizer dedented PRE content — quoted Python arrived
+    // syntactically broken, worse than native toString.
+    const selection = selectAll(
+      "<p>Try:</p><pre><code>def fit(x):\n    if x:\n        return 1</code></pre>"
+    );
+    // The blank line before the fence is proper markdown block separation.
+    expect(textFromSelection(selection)).toBe(
+      "Try:\n\n```\ndef fit(x):\n    if x:\n        return 1\n```"
+    );
+  });
+
+  it("separates table cells instead of gluing data together", () => {
+    const selection = selectAll(
+      "<table><tbody><tr><td>SRR300D</td><td>≈2 nm</td><td>High ledge density</td></tr>" +
+      "<tr><td>SRR300E</td><td>≈4 nm</td><td>Low</td></tr></tbody></table>"
+    );
+    expect(textFromSelection(selection)).toBe(
+      "SRR300D | ≈2 nm | High ledge density\nSRR300E | ≈4 nm | Low"
+    );
+  });
+
+  it("gives consecutive display equations their own lines", () => {
+    const selection = selectAll(
+      katexMarkup("a=1", "a=1", true) + katexMarkup("b=2", "b=2", true)
+    );
+    expect(textFromSelection(selection)).toBe("$$a=1$$\n\n$$b=2$$");
+  });
+
+  it("restores backticks around inline code, making its dollars inert", () => {
+    const selection = selectAll("<p>run <code>fit($x)</code> now</p>");
+    expect(textFromSelection(selection)).toBe("run `fit($x)` now");
+  });
+
+  it("captures every range of a multi-range selection", () => {
+    // Firefox produces these for Ctrl+select and table columns.
+    const host = document.createElement("div");
+    host.id = "capture-host";
+    host.innerHTML = "<p id='a'>alpha text</p><p id='b'>beta text</p>";
+    document.body.appendChild(host);
+    const r1 = document.createRange();
+    r1.selectNodeContents(host.querySelector("#a") as Element);
+    const r2 = document.createRange();
+    r2.selectNodeContents(host.querySelector("#b") as Element);
+    const fakeSelection = {
+      rangeCount: 2,
+      isCollapsed: false,
+      getRangeAt: (index: number) => (index === 0 ? r1 : r2),
+    };
+    expect(textFromSelection(fakeSelection as unknown as Selection)).toBe("alpha text\nbeta text");
   });
 
   it("returns empty for a collapsed selection", () => {

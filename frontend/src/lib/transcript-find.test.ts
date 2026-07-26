@@ -81,6 +81,44 @@ describe("Unicode-safety — the İstanbul regression", () => {
   });
 });
 
+describe("the painter walks only visible text", () => {
+  const mount = (html: string): HTMLElement => {
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    document.body.appendChild(root);
+    return root;
+  };
+
+  it("never paints KaTeX's invisible MathML layer", () => {
+    // Review-measured: "gamma" counted 15 with ALL 15 tints inside the 1×1px
+    // clipped MathML — and ordinals shifted so the current tint lied.
+    const root = mount(
+      '<p>rate <span class="katex">' +
+      '<span class="katex-mathml"><math><mi>gamma</mi>' +
+      '<annotation encoding="application/x-tex">\\gamma</annotation></math></span>' +
+      '<span class="katex-html">γ</span></span> and gamma prose</p>'
+    );
+    const ranges = collectFindRanges(root, "gamma");
+    expect(ranges).toHaveLength(1); // the prose one only
+    expect(ranges[0].toString()).toBe("gamma");
+    root.remove();
+  });
+
+  it("skips collapsed reasoning bodies but keeps their visible summary", () => {
+    const root = mount(
+      "<details><summary>Thought process here</summary><div>hidden process text</div></details>" +
+      "<p>visible process text</p>"
+    );
+    expect(collectFindRanges(root, "process")).toHaveLength(2); // summary + prose
+    const open = mount(
+      "<details open><summary>Thought process</summary><div>inner process</div></details>"
+    );
+    expect(collectFindRanges(open, "process")).toHaveLength(2); // both visible
+    root.remove();
+    open.remove();
+  });
+});
+
 describe("collectFindRanges", () => {
   const mount = (html: string): HTMLElement => {
     const root = document.createElement("div");

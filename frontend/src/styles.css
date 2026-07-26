@@ -10301,6 +10301,153 @@ details {
   margin-top: 8px;
 }
 
+/* Per-message actions (copy / edit / delete).
+   =========================================================================
+   These were the one control family that never got the design-language pass,
+   and the gap produced a real defect rather than a merely ugly one.
+
+   Tailwind compiles `group-hover:opacity-100` inside `@media (hover:hover)`, so
+   on a touch device the row NEVER became visible — while the coarse-pointer
+   block further down this file simultaneously grew it to a 44px target. Every
+   user message on a phone carried an invisible, unlabelled, unconfirmed Delete
+   that also removes the assistant's reply. Hence the explicit
+   `@media (pointer: coarse)` reveal below: on touch there is no hover to wait
+   for, so the row is simply always visible.
+
+   `:focus-within` is the keyboard half of the same bug — tabbing into a button
+   at opacity 0 previously opened a tooltip anchored to nothing.
+
+   Kept as plain CSS rather than Tailwind utilities so the states are legible in
+   one place and the motion stays on the brand curve; the utilities were using
+   Tailwind's own cubic-bezier(0.4, 0, 0.2, 1), the single off-brand curve in
+   this row, which brand-motion.test.ts structurally cannot see because it only
+   parses `transition:` shorthands in this file. */
+.chat-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 8px;
+  opacity: 0;
+  transition: opacity 160ms var(--motion-ease);
+}
+
+.chat-message-actions[data-role="user"] {
+  justify-content: flex-end;
+}
+
+/* -8px, not -10px: the button is 32px around a 16px glyph, so 8px is the exact
+   inset that flushes the first icon with the text column above it. The
+   attribute selector (0,2,0) is what outranks the unlayered
+   `.pk-message-actions { justify-content: flex-end }` (0,1,0) above. */
+.chat-message-actions[data-role="assistant"] {
+  justify-content: flex-start;
+  margin-inline-start: -8px;
+}
+
+/* `.chat-message-actions:focus-within` is deliberately listed FIRST and stands
+   on its own: it needs no cooperation from an ancestor. The parent-scoped
+   variants below depend on the row's parent carrying `.group`, which is a
+   Tailwind class on a component this file does not own — if that markup ever
+   changes, the keyboard reveal must not go with it. Tabbing into a button that
+   stays at opacity 0 is the accessibility half of the touch bug. */
+.chat-message-actions:focus-within,
+.group:hover > .chat-message-actions,
+.group:focus-within > .chat-message-actions,
+.chat-message-actions[data-pinned="true"] {
+  opacity: 1;
+}
+
+@media (pointer: coarse) {
+  .chat-message-actions {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-actions {
+    transition: none;
+  }
+}
+
+/* Rest is genuinely quiet: no border, no fill. The previous ghost wash measured
+   ~1.1:1 against the chat surface, which is not a hover state, it is a rumour.
+   The BORDER carries the hover signal here, with the house raised-hover pattern
+   (translateY(-1px) + shadow) that .resource-browser-card, .chat-artifact-card,
+   .chat-document-chip and the viewer ghost buttons all use. */
+.chat-message-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  transition:
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    background-color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
+}
+
+.chat-message-action:hover:not(:disabled) {
+  color: var(--text-main);
+  border-color: var(--line);
+  background: color-mix(in oklab, var(--text-main) 5%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+}
+
+/* The lift is the invitation, not the confirmation — press settles it back. */
+.chat-message-action:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* Focus locates, hover invites: no lift here, deliberately. */
+.chat-message-action:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 42%, transparent);
+  outline-offset: 2px;
+  color: var(--text-main);
+  border-color: var(--line);
+}
+
+.chat-message-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Copied: one ink step, never a colour. The palette has no success token and
+   its own note downstream says never emerald. */
+.chat-message-action[data-state="copied"] {
+  color: var(--text-main);
+  border-color: var(--line);
+  background: color-mix(in oklab, var(--text-main) 8%, transparent);
+}
+
+/* Destructive lives on INTENT only — identical chrome at rest, danger ink on
+   hover and focus. No red icon, no red at rest, no shouting. */
+.chat-message-action[data-tone="destructive"]:hover:not(:disabled),
+.chat-message-action[data-tone="destructive"]:focus-visible {
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 26%, transparent);
+  background: color-mix(in oklab, var(--danger) 8%, transparent);
+}
+
+.dark .chat-message-action:hover:not(:disabled) {
+  /* rgba(12,12,12,0.1) is invisible on a #1b1b1d panel. */
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.dark .chat-message-action[data-tone="destructive"]:hover:not(:disabled),
+.dark .chat-message-action[data-tone="destructive"]:focus-visible {
+  color: var(--destructive);
+  border-color: color-mix(in oklab, var(--destructive) 30%, transparent);
+  background: color-mix(in oklab, var(--destructive) 10%, transparent);
+}
+
 .pk-markdown {
   display: flex;
   flex-direction: column;
@@ -10744,14 +10891,22 @@ details {
   }
 }
 
-/* Touch: enlarge the always-visible chat-reading controls that fall below the
-   44px target on coarse pointers — the per-message action buttons (copy / edit /
-   delete, in an unclamped flex row) and the settings dialog close button. min-*
-   keeps the glyph compact while the tappable area grows; fine-pointer desktops
-   keep their density. Scoped deliberately: a blanket icon-button rule would also
-   hit the fixed-height scroll-to-bottom shell and dense viewer toolbars. */
+/* Touch: enlarge the chat-reading controls that fall below the 44px target on
+   coarse pointers — the per-message action buttons (copy / edit / delete, in an
+   unclamped flex row) and the settings dialog close button. min-* keeps the
+   glyph compact while the tappable area grows; fine-pointer desktops keep their
+   density. Scoped deliberately: a blanket icon-button rule would also hit the
+   fixed-height scroll-to-bottom shell and dense viewer toolbars.
+
+   This rule used to describe these controls as "always-visible" on touch. They
+   were not: their reveal was a Tailwind group-hover utility, which compiles
+   inside @media (hover:hover) and therefore never fires on a phone. This block
+   was growing an invisible Delete to a comfortable 44px. The reveal is now
+   owned by .chat-message-actions above, which makes the row genuinely always
+   visible under (pointer: coarse) — so the description is finally true. */
 @media (pointer: coarse) {
   .pk-message-actions button,
+  .chat-message-action,
   .app-settings-close-button {
     min-height: 44px;
     min-width: 44px;

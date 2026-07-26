@@ -328,8 +328,12 @@ function CodeBlockCode({
               onClick={onCopy}
               className={cn(
                 "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-[var(--line)] bg-[color-mix(in_oklab,var(--bg-panel-strong)_84%,var(--bg-main)_16%)] px-3 text-[12px] font-medium text-[var(--text-muted)] transition-colors duration-150 hover:border-[color-mix(in_oklab,var(--text-main)_18%,var(--line))] hover:bg-[color-mix(in_oklab,var(--bg-panel-strong)_94%,var(--bg-main)_6%)] hover:text-[var(--text-main)]",
+                /* Confirmation is one ink step, not a colour. The palette has no
+                   success token, and its own note says never emerald — green
+                   here spends the "colour means data" budget on a transient
+                   acknowledgement the Check glyph already carries. */
                 isCopied &&
-                  "border-emerald-500/25 bg-emerald-500/10 text-emerald-600 hover:border-emerald-500/30 hover:bg-emerald-500/15 dark:text-emerald-400"
+                  "border-[var(--line)] bg-[color-mix(in_oklab,var(--text-main)_8%,transparent)] text-[var(--text-main)] hover:bg-[color-mix(in_oklab,var(--text-main)_10%,transparent)]"
               )}
             >
               {isCopied ? (

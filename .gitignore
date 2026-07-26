@@ -5,6 +5,15 @@
 !.env.example
 .env.docker
 !.env.docker.example
+# Hand-made backups of the above (.env.docker.bak-pre-apikey and friends). The
+# negations above re-include anything matching *.example, so a backup named
+# after one would otherwise slip back in; these patterns are deliberately not
+# example-shaped. A real .env.docker.bak-pre-apikey was sitting untracked in
+# this repo, one `git add -A` away from being committed.
+.env.*.bak
+.env.*.bak-*
+.env.*.backup
+*.env.bak
 .claude/
 .clause/
 *.api-key

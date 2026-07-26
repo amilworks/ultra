@@ -31,3 +31,25 @@ export const showErrorToast = (
     toast.error(message, options);
   });
 };
+
+/**
+ * A neutral toast carrying a single reversal.
+ *
+ * Deliberately not `toast.success`: removing a message is not a success, it is a
+ * change the user may want back. Success styling on a destructive action reads
+ * as congratulation. Eight seconds is long enough to notice and act on without
+ * the toast becoming furniture.
+ */
+export const showUndoToast = (
+  message: string,
+  onUndo: () => void,
+  options?: { description?: string; durationMs?: number }
+): void => {
+  void loadSonnerModule().then(({ toast }) => {
+    toast(message, {
+      description: options?.description,
+      duration: options?.durationMs ?? 8000,
+      action: { label: "Undo", onClick: onUndo },
+    });
+  });
+};

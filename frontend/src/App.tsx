@@ -617,6 +617,11 @@ type ConversationState = {
      stops rebuilding a deleted turn from control_runs.response_text — see
      readDeletedRunIds in lib/api.ts for why the absence alone is not enough. */
   deletedRunIds: string[];
+  /* Phase-0 follow-ups ("double texting", enqueue flavour): text composed while
+     a run is in flight, dispatched as the NEXT turn on clean completion. One
+     growing message, not a list — additional mid-run sends append a paragraph,
+     so completion fires exactly one run instead of a surprise chain of them. */
+  queuedFollowup: string;
   prompt: string;
   messages: UiMessage[];
   pendingFiles: File[];
@@ -1212,6 +1217,7 @@ const createConversationState = (): ConversationState => {
     historyMessageCount: 0,
     historyRunning: false,
     deletedRunIds: [],
+    queuedFollowup: "",
     prompt: "",
     messages: [],
     pendingFiles: [],
@@ -1602,6 +1608,9 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     deletedRunIds: Array.isArray(state.deletedRunIds)
       ? state.deletedRunIds.filter((id): id is string => typeof id === "string" && Boolean(id))
       : [],
+    /* Survives reload mid-run; if the run finished while the tab was away, the
+       dispatch effect honours the queue's promise on the next load. */
+    queuedFollowup: typeof state.queuedFollowup === "string" ? state.queuedFollowup : "",
   };
 };
 
@@ -1701,6 +1710,7 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
       chatError: conversation.chatError,
       streamingMessageId: conversation.streamingMessageId,
       deletedRunIds: conversation.deletedRunIds ?? [],
+      queuedFollowup: conversation.queuedFollowup ?? "",
     },
   };
 };
@@ -11890,6 +11900,87 @@ export function App() {
     void handleSubmitRef.current(pending.prompt);
   }, [activeConversation]);
 
+  /* Queue the current draft as a follow-up to the RUNNING turn. Repeated sends
+     grow the one queued message (blank-line separated) rather than stacking a
+     list — a queue of N messages would auto-fire N sequential agentic runs on
+     completion, which is a cost surprise nobody asked for. */
+  const queueFollowup = useCallback((): void => {
+    const conversation = activeConversation;
+    const text = activePrompt.trim();
+    if (!conversation || !text) {
+      return;
+    }
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      updatedAt: Date.now(),
+      queuedFollowup: current.queuedFollowup
+        ? `${current.queuedFollowup}\n\n${text}`
+        : text,
+    }));
+    setActivePromptValue("");
+  }, [activeConversation, activePrompt, setActivePromptValue, updateConversation]);
+
+  /* Cancel returns the text to the composer (append rule, same as paste) — a
+     queued thought is never destroyed, only un-queued. */
+  const cancelQueuedFollowup = useCallback((): void => {
+    const conversation = activeConversation;
+    const queued = conversation?.queuedFollowup ?? "";
+    if (!conversation || !queued) {
+      return;
+    }
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      updatedAt: Date.now(),
+      queuedFollowup: "",
+    }));
+    setActivePromptValue((previous) =>
+      previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${queued}` : queued
+    );
+    focusComposerTextarea();
+  }, [activeConversation, focusComposerTextarea, setActivePromptValue, updateConversation]);
+
+  /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn
+     when the active conversation settles — but ONLY on clean completion. After
+     Stop or a failure the queued text returns to the draft instead: the user
+     stopped for a reason, and auto-spending a multi-minute run into a broken
+     context is worse than making them press Enter. Mirrors the pendingRetry
+     effect above (same settle detection, same stable submit handle); driven
+     from persisted conversation state rather than a ref so a reload cannot
+     lose the queue. Clearing the queue BEFORE submitting makes a double-fire
+     impossible: the next effect pass sees an empty queue. */
+  useEffect(() => {
+    const conversation = activeConversation;
+    if (!conversation || !conversation.hydrated) {
+      return;
+    }
+    const queued = conversation.queuedFollowup.trim();
+    if (!queued || conversation.sending || conversation.streamingMessageId) {
+      return;
+    }
+    const lastMessage = conversation.messages[conversation.messages.length - 1];
+    const settled =
+      lastMessage?.role === "assistant" || Boolean(conversation.chatError);
+    if (!settled) {
+      return;
+    }
+    const cleanCompletion =
+      !conversation.chatError &&
+      lastMessage?.role === "assistant" &&
+      lastMessage.status !== "stopped" &&
+      lastMessage.status !== "failed";
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      queuedFollowup: "",
+    }));
+    if (cleanCompletion) {
+      void handleSubmitRef.current(queued);
+    } else {
+      setActivePromptValue((previous) =>
+        previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${queued}` : queued
+      );
+    }
+  }, [activeConversation, setActivePromptValue, updateConversation]);
+
   const historyItems: HistoryItem[] = useMemo(() => {
     return [...conversations]
       .filter(shouldShowConversationInHistory)
@@ -12688,6 +12779,30 @@ export function App() {
                   actions={transcriptActions}
                   findTarget={transcriptFindTarget}
                 />
+                {/* Queued follow-up: scrolls with the transcript, below the
+                    streaming answer. Not part of ConversationTranscript — its
+                    memo comparator is deliberately narrow, and this is
+                    conversation-level state, not a message. */}
+                {activeConversationHydrated && activeConversation?.queuedFollowup ? (
+                  <div className="chat-queued-followup chat-width-frame mx-auto w-full px-4 sm:px-6">
+                    <div className="chat-queued-followup-bubble">
+                      <div className="chat-queued-followup-eyebrow">
+                        <span>Queued — sends when this run finishes</span>
+                        <button
+                          type="button"
+                          className="chat-message-action"
+                          aria-label="Cancel queued follow-up"
+                          onClick={cancelQueuedFollowup}
+                        >
+                          <X className="size-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                      <div className="chat-queued-followup-text">
+                        {activeConversation.queuedFollowup}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 <ChatContainerScrollAnchor />
                 <div className="app-scroll-button-shell absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-3 sm:px-5">
                   <div className="chat-width-frame flex justify-end">
@@ -12918,6 +13033,23 @@ export function App() {
                             // rAF inside runs after React paints.
                             focusComposerTextarea();
                           }
+                          return;
+                        }
+                        // Enter during a run queues the draft as a follow-up
+                        // instead of dying against handleSubmit's sending
+                        // guard. A SEPARATE branch, deliberately: the plain
+                        // Enter-to-send path below is contract-pinned.
+                        if (
+                          event.key === "Enter" &&
+                          !event.shiftKey &&
+                          !event.metaKey &&
+                          !event.ctrlKey &&
+                          !event.altKey &&
+                          !event.nativeEvent.isComposing &&
+                          activeSending
+                        ) {
+                          event.preventDefault();
+                          queueFollowup();
                           return;
                         }
                         if (
@@ -13274,17 +13406,41 @@ export function App() {
                           </DropdownMenuContent>
                         </DropdownMenu>
                         {activeSending ? (
-                          <Button
-                            size="icon"
-                            type="button"
-                            variant="destructive"
-                            onClick={stopActiveConversation}
-                            aria-label="Stop response"
-                            title="Stop response"
-                            className="app-composer-stop-button size-11 rounded-full sm:size-10"
-                          >
-                            <Square className="size-3.5 fill-current" />
-                          </Button>
+                          <>
+                            {/* Queue sits LEFT of Stop; Stop never moves (the
+                                send-position jump was a bug once already). */}
+                            {activePrompt.trim() ? (
+                              <PromptInputAction
+                                tooltip="Queue for after this run"
+                                side="top"
+                                sideOffset={8}
+                                delayDuration={350}
+                                className="app-composer-submit-tooltip"
+                              >
+                                <Button
+                                  size="icon"
+                                  type="button"
+                                  variant="ghost"
+                                  onClick={queueFollowup}
+                                  aria-label="Queue follow-up"
+                                  className="app-composer-queue-button size-11 rounded-full sm:size-10"
+                                >
+                                  <ArrowUp size={18} />
+                                </Button>
+                              </PromptInputAction>
+                            ) : null}
+                            <Button
+                              size="icon"
+                              type="button"
+                              variant="destructive"
+                              onClick={stopActiveConversation}
+                              aria-label="Stop response"
+                              title="Stop response"
+                              className="app-composer-stop-button size-11 rounded-full sm:size-10"
+                            >
+                              <Square className="size-3.5 fill-current" />
+                            </Button>
+                          </>
                         ) : (
                           <PromptInputAction
                             tooltip={

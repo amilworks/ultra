@@ -5,13 +5,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 import type * as ScalarVolumeModule from "./scalarVolume";
+import type { ResolvedScalarRendering } from "./scalarMask";
 
-const { rendererConstruction, textureInitialization, scalarPreparation, scalarUniformSets, multichannelUniformSets, gpuLimits } = vi.hoisted(() => ({
+const {
+  rendererConstruction,
+  rendererRender,
+  textureInitialization,
+  scalarPreparation,
+  scalarUniformSets,
+  multichannelUniformSets,
+  controlEventListeners,
+  gpuLimits,
+} = vi.hoisted(() => ({
   rendererConstruction: vi.fn(),
+  rendererRender: vi.fn(),
   textureInitialization: vi.fn(),
   scalarPreparation: vi.fn(),
   scalarUniformSets: [] as Array<Record<string, { value: unknown }>>,
   multichannelUniformSets: [] as Array<Record<string, { value: unknown }>>,
+  controlEventListeners: new Map<string, Set<() => void>>(),
   gpuLimits: { max3DTextureSize: 0 },
 }));
 
@@ -34,7 +46,9 @@ vi.mock("three", async () => {
     setPixelRatio() {}
     setClearColor() {}
     setSize() {}
-    render() {}
+    render() {
+      rendererRender();
+    }
     initTexture() {
       textureInitialization();
     }
@@ -44,7 +58,7 @@ vi.mock("three", async () => {
     constructor(parameters?: ThreeModule.ShaderMaterialParameters) {
       super(parameters);
       const uniforms = this.uniforms as Record<string, { value: unknown }>;
-      if (uniforms.uWindowLow) {
+      if (uniforms.uWindowLow || uniforms.uMaskThreshold) {
         scalarUniformSets.push(uniforms);
       }
       if (uniforms.uChannelCount) {
@@ -61,7 +75,7 @@ vi.mock("./scalarVolume", async () => {
     ...actual,
     MAX_PREPARED_SCALAR_VOLUME_CACHE_BYTES: 64,
     prepareScalarVolume: (...args: Parameters<typeof actual.prepareScalarVolume>) => {
-      scalarPreparation();
+      scalarPreparation(...args);
       return actual.prepareScalarVolume(...args);
     },
   };
@@ -83,8 +97,14 @@ vi.mock("three/examples/jsm/controls/TrackballControls.js", async () => {
       maxDistance = 1;
       minZoom = 0;
       maxZoom = 1;
-      addEventListener() {}
-      removeEventListener() {}
+      addEventListener(name: string, listener: () => void) {
+        const listeners = controlEventListeners.get(name) ?? new Set<() => void>();
+        listeners.add(listener);
+        controlEventListeners.set(name, listeners);
+      }
+      removeEventListener(name: string, listener: () => void) {
+        controlEventListeners.get(name)?.delete(listener);
+      }
       update() {}
       handleResize() {}
       dispose() {}
@@ -161,6 +181,7 @@ const payload: ScalarVolumePayload = {
   downsampleY: 1,
   downsampleZ: 1,
   previewPolicy: "exact-v1",
+  sampling: "box",
 };
 
 const microscopyViewerInfo = ({
@@ -236,12 +257,35 @@ const channelPayload = ({
   previewPolicy: "auto-v1",
 });
 
+const resolvedIntensity = (
+  channel = 0,
+  time = 0
+): ResolvedScalarRendering => ({
+  channel,
+  time,
+  requestedMode: "intensity",
+  effectiveMode: "intensity",
+  sampling: "box",
+  threshold: null,
+});
+
+const resolvedMask = (threshold: number): ResolvedScalarRendering => ({
+  channel: 0,
+  time: 0,
+  requestedMode: "mask",
+  effectiveMode: "mask",
+  sampling: "nearest",
+  threshold,
+});
+
 beforeEach(() => {
   rendererConstruction.mockClear();
+  rendererRender.mockClear();
   textureInitialization.mockClear();
   scalarPreparation.mockClear();
   scalarUniformSets.length = 0;
   multichannelUniformSets.length = 0;
+  controlEventListeners.clear();
   gpuLimits.max3DTextureSize = 0;
   vi.stubGlobal(
     "ResizeObserver",
@@ -260,6 +304,157 @@ afterEach(() => {
 });
 
 describe("SliceStackVolumeCanvas scalar lifecycle", () => {
+
+  it("uses nearest mask delivery and changes the raw threshold without refetching", async () => {
+    const maskInfo = {
+      ...microscopyViewerInfo({ fileId: "mask-volume", channels: 1 }),
+      scalar_mask_capability: {
+        version: 1,
+        source_authority: "original",
+        source_format: "ome-tiff",
+        source_sha256: "sha-mask-volume",
+        dtype: "uint16",
+        threshold_domain: "raw",
+        threshold_foreground: "above",
+        slice_delivery: "thresholded_png",
+        volume_delivery: "raw_scalar",
+        volume_sampling: "nearest",
+        channel_selection: "single",
+        time_selection: "single",
+        surfaces: ["2d", "mpr", "volume"],
+      },
+      data_semantics: {
+        kind: "probability_mask",
+        basis: "bounded_scalar_profile",
+        strength: "suggested",
+        supported_modes: ["intensity", "mask"],
+        recommended_view: "mask",
+        threshold: {
+          method: "otsu-256-v1",
+          value: 120,
+          domain: "raw",
+          foreground: "above",
+          sample_scope: "volume",
+          sample_count: 8,
+          z_samples: [0, 1],
+        },
+      },
+    } as UploadViewerInfo;
+    const nearestPayload: ScalarVolumePayload = {
+      ...payload,
+      rawMax: 255,
+      previewPolicy: "mask-native-integer-v1",
+      sampling: "nearest",
+    };
+    let resolveNearestPayload!: (value: ScalarVolumePayload) => void;
+    const getUploadScalarVolume = vi.fn(
+      () =>
+        new Promise<ScalarVolumePayload>((resolve) => {
+          resolveNearestPayload = resolve;
+        })
+    );
+    const apiClient = {
+      getUploadScalarVolume,
+      uploadAtlasUrl: vi.fn(() => "/atlas.png"),
+      uploadSliceUrl: vi.fn(() => "/slice.png"),
+    } as unknown as ApiClient;
+    const baseDisplay = {
+      enhancement: "d",
+      negative: false,
+      fusion_method: "a",
+      channels: [0],
+      scalar_render_mode: "mask",
+      scalar_threshold_method: "otsu-256-v1",
+      scalar_threshold_value: 120,
+    } as NonNullable<UploadViewerInfo["display_defaults"]>;
+    const { rerender } = render(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="mask-volume"
+        viewerInfo={maskInfo}
+        displayState={baseDisplay}
+        zIndex={0}
+        tIndex={0}
+        resolvedScalarRendering={resolvedMask(120)}
+      />
+    );
+
+    await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(1));
+    expect(document.querySelector("[data-viewer-surface='volume']")).toHaveAttribute(
+      "data-viewer-mask-texture-ready",
+      "false"
+    );
+    expect(textureInitialization).not.toHaveBeenCalled();
+    await act(async () => resolveNearestPayload(nearestPayload));
+    await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
+    expect(document.querySelector("[data-viewer-surface='volume']")).toHaveAttribute(
+      "data-viewer-mask-texture-ready",
+      "true"
+    );
+    expect(getUploadScalarVolume).toHaveBeenCalledWith(
+      "mask-volume",
+      expect.objectContaining({ channel: 0, t: 0, sampling: "nearest" })
+    );
+    expect(scalarUniformSets[0]?.uMaskThreshold.value).toBe(120);
+    expect(scalarPreparation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(AbortSignal),
+      "raw-integer"
+    );
+    const requestAnimationFrameMock = vi.mocked(window.requestAnimationFrame);
+    const initialFrame =
+      requestAnimationFrameMock.mock.calls[
+        requestAnimationFrameMock.mock.calls.length - 1
+      ]?.[0];
+    expect(initialFrame).toBeDefined();
+    act(() => initialFrame?.(0));
+    expect(rendererRender).toHaveBeenCalledTimes(1);
+    requestAnimationFrameMock.mockClear();
+    const timeoutSpy = vi.spyOn(window, "setTimeout");
+
+    rerender(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="mask-volume"
+        viewerInfo={maskInfo}
+        displayState={{
+          ...baseDisplay,
+          scalar_threshold_method: "manual",
+          scalar_threshold_value: 140,
+        }}
+        zIndex={0}
+        tIndex={0}
+        resolvedScalarRendering={resolvedMask(140)}
+      />
+    );
+
+    await waitFor(() =>
+      expect(scalarUniformSets[0]?.uMaskThreshold.value).toBe(140)
+    );
+    expect(getUploadScalarVolume).toHaveBeenCalledTimes(1);
+    expect(rendererConstruction).toHaveBeenCalledTimes(1);
+    expect(textureInitialization).toHaveBeenCalledTimes(1);
+    expect(requestAnimationFrameMock).toHaveBeenCalledTimes(1);
+    const thresholdFrame = requestAnimationFrameMock.mock.calls[0]?.[0];
+    act(() => thresholdFrame?.(0));
+    expect(rendererRender).toHaveBeenCalledTimes(2);
+    requestAnimationFrameMock.mockClear();
+    act(() => {
+      controlEventListeners.get("start")?.forEach((listener) => listener());
+      controlEventListeners.get("change")?.forEach((listener) => listener());
+      controlEventListeners.get("end")?.forEach((listener) => listener());
+    });
+    expect(requestAnimationFrameMock).toHaveBeenCalledTimes(1);
+    const cameraFrame = requestAnimationFrameMock.mock.calls[0]?.[0];
+    act(() => cameraFrame?.(0));
+    expect(rendererRender).toHaveBeenCalledTimes(3);
+    expect(
+      timeoutSpy.mock.calls.some(
+        ([, delay]) => typeof delay === "number" && delay > 0 && delay < 200
+      )
+    ).toBe(false);
+    timeoutSpy.mockRestore();
+  });
 
   it("keeps one renderer and one scalar load across cutaway, Z, and window uniform changes", async () => {
     const getUploadScalarVolume = vi.fn(async () => payload);
@@ -284,6 +479,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
         displayState={baseDisplay}
         zIndex={0}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
         volumeCutaway={false}
       />
     );
@@ -309,6 +505,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
         }}
         zIndex={1}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
         volumeCutaway
       />
     );
@@ -359,6 +556,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
         displayState={displayState}
         zIndex={0}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(1));
@@ -371,6 +569,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
         displayState={displayState}
         zIndex={0}
         tIndex={1}
+        resolvedScalarRendering={resolvedIntensity(0, 1)}
       />
     );
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
@@ -389,6 +588,7 @@ describe("SliceStackVolumeCanvas scalar lifecycle", () => {
         displayState={{ ...displayState, enhancement: "hounsfield:-800:400" }}
         zIndex={0}
         tIndex={1}
+        resolvedScalarRendering={resolvedIntensity(0, 1)}
       />
     );
     await waitFor(() => expect(sourceBUniforms?.uWindowLow.value).not.toBe(sourceBWindowLow));
@@ -434,6 +634,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0, 1, 2])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
 
@@ -492,6 +693,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0, 1, 2])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
 
@@ -508,6 +710,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
@@ -538,6 +741,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0, 1, 2])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(1));
@@ -572,6 +776,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0, 1])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
 
@@ -596,6 +801,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
@@ -608,8 +814,58 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
+    await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(2));
+    expect(getUploadScalarVolume).toHaveBeenCalledTimes(1);
+  });
+
+  it("checks the scalar prepared cache before issuing a remount request", async () => {
+    const getUploadScalarVolume = vi.fn(async () => payload);
+    const apiClient = {
+      getUploadScalarVolume,
+      uploadAtlasUrl: vi.fn(() => "/atlas.png"),
+      uploadSliceUrl: vi.fn(() => "/slice.png"),
+    } as unknown as ApiClient;
+    const first = render(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="scalar-cache-before-network"
+        viewerInfo={{
+          ...viewerInfo,
+          file_id: "scalar-cache-before-network",
+          metadata: {
+            ...viewerInfo.metadata,
+            sha256: "scalar-cache-sha",
+          },
+        }}
+        displayState={displayState([0])}
+        tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
+      />
+    );
+    await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
+    first.unmount();
+
+    render(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="scalar-cache-before-network"
+        viewerInfo={{
+          ...viewerInfo,
+          file_id: "scalar-cache-before-network",
+          metadata: {
+            ...viewerInfo.metadata,
+            sha256: "scalar-cache-sha",
+          },
+        }}
+        displayState={displayState([0])}
+        tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
+      />
+    );
+
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(2));
     expect(getUploadScalarVolume).toHaveBeenCalledTimes(1);
   });
@@ -629,6 +885,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={infoA}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(getUploadScalarVolumeA).toHaveBeenCalledTimes(1));
@@ -645,6 +902,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={infoB}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(getUploadScalarVolumeA).toHaveBeenCalledTimes(2));
@@ -663,6 +921,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={infoB}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(getUploadScalarVolumeB).toHaveBeenCalledTimes(1));
@@ -683,6 +942,7 @@ describe("SliceStackVolumeCanvas multichannel admission", () => {
         viewerInfo={info}
         displayState={displayState([0])}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
 
@@ -731,6 +991,7 @@ describe("SliceStackVolumeCanvas delivered GPU admission and recovery", () => {
         viewerInfo={hugeSourceInfo}
         displayState={displayState}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
@@ -767,6 +1028,7 @@ describe("SliceStackVolumeCanvas delivered GPU admission and recovery", () => {
         viewerInfo={hugeSourceInfo}
         displayState={displayState}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(screen.getByText(/delivered volume exceeds/i)).toBeTruthy());
@@ -790,6 +1052,7 @@ describe("SliceStackVolumeCanvas delivered GPU admission and recovery", () => {
         viewerInfo={viewerInfo}
         displayState={displayState}
         tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
       />
     );
     await waitFor(() => expect(screen.getByRole("button", { name: /retry volume/i })).toBeTruthy());
@@ -812,6 +1075,7 @@ describe("SliceStackVolumeCanvas delivered GPU admission and recovery", () => {
         viewerInfo={viewerInfo}
         displayState={displayState}
         tIndex={1.5}
+        resolvedScalarRendering={resolvedIntensity(0, 1.5)}
       />
     );
     expect(await screen.findByText(/time index/i)).toBeTruthy();

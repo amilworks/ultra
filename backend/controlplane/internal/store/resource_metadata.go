@@ -16,6 +16,14 @@ func mergeResourceMetadata(existing domain.JSONMap, patch domain.JSONMap) domain
 		merged = cloneResourceMetadataValue(existing).(domain.JSONMap)
 	}
 	for key, value := range patch {
+		// Viewer calibration is a versioned, SHA-bound snapshot, not an open-ended
+		// metadata namespace. Preserve independently saved C/T entries only when
+		// the patch names the same exact source SHA; each patched selection replaces
+		// its prior snapshot atomically, while stale root/entry keys are discarded.
+		if key == "ultra_viewer_calibration_v1" {
+			merged[key] = mergeViewerCalibrationMetadata(merged[key], value)
+			continue
+		}
 		patchMap, patchIsMap := resourceMetadataMap(value)
 		if patchIsMap {
 			if existingMap, existingIsMap := resourceMetadataMap(merged[key]); existingIsMap {
@@ -28,6 +36,108 @@ func mergeResourceMetadata(existing domain.JSONMap, patch domain.JSONMap) domain
 		merged[key] = cloneResourceMetadataValue(value)
 	}
 	return merged
+}
+
+func mergeViewerCalibrationMetadata(existing any, patch any) any {
+	patchMap, patchOK := resourceMetadataMap(patch)
+	if !patchOK {
+		return cloneResourceMetadataValue(patch)
+	}
+	existingMap, existingOK := resourceMetadataMap(existing)
+	patchSHA, patchSHAOK := patchMap["source_sha256"].(string)
+	existingSHA, existingSHAOK := existingMap["source_sha256"].(string)
+	if !existingOK || !patchSHAOK || !existingSHAOK || patchSHA == "" || patchSHA != existingSHA {
+		return cloneResourceMetadataValue(patchMap)
+	}
+	patchSelections, patchSelectionsOK := resourceMetadataMap(patchMap["selections"])
+	existingSelections, existingSelectionsOK := resourceMetadataMap(existingMap["selections"])
+	if !patchSelectionsOK || !existingSelectionsOK {
+		return cloneResourceMetadataValue(patchMap)
+	}
+	mergedSelections := cloneResourceMetadataValue(existingSelections).(domain.JSONMap)
+	for key, value := range patchSelections {
+		mergedSelections[key] = cloneResourceMetadataValue(value)
+	}
+	result := cloneResourceMetadataValue(patchMap).(domain.JSONMap)
+	result["selections"] = mergedSelections
+	return result
+}
+
+func validateViewerCalibrationPrecondition(
+	resource domain.ResourceRecord,
+	input domain.MergeResourceMetadataInput,
+) error {
+	if input.SelectionExpectedRevisions == nil {
+		return nil
+	}
+	expectedSHA := strings.TrimSpace(input.ExpectedSourceSHA256)
+	if expectedSHA == "" ||
+		strings.TrimSpace(resource.SHA256) == "" ||
+		expectedSHA != strings.TrimSpace(resource.SHA256) ||
+		strings.TrimSpace(resource.Status) != "active" ||
+		!resource.DeletedAt.IsZero() {
+		return ErrConflict
+	}
+	patchCalibration, patchOK := resourceMetadataMap(
+		input.Patch["ultra_viewer_calibration_v1"],
+	)
+	patchSHA, patchSHAOK := patchCalibration["source_sha256"].(string)
+	if !patchOK || !patchSHAOK || strings.TrimSpace(patchSHA) != expectedSHA {
+		return ErrConflict
+	}
+	existingCalibration, existingOK := resourceMetadataMap(
+		resource.Metadata["ultra_viewer_calibration_v1"],
+	)
+	if existingOK {
+		existingSHA, _ := existingCalibration["source_sha256"].(string)
+		if strings.TrimSpace(existingSHA) != expectedSHA {
+			return ErrConflict
+		}
+	}
+	existingSelections, _ := resourceMetadataMap(existingCalibration["selections"])
+	patchSelections, patchSelectionsOK := resourceMetadataMap(patchCalibration["selections"])
+	if !patchSelectionsOK || len(input.SelectionExpectedRevisions) != len(patchSelections) {
+		return ErrConflict
+	}
+	for selectionKey, expectedRevision := range input.SelectionExpectedRevisions {
+		if expectedRevision < 0 {
+			return ErrConflict
+		}
+		if _, patched := patchSelections[selectionKey]; !patched {
+			return ErrConflict
+		}
+		revision := 0
+		if existingSelection, ok := resourceMetadataMap(existingSelections[selectionKey]); ok {
+			parsed, valid := resourceMetadataInteger(existingSelection["revision"])
+			if !valid || parsed <= 0 {
+				return ErrConflict
+			}
+			revision = parsed
+		}
+		if revision != expectedRevision {
+			return ErrConflict
+		}
+	}
+	return nil
+}
+
+func resourceMetadataInteger(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		if typed < int64(-int(^uint(0)>>1)-1) || typed > int64(int(^uint(0)>>1)) {
+			return 0, false
+		}
+		return int(typed), true
+	case float64:
+		if typed != float64(int(typed)) {
+			return 0, false
+		}
+		return int(typed), true
+	default:
+		return 0, false
+	}
 }
 
 func resourceMetadataMap(value any) (domain.JSONMap, bool) {

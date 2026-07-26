@@ -11301,6 +11301,57 @@ func TestOmeTiffUploadHistogramPreservesSixteenBitValues(t *testing.T) {
 	}
 }
 
+func TestUploadHistogramPreservesCompositeChannelSelection(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		UploadRoot: uploadRoot,
+	})
+	fileID := writeTestUploadFile(
+		t,
+		uploadRoot,
+		"composite.png",
+		testRGBPNGBytes(t, 2, 1, []color.RGBA{
+			{R: 200, G: 10, B: 20, A: 255},
+			{R: 30, G: 180, B: 220, A: 255},
+		}),
+	)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v2/uploads/"+fileID+"/histogram?bins=8&channels=0,2",
+		nil,
+	)
+	req.Header.Set("X-Ultra-User-Id", "test-user")
+	req.Header.Set("X-Ultra-Org-Id", "test-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("histogram status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Channels  []int `json:"channels"`
+		Histogram struct {
+			ChannelIndices []int `json:"channel_indices"`
+		} `json:"histogram"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode histogram response: %v", err)
+	}
+	want := []int{0, 2}
+	if !reflect.DeepEqual(response.Channels, want) ||
+		!reflect.DeepEqual(response.Histogram.ChannelIndices, want) {
+		t.Fatalf(
+			"histogram channels = %v payload=%v, want %v",
+			response.Channels,
+			response.Histogram.ChannelIndices,
+			want,
+		)
+	}
+}
+
 func TestV2ResourcesUseBisqueSessionCookiePrincipal(t *testing.T) {
 	t.Parallel()
 

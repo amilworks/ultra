@@ -6,6 +6,7 @@ import {
   loadSliceBitmap,
   prefetchSliceBitmaps,
   sliceBitmapToTexture,
+  sliceCacheByteSize,
   sliceCacheSize,
 } from "./sliceImageCache";
 
@@ -93,6 +94,25 @@ describe("sliceImageCache", () => {
       await loadSliceBitmap(`/slice/${index}`);
     }
     expect(sliceCacheSize()).toBeLessThanOrEqual(80);
+  });
+
+  it("also bounds decoded bitmap residency by conservative RGBA bytes without closing live sources", async () => {
+    const largeBitmaps: ImageBitmap[] = [];
+    createBitmapMock.mockImplementation(async () => {
+      const bitmap = {
+        width: 4096,
+        height: 4096,
+        close: vi.fn(),
+      } as unknown as ImageBitmap;
+      largeBitmaps.push(bitmap);
+      return bitmap;
+    });
+    await loadSliceBitmap("/slice/large-a");
+    await loadSliceBitmap("/slice/large-b");
+
+    expect(sliceCacheByteSize()).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(sliceCacheSize()).toBe(1);
+    expect(largeBitmaps[0]?.close).not.toHaveBeenCalled();
   });
 
   it("builds an sRGB, mip-free texture from a decoded slice", () => {

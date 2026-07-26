@@ -12,13 +12,13 @@ and live in the ``imaging`` optional-dependency extra.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import operator
 import os
 import shutil
 import tempfile
-import time
 from typing import Any
 
 __all__ = ["create_app"]
@@ -26,6 +26,41 @@ __all__ = ["create_app"]
 _PNG = "image/png"
 _SCALAR_VOLUME_MAX_BYTES = 256 * 1024 * 1024
 _SCALAR_DTYPE_BYTES = {"uint8": 1, "uint16": 2, "int16": 2, "float32": 4}
+_SCALAR_VOLUME_RESIDENT_MULTIPLIER = 3
+_DEFAULT_SCALAR_VOLUME_INFLIGHT_BYTES = 1024 * 1024 * 1024
+
+
+def _scalar_volume_inflight_budget_bytes() -> int:
+    raw = os.environ.get("ULTRA_IMGSVC_SCALAR_VOLUME_INFLIGHT_BYTES", "").strip()
+    if not raw:
+        return _DEFAULT_SCALAR_VOLUME_INFLIGHT_BYTES
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return _DEFAULT_SCALAR_VOLUME_INFLIGHT_BYTES
+    return parsed if parsed > 0 else _DEFAULT_SCALAR_VOLUME_INFLIGHT_BYTES
+
+
+class _WeightedByteBudget:
+    """Fail-fast process-local admission for large scalar response residency."""
+
+    def __init__(self, capacity: int) -> None:
+        self._capacity = capacity
+        self._used = 0
+        self._lock = asyncio.Lock()
+
+    async def try_acquire(self, weight: int) -> bool:
+        if weight <= 0 or weight > self._capacity:
+            return False
+        async with self._lock:
+            if self._used + weight > self._capacity:
+                return False
+            self._used += weight
+            return True
+
+    async def release(self, weight: int) -> None:
+        async with self._lock:
+            self._used = max(0, self._used - weight)
 
 
 def _exact_integer(value: Any, field: str) -> int:
@@ -78,16 +113,24 @@ def _scalar_volume_envelope(vol: dict[str, Any]) -> tuple[Any, dict[str, str]]:
     downsample_y = _exact_integer(vol["downsample_y"], "downsample_y")
     downsample_z = _exact_integer(vol["downsample_z"], "downsample_z")
     preview_policy = str(vol["preview_policy"]).strip()
+    sampling = str(vol.get("sampling", "box")).strip().lower()
     if channel < 0 or time_index < 0:
         raise ValueError("scalar-volume channel/time identity must be nonnegative")
-    if min(source_width, source_height, source_depth, downsample_x, downsample_y, downsample_z) <= 0:
+    if (
+        min(source_width, source_height, source_depth, downsample_x, downsample_y, downsample_z)
+        <= 0
+    ):
         raise ValueError("scalar-volume source geometry/provenance must be positive")
     delivered = (
         (source_width + downsample_x - 1) // downsample_x,
         (source_height + downsample_y - 1) // downsample_y,
         (source_depth + downsample_z - 1) // downsample_z,
     )
-    if delivered != (width, height, depth) or not preview_policy:
+    if (
+        delivered != (width, height, depth)
+        or not preview_policy
+        or sampling not in {"box", "nearest"}
+    ):
         raise ValueError("scalar-volume provenance does not match the delivery grid")
 
     headers = {
@@ -109,8 +152,10 @@ def _scalar_volume_envelope(vol: dict[str, Any]) -> tuple[Any, dict[str, str]]:
         "x-volume-downsample-y": str(downsample_y),
         "x-volume-downsample-z": str(downsample_z),
         "x-volume-preview-policy": preview_policy,
+        "x-volume-sampling": sampling,
     }
     return data, headers
+
 
 # --- Local pyramid cache ----------------------------------------------------
 # A derived OME-BigTIFF pyramid has many scattered IFDs (z x channel x level);
@@ -121,11 +166,12 @@ def _scalar_volume_envelope(vol: dict[str, Any]) -> tuple[Any, dict[str, str]]:
 # from local disk: copy-on-first-use (one sequential NFS read, fast) into a
 # size-bounded LRU, after which every tile/slice/atlas read is local. Best-effort:
 # any error degrades to the original (NFS) path so serving never hard-fails.
-_PYRAMID_CACHE_ENABLED = os.environ.get("ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE", "1").strip().lower() not in ("0", "false", "no")
-_PYRAMID_CACHE_DIR = (
-    os.environ.get("ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE_DIR", "").strip()
-    or os.path.join(tempfile.gettempdir(), "ultra-pyramid-cache")
-)
+_PYRAMID_CACHE_ENABLED = os.environ.get(
+    "ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE", "1"
+).strip().lower() not in ("0", "false", "no")
+_PYRAMID_CACHE_DIR = os.environ.get(
+    "ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE_DIR", ""
+).strip() or os.path.join(tempfile.gettempdir(), "ultra-pyramid-cache")
 
 
 def _pyramid_cache_budget_bytes() -> int:
@@ -139,7 +185,25 @@ def _pyramid_cache_budget_bytes() -> int:
 
 
 def _is_derived_pyramid(path: str) -> bool:
-    return isinstance(path, str) and "/derived/" in path and path.endswith("__pyramid.tif")
+    if not isinstance(path, str):
+        return False
+    normalized = os.path.normpath(path)
+    return (
+        os.path.basename(os.path.dirname(normalized)) == "derived"
+        and os.path.basename(normalized).endswith("__pyramid.tif")
+    )
+
+
+def _pyramid_access_marker(path: str) -> str:
+    return f"{path}.access"
+
+
+def _touch_pyramid_access_marker(path: str) -> None:
+    """Record cache recency without mutating the scientific source file's stat identity."""
+    marker = _pyramid_access_marker(path)
+    descriptor = os.open(marker, os.O_CREAT | os.O_WRONLY, 0o600)
+    os.close(descriptor)
+    os.utime(marker, None)
 
 
 def _evict_pyramid_cache(incoming: int) -> None:
@@ -148,22 +212,39 @@ def _evict_pyramid_cache(incoming: int) -> None:
         budget = _pyramid_cache_budget_bytes()
         entries: list[tuple[float, int, str]] = []
         total = 0
-        for name in os.listdir(_PYRAMID_CACHE_DIR):
-            if not name.endswith(".tif"):
-                continue
-            fp = os.path.join(_PYRAMID_CACHE_DIR, name)
+        cache_directories = (
+            _PYRAMID_CACHE_DIR,
+            os.path.join(_PYRAMID_CACHE_DIR, "derived"),
+        )
+        for directory in cache_directories:
             try:
-                s = os.stat(fp)
+                names = os.listdir(directory)
             except OSError:
                 continue
-            entries.append((s.st_atime, s.st_size, fp))
-            total += s.st_size
+            for name in names:
+                if not name.endswith(".tif"):
+                    continue
+                fp = os.path.join(directory, name)
+                try:
+                    s = os.stat(fp)
+                except OSError:
+                    continue
+                try:
+                    recency = os.stat(_pyramid_access_marker(fp)).st_mtime
+                except OSError:
+                    recency = s.st_atime
+                entries.append((recency, s.st_size, fp))
+                total += s.st_size
         entries.sort()  # least-recently-accessed first
         while total + incoming > budget and entries:
             _, sz, fp = entries.pop(0)
             try:
                 os.remove(fp)
                 total -= sz
+            except OSError:
+                pass
+            try:
+                os.remove(_pyramid_access_marker(fp))
             except OSError:
                 pass
     except OSError:
@@ -180,27 +261,30 @@ def localize_pyramid(path: str) -> str:
     except OSError:
         return path
     key = hashlib.sha256(f"{path}|{st.st_size}|{int(st.st_mtime_ns)}".encode()).hexdigest()
-    local = os.path.join(_PYRAMID_CACHE_DIR, key + ".tif")
+    local = os.path.join(
+        _PYRAMID_CACHE_DIR,
+        "derived",
+        f"{key}__pyramid.tif",
+    )
     try:
         if os.path.exists(local):
             try:
-                # LRU touch: bump atime for recency but PRESERVE mtime. The viewer-info
-                # sidecar cache keys on (path, size, mtime_ns); bumping mtime here (the
-                # old ``os.utime(local, None)`` set BOTH to now) changed that key on every
-                # request, so a locally-cached pyramid's /viewerinfo missed its sidecar
-                # every time and re-ran the ~300ms multichannel signal-score decode (and
-                # accumulated an orphaned sidecar per hit). Keeping mtime stable lets the
-                # sidecar hit after the first compute.
-                st_local = os.stat(local)
-                os.utime(local, (time.time(), st_local.st_mtime))  # (atime=now, mtime=unchanged)
+                # Keep LRU recency in a companion marker. Even an atime-only utime changes
+                # ctime on the TIFF itself, which invalidates exact Mask plans while
+                # another request is decoding the same warm localized source.
+                _touch_pyramid_access_marker(local)
             except OSError:
                 pass
             return local
-        os.makedirs(_PYRAMID_CACHE_DIR, exist_ok=True)
+        os.makedirs(os.path.dirname(local), exist_ok=True)
         _evict_pyramid_cache(st.st_size)
         tmp = f"{local}.tmp.{os.getpid()}"
         shutil.copyfile(path, tmp)  # whole-file sequential read: fast even over NFS
         os.replace(tmp, local)  # atomic publish
+        try:
+            _touch_pyramid_access_marker(local)
+        except OSError:
+            pass
         return local
     except OSError:
         return path  # degrade to the NFS path; never hard-fail
@@ -222,42 +306,73 @@ def _parse_fusion_request(channels: str | None, channel_colors: str | None):
 
     ``channels`` is a comma list of 0-based channel indices (the engine's -remap
     is 1-based, so they are shifted). ``channel_colors`` is a comma list of hex LUT
-    colors indexed by channel; they are realigned to the selected channels.
+    colors already projected into the same selected-channel order.
 
     Additive fusion is enabled ONLY for genuine multi-channel composites (2+
     selected channels with at least one color): single-channel and grayscale
-    views keep the fast native display path. Returns
-    (remap_channels_1based | None, aligned_colors | None).
+    views keep the fast native display path. Composite channel/color cardinality
+    must match exactly. Returns (remap_channels_1based | None, selected_colors | None).
     """
     from ultra_deepagents.imaging import fusion
 
     requested: list[int] | None = None
     if channels:
         requested = [int(part) for part in channels.split(",") if part.strip() != ""]
-    by_channel: list | None = None
+    selected_colors: list | None = None
     if channel_colors:
-        by_channel = [fusion.parse_hex_color(part) for part in channel_colors.split(",")]
+        selected_colors = [
+            fusion.parse_hex_color(part) for part in channel_colors.split(",")
+        ]
 
     remap = [c + 1 for c in requested] if requested else None
+    if (
+        requested is not None
+        and len(requested) >= 2
+        and selected_colors is not None
+        and len(selected_colors) != len(requested)
+    ):
+        raise ValueError("channel colors must match the selected channel count")
     fuse = (
         requested is not None
         and len(requested) >= 2
-        and by_channel is not None
-        and any(c is not None for c in by_channel)
+        and selected_colors is not None
+        and any(color is not None for color in selected_colors)
     )
     if not fuse:
         return remap, None
-    # Realign colors to the selected channel order (channel_colors is indexed by
-    # absolute channel; the remapped read returns the selected channels in order).
-    aligned = [by_channel[ch] if 0 <= ch < len(by_channel) else None for ch in requested]
-    if not any(c is not None for c in aligned):
-        aligned = [fusion.convention_channel_color(i) for i in range(len(requested))]
-    return remap, aligned
+    return remap, selected_colors
+
+
+def _parse_histogram_channels(
+    *,
+    channel: int | None,
+    channels: str | None,
+    scope: str,
+) -> list[int]:
+    if channel is not None and channels is not None:
+        raise ValueError("histogram channel selectors are ambiguous")
+    if channels is not None:
+        parts = channels.split(",")
+        if not parts or any(part.strip() == "" for part in parts):
+            raise ValueError("histogram channels must be a comma-separated integer list")
+        try:
+            selected = [int(part) for part in parts]
+        except ValueError as exc:
+            raise ValueError("histogram channels must be integers") from exc
+    else:
+        selected = [0 if channel is None else int(channel)]
+    if any(value < 0 for value in selected):
+        raise ValueError("histogram channel indices must be nonnegative")
+    if len(set(selected)) != len(selected):
+        raise ValueError("duplicate histogram channel indices are not allowed")
+    if scope == "volume" and len(selected) != 1:
+        raise ValueError("volume histogram requires exactly one channel")
+    return selected
 
 
 def create_app(runner: Any = None, *, prefer_real: bool = True):
     try:
-        from fastapi import FastAPI, Response
+        from fastapi import FastAPI, HTTPException, Response
     except Exception as exc:  # pragma: no cover - exercised only without fastapi
         raise RuntimeError(
             "image service requires fastapi/uvicorn (install the 'imaging' extra)"
@@ -270,8 +385,22 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     app = FastAPI(title="Ultra Image Service", version="0.1.0")
     app.state.runner = runner
+    scalar_volume_budget = _WeightedByteBudget(_scalar_volume_inflight_budget_bytes())
+    app.state.scalar_volume_budget = scalar_volume_budget
 
     from fastapi.responses import JSONResponse
+
+    class _ScalarBudgetResponse(Response):
+        def __init__(self, *, budget: _WeightedByteBudget, weight: int, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self._budget = budget
+            self._weight = weight
+
+        async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                await self._budget.release(self._weight)
 
     # The engine raises ValueError for inputs it cannot decode or render — most often a
     # malformed/unsupported file that libbioimage reads as a 0-sized region (after the
@@ -290,13 +419,19 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         "duplicate channel",
         "multiple scenes",
         "source plane input",
+        "source generation",
+        "decode work does not match",
+        "read count does not match",
     )
 
     @app.exception_handler(ValueError)
     async def _engine_value_error(_request, exc: ValueError):  # noqa: ANN202
         message = str(exc)
-        if any(marker in message for marker in decode_error_markers):
-            return JSONResponse(status_code=422, content={"error": "image could not be decoded or rendered", "detail": message})
+        if any(marker in message.lower() for marker in decode_error_markers):
+            return JSONResponse(
+                status_code=422,
+                content={"error": "image could not be decoded or rendered", "detail": message},
+            )
         return JSONResponse(status_code=500, content={"error": "internal error", "detail": message})
 
     @app.get("/healthz")
@@ -313,22 +448,40 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/tile")
     async def tile(
-        path: str, level: int = 0, col: int = 0, row: int = 0, size: int = 512,
-        channels: str | None = None, channel_colors: str | None = None,
+        path: str,
+        level: int = 0,
+        col: int = 0,
+        row: int = 0,
+        size: int = 512,
+        channels: str | None = None,
+        channel_colors: str | None = None,
     ):
         path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
-            "tile", path, level=level, col=col, row=row, tile_size=size,
-            channels=remap, colors=fuse_colors,
+            "tile",
+            path,
+            level=level,
+            col=col,
+            row=row,
+            tile_size=size,
+            channels=remap,
+            colors=fuse_colors,
         )
         return Response(content=png, media_type=_PNG)
 
     @app.get("/slice")
     async def slice_plane(
-        path: str, z: int | None = None, t: int | None = None, level: int | None = None,
-        channels: str | None = None, channel_colors: str | None = None,
+        path: str,
+        z: int | None = None,
+        t: int | None = None,
+        level: int | None = None,
+        channels: str | None = None,
+        channel_colors: str | None = None,
         full_resolution: bool = True,
+        scalar_render_mode: str = "intensity",
+        scalar_threshold_value: float | None = None,
+        scalar_threshold_foreground: str = "above",
     ):
         path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
@@ -336,28 +489,51 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         # bounded pyramid level; the settled view (True) reads the native plane so
         # pixel measurements stay exact. An explicit level always wins.
         png = await runner.call(
-            "slice_plane", path, z=z, t=t, level=level, channels=remap, colors=fuse_colors,
+            "slice_plane",
+            path,
+            z=z,
+            t=t,
+            level=level,
+            channels=remap,
+            colors=fuse_colors,
             full_resolution=full_resolution,
+            scalar_render_mode=scalar_render_mode,
+            scalar_threshold_value=scalar_threshold_value,
+            scalar_threshold_foreground=scalar_threshold_foreground,
         )
         return Response(content=png, media_type=_PNG)
 
     @app.get("/thumbnail")
     async def thumbnail(
-        path: str, max_size: int = 256, z: int | None = None, level: int | None = None,
-        channels: str | None = None, channel_colors: str | None = None,
+        path: str,
+        max_size: int = 256,
+        z: int | None = None,
+        level: int | None = None,
+        channels: str | None = None,
+        channel_colors: str | None = None,
     ):
         path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
         png = await runner.call(
-            "thumbnail", path, max_size=max_size, z=z, level=level,
-            channels=remap, colors=fuse_colors,
+            "thumbnail",
+            path,
+            max_size=max_size,
+            z=z,
+            level=level,
+            channels=remap,
+            colors=fuse_colors,
         )
         return Response(content=png, media_type=_PNG)
 
     @app.get("/atlas")
     async def atlas(
-        path: str, grid_rows: int | None = None, grid_cols: int | None = None, level: int | None = None,
-        scale: float | None = None, channels: str | None = None, channel_colors: str | None = None,
+        path: str,
+        grid_rows: int | None = None,
+        grid_cols: int | None = None,
+        level: int | None = None,
+        scale: float | None = None,
+        channels: str | None = None,
+        channel_colors: str | None = None,
     ):
         path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
@@ -367,19 +543,48 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             # the only way to parallelize a deep stack). Byte-identical to engine.atlas().
             from ultra_deepagents.imaging.atlas import assemble_atlas
 
-            png = await assemble_atlas(runner, path, channels=remap, colors=fuse_colors, level=level)
+            png = await assemble_atlas(
+                runner, path, channels=remap, colors=fuse_colors, level=level
+            )
         else:
             # Single process (InlineRunner / externally-managed): the sequential path.
             grid = (grid_rows, grid_cols) if grid_rows and grid_cols else None
             png = await runner.call(
-                "atlas", path, grid=grid, level=level, atlas_scale=scale,
-                channels=remap, colors=fuse_colors,
+                "atlas",
+                path,
+                grid=grid,
+                level=level,
+                atlas_scale=scale,
+                channels=remap,
+                colors=fuse_colors,
             )
         return Response(content=png, media_type=_PNG)
 
     @app.get("/histogram")
-    async def histogram(path: str, bins: int = 256) -> dict[str, Any]:
-        return await runner.call("histogram", await _localize_pyramid_async(path), bins=bins)
+    async def histogram(
+        path: str,
+        bins: int = 256,
+        channel: int | None = None,
+        channels: str | None = None,
+        t: int = 0,
+        scope: str = "display",
+    ) -> dict[str, Any]:
+        normalized_scope = str(scope).strip().lower()
+        if normalized_scope not in {"display", "volume"}:
+            raise ValueError("unsupported histogram scope")
+        selected = _parse_histogram_channels(
+            channel=channel,
+            channels=channels,
+            scope=normalized_scope,
+        )
+        return await runner.call(
+            "histogram",
+            await _localize_pyramid_async(path),
+            bins=bins,
+            channels=[value + 1 for value in selected],
+            t=t,
+            scope=normalized_scope,
+        )
 
     @app.get("/viewerinfo")
     async def viewerinfo(path: str, name: str | None = None) -> dict[str, Any]:
@@ -396,19 +601,57 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             png = await video.extract_poster(path, time_seconds=t, max_size=max_size)
         except video.VideoError as exc:
             return Response(content=str(exc), media_type="text/plain", status_code=415)
-        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+        return Response(
+            content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"}
+        )
 
     @app.get("/scalar-volume")
-    async def scalar_volume(path: str, channel: int = 0, t: int = 0):
+    async def scalar_volume(path: str, channel: int = 0, t: int = 0, sampling: str = "box"):
         path = await _localize_pyramid_async(path)
-        if getattr(runner, "workers", 1) > 1:
-            from ultra_deepagents.imaging.atlas import assemble_scalar_volume
+        from ultra_deepagents.imaging.atlas import (
+            SCALAR_MASK_NATIVE_POLICY,
+            validate_scalar_plan,
+        )
 
-            vol = await assemble_scalar_volume(runner, path, channel=channel, t=t)
-        else:
-            vol = await runner.call("scalar_volume", path, channel=channel, t=t)
-        data, headers = _scalar_volume_envelope(vol)
-        return Response(content=data, media_type="application/octet-stream", headers=headers)
+        plan = await runner.call("scalar_plan", path, channel=channel, t=t, sampling=sampling)
+        output_bytes = validate_scalar_plan(plan)
+        resident_bytes = output_bytes * _SCALAR_VOLUME_RESIDENT_MULTIPLIER
+        if not await scalar_volume_budget.try_acquire(resident_bytes):
+            raise HTTPException(
+                status_code=503,
+                detail="scalar-volume process residency budget is currently exhausted",
+                headers={"Retry-After": "1"},
+            )
+        try:
+            if (
+                getattr(runner, "workers", 1) > 1
+                or plan.get("preview_policy") == SCALAR_MASK_NATIVE_POLICY
+            ):
+                from ultra_deepagents.imaging.atlas import assemble_scalar_volume
+
+                vol = await assemble_scalar_volume(
+                    runner,
+                    path,
+                    channel=channel,
+                    t=t,
+                    sampling=sampling,
+                    plan=plan,
+                )
+            else:
+                vol = await runner.call(
+                    "scalar_volume", path, channel=channel, t=t, sampling=sampling
+                )
+            data, headers = _scalar_volume_envelope(vol)
+            return _ScalarBudgetResponse(
+                budget=scalar_volume_budget,
+                weight=resident_bytes,
+                content=data,
+                media_type="application/octet-stream",
+                headers=headers,
+            )
+        except BaseException:
+            await scalar_volume_budget.release(resident_bytes)
+            raise
 
     # --- HDF5 data viewer -------------------------------------------------------
     # These serve the frontend HDF5 explorer (frontend/src/components/viewer/hdf5).
@@ -421,7 +664,9 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
     from ultra_deepagents.imaging.hdf5 import Hdf5DatasetNotFound
 
     def _not_found(exc: Exception):
-        return JSONResponse(status_code=404, content={"error": "dataset not found", "detail": str(exc)})
+        return JSONResponse(
+            status_code=404, content={"error": "dataset not found", "detail": str(exc)}
+        )
 
     @app.get("/hdf5/dataset")
     async def hdf5_dataset(path: str, dataset_path: str, file_id: str = ""):
@@ -439,32 +684,53 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/hdf5/preview/slice")
     async def hdf5_slice(
-        path: str, dataset_path: str, axis: str = "z", index: int | None = None, component: int = 0,
+        path: str,
+        dataset_path: str,
+        axis: str = "z",
+        index: int | None = None,
+        component: int = 0,
         feature_ids: str | None = None,
     ):
         try:
             png = await runner.call(
-                "hdf5_slice_png", path, dataset_path, axis=axis, index=index, component=component,
+                "hdf5_slice_png",
+                path,
+                dataset_path,
+                axis=axis,
+                index=index,
+                component=component,
                 feature_ids=feature_ids,
             )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
-        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+        return Response(
+            content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"}
+        )
 
     @app.get("/hdf5/preview/atlas")
     async def hdf5_atlas(
-        path: str, dataset_path: str, enhancement: str | None = None, fusion_method: str | None = None,
-        negative: str | None = None, channels: str | None = None, component: int = 0,
+        path: str,
+        dataset_path: str,
+        enhancement: str | None = None,
+        fusion_method: str | None = None,
+        negative: str | None = None,
+        channels: str | None = None,
+        component: int = 0,
         feature_ids: str | None = None,
     ):
         try:
             png = await runner.call(
-                "hdf5_atlas_png", path, dataset_path, component=component,
+                "hdf5_atlas_png",
+                path,
+                dataset_path,
+                component=component,
                 feature_ids=feature_ids,
             )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
-        return Response(content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"})
+        return Response(
+            content=png, media_type=_PNG, headers={"Cache-Control": "private, max-age=3600"}
+        )
 
     @app.get("/hdf5/preview/scalar-volume")
     async def hdf5_scalar_volume(path: str, dataset_path: str, channel: int = 0):
@@ -476,19 +742,33 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         return Response(content=data, media_type="application/octet-stream", headers=headers)
 
     @app.get("/hdf5/preview/histogram")
-    async def hdf5_histogram(path: str, dataset_path: str, component: int = 0, bins: int = 24, file_id: str = ""):
+    async def hdf5_histogram(
+        path: str, dataset_path: str, component: int = 0, bins: int = 24, file_id: str = ""
+    ):
         try:
             return await runner.call(
-                "hdf5_histogram", path, dataset_path, component=component, bins=bins, file_id=file_id,
+                "hdf5_histogram",
+                path,
+                dataset_path,
+                component=component,
+                bins=bins,
+                file_id=file_id,
             )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)
 
     @app.get("/hdf5/preview/table")
-    async def hdf5_table(path: str, dataset_path: str, offset: int = 0, limit: int = 12, file_id: str = ""):
+    async def hdf5_table(
+        path: str, dataset_path: str, offset: int = 0, limit: int = 12, file_id: str = ""
+    ):
         try:
             return await runner.call(
-                "hdf5_table", path, dataset_path, offset=offset, limit=limit, file_id=file_id,
+                "hdf5_table",
+                path,
+                dataset_path,
+                offset=offset,
+                limit=limit,
+                file_id=file_id,
             )
         except Hdf5DatasetNotFound as exc:
             return _not_found(exc)

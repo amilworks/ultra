@@ -21,6 +21,7 @@ const scalarIdentityHeaders = (
   "x-volume-downsample-y": "1",
   "x-volume-downsample-z": "1",
   "x-volume-preview-policy": "exact-v1",
+  "x-volume-sampling": "box",
 });
 
 describe("ApiClient browser auth hardening", () => {
@@ -76,6 +77,24 @@ describe("ApiClient browser auth hardening", () => {
     expect(client.uploadSliceUrl("file-123", { axis: "z", z: 2, cacheKey: "windowed-v1:abc123" })).toBe(
       "https://ultra.example.org/v2/uploads/file-123/slice?axis=z&z=2&cache_key=windowed-v1%3Aabc123"
     );
+  });
+
+  it("builds raw mask slice URLs without display intensity controls", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const parsed = new URL(
+      client.uploadSliceUrl("file-123", {
+        axis: "z",
+        z: 2,
+        t: 1,
+        scalarRenderMode: "mask",
+        scalarThresholdValue: 120,
+        scalarThresholdForeground: "above",
+      })
+    );
+
+    expect(parsed.searchParams.get("scalar_render_mode")).toBe("mask");
+    expect(parsed.searchParams.get("scalar_threshold_value")).toBe("120");
+    expect(parsed.searchParams.get("scalar_threshold_foreground")).toBe("above");
   });
 
   it("builds transformed uploaded image display URLs", () => {
@@ -363,6 +382,7 @@ describe("ApiClient scalar volume envelopes", () => {
           "x-volume-downsample-y": "1",
           "x-volume-downsample-z": "1",
           "x-volume-preview-policy": "auto-v1",
+          "x-volume-sampling": "box",
         },
       })
     );
@@ -387,6 +407,48 @@ describe("ApiClient scalar volume envelopes", () => {
       downsampleZ: 1,
       previewPolicy: "auto-v1",
     });
+  });
+
+  it("requires the scalar volume response to honor nearest sampling", async () => {
+    const headers = {
+      "x-volume-width": "1",
+      "x-volume-height": "1",
+      "x-volume-depth": "1",
+      "x-volume-dtype": "uint8",
+      "x-volume-bytes-per-voxel": "1",
+      "x-volume-raw-min": "0",
+      "x-volume-raw-max": "255",
+      "x-volume-scl-slope": "1",
+      "x-volume-scl-inter": "0",
+      ...scalarIdentityHeaders("1", "1", "1"),
+      "x-volume-preview-policy": "nearest-source-grid-v1",
+      "x-volume-sampling": "nearest",
+    };
+    const fetchMock = vi.fn(async () =>
+      new Response(new Uint8Array([255]), { status: 200, headers })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(
+      client.getUploadScalarVolume("file-123", { channel: 0, t: 0, sampling: "nearest" })
+    ).resolves.toMatchObject({ sampling: "nearest", previewPolicy: "nearest-source-grid-v1" });
+    expect(
+      String((fetchMock.mock.calls[0] as unknown as [RequestInfo | URL] | undefined)?.[0])
+    ).toContain("sampling=nearest");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(new Uint8Array([255]), {
+          status: 200,
+          headers: { ...headers, "x-volume-sampling": "box" },
+        })
+      )
+    );
+    await expect(
+      client.getUploadScalarVolume("file-123", { sampling: "nearest" })
+    ).rejects.toMatchObject({ status: 502 });
   });
 
   it.each([
@@ -420,6 +482,34 @@ describe("ApiClient scalar volume envelopes", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
 
     await expect(client.getUploadScalarVolume("file-123")).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("treats a missing sampling header as box only for box-compatible requests", async () => {
+    const headers: Record<string, string> = {
+      "x-volume-width": "1",
+      "x-volume-height": "1",
+      "x-volume-depth": "1",
+      "x-volume-dtype": "uint8",
+      "x-volume-bytes-per-voxel": "1",
+      "x-volume-raw-min": "0",
+      "x-volume-raw-max": "1",
+      "x-volume-scl-slope": "1",
+      "x-volume-scl-inter": "0",
+      ...scalarIdentityHeaders("1", "1", "1"),
+    };
+    delete headers["x-volume-sampling"];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(new Uint8Array([1]), { status: 200, headers }))
+    );
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(client.getUploadScalarVolume("file-123")).resolves.toMatchObject({
+      sampling: "box",
+    });
+    await expect(
+      client.getUploadScalarVolume("file-123", { sampling: "nearest" })
+    ).rejects.toMatchObject({ status: 502 });
   });
 
   it.each([
@@ -491,6 +581,55 @@ describe("ApiClient scalar volume envelopes", () => {
 
     await expect(client.getUploadScalarVolume("file-123")).rejects.toMatchObject({ status: 502 });
     expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it("accounts native integer Mask delivery as zero-copy while keeping generic nearest staging", async () => {
+    const makeResponse = (previewPolicy: string) => {
+      const getReader = vi.fn(() => ({
+        read: vi.fn(async () => ({ done: true, value: undefined })),
+        cancel: vi.fn(async () => undefined),
+        releaseLock: vi.fn(),
+      }));
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers({
+          "x-volume-width": "1024",
+          "x-volume-height": "1024",
+          "x-volume-depth": "60",
+          "x-volume-dtype": "uint16",
+          "x-volume-bytes-per-voxel": "2",
+          "x-volume-raw-min": "0",
+          "x-volume-raw-max": "1",
+          "x-volume-scl-slope": "1",
+          "x-volume-scl-inter": "0",
+          ...scalarIdentityHeaders("1024", "1024", "60"),
+          "x-volume-preview-policy": previewPolicy,
+          "x-volume-sampling": "nearest",
+        }),
+        body: { getReader },
+        getReader,
+      } as unknown as Response & { getReader: ReturnType<typeof vi.fn> };
+    };
+    const generic = makeResponse("nearest-source-grid-v1");
+    const exactMask = makeResponse("mask-native-integer-v1");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn()
+        .mockResolvedValueOnce(generic)
+        .mockResolvedValueOnce(exactMask)
+    );
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(
+      client.getUploadScalarVolume("file-123", { sampling: "nearest" })
+    ).rejects.toMatchObject({ status: 502 });
+    expect(generic.getReader).not.toHaveBeenCalled();
+
+    await expect(
+      client.getUploadScalarVolume("file-123", { sampling: "nearest" })
+    ).rejects.toMatchObject({ status: 502 });
+    expect(exactMask.getReader).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a payload whose dtype, byte width, or body length disagree", async () => {
@@ -7160,6 +7299,60 @@ describe("ApiClient V2 chat bridge", () => {
       "https://ultra.example.org/v2/runs/run_long/events?limit=2&after_sequence=0",
       "https://ultra.example.org/v2/runs/run_long/events?limit=2&after_sequence=2",
     ]);
+  });
+});
+
+describe("ApiClient upload histogram identity", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("preserves an ordinary composite channel selection without volume scope", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      void input;
+      return new Response(JSON.stringify({ channels: [0, 2], bins: 32 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.getUploadHistogram("file_x", {
+      bins: 32,
+      channels: [0, 2],
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://ultra.example.org/v2/uploads/file_x/histogram?channels=0%2C2&bins=32"
+    );
+  });
+
+  it("uses one explicit channel only for volume calibration", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      void input;
+      return new Response(JSON.stringify({ channels: [2], bins: 256 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.getUploadHistogram("file_x", {
+      channel: 2,
+      scope: "volume",
+    });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://ultra.example.org/v2/uploads/file_x/histogram?channel=2&scope=volume"
+    );
+    await expect(
+      client.getUploadHistogram("file_x", {
+        channels: [0, 2],
+        scope: "volume",
+      })
+    ).rejects.toThrow(/exactly one channel/i);
   });
 });
 

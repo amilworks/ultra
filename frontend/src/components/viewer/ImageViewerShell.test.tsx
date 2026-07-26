@@ -1,18 +1,35 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ApiClient } from "@/lib/api";
+import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
 import { ImageViewerShell } from "./ImageViewerShell";
 
 vi.mock("./DirectPlaneImage", () => ({
-  DirectPlaneImage: ({ imageUrl }: { imageUrl: string }) => (
-    <div data-testid="direct-plane-image" data-image-url={imageUrl} />
+  DirectPlaneImage: ({
+    imageUrl,
+    scalarSlice,
+  }: {
+    imageUrl: string;
+    scalarSlice?: { sliceIndex: number } | null;
+  }) => (
+    <div
+      data-testid="direct-plane-image"
+      data-image-url={imageUrl}
+      data-scalar-slice-index={scalarSlice?.sliceIndex ?? ""}
+    />
   ),
 }));
 
@@ -39,8 +56,29 @@ vi.mock("./DeepZoomCanvas", () => ({
 }));
 
 vi.mock("./SlicePlaneCanvas", () => ({
-  SlicePlaneCanvas: ({ imageUrl, title }: { imageUrl: string; title: string }) => (
-    <div data-testid="slice-plane-canvas" data-image-url={imageUrl} data-title={title} />
+  SlicePlaneCanvas: ({
+    imageUrl,
+    title,
+    scalarSlice,
+    crosshair,
+    coordinateGrid,
+  }: {
+    imageUrl: string;
+    title: string;
+    scalarSlice?: { sliceIndex: number } | null;
+    crosshair?: { row: number; col: number };
+    coordinateGrid?: { width: number; height: number } | null;
+  }) => (
+    <div
+      data-testid="slice-plane-canvas"
+      data-image-url={imageUrl}
+      data-title={title}
+      data-scalar-slice-index={scalarSlice?.sliceIndex ?? ""}
+      data-crosshair-row={crosshair?.row ?? ""}
+      data-crosshair-col={crosshair?.col ?? ""}
+      data-coordinate-grid-width={coordinateGrid?.width ?? ""}
+      data-coordinate-grid-height={coordinateGrid?.height ?? ""}
+    />
   ),
 }));
 
@@ -50,6 +88,7 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
     xIndex,
     yIndex,
     zIndex,
+    tIndex,
   }: {
     displayState?: {
       scalar_colormap?: string;
@@ -62,14 +101,23 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
       volume_clip_min?: { x: number; y: number; z: number };
       volume_clip_max?: { x: number; y: number; z: number };
       volume_cutaway?: boolean | null;
+      scalar_render_mode?: "auto" | "intensity" | "mask";
+      scalar_threshold_method?: "otsu-256-v1" | "manual";
+      scalar_threshold_value?: number | null;
     } | null;
     xIndex?: number;
     yIndex?: number;
     zIndex?: number;
+    tIndex?: number;
   }) => (
     <div
       data-testid="slice-stack-volume-canvas"
       data-cutaway={displayState?.volume_cutaway ? "true" : "false"}
+      data-scalar-render-mode={displayState?.scalar_render_mode ?? ""}
+      data-scalar-threshold-method={displayState?.scalar_threshold_method ?? ""}
+      data-scalar-threshold-value={
+        displayState?.scalar_threshold_value == null ? "" : String(displayState.scalar_threshold_value)
+      }
       data-scalar-colormap={displayState?.scalar_colormap ?? ""}
       data-signal-floor={displayState?.volume_signal_floor == null ? "" : String(displayState.volume_signal_floor)}
       data-density={displayState?.volume_density == null ? "" : String(displayState.volume_density)}
@@ -88,6 +136,7 @@ vi.mock("./SliceStackVolumeCanvas", () => ({
       data-x-index={xIndex == null ? "" : String(xIndex)}
       data-y-index={yIndex == null ? "" : String(yIndex)}
       data-z-index={zIndex == null ? "" : String(zIndex)}
+      data-t-index={tIndex == null ? "" : String(tIndex)}
     />
   ),
 }));
@@ -259,6 +308,8 @@ type SliceUrlConfig = DisplayUrlConfig & {
   z?: number;
   t?: number;
   fullResolution?: boolean;
+  scalarRenderMode?: "intensity" | "mask";
+  scalarThresholdValue?: number;
 };
 
 const buildSliceUrl = (fileId: string, config?: SliceUrlConfig) => {
@@ -283,6 +334,12 @@ const buildSliceUrl = (fileId: string, config?: SliceUrlConfig) => {
   if (config?.cacheKey) {
     params.set("cache_key", config.cacheKey);
   }
+  if (config?.scalarRenderMode) {
+    params.set("scalar_render_mode", config.scalarRenderMode);
+  }
+  if (typeof config?.scalarThresholdValue === "number") {
+    params.set("scalar_threshold_value", String(config.scalarThresholdValue));
+  }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return `https://ultra.example.org/v2/uploads/${fileId}/slice${suffix}`;
 };
@@ -302,6 +359,813 @@ const chooseSelectOption = async (name: string, optionName: string): Promise<voi
 };
 
 describe("ImageViewerShell", () => {
+  const maskMprPlanes = {
+    z: {
+      axis: "z" as const,
+      label: "Axial",
+      axes: ["Y", "X"],
+      pixel_size: { width: 10, height: 9 },
+      spacing: { row: 1, col: 1 },
+      world_size: { width: 10, height: 9 },
+      aspect_ratio: 10 / 9,
+    },
+    y: {
+      axis: "y" as const,
+      label: "Coronal",
+      axes: ["Z", "X"],
+      pixel_size: { width: 10, height: 7 },
+      spacing: { row: 1, col: 1 },
+      world_size: { width: 10, height: 7 },
+      aspect_ratio: 10 / 7,
+    },
+    x: {
+      axis: "x" as const,
+      label: "Sagittal",
+      axes: ["Z", "Y"],
+      pixel_size: { width: 9, height: 7 },
+      spacing: { row: 1, col: 1 },
+      world_size: { width: 9, height: 7 },
+      aspect_ratio: 9 / 7,
+    },
+  };
+  const maskMprThreshold = {
+    method: "otsu-256-v1" as const,
+    value: 120,
+    domain: "raw" as const,
+    foreground: "above" as const,
+    sample_scope: "volume",
+    sample_count: 36,
+    z_samples: [0, 3, 6],
+    channel: 1,
+    t: 1,
+    sampling_algorithm: "scalar-profile-otsu-256-v1",
+  };
+  const makeMaskMprViewerInfo = (): UploadViewerInfo => ({
+    ...viewerInfo,
+    file_id: "file-mask-mpr",
+    original_name: "mask.ome.tiff",
+    modality: "microscopy",
+    dims_order: "TCZYX",
+    backend_mode: "direct",
+    axis_sizes: { T: 2, C: 2, Z: 7, Y: 9, X: 10 },
+    selected_indices: { T: 1, C: 1, Z: 6 },
+    is_volume: true,
+    is_timeseries: true,
+    is_multichannel: true,
+    display_defaults: {
+      ...(viewerInfo.display_defaults as NonNullable<UploadViewerInfo["display_defaults"]>),
+      channels: [1],
+      time_index: 1,
+      z_index: 6,
+      scalar_render_mode: "mask",
+      scalar_threshold_method: "otsu-256-v1",
+      scalar_threshold_value: 120,
+      scalar_threshold_foreground: "above",
+    },
+    metadata: {
+      ...viewerInfo.metadata,
+      reader: "tifffile",
+      dims_order: "TCZYX",
+      array_shape: [2, 2, 7, 9, 10],
+      array_dtype: "uint16",
+      sha256: "mask-mpr-sha",
+    },
+    data_semantics: {
+      kind: "binary_mask",
+      basis: "bounded_scalar_profile",
+      strength: "exact",
+      supported_modes: ["intensity", "mask"],
+      recommended_view: "mask",
+      threshold: maskMprThreshold,
+    },
+    scalar_mask_capability: {
+      version: 1,
+      source_authority: "original",
+      source_format: "ome-tiff",
+      source_sha256: "mask-mpr-sha",
+      dtype: "uint16",
+      threshold_domain: "raw",
+      threshold_foreground: "above",
+      slice_delivery: "thresholded_png",
+      volume_delivery: "raw_scalar",
+      volume_sampling: "nearest",
+      channel_selection: "single",
+      time_selection: "single",
+      surfaces: ["2d", "mpr", "volume"],
+    },
+    service_urls: {
+      ...viewerInfo.service_urls,
+      histogram: undefined,
+      scalar_volume: "/v2/uploads/file-mask-mpr/scalar-volume",
+    },
+    viewer: {
+      ...viewerInfo.viewer,
+      default_surface: "mpr",
+      available_surfaces: ["2d", "mpr", "volume", "metadata"],
+      default_axis: "z",
+      slice_axes: ["z", "y", "x"],
+      default_plane: maskMprPlanes.z,
+      planes: maskMprPlanes,
+      volume_mode: "slice_stack",
+      render_policy: "scalar",
+      diagnostic_surface: "none",
+      display_capabilities: ["channel_visibility"],
+      viewer_capabilities: ["2d", "mpr", "volume", "metadata"],
+      service_urls: {
+        slice: "/v2/uploads/file-mask-mpr/slice",
+        scalar_volume: "/v2/uploads/file-mask-mpr/scalar-volume",
+      },
+    },
+  });
+  const makeMaskMprPayload = (
+    overrides: Partial<ScalarVolumePayload> = {}
+  ): ScalarVolumePayload => {
+    const sourceWidth = overrides.sourceWidth ?? 10;
+    const sourceHeight = overrides.sourceHeight ?? 9;
+    const sourceDepth = overrides.sourceDepth ?? 7;
+    const width = overrides.width ?? sourceWidth;
+    const height = overrides.height ?? sourceHeight;
+    const depth = overrides.depth ?? sourceDepth;
+    return {
+      data:
+        overrides.data ??
+        new Uint16Array(width * height * depth)
+          .map((_, index) => index + 100)
+          .buffer,
+      width,
+      height,
+      depth,
+      dtype: "uint16",
+      bytesPerVoxel: 2,
+      rawMin: 100,
+      rawMax: 100 + width * height * depth - 1,
+      channel: 1,
+      time: 1,
+      sourceWidth,
+      sourceHeight,
+      sourceDepth,
+      downsampleX: 1,
+      downsampleY: 1,
+      downsampleZ: 1,
+      previewPolicy: "mask-native-integer-v1",
+      sampling: "nearest",
+      sclSlope: 1,
+      sclInter: 0,
+      ...overrides,
+    };
+  };
+  const makeMaskMprShellProps = (
+    maskViewerInfo: UploadViewerInfo,
+    apiClient: ApiClient
+  ) => ({
+    viewerInfo: maskViewerInfo,
+    apiClient,
+    onSurfaceChange: () => {},
+    selectedDisplayState: maskViewerInfo.display_defaults ?? null,
+    updateSelectedDisplay: () => {},
+    clampedIndices: { x: 4, y: 5, z: 6, t: 1 },
+    debouncedX: 4,
+    debouncedY: 5,
+    debouncedZ: 6,
+    debouncedT: 1,
+    xAxisSize: 10,
+    yAxisSize: 9,
+    zAxisSize: 7,
+    tAxisSize: 2,
+    setSelectedIndex: () => {},
+    selectedCaption: "",
+    captionLoading: false,
+  });
+  const makeIntensityMprViewerInfo = (): UploadViewerInfo => ({
+    ...viewerInfo,
+    file_id: "file-box-mpr",
+    original_name: "intensity.nii",
+    modality: "medical",
+    dims_order: "ZYX",
+    backend_mode: "scalar",
+    axis_sizes: { T: 1, C: 1, Z: 7, Y: 9, X: 10 },
+    selected_indices: { T: 0, C: 0, Z: 6 },
+    is_volume: true,
+    is_timeseries: false,
+    is_multichannel: false,
+    display_defaults: {
+      ...(viewerInfo.display_defaults as NonNullable<UploadViewerInfo["display_defaults"]>),
+      enhancement: "hounsfield:120:240",
+      channels: [0],
+      time_index: 0,
+      z_index: 6,
+      volume_channel: 0,
+    },
+    service_urls: {
+      ...viewerInfo.service_urls,
+      histogram: undefined,
+      scalar_volume: "/v2/uploads/file-box-mpr/scalar-volume",
+    },
+    metadata: {
+      ...viewerInfo.metadata,
+      reader: "nifti",
+      dims_order: "ZYX",
+      array_shape: [7, 9, 10],
+      array_dtype: "uint16",
+      sha256: "box-mpr-sha",
+    },
+    viewer: {
+      ...viewerInfo.viewer,
+      default_surface: "mpr",
+      available_surfaces: ["mpr", "volume", "metadata"],
+      default_axis: "z",
+      slice_axes: ["z", "y", "x"],
+      default_plane: maskMprPlanes.z,
+      planes: maskMprPlanes,
+      volume_mode: "scalar",
+      render_policy: "scalar",
+      diagnostic_surface: "mpr",
+      display_capabilities: ["scalar_probe"],
+      viewer_capabilities: ["mpr", "volume", "metadata"],
+    },
+  });
+
+  it("calibrates mask rendering with exact volume provenance and saves a SHA-bound default", async () => {
+    const maskHistogram: UploadViewerHistogramResponse = {
+      file_id: "file-mask",
+      bins: 4,
+      dtype: "uint8",
+      channels: [1],
+      source: "image-service-source",
+      sample_count: 8,
+      scope: "volume",
+      channel: 1,
+      t: 0,
+      sampling: {
+        algorithm: "scalar-profile-otsu-256-v1",
+        scope: "volume",
+        strategy: "exact",
+        sample_count: 8,
+        z_samples: [0, 1],
+      },
+      threshold: {
+        method: "otsu-256-v1",
+        value: 120,
+        domain: "raw",
+        foreground: "above",
+        sample_scope: "volume",
+        sample_count: 8,
+        z_samples: [0, 1],
+        channel: 1,
+        t: 0,
+        sampling_algorithm: "scalar-profile-otsu-256-v1",
+        sampling_strategy: "exact",
+        source_sha256: "mask-sha-256",
+        bins: 256,
+      },
+      histogram: {
+        bins: [4, 1, 1, 2],
+        edges: [0, 64, 128, 192, 256],
+        min: 0,
+        max: 255,
+        channel_indices: [1],
+        time_index: 0,
+      },
+    };
+    const maskViewer: UploadViewerInfo = {
+      ...viewerInfo,
+      file_id: "file-mask",
+      original_name: "mask.tif",
+      dims_order: "ZYX",
+      axis_sizes: { T: 3, C: 2, Z: 2, Y: 2, X: 2 },
+      is_volume: true,
+      is_timeseries: true,
+      is_multichannel: true,
+      selected_indices: { T: 0, C: 1, Z: 0 },
+      metadata: {
+        ...viewerInfo.metadata,
+        dims_order: "ZYX",
+        array_shape: [2, 2, 2],
+        array_dtype: "uint8",
+        sha256: "mask-sha-256",
+      },
+      data_semantics: {
+        kind: "binary_mask",
+        basis: "exact_two_code_volume",
+        strength: "exact",
+        supported_modes: ["intensity", "mask"],
+        recommended_view: "mask",
+        threshold: {
+          method: "otsu-256-v1",
+          value: 120,
+          domain: "raw",
+          foreground: "above",
+          sample_scope: "volume",
+          sample_count: 8,
+          z_samples: [0, 1],
+          channel: 1,
+          t: 0,
+          sampling_algorithm: "scalar-profile-otsu-256-v1",
+        },
+      },
+      scalar_mask_capability: {
+        version: 1,
+        source_authority: "original",
+        source_format: "tiff",
+        source_sha256: "mask-sha-256",
+        dtype: "uint8",
+        threshold_domain: "raw",
+        threshold_foreground: "above",
+        slice_delivery: "thresholded_png",
+        volume_delivery: "raw_scalar",
+        volume_sampling: "nearest",
+        channel_selection: "single",
+        time_selection: "single",
+        surfaces: ["2d", "mpr", "volume"],
+      },
+      display_defaults: {
+        ...(viewerInfo.display_defaults as NonNullable<UploadViewerInfo["display_defaults"]>),
+        scalar_render_mode: "auto",
+        scalar_threshold_method: "otsu-256-v1",
+        scalar_threshold_value: 120,
+        scalar_threshold_foreground: "above",
+        channels: [1],
+      },
+      service_urls: {
+        ...viewerInfo.service_urls,
+        scalar_volume: "/v2/uploads/file-mask/scalar-volume",
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        default_surface: "volume",
+        available_surfaces: ["2d", "mpr", "volume", "metadata"],
+        volume_mode: "slice_stack",
+        service_urls: {
+          slice: "/v2/uploads/file-mask/slice",
+          scalar_volume: "/v2/uploads/file-mask/scalar-volume",
+        },
+      },
+    };
+    const uploadSliceUrl = vi.fn(buildSliceUrl);
+    let persistedSelections: Record<string, unknown> = {};
+    let resolveTime2Histogram:
+      | ((value: UploadViewerHistogramResponse) => void)
+      | undefined;
+    let time2HistogramResolved = false;
+    let deferCalibrationSaves = false;
+    const pendingCalibrationSaves: Array<{
+      selectionId: string;
+      resolve: () => void;
+    }> = [];
+    const histogramForTime = (time: number): UploadViewerHistogramResponse => {
+      const threshold = time === 2 ? 220 : 120;
+      return {
+        ...maskHistogram,
+        t: time,
+        threshold: {
+          ...maskHistogram.threshold!,
+          value: threshold,
+          t: time,
+        },
+        histogram: {
+          ...maskHistogram.histogram,
+          time_index: time,
+        },
+        data_semantics: {
+          ...maskViewer.data_semantics!,
+          threshold: {
+            ...maskViewer.data_semantics!.threshold!,
+            value: threshold,
+            t: time,
+          },
+        },
+      };
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(
+        async (_fileId: string, config?: { t?: number }) => {
+          const time = config?.t ?? 0;
+          if (time === 1) {
+            throw new Error("selection histogram rejected");
+          }
+          if (time === 2 && !time2HistogramResolved) {
+            return await new Promise<UploadViewerHistogramResponse>((resolve) => {
+              resolveTime2Histogram = resolve;
+            });
+          }
+          return histogramForTime(time);
+        }
+      ),
+      uploadSliceUrl,
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+      uploadAtlasUrl: vi.fn(() => "/atlas"),
+      patchResourceMetadata: vi.fn(
+        async (_fileId: string, metadata: Record<string, unknown>) => ({
+          resource: {
+            metadata: {
+              ...metadata,
+              ultra_viewer_calibration_v1: {
+                ...(metadata.ultra_viewer_calibration_v1 as Record<string, unknown>),
+                selections: {
+                  ...persistedSelections,
+                  ...(
+                    (metadata.ultra_viewer_calibration_v1 as Record<string, unknown>)
+                      .selections as Record<string, unknown>
+                  ),
+                },
+              },
+            },
+          },
+        })
+      ),
+    } as unknown as ApiClient;
+    vi.mocked(apiClient.patchResourceMetadata).mockImplementation(
+      async (_fileId: string, metadata: Record<string, unknown>) => {
+        const calibration = metadata.ultra_viewer_calibration_v1 as Record<string, unknown>;
+        const requestSelections = calibration.selections as Record<string, unknown>;
+        const acknowledgedSelections = Object.fromEntries(
+          Object.entries(requestSelections).map(([key, rawSelection]) => {
+            const {
+              expected_revision: expectedRevision,
+              ...selection
+            } = rawSelection as Record<string, unknown>;
+            return [
+              key,
+              {
+                ...selection,
+                revision: Number(expectedRevision) + 1,
+              },
+            ];
+          })
+        );
+        const selectionId = Object.keys(requestSelections)[0] ?? "";
+        if (deferCalibrationSaves) {
+          return await new Promise((resolve) => {
+            pendingCalibrationSaves.push({
+              selectionId,
+              resolve: () =>
+                resolve({
+                  resource: {
+                    metadata: {
+                      ultra_viewer_calibration_v1: {
+                        ...calibration,
+                        selections: acknowledgedSelections,
+                      },
+                    },
+                  },
+                } as never),
+            });
+          });
+        }
+        persistedSelections = {
+          ...persistedSelections,
+          ...acknowledgedSelections,
+        };
+        return {
+          resource: {
+            metadata: {
+              ultra_viewer_calibration_v1: {
+                ...calibration,
+                selections: persistedSelections,
+              },
+            },
+          },
+        } as never;
+      }
+    );
+
+    function Harness() {
+      const [currentViewer, setCurrentViewer] = useState(maskViewer);
+      const [displayState, setDisplayState] = useState(maskViewer.display_defaults ?? null);
+      const [time, setTime] = useState(0);
+      const [surface, setSurface] = useState<"2d" | "volume">("volume");
+      const [mounted, setMounted] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setTime(0)}>Time 0</button>
+          <button type="button" onClick={() => setTime(1)}>Time 1</button>
+          <button type="button" onClick={() => setTime(2)}>Time 2</button>
+          <button type="button" onClick={() => setSurface("2d")}>2D surface</button>
+          <button type="button" onClick={() => setSurface("volume")}>Volume surface</button>
+          <button
+            type="button"
+            onClick={() => {
+              setMounted(false);
+              setDisplayState(maskViewer.display_defaults ?? null);
+            }}
+          >
+            Switch away
+          </button>
+          <button type="button" onClick={() => setMounted(true)}>Switch back</button>
+          {mounted ? <ImageViewerShell
+            viewerInfo={currentViewer}
+            apiClient={apiClient}
+            selectedSurface={surface}
+            onSurfaceChange={(nextSurface) =>
+              setSurface(nextSurface === "2d" ? "2d" : "volume")
+            }
+            selectedDisplayState={displayState}
+            updateSelectedDisplay={(patch) =>
+              setDisplayState((previous) => (previous ? { ...previous, ...patch } : previous))
+            }
+            clampedIndices={{ x: 0, y: 0, z: 0, t: time }}
+            debouncedX={0}
+            debouncedY={0}
+            debouncedZ={0}
+            debouncedT={time}
+            xAxisSize={2}
+            yAxisSize={2}
+            zAxisSize={2}
+            tAxisSize={3}
+            setSelectedIndex={() => {}}
+            selectedCaption=""
+            captionLoading={false}
+            onViewerCalibrationsChange={(calibrations) => {
+              if (!calibrations) {
+                return;
+              }
+              setCurrentViewer((previous) => ({
+                ...previous,
+                viewer_calibrations:
+                  previous.viewer_calibrations?.source_sha256 ===
+                  calibrations.source_sha256
+                    ? {
+                        version: 1,
+                        source_sha256: calibrations.source_sha256,
+                        selections: {
+                          ...previous.viewer_calibrations.selections,
+                          ...calibrations.selections,
+                        },
+                      }
+                    : calibrations,
+              }));
+            }}
+          /> : null}
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    expect(apiClient.getUploadHistogram).not.toHaveBeenCalled();
+    expect(screen.getByRole("combobox", { name: "Scalar rendering" })).toHaveTextContent(
+      "Auto · Mask"
+    );
+    await chooseSelectOption("Scalar rendering", "Mask");
+    await waitFor(() =>
+      expect(apiClient.getUploadHistogram).toHaveBeenCalledWith(
+        "file-mask",
+        expect.objectContaining({
+          bins: 256,
+          channel: 1,
+          t: 0,
+          scope: "volume",
+          signal: expect.any(AbortSignal),
+        })
+      )
+    );
+    expect(apiClient.getUploadHistogram).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.mocked(apiClient.getUploadHistogram).mock.results[0]?.value;
+    });
+    openAdvancedControls();
+    await waitFor(() =>
+      expect(screen.getByLabelText("Mask raw threshold")).toHaveValue("120")
+    );
+    expect(screen.queryByRole("combobox", { name: "Projection" })).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), { target: { value: "130" } });
+    expect(screen.getByTestId("slice-stack-volume-canvas")).toHaveAttribute(
+      "data-scalar-threshold-value",
+      "130"
+    );
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save resource default" }));
+
+    await waitFor(() =>
+      expect(apiClient.patchResourceMetadata).toHaveBeenCalledWith("file-mask", {
+        ultra_viewer_calibration_v1: {
+          version: 1,
+          source_sha256: "mask-sha-256",
+          selections: {
+            "c1:t0": {
+              channel: 1,
+              t: 0,
+              render_mode: "mask",
+              threshold_method: "manual",
+              threshold_value: 130,
+              threshold_foreground: "above",
+              expected_revision: 0,
+              threshold_provenance: {
+                method: "otsu-256-v1",
+                value: 120,
+                domain: "raw",
+                foreground: "above",
+                channel: 1,
+                t: 0,
+                sample_scope: "volume",
+                sample_count: 8,
+                sampling_algorithm: "scalar-profile-otsu-256-v1",
+                sampling_strategy: "exact",
+                z_samples: [0, 1],
+                source_sha256: "mask-sha-256",
+                bins: 256,
+              },
+            },
+          },
+        },
+      })
+    );
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Switch away" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch back" }));
+    openAdvancedControls();
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("130");
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 2" }));
+    await chooseSelectOption("Scalar rendering", "Mask");
+    await waitFor(() =>
+      expect(apiClient.getUploadHistogram).toHaveBeenCalledWith(
+        "file-mask",
+        expect.objectContaining({
+          bins: 256,
+          channel: 1,
+          t: 2,
+          scope: "volume",
+          signal: expect.any(AbortSignal),
+        })
+      )
+    );
+    expect(screen.getByTestId("slice-stack-volume-canvas")).toHaveAttribute(
+      "data-scalar-render-mode",
+      "intensity"
+    );
+    time2HistogramResolved = true;
+    await act(async () => {
+      resolveTime2Histogram?.(histogramForTime(2));
+    });
+    await waitFor(() =>
+      expect(screen.getByLabelText("Mask raw threshold")).toHaveValue("220")
+    );
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "230" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save resource default" }));
+    await waitFor(() =>
+      expect(apiClient.patchResourceMetadata).toHaveBeenLastCalledWith(
+        "file-mask",
+        expect.objectContaining({
+          ultra_viewer_calibration_v1: expect.objectContaining({
+            selections: {
+              "c1:t2": expect.objectContaining({
+                channel: 1,
+                t: 2,
+                threshold_value: 230,
+                threshold_provenance: expect.objectContaining({
+                  value: 220,
+                  t: 2,
+                }),
+              }),
+            },
+          }),
+        })
+      )
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 0" }));
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("130");
+    await new Promise((resolvePromise) => window.setTimeout(resolvePromise, 200));
+
+    uploadSliceUrl.mockClear();
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "140" },
+    });
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "150" },
+    });
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "160" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "2D surface" }));
+    expect(screen.getByTestId("direct-plane-image")).toHaveAttribute(
+      "data-image-url",
+      expect.stringContaining("scalar_threshold_value=130")
+    );
+    await waitFor(
+      () =>
+        expect(screen.getByTestId("direct-plane-image")).toHaveAttribute(
+          "data-image-url",
+          expect.stringContaining("scalar_threshold_value=160")
+        ),
+      { timeout: 1000 }
+    );
+    const requestedThresholds = new Set(
+      uploadSliceUrl.mock.calls
+        .map((call) => call[1]?.scalarThresholdValue)
+        .filter((value): value is number => typeof value === "number")
+    );
+    expect(requestedThresholds).toEqual(new Set([130, 160]));
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 1" }));
+    await waitFor(() =>
+      expect(apiClient.getUploadHistogram).toHaveBeenCalledWith(
+        "file-mask",
+        expect.objectContaining({
+          bins: 256,
+          channel: 1,
+          t: 1,
+          scope: "volume",
+          signal: expect.any(AbortSignal),
+        })
+      )
+    );
+    await waitFor(() => {
+      const imageUrl = screen.getByTestId("direct-plane-image").getAttribute("data-image-url") ?? "";
+      expect(imageUrl).not.toContain("scalar_render_mode=mask");
+      expect(imageUrl).not.toContain("scalar_threshold_value=");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 0" }));
+    fireEvent.click(screen.getByRole("button", { name: "Volume surface" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("slice-stack-volume-canvas")).toHaveAttribute(
+        "data-t-index",
+        "0"
+      )
+    );
+    if (
+      screen
+        .getByRole("button", { name: "Advanced rendering" })
+        .getAttribute("aria-expanded") !== "true"
+    ) {
+      openAdvancedControls();
+    }
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("160");
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "170" },
+    });
+    deferCalibrationSaves = true;
+    fireEvent.click(screen.getByRole("button", { name: "Save resource default" }));
+    await waitFor(() =>
+      expect(pendingCalibrationSaves.map((pending) => pending.selectionId)).toContain(
+        "c1:t0"
+      )
+    );
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "180" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 2" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("slice-stack-volume-canvas")).toHaveAttribute(
+        "data-t-index",
+        "2"
+      )
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", { name: "Scalar rendering" })
+      ).toHaveTextContent("Mask")
+    );
+    if (
+      screen
+        .getByRole("button", { name: "Advanced rendering" })
+        .getAttribute("aria-expanded") !== "true"
+    ) {
+      openAdvancedControls();
+    }
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("230");
+    fireEvent.change(screen.getByLabelText("Mask raw threshold"), {
+      target: { value: "240" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save resource default" }));
+    await waitFor(() =>
+      expect(pendingCalibrationSaves.map((pending) => pending.selectionId)).toEqual(
+        expect.arrayContaining(["c1:t0", "c1:t2"])
+      )
+    );
+
+    await act(async () => {
+      pendingCalibrationSaves.find(
+        (pending) => pending.selectionId === "c1:t2"
+      )?.resolve();
+    });
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    await act(async () => {
+      pendingCalibrationSaves.find(
+        (pending) => pending.selectionId === "c1:t0"
+      )?.resolve();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Time 0" }));
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("180");
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Time 2" }));
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("240");
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch away" }));
+    fireEvent.click(screen.getByRole("button", { name: "Switch back" }));
+    openAdvancedControls();
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("240");
+    fireEvent.click(screen.getByRole("button", { name: "Time 0" }));
+    expect(await screen.findByLabelText("Mask raw threshold")).toHaveValue("170");
+  });
+
   it("uses shadcn selects instead of native browser dropdowns", () => {
     const source = readFileSync(resolve(process.cwd(), "src/components/viewer/ImageViewerShell.tsx"), "utf8");
 
@@ -347,7 +1211,15 @@ describe("ImageViewerShell", () => {
 
     render(<Harness />);
 
-    await waitFor(() => expect(apiClient.getUploadHistogram).toHaveBeenCalledWith("file-123", { bins: 256 }));
+    await waitFor(() =>
+      expect(apiClient.getUploadHistogram).toHaveBeenCalledWith(
+        "file-123",
+        expect.objectContaining({
+          bins: 256,
+          signal: expect.any(AbortSignal),
+        })
+      )
+    );
     const centerSlider = await screen.findByLabelText("Window center");
     fireEvent.change(centerSlider, { target: { value: "1002" } });
 
@@ -796,6 +1668,539 @@ describe("ImageViewerShell", () => {
     await waitFor(() => expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("z=1"));
   });
 
+  it("maps microscopy Mask MPR through the validated native integer payload", async () => {
+    const maskPlanes = {
+      z: {
+        axis: "z" as const,
+        label: "Axial",
+        axes: ["Y", "X"],
+        pixel_size: { width: 10, height: 9 },
+        spacing: { row: 1, col: 1 },
+        world_size: { width: 10, height: 9 },
+        aspect_ratio: 10 / 9,
+      },
+      y: {
+        axis: "y" as const,
+        label: "Coronal",
+        axes: ["Z", "X"],
+        pixel_size: { width: 10, height: 7 },
+        spacing: { row: 1, col: 1 },
+        world_size: { width: 10, height: 7 },
+        aspect_ratio: 10 / 7,
+      },
+      x: {
+        axis: "x" as const,
+        label: "Sagittal",
+        axes: ["Z", "Y"],
+        pixel_size: { width: 9, height: 7 },
+        spacing: { row: 1, col: 1 },
+        world_size: { width: 9, height: 7 },
+        aspect_ratio: 9 / 7,
+      },
+    };
+    const threshold = {
+      method: "otsu-256-v1" as const,
+      value: 120,
+      domain: "raw" as const,
+      foreground: "above" as const,
+      sample_scope: "volume",
+      sample_count: 36,
+      z_samples: [0, 3, 6],
+      channel: 1,
+      t: 1,
+      sampling_algorithm: "scalar-profile-otsu-256-v1",
+    };
+    const maskViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      file_id: "file-mask-mpr",
+      original_name: "mask.ome.tiff",
+      modality: "microscopy",
+      dims_order: "TCZYX",
+      backend_mode: "direct",
+      axis_sizes: { T: 2, C: 2, Z: 7, Y: 9, X: 10 },
+      selected_indices: { T: 1, C: 1, Z: 6 },
+      is_volume: true,
+      is_timeseries: true,
+      is_multichannel: true,
+      display_defaults: {
+        ...(viewerInfo.display_defaults as NonNullable<UploadViewerInfo["display_defaults"]>),
+        channels: [1],
+        time_index: 1,
+        z_index: 6,
+        scalar_render_mode: "mask",
+        scalar_threshold_method: "otsu-256-v1",
+        scalar_threshold_value: 120,
+        scalar_threshold_foreground: "above",
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        reader: "tifffile",
+        dims_order: "TCZYX",
+        array_shape: [2, 2, 7, 9, 10],
+        array_dtype: "uint16",
+        sha256: "mask-mpr-sha",
+      },
+      data_semantics: {
+        kind: "binary_mask",
+        basis: "bounded_scalar_profile",
+        strength: "exact",
+        supported_modes: ["intensity", "mask"],
+        recommended_view: "mask",
+        threshold,
+      },
+      scalar_mask_capability: {
+        version: 1,
+        source_authority: "original",
+        source_format: "ome-tiff",
+        source_sha256: "mask-mpr-sha",
+        dtype: "uint16",
+        threshold_domain: "raw",
+        threshold_foreground: "above",
+        slice_delivery: "thresholded_png",
+        volume_delivery: "raw_scalar",
+        volume_sampling: "nearest",
+        channel_selection: "single",
+        time_selection: "single",
+        surfaces: ["2d", "mpr", "volume"],
+      },
+      service_urls: {
+        ...viewerInfo.service_urls,
+        scalar_volume: "/v2/uploads/file-mask-mpr/scalar-volume",
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        default_surface: "mpr",
+        available_surfaces: ["2d", "mpr", "volume", "metadata"],
+        default_axis: "z",
+        slice_axes: ["z", "y", "x"],
+        default_plane: maskPlanes.z,
+        planes: maskPlanes,
+        volume_mode: "slice_stack",
+        render_policy: "scalar",
+        diagnostic_surface: "none",
+        display_capabilities: ["channel_visibility"],
+        viewer_capabilities: ["2d", "mpr", "volume", "metadata"],
+        service_urls: {
+          slice: "/v2/uploads/file-mask-mpr/slice",
+          scalar_volume: "/v2/uploads/file-mask-mpr/scalar-volume",
+        },
+      },
+    };
+    const scalarVolumeResponse = {
+      data: new Uint16Array(10 * 9 * 7)
+        .map((_, index) => index + 100)
+        .buffer,
+      width: 10,
+      height: 9,
+      depth: 7,
+      dtype: "uint16" as const,
+      bytesPerVoxel: 2,
+      rawMin: 100,
+      rawMax: 729,
+      channel: 1,
+      time: 1,
+      sourceWidth: 10,
+      sourceHeight: 9,
+      sourceDepth: 7,
+      downsampleX: 1,
+      downsampleY: 1,
+      downsampleZ: 1,
+      previewPolicy: "mask-native-integer-v1",
+      sampling: "nearest" as const,
+      sclSlope: 1,
+      sclInter: 0,
+    };
+    let resolveScalarVolume!: (value: typeof scalarVolumeResponse) => void;
+    const getUploadScalarVolume = vi.fn(
+      () =>
+        new Promise<typeof scalarVolumeResponse>((resolve) => {
+          resolveScalarVolume = resolve;
+        })
+    );
+    const uploadSliceUrl = vi.fn(buildSliceUrl);
+    const apiClient = {
+      getUploadScalarVolume,
+      getUploadHistogram: vi.fn(async () => ({
+        file_id: "file-mask-mpr",
+        bins: 256,
+        dtype: "uint16",
+        channels: [1],
+        source: "image-service-source",
+        sample_count: 36,
+        scope: "volume",
+        channel: 1,
+        t: 1,
+        sampling: {
+          algorithm: "scalar-profile-otsu-256-v1",
+          scope: "volume",
+          strategy: "exact",
+          sample_count: 36,
+          z_samples: [0, 3, 6],
+        },
+        threshold: { ...threshold, source_sha256: "mask-mpr-sha", bins: 256 },
+        histogram: {
+          bins: [18, 18],
+          edges: [0, 120, 65535],
+          min: 0,
+          max: 65535,
+          channel_indices: [1],
+          time_index: 1,
+        },
+      })),
+      uploadSliceUrl,
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+    const shellProps = {
+      viewerInfo: maskViewerInfo,
+      apiClient,
+      onSurfaceChange: () => {},
+      selectedDisplayState: maskViewerInfo.display_defaults ?? null,
+      updateSelectedDisplay: () => {},
+      clampedIndices: { x: 4, y: 5, z: 6, t: 1 },
+      debouncedX: 4,
+      debouncedY: 5,
+      debouncedZ: 6,
+      debouncedT: 1,
+      xAxisSize: 10,
+      yAxisSize: 9,
+      zAxisSize: 7,
+      tAxisSize: 2,
+      setSelectedIndex: () => {},
+      selectedCaption: "",
+      captionLoading: false,
+    };
+    const { rerender } = render(
+      <ImageViewerShell {...shellProps} selectedSurface="mpr" />
+    );
+
+    await waitFor(() =>
+      expect(getUploadScalarVolume).toHaveBeenCalledWith(
+        "file-mask-mpr",
+        expect.objectContaining({
+          channel: 1,
+          t: 1,
+          sampling: "nearest",
+          signal: expect.any(AbortSignal),
+        })
+      )
+    );
+    expect(document.querySelectorAll("[data-viewer-mpr-mask-unavailable]")).toHaveLength(3);
+    expect(screen.queryAllByTestId("slice-plane-canvas")).toHaveLength(0);
+    expect(uploadSliceUrl).not.toHaveBeenCalledWith(
+      "file-mask-mpr",
+      expect.objectContaining({ axis: "x" })
+    );
+    expect(uploadSliceUrl).not.toHaveBeenCalledWith(
+      "file-mask-mpr",
+      expect.objectContaining({ axis: "y" })
+    );
+    await act(async () => resolveScalarVolume(scalarVolumeResponse));
+    await waitFor(() => expect(screen.getAllByTestId("slice-plane-canvas")).toHaveLength(3));
+    expect(document.querySelectorAll("[data-viewer-mpr-mask-unavailable]")).toHaveLength(0);
+    const canvases = Object.fromEntries(
+      screen.getAllByTestId("slice-plane-canvas").map((canvas) => [
+        canvas.dataset.title?.slice(0, 1),
+        canvas,
+      ])
+    );
+    expect(canvases.z).toHaveAttribute("data-scalar-slice-index", "6");
+    expect(canvases.y).toHaveAttribute("data-scalar-slice-index", "5");
+    expect(canvases.x).toHaveAttribute("data-scalar-slice-index", "4");
+    expect(canvases.z).toHaveAttribute("data-crosshair-row", "5");
+    expect(canvases.z).toHaveAttribute("data-crosshair-col", "4");
+    expect(canvases.y).toHaveAttribute("data-crosshair-row", "6");
+    expect(canvases.y).toHaveAttribute("data-crosshair-col", "4");
+    expect(canvases.x).toHaveAttribute("data-crosshair-row", "6");
+    expect(canvases.x).toHaveAttribute("data-crosshair-col", "5");
+    expect(canvases.z).toHaveAttribute("data-coordinate-grid-width", "10");
+    expect(canvases.z).toHaveAttribute("data-coordinate-grid-height", "9");
+    expect(canvases.y).toHaveAttribute("data-coordinate-grid-width", "10");
+    expect(canvases.y).toHaveAttribute("data-coordinate-grid-height", "7");
+    expect(canvases.x).toHaveAttribute("data-coordinate-grid-width", "9");
+    expect(canvases.x).toHaveAttribute("data-coordinate-grid-height", "7");
+    expect(screen.getByText("Voxel value")).toBeInTheDocument();
+    expect(screen.getByText("694")).toBeInTheDocument();
+
+    rerender(<ImageViewerShell {...shellProps} selectedSurface="2d" />);
+    const directPlane = await screen.findByTestId("direct-plane-image");
+    expect(directPlane).toHaveAttribute("data-scalar-slice-index", "");
+    expect(directPlane).toHaveAttribute(
+      "data-image-url",
+      expect.stringContaining("scalar_render_mode=mask")
+    );
+    expect(uploadSliceUrl).toHaveBeenCalledWith(
+      "file-mask-mpr",
+      expect.objectContaining({
+        axis: "z",
+        z: 6,
+        t: 1,
+        channels: [1],
+        fullResolution: true,
+        scalarRenderMode: "mask",
+      })
+    );
+  });
+
+  it.each([
+    ["wrong source grid", { sourceWidth: 11 }],
+    ["wrong nearest policy", { previewPolicy: "auto-v1" }],
+    [
+      "wrong Mask dtype",
+      {
+        data: new Uint8Array(4 * 3 * 3).buffer,
+        dtype: "uint8",
+        bytesPerVoxel: 1,
+      },
+    ],
+  ] as const)("fails closed when Mask MPR receives %s provenance", async (_caseName, overrides) => {
+    const maskViewerInfo = makeMaskMprViewerInfo();
+    const payload = makeMaskMprPayload(overrides);
+    const apiClient = {
+      getUploadScalarVolume: vi.fn(async () => payload),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        {...makeMaskMprShellProps(maskViewerInfo, apiClient)}
+        selectedSurface="mpr"
+      />
+    );
+
+    await waitFor(() => expect(screen.getByText("Unavailable")).toBeInTheDocument());
+    expect(document.querySelectorAll("[data-viewer-mpr-mask-unavailable]")).toHaveLength(3);
+    expect(screen.queryAllByTestId("slice-plane-canvas")).toHaveLength(0);
+    expect(screen.queryByText("Preview sample")).not.toBeInTheDocument();
+    expect(screen.queryByText("Unavailable (not sampled in preview)")).not.toBeInTheDocument();
+  });
+
+  it("keeps the exact server Mask slice authoritative without loading a full volume in ordinary 2D", async () => {
+    const maskViewerInfo = makeMaskMprViewerInfo();
+    const getUploadScalarVolume = vi.fn();
+    const uploadSliceUrl = vi.fn(buildSliceUrl);
+    const apiClient = {
+      getUploadScalarVolume,
+      uploadSliceUrl,
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        {...makeMaskMprShellProps(maskViewerInfo, apiClient)}
+        selectedSurface="2d"
+      />
+    );
+    expect(getUploadScalarVolume).not.toHaveBeenCalled();
+
+    const directPlane = await screen.findByTestId("direct-plane-image");
+    await waitFor(() =>
+      expect(directPlane).toHaveAttribute("data-scalar-slice-index", "")
+    );
+    expect(directPlane).toHaveAttribute(
+      "data-image-url",
+      expect.stringContaining("scalar_render_mode=mask")
+    );
+    expect(uploadSliceUrl).toHaveBeenCalledWith(
+      "file-mask-mpr",
+      expect.objectContaining({
+        axis: "z",
+        z: 6,
+        t: 1,
+        channels: [1],
+        fullResolution: true,
+        scalarRenderMode: "mask",
+      })
+    );
+  });
+
+  it("aborts Mask MPR volume work when leaving MPR and starts cleanly on return", async () => {
+    const maskViewerInfo = makeMaskMprViewerInfo();
+    const getUploadScalarVolume = vi.fn(
+      (fileId: string, options: { signal?: AbortSignal }) => {
+        void fileId;
+        void options;
+        return new Promise<ScalarVolumePayload>(() => {});
+      }
+    );
+    const apiClient = {
+      getUploadScalarVolume,
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+    const props = makeMaskMprShellProps(maskViewerInfo, apiClient);
+    const { rerender } = render(
+      <ImageViewerShell {...props} selectedSurface="mpr" />
+    );
+
+    await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(1));
+    const firstSignal = getUploadScalarVolume.mock.calls[0]?.[1]?.signal;
+    expect(firstSignal?.aborted).toBe(false);
+
+    rerender(<ImageViewerShell {...props} selectedSurface="2d" />);
+    await waitFor(() => expect(firstSignal?.aborted).toBe(true));
+
+    rerender(<ImageViewerShell {...props} selectedSurface="mpr" />);
+    await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(2));
+    expect(getUploadScalarVolume.mock.calls[1]?.[1]?.signal?.aborted).toBe(false);
+  });
+
+  it("revalidates Mask payloads when source expectations or the ApiClient identity changes", async () => {
+    const initialViewerInfo = makeMaskMprViewerInfo();
+    const resizedViewerInfo: UploadViewerInfo = {
+      ...initialViewerInfo,
+      axis_sizes: { ...initialViewerInfo.axis_sizes, X: 11 },
+      metadata: {
+        ...initialViewerInfo.metadata,
+        array_shape: [2, 2, 7, 9, 11],
+      },
+    };
+    const clientOneResolvers: Array<(value: ScalarVolumePayload) => void> = [];
+    const clientOneGetScalarVolume = vi.fn(
+      () =>
+        new Promise<ScalarVolumePayload>((resolve) => {
+          clientOneResolvers.push(resolve);
+        })
+    );
+    const clientOne = {
+      getUploadScalarVolume: clientOneGetScalarVolume,
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+    let resolveClientTwo!: (value: ScalarVolumePayload) => void;
+    const clientTwoGetScalarVolume = vi.fn(
+      () =>
+        new Promise<ScalarVolumePayload>((resolve) => {
+          resolveClientTwo = resolve;
+        })
+    );
+    const clientTwo = {
+      getUploadScalarVolume: clientTwoGetScalarVolume,
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+    const { rerender } = render(
+      <ImageViewerShell
+        {...makeMaskMprShellProps(initialViewerInfo, clientOne)}
+        selectedSurface="mpr"
+      />
+    );
+
+    await waitFor(() => expect(clientOneGetScalarVolume).toHaveBeenCalledTimes(1));
+    await act(async () => clientOneResolvers[0]?.(makeMaskMprPayload()));
+    await waitFor(() => expect(screen.getAllByTestId("slice-plane-canvas")).toHaveLength(3));
+
+    rerender(
+      <ImageViewerShell
+        {...makeMaskMprShellProps(resizedViewerInfo, clientOne)}
+        selectedSurface="mpr"
+        xAxisSize={11}
+      />
+    );
+    expect(document.querySelectorAll("[data-viewer-mpr-mask-unavailable]")).toHaveLength(3);
+    expect(screen.queryAllByTestId("slice-plane-canvas")).toHaveLength(0);
+    await waitFor(() => expect(clientOneGetScalarVolume).toHaveBeenCalledTimes(2));
+    await act(async () =>
+      clientOneResolvers[1]?.(makeMaskMprPayload({ sourceWidth: 11 }))
+    );
+    await waitFor(() => expect(screen.getAllByTestId("slice-plane-canvas")).toHaveLength(3));
+
+    rerender(
+      <ImageViewerShell
+        {...makeMaskMprShellProps(resizedViewerInfo, clientTwo)}
+        selectedSurface="mpr"
+        xAxisSize={11}
+      />
+    );
+    expect(document.querySelectorAll("[data-viewer-mpr-mask-unavailable]")).toHaveLength(3);
+    expect(screen.queryAllByTestId("slice-plane-canvas")).toHaveLength(0);
+    await waitFor(() => expect(clientTwoGetScalarVolume).toHaveBeenCalledTimes(1));
+    await act(async () =>
+      resolveClientTwo(makeMaskMprPayload({ sourceWidth: 11 }))
+    );
+    await waitFor(() => expect(screen.getAllByTestId("slice-plane-canvas")).toHaveLength(3));
+  });
+
+  it("does not snap or disclose exact values for a downsampled BOX intensity preview", async () => {
+    const intensityViewerInfo = makeIntensityMprViewerInfo();
+    const payload = makeMaskMprPayload({
+      data: new Uint16Array(4 * 3 * 3)
+        .map((_, index) => index + 100)
+        .buffer,
+      width: 4,
+      height: 3,
+      depth: 3,
+      rawMax: 135,
+      downsampleX: 3,
+      downsampleY: 4,
+      downsampleZ: 3,
+      channel: 0,
+      time: 0,
+      previewPolicy: "auto-v1",
+      sampling: "box",
+    });
+    let resolveScalarVolume!: (value: ScalarVolumePayload) => void;
+    const getUploadScalarVolume = vi.fn(
+      () =>
+        new Promise<ScalarVolumePayload>((resolve) => {
+          resolveScalarVolume = resolve;
+        })
+    );
+    const apiClient = {
+      getUploadScalarVolume,
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "/preview"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={intensityViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="mpr"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={intensityViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 4, y: 5, z: 6, t: 0 }}
+        debouncedX={4}
+        debouncedY={5}
+        debouncedZ={6}
+        debouncedT={0}
+        xAxisSize={10}
+        yAxisSize={9}
+        zAxisSize={7}
+        tAxisSize={1}
+        setSelectedIndex={() => {}}
+        selectedCaption=""
+        captionLoading={false}
+      />
+    );
+
+    await waitFor(() => expect(getUploadScalarVolume).toHaveBeenCalledTimes(1));
+    await act(async () => resolveScalarVolume(payload));
+    await waitFor(() => expect(screen.getAllByTestId("slice-plane-canvas")).toHaveLength(3));
+    const canvases = Object.fromEntries(
+      screen.getAllByTestId("slice-plane-canvas").map((canvas) => [
+        canvas.dataset.title?.slice(0, 1),
+        canvas,
+      ])
+    );
+    expect(canvases.z).toHaveAttribute("data-scalar-slice-index", "2");
+    expect(canvases.y).toHaveAttribute("data-scalar-slice-index", "1");
+    expect(canvases.x).toHaveAttribute("data-scalar-slice-index", "1");
+    expect(canvases.z).toHaveAttribute("data-crosshair-row", "1");
+    expect(canvases.z).toHaveAttribute("data-crosshair-col", "1");
+    expect(canvases.y).toHaveAttribute("data-crosshair-row", "2");
+    expect(canvases.y).toHaveAttribute("data-crosshair-col", "1");
+    expect(canvases.x).toHaveAttribute("data-crosshair-row", "2");
+    expect(canvases.x).toHaveAttribute("data-crosshair-col", "1");
+    expect(canvases.z).toHaveAttribute("data-coordinate-grid-width", "4");
+    expect(canvases.z).toHaveAttribute("data-coordinate-grid-height", "3");
+    expect(canvases.y).toHaveAttribute("data-coordinate-grid-width", "4");
+    expect(canvases.x).toHaveAttribute("data-coordinate-grid-width", "3");
+    expect(screen.queryByText("Preview sample")).not.toBeInTheDocument();
+    expect(screen.queryByText("Voxel value")).not.toBeInTheDocument();
+  });
+
   it("shows source voxel values for the single selected scalar MPR channel", async () => {
     const scalarPlanes = {
       z: {
@@ -850,7 +2255,7 @@ describe("ImageViewerShell", () => {
         }),
         fusion_method: "a",
         channels: [1],
-        volume_channel: 0,
+        volume_channel: 1,
       },
       service_urls: {
         ...viewerInfo.service_urls,
@@ -897,6 +2302,7 @@ describe("ImageViewerShell", () => {
         downsampleY: 1,
         downsampleZ: 1,
         previewPolicy: "native-exact-v1",
+        sampling: "box",
         sclSlope: 1,
         sclInter: 0,
       })),
@@ -928,10 +2334,15 @@ describe("ImageViewerShell", () => {
     );
 
     await waitFor(() =>
-      expect(apiClient.getUploadScalarVolume).toHaveBeenCalledWith("file-123", {
-        t: 0,
-        channel: 1,
-      })
+      expect(apiClient.getUploadScalarVolume).toHaveBeenCalledWith(
+        "file-123",
+        expect.objectContaining({
+          t: 0,
+          channel: 1,
+          sampling: "box",
+          signal: expect.any(AbortSignal),
+        })
+      )
     );
     expect(await screen.findByText("Voxel value")).toBeInTheDocument();
     expect(screen.getByText("60")).toBeInTheDocument();
@@ -1042,6 +2453,7 @@ describe("ImageViewerShell", () => {
           downsampleY: 1,
           downsampleZ: 1,
           previewPolicy: "native-exact-v1",
+          sampling: "box",
           sclSlope: 1,
           sclInter: 0,
         };
@@ -1088,25 +2500,35 @@ describe("ImageViewerShell", () => {
     render(<Harness />);
 
     await waitFor(() =>
-      expect(apiClient.getUploadScalarVolume).toHaveBeenCalledWith("file-123", {
-        t: 0,
-        channel: 0,
-      })
+      expect(apiClient.getUploadScalarVolume).toHaveBeenCalledWith(
+        "file-123",
+        expect.objectContaining({
+          t: 0,
+          channel: 0,
+          sampling: "box",
+          signal: expect.any(AbortSignal),
+        })
+      )
     );
     openAdvancedControls();
     await chooseSelectOption("Volume channel", "Channel 2");
 
     await waitFor(() =>
-      expect(apiClient.getUploadScalarVolume).toHaveBeenLastCalledWith("file-123", {
-        t: 0,
-        channel: 1,
-      })
+      expect(apiClient.getUploadScalarVolume).toHaveBeenLastCalledWith(
+        "file-123",
+        expect.objectContaining({
+          t: 0,
+          channel: 1,
+          sampling: "box",
+          signal: expect.any(AbortSignal),
+        })
+      )
     );
     expect(screen.getAllByTestId("slice-plane-canvas")[0].dataset.imageUrl).toContain("channels=1");
     expect(await screen.findByText("600")).toBeInTheDocument();
   });
 
-  it("uses scalar volume histograms for the selected volume channel", async () => {
+  it("does not eagerly fetch a volume histogram on a cold intensity load", async () => {
     const scalarPlanes = {
       z: {
         axis: "z" as const,
@@ -1193,8 +2615,9 @@ describe("ImageViewerShell", () => {
       },
     };
     const apiClient = {
-      getUploadHistogram: vi.fn(async (_fileId: string, config?: { channels?: number[] }) => {
-        const channel = config?.channels?.[0] ?? 0;
+      getUploadHistogram: vi.fn(
+        async (_fileId: string, config?: { channel?: number; channels?: number[] }) => {
+        const channel = config?.channel ?? config?.channels?.[0] ?? 0;
         return {
           ...histogram,
           dtype: "int16",
@@ -1210,7 +2633,8 @@ describe("ImageViewerShell", () => {
             channel_indices: [channel],
           },
         };
-      }),
+        }
+      ),
       uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
       uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
     } as unknown as ApiClient;
@@ -1245,18 +2669,13 @@ describe("ImageViewerShell", () => {
 
     render(<Harness />);
 
-    await waitFor(() =>
-      expect(apiClient.getUploadHistogram).toHaveBeenCalledWith("file-123", { bins: 256, channels: [1] })
-    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(apiClient.getUploadHistogram).not.toHaveBeenCalled();
     openAdvancedControls();
-    expect(await screen.findByText("int16 • 8 samples")).toBeInTheDocument();
-    expect(screen.getByText("-5-500")).toBeInTheDocument();
-
     fireEvent.click(screen.getByRole("button", { name: "Channel 1" }));
-
-    await waitFor(() =>
-      expect(apiClient.getUploadHistogram).toHaveBeenLastCalledWith("file-123", { bins: 256, channels: [0] })
-    );
+    expect(apiClient.getUploadHistogram).not.toHaveBeenCalled();
   });
 
   it("lets scalar volume rendering switch to a perceptual colormap", async () => {

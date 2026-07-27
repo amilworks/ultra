@@ -73,6 +73,11 @@ from ultra_deepagents.progress_guard import (
 )
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
+from ultra_deepagents.steering import (
+    build_steering_inbox,
+    steer_ids_in_messages,
+    steer_message_id,
+)
 from ultra_deepagents.title_generation import (
     resolve_conversation_title_task,
     start_conversation_title_task,
@@ -607,6 +612,13 @@ async def run_job(
                 cache_root=Path(settings.memory_root).expanduser() / "papers",
             )
         evaluation_surface: dict[str, str] = {}
+        # Mid-run steering: cleanroom evaluation profiles run with a sealed
+        # surface, so they never grow a steering channel.
+        steering_inbox = (
+            build_steering_inbox(settings, run_id=context.run_id)
+            if evaluation_policy is None
+            else None
+        )
         agent = _build_agent_with_optional_checkpointer(
             agent_factory,
             settings,
@@ -615,6 +627,7 @@ async def run_job(
             context=context,
             checkpointer=checkpointer,
             surface_attestation_sink=evaluation_surface.update,
+            steering_inbox=steering_inbox,
         )
         if evaluation_policy is not None and not evaluation_surface:
             if agent_factory is build_research_agent:
@@ -691,6 +704,7 @@ async def run_job(
         completion_continuations_used = 0
         model_stream_recoveries_used = 0
         progress_stall_recoveries_used = 0
+        steer_barrier_rounds_used = 0
         previous_missing_kinds: set[str] | None = None
         previous_artifact_signature: frozenset[tuple[str, str]] | None = None
         run_usage = _usage_from_prior_payload(prior_usage)
@@ -877,6 +891,22 @@ async def run_job(
                 not missing_kinds
                 or completion_continuations_used >= settings.completion_max_continuations
             ):
+                # Finalization steer barrier: atomically stop accepting steers
+                # and apply any that arrived too late for the in-loop
+                # middleware. An accepted steer either reaches the model here
+                # or was already injected — it can never silently miss the run.
+                if await _steer_barrier_continuation(
+                    steering_inbox,
+                    messages=messages,
+                    attempt_result=attempt_result,
+                    artifact_events=artifact_events,
+                    context=context,
+                    sequencer=sequencer,
+                    publish_event=publish_event,
+                    rounds_used=steer_barrier_rounds_used,
+                ):
+                    steer_barrier_rounds_used += 1
+                    continue
                 break
 
             # No-progress guard: if this continuation could not change the set of
@@ -891,6 +921,18 @@ async def run_job(
                 and set(missing_kinds) == previous_missing_kinds
                 and artifact_signature == previous_artifact_signature
             ):
+                if await _steer_barrier_continuation(
+                    steering_inbox,
+                    messages=messages,
+                    attempt_result=attempt_result,
+                    artifact_events=artifact_events,
+                    context=context,
+                    sequencer=sequencer,
+                    publish_event=publish_event,
+                    rounds_used=steer_barrier_rounds_used,
+                ):
+                    steer_barrier_rounds_used += 1
+                    continue
                 break
             previous_missing_kinds = set(missing_kinds)
             previous_artifact_signature = artifact_signature
@@ -976,6 +1018,95 @@ def _cancel_title_task(task: asyncio.Task | None) -> None:
         task.cancel()
 
 
+_STEER_BARRIER_MAX_ROUNDS = 3
+
+
+async def _steer_barrier_continuation(
+    steering_inbox: Any | None,
+    *,
+    messages: list[dict[str, Any]],
+    attempt_result: AgentAttemptResult,
+    artifact_events: list[dict[str, Any]],
+    context: AgentRunContext,
+    sequencer: RunEventSequencer,
+    publish_event: PublishEvent,
+    rounds_used: int,
+) -> bool:
+    """Close the steer barrier; feed still-unseen steers into one more pass.
+
+    True means steers were appended to ``messages`` and the caller should
+    ``continue`` the attempt loop so the model responds to them before the
+    terminal event. The appended dicts carry the steer's message_id as the
+    message id, so ``add_messages`` collapses them with any copy the in-loop
+    middleware already injected. Bounded by ``_STEER_BARRIER_MAX_ROUNDS`` —
+    an ack that can never land must not keep a run alive forever (leftovers
+    surface loudly via the control plane's terminal steer.missed sweep).
+    """
+    if steering_inbox is None:
+        return False
+    if rounds_used >= _STEER_BARRIER_MAX_ROUNDS:
+        logger.error(
+            "Steer barrier rounds exhausted; finishing with steers still pending.",
+            extra={"run_id": context.run_id},
+        )
+        return False
+    pending = await steering_inbox.close_barrier()
+    if not pending:
+        return False
+    present = steer_ids_in_messages(messages)
+    fresh = [
+        steer
+        for steer in pending
+        if steer_message_id(steer) and steer_message_id(steer) not in present
+    ]
+    if not fresh:
+        # Already in the conversation (middleware injected them; only the ack
+        # was lost). Re-ack rather than re-run: the model has seen them.
+        for steer in pending:
+            await steering_inbox.ack(str(steer.get("steer_id") or ""))
+        return False
+    notice_lines = [steer.get("content", "") for steer in fresh]
+    notice = "Applying steering update(s) received at completion: " + " | ".join(
+        line.strip()[:120] for line in notice_lines if str(line).strip()
+    )
+    await publish_event(
+        sequencer.stamp(
+            RunEvent(
+                run_id=context.run_id,
+                thread_id=context.thread_id,
+                event_kind="trace.message.delta",
+                event_type="trace",
+                node_name="steering_barrier",
+                agent_role="steering_barrier",
+                level="info",
+                message=notice,
+                payload={
+                    "text": notice,
+                    "steer_ids": [str(steer.get("steer_id") or "") for steer in fresh],
+                    "barrier_round": rounds_used + 1,
+                },
+            ).to_dict()
+        )
+    )
+    current_response_text = _choose_response_text(
+        final_response_text=attempt_result.final_response_text,
+        streamed_response_text=attempt_result.streamed_response_text,
+        post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
+        artifact_events=artifact_events,
+    )
+    if current_response_text.strip():
+        messages.append({"role": "assistant", "content": current_response_text})
+    for steer in fresh:
+        messages.append(
+            {
+                "role": "user",
+                "content": str(steer.get("content") or ""),
+                "id": steer_message_id(steer),
+            }
+        )
+    return True
+
+
 def _build_agent_with_optional_checkpointer(
     agent_factory: Callable[..., Any],
     settings: RuntimeSettings,
@@ -985,6 +1116,7 @@ def _build_agent_with_optional_checkpointer(
     context: AgentRunContext,
     checkpointer: Any | None,
     surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
+    steering_inbox: Any | None = None,
 ) -> Any:
     """Build the agent, passing the checkpointer only when the factory accepts
     it so custom/test factories without that parameter still work."""
@@ -1007,6 +1139,8 @@ def _build_agent_with_optional_checkpointer(
         "surface_attestation_sink" in parameters or accepts_var_kwargs
     ):
         kwargs["surface_attestation_sink"] = surface_attestation_sink
+    if steering_inbox is not None and ("steering_inbox" in parameters or accepts_var_kwargs):
+        kwargs["steering_inbox"] = steering_inbox
     return agent_factory(settings, **kwargs)
 
 
@@ -2195,17 +2329,29 @@ def _response_references_artifacts(
     return False
 
 
+def _is_steering_seed_message(message: dict[str, Any]) -> bool:
+    metadata = message.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("kind") == "steering"
+
+
 def _run_request_text(job: RunJobEnvelope) -> str:
     if evaluation_profile_policy(job.evaluation_profile) is not None:
         return job.goal
     parts = [job.goal]
+    # The request = the last NON-steering user message. A requeue-seeded
+    # steer ("also label the axes") must not become the whole request and
+    # erase the original demand classification — steers only ADD, appended
+    # after the request below.
     for message in reversed(job.messages or []):
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or message.get("type") or "").lower()
-        if role in {"user", "human"}:
+        if role in {"user", "human"} and not _is_steering_seed_message(message):
             parts.append(_chunk_text(message.get("content")))
             break
+    for message in job.messages or []:
+        if isinstance(message, dict) and _is_steering_seed_message(message):
+            parts.append(_chunk_text(message.get("content")))
     return "\n".join(part for part in parts if part)
 
 
@@ -2213,7 +2359,18 @@ def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
     policy = evaluation_profile_policy(job.evaluation_profile)
     if policy is not None:
         return list(goal_only_messages(policy.name, job.goal))
-    return list(job.messages or [{"role": "user", "content": job.goal}])
+    messages = list(job.messages or [{"role": "user", "content": job.goal}])
+    # Requeue-seeded steering rows carry their thread message_id as the graph
+    # message id, unifying the add_messages id-dedup invariant with the
+    # steering middleware's injections (see steering.py).
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict) and _is_steering_seed_message(message):
+            row_id = str(message.get("message_id") or "").strip()
+            if row_id and not message.get("id"):
+                message = {**message, "id": row_id}
+        normalized.append(message)
+    return normalized
 
 
 def _requested_artifact_kinds(text: str) -> list[str]:

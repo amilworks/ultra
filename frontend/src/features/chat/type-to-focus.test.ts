@@ -32,7 +32,9 @@ const predicateBody = (): string => {
 const effectBody = (): string => {
   const start = appSource.indexOf("  // Type-to-focus: start typing anywhere in a chat");
   expect(start, "type-to-focus effect is missing").toBeGreaterThan(-1);
-  return appSource.slice(start, appSource.indexOf("  }, [activePanel, authStatus]);", start));
+  const end = appSource.indexOf("  }, [activePanel, authStatus, viewerOpen]);", start);
+  expect(end, "type-to-focus effect end marker moved").toBeGreaterThan(start);
+  return appSource.slice(start, end);
 };
 
 describe("type-to-focus captures the keystroke", () => {
@@ -112,6 +114,9 @@ describe("type-to-focus keeps its hands off everything else", () => {
     // keyboard behaviour; the composer is not on screen there.
     expect(effectBody()).toMatch(/activePanel !== "chat"/);
     expect(effectBody()).toMatch(/authStatus !== "authenticated"/);
+    // The Lens/file viewer overlays the chat; typing there must not warp
+    // focus down into a composer the user cannot see.
+    expect(effectBody()).toMatch(/viewerOpen/);
   });
 
   it("unsubscribes on cleanup", () => {

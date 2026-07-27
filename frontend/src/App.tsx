@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { flushSync } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import {
   ChatContainerContent,
   ChatContainerRoot,
@@ -86,6 +86,20 @@ import {
 } from "./lib/figureLightbox";
 import { bundleRootForRelativePath, groupPendingUploads } from "./lib/pendingBundles";
 import { filesFromClipboard } from "./lib/clipboardFiles";
+import {
+  draftWithQuotedSelection,
+  pastedTextFile,
+  shouldAttachPastedText,
+} from "./lib/pasted-text";
+import {
+  applyTranscriptFindHighlights,
+  clearTranscriptFindHighlights,
+  computeTranscriptFindMatches,
+} from "./lib/transcript-find";
+import { textFromSelection } from "./lib/selection-capture";
+import { TranscriptFindBar } from "./components/chat/TranscriptFindBar";
+// Type-only: erased at compile time, so react-virtuoso itself stays lazy.
+import type { VirtuosoHandle } from "react-virtuoso";
 import {
   collectDroppedFiles,
   isOsFileDrag,
@@ -284,6 +298,7 @@ import {
   Square,
   SquarePen,
   Table2,
+  TextQuote,
   Trash,
   X,
 } from "lucide-react";
@@ -602,6 +617,11 @@ type ConversationState = {
      stops rebuilding a deleted turn from control_runs.response_text — see
      readDeletedRunIds in lib/api.ts for why the absence alone is not enough. */
   deletedRunIds: string[];
+  /* Phase-0 follow-ups ("double texting", enqueue flavour): text composed while
+     a run is in flight, dispatched as the NEXT turn on clean completion. One
+     growing message, not a list — additional mid-run sends append a paragraph,
+     so completion fires exactly one run instead of a surprise chain of them. */
+  queuedFollowup: string;
   prompt: string;
   messages: UiMessage[];
   pendingFiles: File[];
@@ -1197,6 +1217,7 @@ const createConversationState = (): ConversationState => {
     historyMessageCount: 0,
     historyRunning: false,
     deletedRunIds: [],
+    queuedFollowup: "",
     prompt: "",
     messages: [],
     pendingFiles: [],
@@ -1587,6 +1608,11 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     deletedRunIds: Array.isArray(state.deletedRunIds)
       ? state.deletedRunIds.filter((id): id is string => typeof id === "string" && Boolean(id))
       : [],
+    /* Survives reload mid-run. If the run finished while the tab was away,
+       the queued text returns to the DRAFT on load rather than auto-sending —
+       a reload cannot witness the completion, and hydrated state can disguise
+       a failed (or still-active) run as a clean one. */
+    queuedFollowup: typeof state.queuedFollowup === "string" ? state.queuedFollowup : "",
   };
 };
 
@@ -1686,6 +1712,7 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
       chatError: conversation.chatError,
       streamingMessageId: conversation.streamingMessageId,
       deletedRunIds: conversation.deletedRunIds ?? [],
+      queuedFollowup: conversation.queuedFollowup ?? "",
     },
   };
 };
@@ -1945,6 +1972,9 @@ const ConversationMessageRow = memo(
     if (!isAssistant) {
       return (
         <Message
+          /* Row identity for ⌘F: highlight painting and scroll-into-view find
+             mounted rows by this attribute, whichever transcript mode is live. */
+          data-message-id={message.id}
           className={cn(
             "chat-width-frame mx-auto w-full justify-end px-4 sm:px-6",
             isLastMessage && "pk-message-enter"
@@ -2017,6 +2047,7 @@ const ConversationMessageRow = memo(
 
     return (
       <Message
+        data-message-id={message.id}
         className={cn(
           "chat-width-frame mx-auto w-full justify-start px-4 sm:px-6",
           isLastMessage && "pk-message-enter"
@@ -2277,6 +2308,10 @@ type ConversationTranscriptProps = {
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
   actions: ConversationTranscriptActions;
+  /* ⌘F navigation: which message to bring into view. The nonce forces a
+     re-scroll when the user re-navigates to the same match after scrolling
+     away — identity alone would look unchanged. */
+  findTarget: { messageId: string; messageIndex: number; nonce: number } | null;
 };
 
 const ConversationTranscript = memo(
@@ -2295,6 +2330,7 @@ const ConversationTranscript = memo(
     bisqueLinksByFileId,
     apiClient,
     actions,
+    findTarget,
   }: ConversationTranscriptProps) {
     const conversationRunArtifacts = useMemo(
       () => collectConversationRunArtifacts(messages),
@@ -2322,6 +2358,42 @@ const ConversationTranscript = memo(
       messages,
       messageWindow
     );
+    const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+    /* ⌘F: bring the current match's message into view. Both transcript modes
+       hide messages from the DOM — Virtuoso virtualizes long chats, and the
+       windowed path hides the head behind "Show earlier messages" — so each
+       needs its own route there. Highlighting is NOT done here: App retries
+       paint until this scroll has actually mounted the row. */
+    useEffect(() => {
+      if (!findTarget) {
+        return;
+      }
+      const index =
+        messages[findTarget.messageIndex]?.id === findTarget.messageId
+          ? findTarget.messageIndex
+          : messages.findIndex((message) => message.id === findTarget.messageId);
+      if (index < 0) {
+        return;
+      }
+      if (shouldVirtualizeMessages) {
+        virtuosoRef.current?.scrollToIndex({ index, align: "center" });
+        return;
+      }
+      const hiddenCount = Math.max(messages.length - messageWindow, 0);
+      if (index < hiddenCount) {
+        // The match is behind the "Show earlier messages" fold — widen the
+        // window exactly far enough to include it.
+        setMessageWindow(messages.length - index);
+      }
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector(`[data-message-id="${CSS.escape(findTarget.messageId)}"]`)
+          ?.scrollIntoView({ block: "center" });
+      });
+      // Deliberately narrow: re-running on every messages identity change would
+      // yank the scroll position on each streaming delta while find is open.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [findTarget]);
     const renderMessageRow = useCallback(
       (message: UiMessage, index: number, totalMessages: number) => (
         <ErrorBoundary
@@ -2453,6 +2525,7 @@ const ConversationTranscript = memo(
           // then the bounded-window fallback below renders (already DOM-bounded), then it swaps in.
           <Suspense fallback={null}>
             <LazyVirtuoso
+              ref={virtuosoRef}
               className="w-full"
               customScrollParent={virtualizedScrollParent}
               data={messages}
@@ -2490,6 +2563,7 @@ const ConversationTranscript = memo(
     previousProps.welcomeName === nextProps.welcomeName &&
     previousProps.welcomeNonce === nextProps.welcomeNonce &&
     previousProps.messages === nextProps.messages &&
+    previousProps.findTarget === nextProps.findTarget &&
     previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
     previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
     previousProps.blankChatUsageError === nextProps.blankChatUsageError &&
@@ -6359,6 +6433,18 @@ export function App() {
     [activeConversation, updateActiveConversation]
   );
 
+  /* A paste that reads as data rather than prompt (see shouldAttachPastedText)
+     becomes a .txt attachment instead of flooding the composer. The chip IS the
+     feedback — no toast: it appears where the text would have gone, and
+     removing it is the escape hatch for anyone who truly wanted the text
+     inline. */
+  const attachPastedText = useCallback(
+    (text: string): void => {
+      attachFilesToActiveConversation([pastedTextFile(text)]);
+    },
+    [attachFilesToActiveConversation]
+  );
+
   // Window-level file-drag tracking: (a) preventDefault on dragover/drop so a
   // drop that misses every target never navigates the tab away from the app,
   // and (b) a depth counter (dragenter/dragleave fire once per element
@@ -6608,7 +6694,7 @@ export function App() {
 
   // Type-to-focus: start typing anywhere in a chat and the composer takes it.
   useEffect(() => {
-    if (authStatus !== "authenticated" || activePanel !== "chat") {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
       return;
     }
     const handleTypeToFocus = (event: KeyboardEvent): void => {
@@ -6637,7 +6723,8 @@ export function App() {
     };
     window.addEventListener("keydown", handleTypeToFocus);
     return () => window.removeEventListener("keydown", handleTypeToFocus);
-  }, [activePanel, authStatus]);
+  }, [activePanel, authStatus, viewerOpen]);
+
 
   const isChatStopRequested = useCallback((conversationId: string): boolean => {
     const normalizedConversationId = conversationId.trim();
@@ -10340,6 +10427,477 @@ export function App() {
     }
   }, [activeConversation, dismissedSlashPrompt]);
 
+  /* Paste-to-focus: ⌘V anywhere in a chat routes the clipboard to the composer,
+     the paste sibling of type-to-focus above and of the Resources-panel
+     paste-to-upload. Unlike a keydown, a paste's default action targets the
+     event's own target — focusing mid-flight redirects nothing — and on an
+     uneditable target that default action is a no-op. So this handler does the
+     work itself: clipboardData is fully readable here, files attach through the
+     same path as the composer's own onPaste, and text lands in the draft (or
+     becomes an attachment when it reads as data). No double-insert risk: when
+     the composer IS focused this never runs (its target is editable), and when
+     it is not, nothing else would have consumed the paste. */
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+      return;
+    }
+    const handleChatPaste = (event: ClipboardEvent): void => {
+      const textarea = composerTextareaRef.current;
+      if (!textarea || textarea.disabled || !event.clipboardData) {
+        return;
+      }
+      if (isEditableEventTarget(event.target) || hasBlockingOverlay()) {
+        return;
+      }
+      const pastedFiles = filesFromClipboard(event.clipboardData);
+      if (pastedFiles.length > 0) {
+        event.preventDefault();
+        attachFilesToActiveConversation(pastedFiles);
+        return;
+      }
+      const pastedText = event.clipboardData.getData("text/plain");
+      if (!pastedText) {
+        return;
+      }
+      event.preventDefault();
+      if (shouldAttachPastedText(pastedText)) {
+        attachPastedText(pastedText);
+      } else {
+        setActivePromptValue((previous) => {
+          if (!previous) {
+            return pastedText;
+          }
+          // A paste aimed at nothing in particular lands after the draft; a
+          // newline keeps it from gluing onto the last drafted word.
+          return /\s$/.test(previous) ? `${previous}${pastedText}` : `${previous}\n${pastedText}`;
+        });
+      }
+      // rAF focus is fine here (unlike type-to-focus): there is no default
+      // action left to catch, and it runs after React commits the new draft,
+      // so the caret lands at the true end.
+      focusComposerTextarea();
+    };
+    window.addEventListener("paste", handleChatPaste);
+    return () => window.removeEventListener("paste", handleChatPaste);
+  }, [
+    activePanel,
+    attachFilesToActiveConversation,
+    attachPastedText,
+    authStatus,
+    focusComposerTextarea,
+    setActivePromptValue,
+    viewerOpen,
+  ]);
+
+  /* Ask-about-selection: highlight transcript text, get a quiet chip that
+     quotes it into the composer. The text is captured at show time, not at
+     click time — the chip's own mousedown would otherwise collapse the
+     selection before click fires (belt: stored text; braces: the chip also
+     preventDefaults its mousedown). */
+  const [selectionAsk, setSelectionAsk] = useState<{
+    text: string;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  const askAboutSelection = useCallback((): void => {
+    const ask = selectionAsk;
+    setSelectionAsk(null);
+    if (!ask) {
+      return;
+    }
+    /* Collapse the DOM selection the moment it is consumed. Review-confirmed:
+       without this, the click's own mouseup (and Escape's keyup) re-measured
+       the still-live selection and resurrected the chip a frame after every
+       dismissal — and the grey inactive highlight lingered over the quoted
+       text. One line fixes all three. */
+    window.getSelection()?.removeAllRanges();
+    // A selection large enough to read as data gets the same treatment as a
+    // large paste: attachment chip, not a hundred quoted lines.
+    if (shouldAttachPastedText(ask.text)) {
+      attachPastedText(ask.text);
+    } else {
+      // Markdown blockquote, visible and editable — the user sees exactly the
+      // context the model will see, and can trim it line by line.
+      setActivePromptValue((previous) => draftWithQuotedSelection(previous, ask.text));
+    }
+    focusComposerTextarea();
+  }, [attachPastedText, focusComposerTextarea, selectionAsk, setActivePromptValue]);
+
+  useEffect(() => {
+    if (
+      authStatus !== "authenticated" ||
+      activePanel !== "chat" ||
+      viewerOpen ||
+      // Fine pointers only: on touch the OS selection callout owns this
+      // interaction, and a 30px chip would fight it while breaking the 44px
+      // target law. Gating the whole effect keeps touch entirely native.
+      !window.matchMedia("(pointer: fine)").matches
+    ) {
+      setSelectionAsk(null);
+      return;
+    }
+    /* Reads the live selection and produces the chip's anchor, or null.
+       Restricted to `.pk-message` at BOTH ends so sidebar titles, composer
+       internals and stray UI text never grow a chip. */
+    const measureSelection = (): { text: string; x: number; y: number } | null => {
+      // A dialog above the transcript, or a composer that cannot accept a
+      // quote yet (conversation still hydrating), means no offer.
+      if (hasBlockingOverlay() || composerTextareaRef.current?.disabled) {
+        return null;
+      }
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+        return null;
+      }
+      /* KaTeX-aware: a quoted formula carries its actual TeX source
+         ($O(n^3)$), not the visible glyph soup — the render embeds the
+         original in an annotation node, and the model reads TeX fluently. */
+      const text = textFromSelection(selection);
+      if (!text.trim()) {
+        return null;
+      }
+      const withinMessage = (node: Node | null): boolean => {
+        const element =
+          node instanceof Element ? node : (node?.parentElement ?? null);
+        return Boolean(element?.closest(".pk-message"));
+      };
+      if (!withinMessage(selection.anchorNode) || !withinMessage(selection.focusNode)) {
+        return null;
+      }
+      const rect = selection.getRangeAt(0).getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) {
+        return null;
+      }
+      // Scrolled out of the viewport: stand down instead of pinning to the
+      // clamped edge over unrelated UI (review finding — the clamps below are
+      // for PARTIALLY visible selections, not gone ones).
+      if (
+        rect.bottom < 0 ||
+        rect.top > window.innerHeight ||
+        rect.right < 0 ||
+        rect.left > window.innerWidth
+      ) {
+        return null;
+      }
+      return {
+        text,
+        // Clamped so the chip never slides off-viewport on selections that
+        // start at the edge; it renders translate(-50%, -100%) from this point.
+        x: Math.min(Math.max(rect.left + rect.width / 2, 72), window.innerWidth - 72),
+        y: Math.max(rect.top, 44),
+      };
+    };
+    // Shown on mouseup/keyup rather than selectionchange, so the chip does not
+    // flicker alongside the pointer mid-drag. selectionchange only ever hides.
+    // The guards mirror dismissOnKey — review-confirmed that an unguarded
+    // keyup re-showed the chip one frame after Escape dismissed it (Escape
+    // does not collapse a browser selection).
+    let revealFrame = 0;
+    const reveal = (event: Event): void => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key === "Escape" || isEditableEventTarget(event.target)) {
+          return;
+        }
+      }
+      if (event.target instanceof Element && event.target.closest(".chat-selection-ask")) {
+        return;
+      }
+      if (revealFrame) {
+        window.cancelAnimationFrame(revealFrame);
+      }
+      revealFrame = window.requestAnimationFrame(() => {
+        revealFrame = 0;
+        setSelectionAsk(measureSelection());
+      });
+    };
+    const collapseWatch = (): void => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) {
+        setSelectionAsk(null);
+      }
+    };
+    const dismissOnKey = (event: KeyboardEvent): void => {
+      // Escape dismisses outright; typing (which type-to-focus routes to the
+      // composer) means the moment has passed — the highlight may linger as an
+      // inactive selection, but the chip should not.
+      if (event.key === "Escape" || isEditableEventTarget(event.target)) {
+        setSelectionAsk(null);
+      }
+    };
+    // Track the transcript while it scrolls under a live selection: recompute
+    // from the same DOM range, rAF-throttled; hide if it left the viewport.
+    let repositionFrame = 0;
+    const reposition = (): void => {
+      if (repositionFrame) {
+        return;
+      }
+      repositionFrame = window.requestAnimationFrame(() => {
+        repositionFrame = 0;
+        setSelectionAsk((current) => (current ? measureSelection() : current));
+      });
+    };
+    window.addEventListener("mouseup", reveal);
+    window.addEventListener("keyup", reveal);
+    document.addEventListener("selectionchange", collapseWatch);
+    window.addEventListener("keydown", dismissOnKey);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("mouseup", reveal);
+      window.removeEventListener("keyup", reveal);
+      document.removeEventListener("selectionchange", collapseWatch);
+      window.removeEventListener("keydown", dismissOnKey);
+      window.removeEventListener("scroll", reposition, true);
+      if (repositionFrame) {
+        window.cancelAnimationFrame(repositionFrame);
+      }
+      if (revealFrame) {
+        window.cancelAnimationFrame(revealFrame);
+      }
+      setSelectionAsk(null);
+    };
+  }, [activePanel, authStatus, viewerOpen]);
+
+  /* ⌘F find-within-conversation. Browser find only sees mounted DOM, and both
+     transcript modes keep most of a long conversation out of the DOM (Virtuoso
+     virtualization; the windowed tail behind "Show earlier messages"). So
+     matching runs over the message DATA, navigation drives the virtualized
+     scroller, and highlights are painted onto whichever rows exist — retried
+     until the scroll has mounted the current match's row. */
+  const [transcriptFindOpen, setTranscriptFindOpen] = useState(false);
+  const [transcriptFindQuery, setTranscriptFindQuery] = useState("");
+  const [transcriptFindIndex, setTranscriptFindIndex] = useState(0);
+  const [transcriptFindNonce, setTranscriptFindNonce] = useState(0);
+  /* Which conversation this find session belongs to. On a conversation switch
+     the close-on-switch effect races the child transcript's scroll effect
+     (child effects run first), so for one render a stale query could compute
+     matches against the NEW conversation and yank its scroll. Gating on the
+     captured id makes the switch render inert with no effect-ordering luck. */
+  const [transcriptFindConversationId, setTranscriptFindConversationId] =
+    useState<string | null>(null);
+  const transcriptFindInputRef = useRef<HTMLInputElement | null>(null);
+
+  const activeConversationIdForFind = activeConversation?.id ?? null;
+  const transcriptFindActive =
+    transcriptFindOpen &&
+    transcriptFindConversationId === activeConversationIdForFind;
+
+  const transcriptFindMatches = useMemo(
+    () =>
+      transcriptFindActive
+        ? computeTranscriptFindMatches(activeMessages, transcriptFindQuery)
+        : [],
+    [activeMessages, transcriptFindActive, transcriptFindQuery]
+  );
+  /* Clamped, not reset: matches shift while an answer streams in, and a stored
+     index past the end should degrade to the last match, not crash to zero. */
+  const clampedTranscriptFindIndex =
+    transcriptFindMatches.length > 0
+      ? Math.min(transcriptFindIndex, transcriptFindMatches.length - 1)
+      : 0;
+  const currentTranscriptFindMatch =
+    transcriptFindMatches[clampedTranscriptFindIndex] ?? null;
+  const currentFindMessageId = currentTranscriptFindMatch?.messageId ?? null;
+  const currentFindOccurrence = currentTranscriptFindMatch?.occurrence ?? 0;
+  const currentFindMessageIndex = currentTranscriptFindMatch?.messageIndex ?? -1;
+  /* Write the clamp back when it engages. Left stale, a large index silently
+     re-extends when matches shrink then grow again (deletion, then a streaming
+     answer), teleporting the current match with no user action. */
+  useEffect(() => {
+    if (transcriptFindIndex !== clampedTranscriptFindIndex) {
+      setTranscriptFindIndex(clampedTranscriptFindIndex);
+    }
+  }, [clampedTranscriptFindIndex, transcriptFindIndex]);
+  /* Keyed on primitives, NOT on the match object: matches recompute on every
+     streaming delta, and a fresh object identity would re-fire the transcript's
+     scroll effect and yank the reading position once per token. */
+  const transcriptFindTarget = useMemo(
+    () =>
+      transcriptFindActive && currentFindMessageId
+        ? {
+            messageId: currentFindMessageId,
+            /* Index travels with the id: duplicate message ids exist in real
+               data (React key warnings prove it), and an id-only findIndex
+               would always land on the first duplicate. */
+            messageIndex: currentFindMessageIndex,
+            nonce: transcriptFindNonce,
+          }
+        : null,
+    [
+      currentFindMessageId,
+      currentFindMessageIndex,
+      transcriptFindNonce,
+      transcriptFindActive,
+    ]
+  );
+
+  const openTranscriptFind = useCallback((): void => {
+    // flushSync + synchronous focus, NOT an rAF: in the frame between ⌘F and a
+    // deferred focus, type-to-focus would route the user's next keystrokes
+    // into the composer draft. Mount the bar and take focus before the
+    // handler returns; select so ⌘F with a previous query behaves like
+    // browser find (type to replace, Enter to reuse).
+    flushSync(() => {
+      setTranscriptFindOpen(true);
+      setTranscriptFindConversationId(activeConversation?.id ?? null);
+    });
+    transcriptFindInputRef.current?.focus();
+    transcriptFindInputRef.current?.select();
+  }, [activeConversation?.id]);
+
+  const closeTranscriptFind = useCallback((): void => {
+    setTranscriptFindOpen(false);
+    clearTranscriptFindHighlights();
+    focusComposerTextarea();
+  }, [focusComposerTextarea]);
+
+  const handleTranscriptFindQueryChange = useCallback((value: string): void => {
+    setTranscriptFindQuery(value);
+    // A new query restarts from its first match, live as you type.
+    setTranscriptFindIndex(0);
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, []);
+
+  const goToNextTranscriptFindMatch = useCallback((): void => {
+    if (transcriptFindMatches.length === 0) {
+      return;
+    }
+    setTranscriptFindIndex(
+      (clampedTranscriptFindIndex + 1) % transcriptFindMatches.length
+    );
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, [clampedTranscriptFindIndex, transcriptFindMatches.length]);
+
+  const goToPreviousTranscriptFindMatch = useCallback((): void => {
+    if (transcriptFindMatches.length === 0) {
+      return;
+    }
+    setTranscriptFindIndex(
+      (clampedTranscriptFindIndex - 1 + transcriptFindMatches.length) %
+        transcriptFindMatches.length
+    );
+    setTranscriptFindNonce((nonce) => nonce + 1);
+  }, [clampedTranscriptFindIndex, transcriptFindMatches.length]);
+
+  /* ⌘F/^F opens (or refocuses) the bar. Interception is deliberate even while
+     an input is focused — that is how browser find behaves — but only on the
+     chat panel: Resources and the viewer render plain DOM where native find
+     works, so they keep it. */
+  useEffect(() => {
+    if (authStatus !== "authenticated" || activePanel !== "chat" || viewerOpen) {
+      return;
+    }
+    // ⌘F on Apple platforms, Ctrl+F elsewhere — NOT both. On macOS Ctrl+F is
+    // the system-wide caret-forward binding in every text field; hijacking it
+    // breaks readline muscle memory inside the composer and the find input
+    // itself. event.code keeps the chord working on non-Latin layouts, where
+    // event.key reports the local script.
+    const isApplePlatform = /Mac|iP(hone|ad|od)/.test(window.navigator.platform);
+    const handleFindShortcut = (event: KeyboardEvent): void => {
+      const chordModifier = isApplePlatform
+        ? event.metaKey && !event.ctrlKey
+        : event.ctrlKey && !event.metaKey;
+      if (
+        chordModifier &&
+        !event.altKey &&
+        !event.shiftKey &&
+        // The code fallback ONLY fires when key is not a basic Latin letter
+        // (Cyrillic/Greek/Hebrew layouts). On Latin non-QWERTY layouts the
+        // physical F key carries another letter — on Turkish-F, ⌘A lives on
+        // KeyF, and an unconditional code match would steal select-all.
+        (event.key.toLowerCase() === "f" ||
+          (event.code === "KeyF" && !/^[a-z]$/i.test(event.key)))
+      ) {
+        if (hasBlockingOverlay()) {
+          return;
+        }
+        // A zero-message chat has nothing for data-layer find to search, but
+        // the welcome screen DOES have on-screen text — let native find keep
+        // it rather than suppressing both.
+        if (activeMessages.length === 0) {
+          return;
+        }
+        event.preventDefault();
+        openTranscriptFind();
+      }
+    };
+    window.addEventListener("keydown", handleFindShortcut);
+    return () => window.removeEventListener("keydown", handleFindShortcut);
+  }, [activeMessages.length, activePanel, authStatus, openTranscriptFind, viewerOpen]);
+
+  /* Switching conversations closes find: the query may be worth keeping, but a
+     match list pointing into another conversation's messages is not. The
+     transcriptFindActive gate above already made this render-safe; this effect
+     just tidies the state. */
+  useEffect(() => {
+    setTranscriptFindOpen(false);
+    setTranscriptFindIndex(0);
+    clearTranscriptFindHighlights();
+  }, [activeConversationIdForFind]);
+
+  /* Paint highlights over mounted rows. Retries because the interesting case —
+     jumping to a match far up a virtualized transcript — mounts the row some
+     frames after scrollToIndex. Also re-runs on activeMessages so highlights
+     track content while an answer streams. */
+  useEffect(() => {
+    if (!transcriptFindActive || !transcriptFindQuery.trim()) {
+      clearTranscriptFindHighlights();
+      return;
+    }
+    let cancelled = false;
+    let attempts = 0;
+    const apply = (): void => {
+      if (cancelled) {
+        return;
+      }
+      const { currentLocated } = applyTranscriptFindHighlights({
+        query: transcriptFindQuery,
+        currentMessageId: currentFindMessageId,
+        currentOccurrence: currentFindOccurrence,
+      });
+      if (!currentLocated && attempts < 12) {
+        attempts += 1;
+        window.setTimeout(apply, 90);
+      }
+    };
+    apply();
+    /* Repaint as the user scrolls: Virtuoso mounts and unmounts rows, and a
+       highlight registered on an unmounted row's text nodes collapses with
+       them. Counts and navigation live in the data layer, so repainting is
+       idempotent decoration — rAF-throttled, passive. */
+    let repaintFrame = 0;
+    const repaintOnScroll = (): void => {
+      if (repaintFrame) {
+        return;
+      }
+      repaintFrame = window.requestAnimationFrame(() => {
+        repaintFrame = 0;
+        if (!cancelled) {
+          applyTranscriptFindHighlights({
+            query: transcriptFindQuery,
+            currentMessageId: currentFindMessageId,
+            currentOccurrence: currentFindOccurrence,
+          });
+        }
+      });
+    };
+    window.addEventListener("scroll", repaintOnScroll, { capture: true, passive: true });
+    return () => {
+      cancelled = true;
+      window.removeEventListener("scroll", repaintOnScroll, true);
+      if (repaintFrame) {
+        window.cancelAnimationFrame(repaintFrame);
+      }
+    };
+  }, [
+    activeMessages,
+    currentFindMessageId,
+    currentFindOccurrence,
+    transcriptFindNonce,
+    transcriptFindActive,
+    transcriptFindQuery,
+  ]);
+
   /* Deleting a user message also removes every consecutive assistant reply that
      followed it (removeMessageWithPairedResponse). That is the right behaviour —
      an answer without its question is noise — but it is more than the button
@@ -11344,6 +11902,130 @@ export function App() {
     void handleSubmitRef.current(pending.prompt);
   }, [activeConversation]);
 
+  /* Conversations whose RUNNING state this session has witnessed. The
+     auto-dispatch arm requires this: a reload can hydrate a failed or even
+     still-active run as "settled and clean" (reconciliation rebuilds messages
+     without status markers, and a transiently failed run fetch reads as
+     inactive), so firing on hydrated state alone could spend a run into a
+     broken context — or double-text into a live one. Unarmed conversations
+     fall back to the draft-return arm: the text survives, and the user's own
+     Enter is the consent. */
+  const dispatchArmedConversationsRef = useRef<Set<string>>(new Set());
+  const dispatchInFlightRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (activeConversation?.sending && activeConversation.id) {
+      dispatchArmedConversationsRef.current.add(activeConversation.id);
+    }
+  }, [activeConversation?.id, activeConversation?.sending]);
+
+  /* Queue the current draft as a follow-up to the RUNNING turn. Repeated sends
+     grow the one queued message (blank-line separated) rather than stacking a
+     list — a queue of N messages would auto-fire N sequential agentic runs on
+     completion, which is a cost surprise nobody asked for. */
+  const queueFollowup = useCallback((): void => {
+    const conversation = activeConversation;
+    const text = activePrompt.trim();
+    // The send path refuses these; queueing must not smuggle them past it.
+    if (!conversation || !text || slashMenuOpen || composerResourcePickerOpen) {
+      return;
+    }
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      updatedAt: Date.now(),
+      queuedFollowup: current.queuedFollowup
+        ? `${current.queuedFollowup}\n\n${text}`
+        : text,
+    }));
+    setActivePromptValue("");
+  }, [activeConversation, activePrompt, setActivePromptValue, updateConversation]);
+
+  /* Cancel returns the text to the composer (append rule, same as paste) — a
+     queued thought is never destroyed, only un-queued. */
+  const cancelQueuedFollowup = useCallback((): void => {
+    const conversation = activeConversation;
+    const queued = conversation?.queuedFollowup ?? "";
+    if (!conversation || !queued) {
+      return;
+    }
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      updatedAt: Date.now(),
+      queuedFollowup: "",
+    }));
+    setActivePromptValue((previous) =>
+      previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${queued}` : queued
+    );
+    focusComposerTextarea();
+  }, [activeConversation, focusComposerTextarea, setActivePromptValue, updateConversation]);
+
+  /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn
+     when the active conversation settles — but ONLY on clean completion. After
+     Stop or a failure the queued text returns to the draft instead: the user
+     stopped for a reason, and auto-spending a multi-minute run into a broken
+     context is worse than making them press Enter. Mirrors the pendingRetry
+     effect above (same settle detection, same stable submit handle); driven
+     from persisted conversation state rather than a ref so a reload cannot
+     lose the queue. Clearing the queue BEFORE submitting makes a double-fire
+     impossible: the next effect pass sees an empty queue. */
+  useEffect(() => {
+    const conversation = activeConversation;
+    if (!conversation || !conversation.hydrated) {
+      return;
+    }
+    const queued = conversation.queuedFollowup.trim();
+    if (!queued || conversation.sending || conversation.streamingMessageId) {
+      return;
+    }
+    /* DEFER — do not clear — while any state that would make handleSubmit
+       refuse is up. Clearing first and letting handleSubmit silently decline
+       destroyed the queued text (review-confirmed: a "/"-prefixed draft
+       hydrating alongside a queue was enough). These states all re-render on
+       change, so the effect re-evaluates when they clear. */
+    if (slashMenuOpen || composerResourcePickerOpen || conversation.selectionImportPending) {
+      return;
+    }
+    if (dispatchInFlightRef.current.has(conversation.id)) {
+      // StrictMode double-invokes effects against the same state snapshot;
+      // clear-before-submit alone cannot see that.
+      return;
+    }
+    const lastMessage = conversation.messages[conversation.messages.length - 1];
+    const settled =
+      lastMessage?.role === "assistant" || Boolean(conversation.chatError);
+    if (!settled) {
+      return;
+    }
+    const cleanCompletion =
+      !conversation.chatError &&
+      lastMessage?.role === "assistant" &&
+      lastMessage.status !== "stopped" &&
+      lastMessage.status !== "failed" &&
+      // Only a completion this session actually WITNESSED may spend a run.
+      dispatchArmedConversationsRef.current.has(conversation.id);
+    dispatchInFlightRef.current.add(conversation.id);
+    updateConversation(conversation.id, (current) => ({
+      ...current,
+      queuedFollowup: "",
+    }));
+    if (cleanCompletion) {
+      dispatchArmedConversationsRef.current.delete(conversation.id);
+      void handleSubmitRef.current(queued).finally(() => {
+        dispatchInFlightRef.current.delete(conversation.id);
+      });
+    } else {
+      dispatchInFlightRef.current.delete(conversation.id);
+      setActivePromptValue((previous) =>
+        previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${queued}` : queued
+      );
+    }
+  }, [
+    activeConversation,
+    composerResourcePickerOpen,
+    setActivePromptValue,
+    slashMenuOpen,
+    updateConversation,
+  ]);
+
   const historyItems: HistoryItem[] = useMemo(() => {
     return [...conversations]
       .filter(shouldShowConversationInHistory)
@@ -12098,6 +12780,21 @@ export function App() {
           ) : (
             <>
             <div className="relative min-h-0 flex-1 overflow-hidden">
+              {/* Anchored to this NON-scrolling wrapper, deliberately: the
+                  ChatContainerRoot below is the scroll container, and an
+                  absolute child there rides the scrolled coordinate space. */}
+              {transcriptFindActive ? (
+                <TranscriptFindBar
+                  ref={transcriptFindInputRef}
+                  query={transcriptFindQuery}
+                  matchCount={transcriptFindMatches.length}
+                  currentIndex={clampedTranscriptFindIndex}
+                  onQueryChange={handleTranscriptFindQueryChange}
+                  onNext={goToNextTranscriptFindMatch}
+                  onPrevious={goToPreviousTranscriptFindMatch}
+                  onClose={closeTranscriptFind}
+                />
+              ) : null}
               <ChatContainerRoot
                 className="relative h-full min-h-0 flex-col"
               >
@@ -12125,7 +12822,32 @@ export function App() {
                   bisqueLinksByFileId={activeBisqueLinksByFileId}
                   apiClient={apiClient}
                   actions={transcriptActions}
+                  findTarget={transcriptFindTarget}
                 />
+                {/* Queued follow-up: scrolls with the transcript, below the
+                    streaming answer. Not part of ConversationTranscript — its
+                    memo comparator is deliberately narrow, and this is
+                    conversation-level state, not a message. */}
+                {activeConversationHydrated && activeConversation?.queuedFollowup ? (
+                  <div className="chat-queued-followup chat-width-frame mx-auto w-full px-4 sm:px-6">
+                    <div className="chat-queued-followup-bubble">
+                      <div className="chat-queued-followup-eyebrow">
+                        <span>Queued — sends when this run finishes</span>
+                        <button
+                          type="button"
+                          className="chat-message-action"
+                          aria-label="Cancel queued follow-up"
+                          onClick={cancelQueuedFollowup}
+                        >
+                          <X className="size-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                      <div className="chat-queued-followup-text">
+                        {activeConversation.queuedFollowup}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 <ChatContainerScrollAnchor />
                 <div className="app-scroll-button-shell absolute bottom-4 left-1/2 z-10 flex w-full -translate-x-1/2 justify-end px-3 sm:px-5">
                   <div className="chat-width-frame flex justify-end">
@@ -12187,7 +12909,14 @@ export function App() {
                 allowDirectories
               >
                 <PromptInput
-                  isLoading={activeSending || !activeConversationHydrated}
+                  /* Hydration is the ONLY thing that disables typing. Folding
+                     activeSending in here disabled the textarea for the whole
+                     run — which made mid-run follow-ups unreachable for real
+                     keyboards (review-confirmed live: disabled=true, focus() a
+                     no-op; only script-dispatched events ever "worked").
+                     Mid-run SUBMISSION stays blocked elsewhere: Stop replaces
+                     the submit button, and handleSubmit guards sending. */
+                  isLoading={!activeConversationHydrated}
                   value={activePrompt}
                   onValueChange={(value) => setActivePromptValue(value)}
                   onSubmit={() => {
@@ -12258,15 +12987,24 @@ export function App() {
                       disabled={!activeConversationHydrated}
                       onPaste={(event) => {
                         // File-bearing pastes (screenshots, Finder-copied
-                        // files) attach instead of pasting; text-only pastes
-                        // fall through untouched. Files win over rich text —
-                        // paste-without-formatting is the text escape hatch.
+                        // files) attach instead of pasting; ordinary text
+                        // pastes fall through untouched. Files win over rich
+                        // text — paste-without-formatting is the text escape
+                        // hatch.
                         const pastedFiles = filesFromClipboard(event.clipboardData);
-                        if (pastedFiles.length === 0) {
+                        if (pastedFiles.length > 0) {
+                          event.preventDefault();
+                          attachFilesToActiveConversation(pastedFiles);
                           return;
                         }
-                        event.preventDefault();
-                        attachFilesToActiveConversation(pastedFiles);
+                        // Text that reads as data (logs, tables, sequences —
+                        // see shouldAttachPastedText) becomes an attachment
+                        // chip instead of burying the prompt.
+                        const pastedText = event.clipboardData.getData("text/plain");
+                        if (pastedText && shouldAttachPastedText(pastedText)) {
+                          event.preventDefault();
+                          attachPastedText(pastedText);
+                        }
                       }}
                       onKeyDown={(event) => {
                         if (
@@ -12315,6 +13053,64 @@ export function App() {
                             setActiveSlashWorkflowId(null);
                             return;
                           }
+                        }
+                        // ArrowUp in an EMPTY composer recalls the last prompt
+                        // for refinement — shell/Slack/Discord muscle memory.
+                        // Recall only, never edit: the message-level Edit
+                        // removes a turn and its reply, which is far too much
+                        // consequence to hang off an arrow key. Any drafted
+                        // text disables it, so cursoring around a multi-line
+                        // draft is untouched.
+                        if (
+                          event.key === "ArrowUp" &&
+                          !event.nativeEvent.isComposing &&
+                          !event.metaKey &&
+                          !event.ctrlKey &&
+                          !event.altKey &&
+                          !event.shiftKey &&
+                          !composerResourcePickerOpen &&
+                          !activePrompt.trim()
+                        ) {
+                          // A pending queue outranks history: recalling the
+                          // OLDER sent message while a queue exists invites
+                          // queueing a duplicate. ArrowUp un-queues instead.
+                          if (activeConversation?.queuedFollowup) {
+                            event.preventDefault();
+                            cancelQueuedFollowup();
+                            return;
+                          }
+                          let lastPrompt = "";
+                          for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
+                            if (activeMessages[index].role === "user") {
+                              lastPrompt = activeMessages[index].content;
+                              break;
+                            }
+                          }
+                          if (lastPrompt.trim()) {
+                            event.preventDefault();
+                            setActivePromptValue(lastPrompt);
+                            // Caret to the end once the value commits; the
+                            // rAF inside runs after React paints.
+                            focusComposerTextarea();
+                          }
+                          return;
+                        }
+                        // Enter during a run queues the draft as a follow-up
+                        // instead of dying against handleSubmit's sending
+                        // guard. A SEPARATE branch, deliberately: the plain
+                        // Enter-to-send path below is contract-pinned.
+                        if (
+                          event.key === "Enter" &&
+                          !event.shiftKey &&
+                          !event.metaKey &&
+                          !event.ctrlKey &&
+                          !event.altKey &&
+                          !event.nativeEvent.isComposing &&
+                          activeSending
+                        ) {
+                          event.preventDefault();
+                          queueFollowup();
+                          return;
                         }
                         if (
                           event.key === "Enter" &&
@@ -12670,17 +13466,41 @@ export function App() {
                           </DropdownMenuContent>
                         </DropdownMenu>
                         {activeSending ? (
-                          <Button
-                            size="icon"
-                            type="button"
-                            variant="destructive"
-                            onClick={stopActiveConversation}
-                            aria-label="Stop response"
-                            title="Stop response"
-                            className="app-composer-stop-button size-11 rounded-full sm:size-10"
-                          >
-                            <Square className="size-3.5 fill-current" />
-                          </Button>
+                          <>
+                            {/* Queue sits LEFT of Stop; Stop never moves (the
+                                send-position jump was a bug once already). */}
+                            {activePrompt.trim() && !slashMenuOpen && !composerResourcePickerOpen ? (
+                              <PromptInputAction
+                                tooltip="Queue for after this run"
+                                side="top"
+                                sideOffset={8}
+                                delayDuration={350}
+                                className="app-composer-tooltip"
+                              >
+                                <Button
+                                  size="icon"
+                                  type="button"
+                                  variant="ghost"
+                                  onClick={queueFollowup}
+                                  aria-label="Queue follow-up"
+                                  className="app-composer-queue-button size-11 rounded-full sm:size-10"
+                                >
+                                  <ArrowUp size={18} />
+                                </Button>
+                              </PromptInputAction>
+                            ) : null}
+                            <Button
+                              size="icon"
+                              type="button"
+                              variant="destructive"
+                              onClick={stopActiveConversation}
+                              aria-label="Stop response"
+                              title="Stop response"
+                              className="app-composer-stop-button size-11 rounded-full sm:size-10"
+                            >
+                              <Square className="size-3.5 fill-current" />
+                            </Button>
+                          </>
                         ) : (
                           <PromptInputAction
                             tooltip={
@@ -12787,6 +13607,27 @@ export function App() {
             />
           </Suspense>
         ) : null}
+        {/* Ask-about-selection chip. Portaled to body: the transcript sits in
+            transformed/overflow ancestors that would trap or clip a
+            position:fixed child. Text was captured at show time, so the click
+            works even if the browser collapses the selection first. */}
+        {selectionAsk
+          ? createPortal(
+              <button
+                type="button"
+                className="chat-selection-ask"
+                style={{ left: selectionAsk.x, top: selectionAsk.y }}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                }}
+                onClick={askAboutSelection}
+              >
+                <TextQuote className="size-3.5" aria-hidden="true" />
+                Ask about this
+              </button>,
+              document.body
+            )
+          : null}
         {/* Message delete. Deliberately the same dialog grammar as conversation
             delete: the two differ in scope, not in kind, and a lighter-weight
             confirmation here would imply this one is safe to fire blind. */}

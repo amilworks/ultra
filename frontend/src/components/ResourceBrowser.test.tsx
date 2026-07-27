@@ -62,6 +62,67 @@ describe("duplicate awareness", () => {
     expect(chips[0].textContent).toBe("Duplicate ×2");
   });
 
+  it("keeps status chips out of the tile text stack when there is a thumbnail", () => {
+    // The meta box fits exactly three rows (name, type/size, date). A chip in that
+    // flow could only be paid for by crushing the type/size and date lines, so on a
+    // tile with a preview surface the chip rides the thumbnail instead.
+    const twin = (fileId: string, name: string): ResourceRecord => ({
+      ...imageResource,
+      file_id: fileId,
+      original_name: name,
+      sha256: "sha-overlay-twin",
+      size_bytes: 5150,
+      has_thumbnail: true,
+    });
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[twin("file_o1", "twin-a.png"), twin("file_o2", "twin-b.png")]}
+      />
+    );
+    const chip = document.querySelector(".resource-browser-dup-chip");
+    expect(chip).not.toBeNull();
+    expect(chip?.closest(".resource-browser-status-overlay")).not.toBeNull();
+    expect(chip?.closest(".resource-browser-preview")).not.toBeNull();
+    expect(chip?.closest(".resource-browser-meta")).toBeNull();
+  });
+
+  it("reveals and focuses the search field when the nav bar asks for it", () => {
+    // The mobile Resources header is not sticky, so the app nav bar owns the
+    // persistent search action and drives it through this signal.
+    const { rerender } = render(<ResourceBrowser {...baseProps} focusSearchSignal={0} />);
+    const input = screen.getByLabelText("Search resources");
+    expect(document.activeElement).not.toBe(input);
+
+    rerender(<ResourceBrowser {...baseProps} focusSearchSignal={1} />);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("gives the search field a name of its own for the nav bar action", () => {
+    // The magnifier is aria-hidden and the nav-bar action points at this field, so
+    // it needs an accessible name that does not depend on the placeholder.
+    render(<ResourceBrowser {...baseProps} />);
+    const byLabel = screen.getByLabelText("Search resources");
+    expect(byLabel).toBe(screen.getByPlaceholderText("Search resources"));
+  });
+
+  it("does not replay a spent search signal when the panel remounts", () => {
+    // The signal counter lives in App and never resets, while this panel unmounts on
+    // every panel switch. Without latching the mount-time value, one tap of the nav
+    // bar action would steal focus into the field on every later return to Resources
+    // — expanding the mobile header into its search state with no user action.
+    // Tap the nav-bar action once: 0 -> 1 focuses the field.
+    const first = render(<ResourceBrowser {...baseProps} focusSearchSignal={0} />);
+    first.rerender(<ResourceBrowser {...baseProps} focusSearchSignal={1} />);
+    expect(document.activeElement).toBe(screen.getByLabelText("Search resources"));
+    first.unmount();
+
+    // Leave Resources and come back. Fresh mount, same already-spent signal value:
+    // it must NOT grab focus.
+    render(<ResourceBrowser {...baseProps} focusSearchSignal={1} />);
+    expect(document.activeElement).not.toBe(screen.getByLabelText("Search resources"));
+  });
+
   it("shows child folders inside an open folder and only roots at the top level", () => {
     const rootFolder: ResourceCollectionRecord = {
       collection_id: "collection_root",

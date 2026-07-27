@@ -192,7 +192,11 @@ for (const [token, weight] of [
   ["page-heading", "600"],
   ["reading-heading", "600"],
   ["strong", "700"],
-  ["reading-strong", "700"],
+  // 600, matching reading-heading rather than exceeding it. At 700 an inline
+  // **emphasis** in an answer outweighed every heading above it (h2/h3/h4 are
+  // all 600), and at h4's 16px it beat the heading at identical size. Emphasis
+  // must not outrank structure.
+  ["reading-strong", "600"],
 ]) {
   check(
     new RegExp(`--font-weight-${token}:\\s*${weight};`).test(stylesCss),

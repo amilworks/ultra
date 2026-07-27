@@ -189,8 +189,6 @@
   --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
-  --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
-  --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
   /* True ghost weight: resolves to #b1b1b1, 2.14:1 on the white card, matching
      the reference composers this was tuned against. Deliberately below 3:1 —
      the textarea now carries its own aria-label, so nothing about the control's
@@ -2059,17 +2057,31 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
   /* animate the card's own padding so the idle padding trim collapses in sync
      with the textarea/action-row (overrides the base 160ms card transition).
-     border-radius animates too — see the slim rule: the surface is a true pill
-     at rest and a rounded card once it grows, and the shape morphs with the
-     height rather than snapping. The radius is restated here because the
-     element also carries .pk-prompt-input, whose later rule would otherwise
-     win; scoping to .app-composer-shell out-specifies it without touching the
-     phone composer (this whole block is min-width: 641px). */
+     The radius no longer animates because there is no radius: the flat surface
+     is the same shape at rest and expanded, so height is the only thing that
+     rides the 220ms. */
   .app-composer-shell .app-composer-card {
-    border-radius: calc(var(--radius) + 0.65rem);
     transition: border-color 160ms var(--motion-ease),
-      box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease),
-      padding 220ms var(--motion-ease), border-radius 220ms var(--motion-ease);
+      box-shadow 160ms var(--motion-ease), padding 220ms var(--motion-ease);
+  }
+
+  /* Room, and one optical line. The resting row is 77px (was 49px), and the
+     placeholder's first text line, the attach +, the model echo and the send
+     button all centre on it — measured spread 0.9px.
+     .app-composer-card-body is a COLUMN flex, so the vertical axis is the MAIN
+     axis: justify-content is what centres the field in the taller row.
+     align-items would only centre it horizontally, and would shrink it off
+     full width. */
+  .app-composer-shell .app-composer-card-body {
+    justify-content: center;
+    min-height: 4.75rem;
+    padding-block: 0.6rem;
+  }
+
+  /* The field keeps its own padding: its height is set inline by the auto-resize
+     JS, and that padding is what centres the line inside its own box. */
+  .app-composer-shell .app-composer-textarea {
+    flex: 0 0 auto;
   }
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
@@ -2109,22 +2121,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* keep the submit affordance on the slim line to balance the placeholder.
      Offsets ONLY — the positioning model never changes, so the button glides
      to/from the toolbar anchor instead of jumping when slim flips mid-type.
-     bottom centers the 2.5rem button in the 3rem pill (card padding is 0). */
+     The old 0.25rem centred a 2.5rem button in a 3rem pill; against the taller
+     flat row that left the model echo and send button sitting low. 1.125rem
+     centres them in the 76px row instead — (76 − 40) / 2 — and stays a plain
+     `bottom` so the glide survives. `top: 50%; bottom: auto` would centre it too,
+     but `auto` is not animatable, so the button would jump. The "Pro" echo is
+     already centred inside this cluster, so both move together. */
   .app-composer-shell[data-composer-slim="true"] .app-composer-actions-end {
     right: 1rem;
-    bottom: 0.25rem;
+    bottom: 1.125rem;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-card {
-    border-color: color-mix(in oklab, var(--line) 70%, transparent);
-    box-shadow: var(--composer-shell-shadow-rest);
     padding-top: 0;
     padding-bottom: 0;
-    /* A real pill, not 90% of one. At 3rem tall the inherited 22.4px radius
-       landed 2.6px short of the semicircle — the "almost round" zone that reads
-       as a mistake. 999px is the house idiom for stadium shapes (the most-used
-       radius in this file), and it makes the resting composer state a
-       deliberate pill that the expanded card visibly grows out of. */
-    border-radius: 999px;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
     opacity: 1;
@@ -6627,28 +6636,42 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
-.app-composer-card {
+/* The composer is the bottom EDGE of the page, not an object floating above it.
+   It used to carry five decorative devices — a full border, a 26–32px radius
+   (999px at rest), a two-stop gradient, and a two-layer 18px shadow — which made
+   an empty input the most decorated thing on a screen whose actual content is
+   the user's data and tables. All of it collapses to one hairline, so the cards
+   and tables in the transcript are the heaviest objects, as they should be.
+
+   Scoped through .app-composer-shell on purpose. The element also carries
+   .pk-prompt-input, which sets border + a 22.4px radius + its own panel
+   background ~4300 lines LATER at equal specificity — a bare .app-composer-card
+   loses to it, and the background is the dangerous one: it paints a visible
+   panel block in dark theme instead of reading as the page edge. */
+.app-composer-shell .app-composer-card {
   position: relative;
   overflow: hidden;
   padding: 0;
-  border: 1px solid color-mix(in oklab, var(--line) 94%, transparent);
-  border-radius: clamp(1.65rem, 1.25rem + 0.9vw, 2rem);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--bg-panel-strong) 97%, #ffffff 3%) 0%,
-      color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-main) 6%) 100%
-    );
-  box-shadow: var(--composer-shell-shadow);
+  border: 0;
+  border-top: 1px solid color-mix(in oklab, var(--line) 88%, transparent);
+  border-radius: 0;
+  background: transparent;
+  /* No visible boundary any more, so the whole region has to read as the field. */
+  cursor: text;
   transition:
     border-color 160ms var(--motion-ease),
-    box-shadow 160ms var(--motion-ease),
-    transform 160ms var(--motion-ease);
+    box-shadow 160ms var(--motion-ease);
 }
 
-.app-composer-card:focus-within {
-  border-color: color-mix(in oklab, var(--line) 76%, var(--text-muted) 24%);
-  box-shadow: 0 20px 42px rgba(12, 12, 12, 0.08), 0 2px 8px rgba(12, 12, 12, 0.05);
+/* Losing the border and shadow took the focus state with them, and the textarea's
+   own outline is none — so the rule itself has to carry it. The inset line doubles
+   the hairline to a visible 2px WITHOUT widening the border, which would shove the
+   whole row down 1px on every focus. --text-muted (#737373) measures 4.42:1 on
+   the composer ground, clearing the 3:1 and 2px WCAG 2.4.11 asks of a focus
+   indicator with margin. */
+.app-composer-shell .app-composer-card:focus-within {
+  border-top-color: var(--text-muted);
+  box-shadow: inset 0 1px 0 var(--text-muted);
 }
 
 .app-composer-card-body {
@@ -6659,7 +6682,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-textarea {
   min-height: 78px;
-  padding: 1.1rem 1.35rem 0.35rem;
+  /* 0.85rem, not 1.1rem: the pill used to supply the top inset, so without it
+     the first line would start hard against the hairline. */
+  padding: 0.85rem 1.35rem 0.35rem;
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
   /* Metric for the size this ACTUALLY renders at. The clamp above is dead —
@@ -6821,11 +6846,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 /* Composer drop affordance: pk-file-upload-drag lands on the FileUpload
    wrapper while an OS file drag is over the composer card. Ink, not color —
-   a drop target is chrome, and the strengthened border + faint ring is the
-   same voice as :focus-within, which is exactly the promise a drop makes. */
+   a drop target is chrome, and the strengthened rule is the same voice as
+   :focus-within, which is exactly the promise a drop makes. The old outer
+   `0 0 0 3px` ring traced the pill; on a flat full-width surface it drew a
+   rectangle around the whole dock, so the weight moves inside the top rule —
+   3px of it, one step louder than focus's 2px. */
 .pk-file-upload-drag .app-composer-card {
-  border-color: color-mix(in oklab, var(--text-main) 40%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--text-main) 8%, transparent);
+  border-top-color: color-mix(in oklab, var(--text-main) 40%, transparent);
+  box-shadow: inset 0 2px 0 color-mix(in oklab, var(--text-main) 40%, transparent);
 }
 
 /* Chat drop overlay ("dump files anywhere"): viewport scrim + one quiet card.
@@ -11044,13 +11072,13 @@ details {
       );
   }
 
-  .app-composer-card {
-    border-radius: 1.55rem;
-  }
+  /* No phone radius override: the flat surface is the same edge at every width.
+     The phone composer keeps its own two-row rhythm (field above, toolbar
+     below) — only the surface is shared with desktop. */
 
   .app-composer-textarea {
     min-height: 72px;
-    padding: 1rem 1rem 0.24rem;
+    padding: 0.85rem 1rem 0.24rem;
     font-size: 1rem;
   }
 
@@ -11324,8 +11352,6 @@ details {
   --viewer-bg: #2a2a2f;
   --viewer-panel-bg: rgba(30, 30, 34, 0.92);
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
-  --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
-  --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
   /* Fades toward the panel it sits on, NOT toward white — mixing with white on
      a dark surface brightens a hint rather than dimming it (this token once
      measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was

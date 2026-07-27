@@ -548,7 +548,243 @@ const normalizeDisplayDefaults = (
       merged.volume_camera_mode == null && !useCTVolumeDefaults
         ? undefined
         : String(merged.volume_camera_mode ?? CT_VOLUME_DISPLAY_DEFAULTS.volumeCameraMode),
+    scalar_render_mode:
+      merged.scalar_render_mode === "intensity" || merged.scalar_render_mode === "mask"
+        ? merged.scalar_render_mode
+        : "auto",
+    scalar_threshold_method:
+      merged.scalar_threshold_method === "manual" ? "manual" : "otsu-256-v1",
+    scalar_threshold_value:
+      Number.isFinite(Number(merged.scalar_threshold_value))
+        ? Number(merged.scalar_threshold_value)
+        : null,
+    scalar_threshold_foreground: "above",
   };
+};
+
+const normalizeDataSemantics = (
+  value: unknown
+): UploadViewerInfo["data_semantics"] | undefined => {
+  const source = toRecord(value);
+  const kind = String(source.kind ?? "");
+  if (kind !== "intensity" && kind !== "binary_mask" && kind !== "probability_mask") {
+    return undefined;
+  }
+  const modes: Array<"intensity" | "mask"> = Array.isArray(source.supported_modes)
+    ? source.supported_modes
+        .map((mode) => String(mode))
+        .filter((mode): mode is "intensity" | "mask" => mode === "intensity" || mode === "mask")
+    : ["intensity"];
+  const thresholdSource = toRecord(source.threshold);
+  const thresholdValue = Number(thresholdSource.value);
+  const thresholdChannel = Number(thresholdSource.channel);
+  const thresholdTime = Number(thresholdSource.t);
+  const thresholdSampleCount = Number(thresholdSource.sample_count);
+  const thresholdSampleScope = String(thresholdSource.sample_scope ?? "");
+  const thresholdSamplingAlgorithm = String(
+    thresholdSource.sampling_algorithm ?? ""
+  ).trim();
+  return {
+    kind,
+    basis: String(source.basis ?? "unknown"),
+    strength: String(source.strength ?? "unknown"),
+    supported_modes: modes.length > 0 ? modes : ["intensity"],
+    recommended_view: source.recommended_view === "mask" ? "mask" : "intensity",
+    threshold:
+      Number.isFinite(thresholdValue) &&
+      String(thresholdSource.method) === "otsu-256-v1" &&
+      String(thresholdSource.domain) === "raw" &&
+      String(thresholdSource.foreground) === "above" &&
+      Number.isSafeInteger(thresholdChannel) &&
+      thresholdChannel >= 0 &&
+      Number.isSafeInteger(thresholdTime) &&
+      thresholdTime >= 0 &&
+      Number.isSafeInteger(thresholdSampleCount) &&
+      thresholdSampleCount > 0 &&
+      (thresholdSampleScope === "volume" ||
+        thresholdSampleScope === "stratified_z") &&
+      Boolean(thresholdSamplingAlgorithm)
+        ? {
+            method: "otsu-256-v1",
+            value: thresholdValue,
+            domain: "raw",
+            foreground: "above",
+            sample_scope: thresholdSampleScope,
+            sample_count: thresholdSampleCount,
+            z_samples: Array.isArray(thresholdSource.z_samples)
+              ? thresholdSource.z_samples.map((entry) => clampNonNegativeInt(entry, 0))
+              : [],
+            channel: thresholdChannel,
+            t: thresholdTime,
+            sampling_algorithm: thresholdSamplingAlgorithm,
+          }
+        : undefined,
+  };
+};
+
+const normalizeScalarMaskCapability = (
+  value: unknown,
+  sourceSha256: string,
+  arrayDtype: string,
+  availableSurfaces: string[]
+): UploadViewerInfo["scalar_mask_capability"] | undefined => {
+  const source = toRecord(value);
+  const dtype = String(source.dtype ?? "").trim().toLowerCase();
+  const format = String(source.source_format ?? "");
+  const capabilitySha = String(source.source_sha256 ?? "").trim();
+  const surfaces = Array.isArray(source.surfaces)
+    ? source.surfaces.map((surface) => String(surface))
+    : [];
+  const expectedSurfaces = availableSurfaces.filter(
+    (surface) => surface === "2d" || surface === "mpr" || surface === "volume"
+  );
+  const requiredSurfaces = ["2d", "mpr", "volume"];
+  if (
+    Number(source.version) !== 1 ||
+    source.source_authority !== "original" ||
+    (format !== "tiff" && format !== "ome-tiff") ||
+    !["uint8", "uint16", "int16"].includes(dtype) ||
+    dtype !== arrayDtype.trim().toLowerCase() ||
+    !sourceSha256 ||
+    capabilitySha !== sourceSha256 ||
+    source.threshold_domain !== "raw" ||
+    source.threshold_foreground !== "above" ||
+    source.slice_delivery !== "thresholded_png" ||
+    source.volume_delivery !== "raw_scalar" ||
+    source.volume_sampling !== "nearest" ||
+    source.channel_selection !== "single" ||
+    source.time_selection !== "single" ||
+    expectedSurfaces.length !== requiredSurfaces.length ||
+    expectedSurfaces.some(
+      (surface, index) => surface !== requiredSurfaces[index]
+    ) ||
+    surfaces.length !== requiredSurfaces.length ||
+    surfaces.some((surface, index) => surface !== requiredSurfaces[index])
+  ) {
+    return undefined;
+  }
+  return {
+    version: 1,
+    source_authority: "original",
+    source_format: format,
+    source_sha256: capabilitySha,
+    dtype: dtype as "uint8" | "uint16" | "int16",
+    threshold_domain: "raw",
+    threshold_foreground: "above",
+    slice_delivery: "thresholded_png",
+    volume_delivery: "raw_scalar",
+    volume_sampling: "nearest",
+    channel_selection: "single",
+    time_selection: "single",
+    surfaces: surfaces as Array<"2d" | "mpr" | "volume">,
+  };
+};
+
+export const normalizeViewerCalibrations = (
+  value: unknown,
+  sourceSha256: string
+): UploadViewerInfo["viewer_calibrations"] | undefined => {
+  const source = toRecord(value);
+  const expectedSourceSha = String(sourceSha256 ?? "").trim();
+  if (
+    !expectedSourceSha ||
+    Number(source.version) !== 1 ||
+    String(source.source_sha256 ?? "").trim() !== expectedSourceSha ||
+    !source.selections ||
+    typeof source.selections !== "object"
+  ) {
+    return undefined;
+  }
+  const selections: NonNullable<
+    UploadViewerInfo["viewer_calibrations"]
+  >["selections"] = {};
+  Object.entries(toRecord(source.selections)).forEach(([key, rawSelection]) => {
+    const selection = toRecord(rawSelection);
+    const provenance = toRecord(selection.threshold_provenance);
+    const channel = Number(selection.channel);
+    const time = Number(selection.t);
+    const revision = Number(selection.revision);
+    const threshold = Number(selection.threshold_value);
+    const provenanceValue = Number(provenance.value);
+    const renderMode = String(selection.render_mode);
+    const thresholdMethod = String(selection.threshold_method);
+    const sampleCount = clampNonNegativeInt(provenance.sample_count, 0);
+    const samplingAlgorithm = String(provenance.sampling_algorithm ?? "").trim();
+    const samplingStrategy = String(provenance.sampling_strategy ?? "");
+    const sampleScope = String(provenance.sample_scope ?? "");
+    const provenanceSourceSha = String(provenance.source_sha256 ?? "").trim();
+    const bins = Number(provenance.bins);
+    const zSamples = Array.isArray(provenance.z_samples)
+      ? provenance.z_samples.map((value) => Number(value))
+      : [];
+    if (
+      !Number.isSafeInteger(channel) ||
+      channel < 0 ||
+      !Number.isSafeInteger(time) ||
+      time < 0 ||
+      !Number.isSafeInteger(revision) ||
+      revision <= 0 ||
+      key !== `c${channel}:t${time}` ||
+      (renderMode !== "auto" && renderMode !== "intensity" && renderMode !== "mask") ||
+      (thresholdMethod !== "manual" && thresholdMethod !== "otsu-256-v1") ||
+      !Number.isFinite(threshold) ||
+      (thresholdMethod === "otsu-256-v1" && threshold !== provenanceValue) ||
+      String(selection.threshold_foreground) !== "above" ||
+      String(provenance.method) !== "otsu-256-v1" ||
+      !Number.isFinite(provenanceValue) ||
+      String(provenance.domain) !== "raw" ||
+      String(provenance.foreground) !== "above" ||
+      Number(provenance.channel) !== channel ||
+      Number(provenance.t) !== time ||
+      (samplingStrategy !== "exact" &&
+        samplingStrategy !== "stratified-z-spatial") ||
+      sampleScope !==
+        (samplingStrategy === "exact" ? "volume" : "stratified_z") ||
+      sampleCount <= 0 ||
+      !samplingAlgorithm ||
+      provenanceSourceSha !== expectedSourceSha ||
+      !Number.isSafeInteger(bins) ||
+      bins < 8 ||
+      zSamples.length === 0 ||
+      zSamples.some(
+        (value, index) =>
+          !Number.isSafeInteger(value) ||
+          value < 0 ||
+          (index > 0 && value <= (zSamples[index - 1] as number))
+      )
+    ) {
+      return;
+    }
+    selections[key] = {
+      revision,
+      channel,
+      t: time,
+      render_mode: renderMode,
+      threshold_method: thresholdMethod,
+      threshold_value: threshold,
+      threshold_foreground: "above",
+      threshold_provenance: {
+        method: "otsu-256-v1",
+        value: provenanceValue,
+        domain: "raw",
+        foreground: "above",
+        channel,
+        t: time,
+        sample_scope: sampleScope as "volume" | "stratified_z",
+        sample_count: sampleCount,
+        sampling_algorithm: samplingAlgorithm,
+        sampling_strategy: samplingStrategy as
+          | "exact"
+          | "stratified-z-spatial",
+        z_samples: zSamples,
+        source_sha256: provenanceSourceSha,
+        bins,
+      },
+    };
+  });
+  return Object.keys(selections).length > 0
+    ? { version: 1, source_sha256: expectedSourceSha, selections }
+    : undefined;
 };
 
 const hasPositiveSpacing = (
@@ -1231,6 +1467,20 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
     ]
   );
   const serviceUrls = normalizeServiceUrls(toRecord(source.service_urls), String(source.file_id ?? ""));
+  const dataSemantics = normalizeDataSemantics(source.data_semantics);
+  const sourceSha256 =
+    metadataSource.sha256 == null ? "" : String(metadataSource.sha256);
+  const arrayDtype = String(metadataSource.array_dtype ?? source.array_dtype ?? "unknown");
+  const scalarMaskCapability = normalizeScalarMaskCapability(
+    source.scalar_mask_capability,
+    sourceSha256,
+    arrayDtype,
+    availableSurfaces
+  );
+  const viewerCalibrations = normalizeViewerCalibrations(
+    source.viewer_calibrations,
+    sourceSha256
+  );
   const atlasSource = toRecord(viewerSource.atlas_scheme);
   const atlasScheme = Object.keys(atlasSource).length > 0
     ? {
@@ -1266,6 +1516,9 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
     is_volume: isVolume,
     is_timeseries: Boolean(source.is_timeseries) || axisSizes.T > 1,
     is_multichannel: Boolean(source.is_multichannel) || axisSizes.C > 1,
+    data_semantics: dataSemantics,
+    scalar_mask_capability: scalarMaskCapability,
+    viewer_calibrations: viewerCalibrations,
     phys,
     display_defaults: displayDefaults,
     service_urls: serviceUrls,
@@ -1277,7 +1530,12 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
       array_shape: Array.isArray(metadataSource.array_shape)
         ? metadataSource.array_shape.map((item) => Math.max(0, Math.round(Number(item) || 0)))
         : defaultShape,
-      array_dtype: String(metadataSource.array_dtype ?? source.array_dtype ?? "unknown"),
+      array_dtype: arrayDtype,
+      sha256: sourceSha256 || undefined,
+      size_bytes:
+        Number.isFinite(Number(metadataSource.size_bytes))
+          ? Number(metadataSource.size_bytes)
+          : undefined,
       // NaN (not 0) when the backend never computed an intensity range, so the viewer
       // hides the row instead of showing a meaningless "0 → 0".
       array_min: toFiniteNumber(metadataSource.array_min ?? source.array_min, Number.NaN),

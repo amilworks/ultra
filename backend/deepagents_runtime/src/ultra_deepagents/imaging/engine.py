@@ -77,32 +77,51 @@ class _Hdf5EngineMixin:
         index = None if z is None else int(z)
         return hdf5.slice_png(path, dataset, axis="z", index=index)
 
-    def hdf5_dataset_summary(self, path: str, dataset_path: str, *, file_id: str = "") -> dict[str, Any]:
+    def hdf5_dataset_summary(
+        self, path: str, dataset_path: str, *, file_id: str = ""
+    ) -> dict[str, Any]:
         return hdf5.dataset_summary(path, dataset_path, file_id=file_id)
 
     def hdf5_materials_dashboard(self, path: str, *, file_id: str = "") -> dict[str, Any]:
         return hdf5.materials_dashboard(path, file_id=file_id)
 
-    def hdf5_slice_png(self, path: str, dataset_path: str, *, axis: str = "z",
-                       index: int | None = None, component: int = 0,
-                       feature_ids: str | None = None) -> bytes:
+    def hdf5_slice_png(
+        self,
+        path: str,
+        dataset_path: str,
+        *,
+        axis: str = "z",
+        index: int | None = None,
+        component: int = 0,
+        feature_ids: str | None = None,
+    ) -> bytes:
         return hdf5.slice_png(
-            path, dataset_path, axis=axis, index=index, component=component,
+            path,
+            dataset_path,
+            axis=axis,
+            index=index,
+            component=component,
             feature_ids=feature_ids,
         )
 
     def hdf5_atlas_png(self, path: str, dataset_path: str, **kwargs: Any) -> bytes:
         return hdf5.atlas_png(path, dataset_path, **kwargs)
 
-    def hdf5_scalar_volume(self, path: str, dataset_path: str, *, channel: int = 0) -> dict[str, Any]:
+    def hdf5_scalar_volume(
+        self, path: str, dataset_path: str, *, channel: int = 0
+    ) -> dict[str, Any]:
         return hdf5.scalar_volume(path, dataset_path, channel=channel)
 
-    def hdf5_histogram(self, path: str, dataset_path: str, *, component: int = 0, bins: int = 24,
-                       file_id: str = "") -> dict[str, Any]:
-        return hdf5.dataset_histogram(path, dataset_path, component=component, bins=bins, file_id=file_id)
+    def hdf5_histogram(
+        self, path: str, dataset_path: str, *, component: int = 0, bins: int = 24, file_id: str = ""
+    ) -> dict[str, Any]:
+        return hdf5.dataset_histogram(
+            path, dataset_path, component=component, bins=bins, file_id=file_id
+        )
 
-    def hdf5_table(self, path: str, dataset_path: str, *, offset: int = 0, limit: int = 12,
-                   file_id: str = "") -> dict[str, Any]:
+    def hdf5_table(
+        self, path: str, dataset_path: str, *, offset: int = 0, limit: int = 12, file_id: str = ""
+    ) -> dict[str, Any]:
         return hdf5.table_preview(path, dataset_path, offset=offset, limit=limit, file_id=file_id)
 
 
@@ -130,6 +149,7 @@ class _BoundedDict(dict):
         super().__setitem__(key, value)
         while len(self) > self._max:
             super().__delitem__(next(iter(self)))
+
 
 # Target long-edge (px) for a non-full-resolution z-scrub frame: the engine reads
 # the smallest pyramid level whose long edge is still >= this, so a transient scrub
@@ -175,7 +195,7 @@ def _native_level_plane_bytes(meta: dict[str, Any], level: int, channels: int = 
     width = max(0, _meta_int(meta, "image_num_x"))
     height = max(0, _meta_int(meta, "image_num_y"))
     scales = _resolution_scales(meta)
-    scale = scales[level] if 0 <= level < len(scales) else (1.0 / (2 ** level))
+    scale = scales[level] if 0 <= level < len(scales) else (1.0 / (2**level))
     delivered_width = max(1, int(math.ceil(width * scale)))
     delivered_height = max(1, int(math.ceil(height * scale)))
     return delivered_width * delivered_height * max(1, channels) * 4
@@ -186,7 +206,9 @@ def _require_native_volume_source(meta: dict[str, Any]) -> None:
         raise ValueError("multiple scenes require an explicit scene identity for volume preview")
     plane_bytes = _native_level_plane_bytes(meta, 0)
     if plane_bytes > _NATIVE_SEMANTIC_SOURCE_PLANE_MAX_BYTES:
-        raise ValueError("source plane input exceeds the bounded native semantic limit; preview is unsupported")
+        raise ValueError(
+            "source plane input exceeds the bounded native semantic limit; preview is unsupported"
+        )
     if plane_bytes * _native_axis_count(meta, "z") > _NATIVE_SEMANTIC_SOURCE_WORK_MAX_BYTES:
         raise ValueError("native semantic source work exceeds the bounded per-channel limit")
 
@@ -258,50 +280,94 @@ class ImageEngine(Protocol):
         ...
 
     def tile(
-        self, path: str, *, level: int, col: int, row: int, tile_size: int = 512,
-        channels: Sequence[int] | None = None, colors: Any = None, windows: Any = None,
+        self,
+        path: str,
+        *,
+        level: int,
+        col: int,
+        row: int,
+        tile_size: int = 512,
+        channels: Sequence[int] | None = None,
+        colors: Any = None,
+        windows: Any = None,
     ) -> bytes:
         """One embedded tile as PNG (bounded read). ``colors`` enables additive
         multi-channel LUT compositing."""
         ...
 
     def region(
-        self, path: str, *, x1: int, y1: int, x2: int, y2: int,
-        region_scale: float | None = None, channels: Sequence[int] | None = None,
-        colors: Any = None, windows: Any = None,
+        self,
+        path: str,
+        *,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        region_scale: float | None = None,
+        channels: Sequence[int] | None = None,
+        colors: Any = None,
+        windows: Any = None,
     ) -> bytes:
         """An arbitrary region of interest as PNG (bounded read)."""
         ...
 
     def slice_plane(
-        self, path: str, *, z: int | None = None, t: int | None = None,
-        level: int | None = None, plane_scale: float | None = None,
-        channels: Sequence[int] | None = None, colors: Any = None, windows: Any = None,
+        self,
+        path: str,
+        *,
+        z: int | None = None,
+        t: int | None = None,
+        level: int | None = None,
+        plane_scale: float | None = None,
+        channels: Sequence[int] | None = None,
+        colors: Any = None,
+        windows: Any = None,
         full_resolution: bool = True,
+        scalar_render_mode: str = "intensity",
+        scalar_threshold_value: float | None = None,
+        scalar_threshold_foreground: str = "above",
     ) -> bytes:
         """A 2D plane (z/t) as PNG. ``full_resolution=False`` may read a bounded level."""
         ...
 
     def thumbnail(
-        self, path: str, *, max_size: int = 256, z: int | None = None,
-        t: int | None = None, level: int | None = None,
+        self,
+        path: str,
+        *,
+        max_size: int = 256,
+        z: int | None = None,
+        t: int | None = None,
+        level: int | None = None,
         channels: Sequence[int] | None = None,
-        colors: Any = None, windows: Any = None,
+        colors: Any = None,
+        windows: Any = None,
     ) -> bytes:
         """A thumbnail (or one z-scrub frame when ``z`` is set) as PNG."""
         ...
 
     def atlas(
-        self, path: str, *, grid: tuple[int, int] | None = None,
-        level: int | None = None, atlas_scale: float | None = None,
-        channels: Sequence[int] | None = None, colors: Any = None, windows: Any = None,
+        self,
+        path: str,
+        *,
+        grid: tuple[int, int] | None = None,
+        level: int | None = None,
+        atlas_scale: float | None = None,
+        channels: Sequence[int] | None = None,
+        colors: Any = None,
+        windows: Any = None,
     ) -> bytes:
         """A texture atlas (z-stack -> 2D grid) as PNG. ``colors`` enables
         additive multi-channel LUT compositing of the stack."""
         ...
 
     def histogram(
-        self, path: str, *, bins: int = 256, channels: Sequence[int] | None = None,
+        self,
+        path: str,
+        *,
+        bins: int = 256,
+        channels: Sequence[int] | None = None,
+        t: int = 0,
+        scope: str = "volume",
     ) -> dict[str, Any]:
         """Per-channel intensity histogram."""
         ...
@@ -313,7 +379,9 @@ class ImageEngine(Protocol):
         when the on-disk blob path has lost its extension."""
         ...
 
-    def scalar_volume(self, path: str, *, channel: int = 0, t: int = 0) -> dict[str, Any]:
+    def scalar_volume(
+        self, path: str, *, channel: int = 0, t: int = 0, sampling: str = "box"
+    ) -> dict[str, Any]:
         """Raw float volume bytes + dims/dtype/min/max for client-side rendering."""
         ...
 
@@ -360,6 +428,12 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
         if _lower_ext(path) not in TIFF_EXTENSIONS:
             return None
+        normalized = os.path.normpath(os.fspath(path))
+        if (
+            os.path.basename(os.path.dirname(normalized)) == "derived"
+            and os.path.basename(normalized).endswith("__pyramid.tif")
+        ):
+            return None
         if self._semantic_tiff_engine is None:
             self._semantic_tiff_engine = BioioEngine()
         return self._semantic_tiff_engine
@@ -390,17 +464,30 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         pf = str(meta.get("image_pixel_format", "")).lower()
         depth = int(meta.get("image_pixel_depth", 8) or 8)
         c = int(meta.get("image_num_c", 1) or 1)
-        mode = str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "").strip().lower()
+        mode = (
+            str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "")
+            .strip()
+            .lower()
+        )
         names = [str(meta.get(f"channels/channel:{i}/name", "")).strip().lower() for i in range(3)]
         rgb_named = names == ["red", "green", "blue"]
-        return ("unsigned" in pf or pf == "") and depth <= 8 and c in (3, 4) and (mode.startswith("rgb") or rgb_named)
+        return (
+            ("unsigned" in pf or pf == "")
+            and depth <= 8
+            and c in (3, 4)
+            and (mode.startswith("rgb") or rgb_named)
+        )
 
     def _display_out_depth(self, path: str) -> str:
         """The display ``-depth`` for a non-fused read: FULL type-range for an 8-bit RGB
         photo, else data-range. (Tiled scalar reads no longer use this — they go through
         the global-window path; this remains for the full-extent slice/thumbnail reads,
         where a single read already data-ranges over the whole image.)"""
-        return pipelines.DEPTH_DISPLAY_8U_FULLRANGE if self._is_display_photo(path) else pipelines.DEPTH_DISPLAY_8U
+        return (
+            pipelines.DEPTH_DISPLAY_8U_FULLRANGE
+            if self._is_display_photo(path)
+            else pipelines.DEPTH_DISPLAY_8U
+        )
 
     def _display_global_windows(self, path: str, channels=None) -> list[tuple[float, float]]:
         """One robust [p1,p99] window per (read) channel, sampled over a downsampled
@@ -432,12 +519,21 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         self._display_window_cache[key] = windows
         return windows
 
-    def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
+    def tile(
+        self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None
+    ) -> bytes:
         try:
             if colors:
                 return self._render_fused(
                     path,
-                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    pipelines.tile(
+                        tile_size,
+                        col,
+                        row,
+                        level,
+                        channels=channels,
+                        out_depth=pipelines.DEPTH_SCALAR_F32,
+                    ),
                     colors,
                     windows,
                 )
@@ -446,12 +542,26 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 # data-range would checkerboard the image).
                 return self._render_windowed(
                     path,
-                    pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                    pipelines.tile(
+                        tile_size,
+                        col,
+                        row,
+                        level,
+                        channels=channels,
+                        out_depth=pipelines.DEPTH_SCALAR_F32,
+                    ),
                     self._display_global_windows(path, channels),
                 )
             return self._render(
                 path,
-                pipelines.tile(tile_size, col, row, level, channels=channels, out_depth=self._display_out_depth(path)),
+                pipelines.tile(
+                    tile_size,
+                    col,
+                    row,
+                    level,
+                    channels=channels,
+                    out_depth=self._display_out_depth(path),
+                ),
             )
         except ValueError as exc:
             # Level-0 fallback for planar multi-page SubIFD pyramids (LIF -> bioio ->
@@ -464,8 +574,14 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             if level != 0 or "empty region" not in str(exc):
                 raise
             return self._tile_base_fallback(
-                path, col=col, row=row, tile_size=tile_size,
-                channels=channels, colors=colors, windows=windows, original=exc,
+                path,
+                col=col,
+                row=row,
+                tile_size=tile_size,
+                channels=channels,
+                colors=colors,
+                windows=windows,
+                original=exc,
             )
 
     # Full-plane decode is only sane for stack-sized planes (the planar-SubIFD class the
@@ -473,7 +589,9 @@ class LibBioImageEngine(_Hdf5EngineMixin):
     # base that unexpectedly reads empty must keep its honest error, never a 9GB decode.
     _TILE_FALLBACK_MAX_PIXELS = 64 * 1024 * 1024  # 64 MP (e.g. 8k x 8k)
 
-    def _tile_base_fallback(self, path, *, col, row, tile_size, channels, colors, windows, original) -> bytes:
+    def _tile_base_fallback(
+        self, path, *, col, row, tile_size, channels, colors, windows, original
+    ) -> bytes:
         """Serve a level-0 tile by reading the NATIVE full plane and cropping.
 
         Mirrors the three tile() render branches so pixels match what a working
@@ -533,12 +651,19 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             )
         return self._encode_png(_plane(self._display_out_depth(path)))
 
-    def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
+    def region(
+        self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None
+    ) -> bytes:
         if colors:
             return self._render_fused(
                 path,
                 pipelines.region(
-                    x1, y1, x2, y2, region_scale=region_scale, channels=channels,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    region_scale=region_scale,
+                    channels=channels,
                     out_depth=pipelines.DEPTH_SCALAR_F32,
                 ),
                 colors,
@@ -548,7 +673,12 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             return self._render_windowed(
                 path,
                 pipelines.region(
-                    x1, y1, x2, y2, region_scale=region_scale, channels=channels,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    region_scale=region_scale,
+                    channels=channels,
                     out_depth=pipelines.DEPTH_SCALAR_F32,
                 ),
                 self._display_global_windows(path, channels),
@@ -556,21 +686,52 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         return self._render(
             path,
             pipelines.region(
-                x1, y1, x2, y2, region_scale=region_scale, channels=channels,
+                x1,
+                y1,
+                x2,
+                y2,
+                region_scale=region_scale,
+                channels=channels,
                 out_depth=self._display_out_depth(path),
             ),
         )
 
-    def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
+    def slice_plane(
+        self,
+        path,
+        *,
+        z=None,
+        t=None,
+        level=None,
+        plane_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+        full_resolution=True,
+        scalar_render_mode="intensity",
+        scalar_threshold_value=None,
+        scalar_threshold_foreground="above",
+    ) -> bytes:
         hdf5_png = self._maybe_hdf5_slice(path, z)
         if hdf5_png is not None:
             return hdf5_png
         if os.path.isfile(path) and (semantic_tiff := self._tiff_scalar_engine(path)):
             return semantic_tiff.slice_plane(
-                path, z=z, t=t, level=level, plane_scale=plane_scale,
-                channels=channels, colors=colors, windows=windows,
+                path,
+                z=z,
+                t=t,
+                level=level,
+                plane_scale=plane_scale,
+                channels=channels,
+                colors=colors,
+                windows=windows,
                 full_resolution=full_resolution,
+                scalar_render_mode=scalar_render_mode,
+                scalar_threshold_value=scalar_threshold_value,
+                scalar_threshold_foreground=scalar_threshold_foreground,
             )
+        if str(scalar_render_mode).strip().lower() == "mask":
+            raise ValueError("unsupported mask slice for this source decoder")
         meta = self._bim.meta(path, self._cache)
         paged = z is not None and t is None and viewerinfo.paged_depth(meta)
         # A transient z-scrub frame (full_resolution=False) only needs to fill the
@@ -594,21 +755,53 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         # not by -slice z:N (which would return the first plane every time). When a
         # bare z is requested and the file is page-based, read that page directly.
         if paged:
-            pipeline = pipelines.page_plane(z, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth, max_dim=scrub_max_dim)
+            pipeline = pipelines.page_plane(
+                z,
+                level=level,
+                plane_scale=plane_scale,
+                channels=channels,
+                out_depth=out_depth,
+                max_dim=scrub_max_dim,
+            )
         else:
-            pipeline = pipelines.slice_plane(z=z, t=t, level=level, plane_scale=plane_scale, channels=channels, out_depth=out_depth, max_dim=scrub_max_dim)
+            pipeline = pipelines.slice_plane(
+                z=z,
+                t=t,
+                level=level,
+                plane_scale=plane_scale,
+                channels=channels,
+                out_depth=out_depth,
+                max_dim=scrub_max_dim,
+            )
         if colors:
             return self._render_fused(path, pipeline, colors, windows)
         return self._render(path, pipeline)
 
-    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+    def thumbnail(
+        self,
+        path,
+        *,
+        max_size=256,
+        z=None,
+        t=None,
+        level=None,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         hdf5_png = self._maybe_hdf5_thumbnail(path, max_size)
         if hdf5_png is not None:
             return hdf5_png
         if os.path.isfile(path) and (semantic_tiff := self._tiff_scalar_engine(path)):
             return semantic_tiff.thumbnail(
-                path, max_size=max_size, z=z, t=t, level=level,
-                channels=channels, colors=colors, windows=windows,
+                path,
+                max_size=max_size,
+                z=z,
+                t=t,
+                level=level,
+                channels=channels,
+                colors=colors,
+                windows=windows,
             )
         if level is None:
             try:
@@ -628,13 +821,25 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 if colors:
                     return self._render_fused(
                         path,
-                        pipelines.thumbnail(max_size, z=z, level=lv, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32),
+                        pipelines.thumbnail(
+                            max_size,
+                            z=z,
+                            level=lv,
+                            channels=channels,
+                            out_depth=pipelines.DEPTH_SCALAR_F32,
+                        ),
                         colors,
                         windows,
                     )
                 return self._render(
                     path,
-                    pipelines.thumbnail(max_size, z=z, level=lv, channels=channels, out_depth=self._display_out_depth(path)),
+                    pipelines.thumbnail(
+                        max_size,
+                        z=z,
+                        level=lv,
+                        channels=channels,
+                        out_depth=self._display_out_depth(path),
+                    ),
                 )
             except ValueError as exc:
                 if "empty region" not in str(exc):
@@ -642,7 +847,17 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 last_exc = exc
         raise last_exc  # all attempts came back empty
 
-    def atlas(self, path, *, grid=None, level=None, atlas_scale=None, channels=None, colors=None, windows=None) -> bytes:
+    def atlas(
+        self,
+        path,
+        *,
+        grid=None,
+        level=None,
+        atlas_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         """Assemble a z-stack texture atlas (the 3D slice_stack volume source).
 
         The libbioimage ``read()`` binding ignores the write-time ``-textureatlas``
@@ -661,14 +876,23 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         plan = self.atlas_plan(path, channels=channels, colors=colors, level=level)
         if windows is None:
             windows = self.atlas_windows(
-                path, depth=plan["depth"], level=plan["read_level"],
-                channels=plan["read_channels"], paged=plan["paged"],
+                path,
+                depth=plan["depth"],
+                level=plan["read_level"],
+                channels=plan["read_channels"],
+                paged=plan["paged"],
             )
         cells = [
             self.atlas_cell(
-                path, z=z, level=plan["read_level"], channels=plan["read_channels"],
-                colors=plan["cell_colors"], windows=windows,
-                cell_w=plan["cell_w"], cell_h=plan["cell_h"], paged=plan["paged"],
+                path,
+                z=z,
+                level=plan["read_level"],
+                channels=plan["read_channels"],
+                colors=plan["cell_colors"],
+                windows=windows,
+                cell_w=plan["cell_w"],
+                cell_h=plan["cell_h"],
+                paged=plan["paged"],
             )
             for z in range(plan["depth"])
         ]
@@ -723,8 +947,15 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         (one worker reads its chunk of planes sequentially; chunks run across workers)."""
         return [
             self.atlas_cell(
-                path, z=z, level=level, channels=channels, colors=colors,
-                windows=windows, cell_w=cell_w, cell_h=cell_h, paged=paged,
+                path,
+                z=z,
+                level=level,
+                channels=channels,
+                colors=colors,
+                windows=windows,
+                cell_w=cell_w,
+                cell_h=cell_h,
+                paged=paged,
             )
             for z in zs
         ]
@@ -783,29 +1014,200 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         resized = self._Image.fromarray(cell).resize((cell_w, cell_h), self._Image.BILINEAR)
         return self._np.asarray(resized, dtype="uint8")
 
-    def histogram(self, path, *, bins=256, channels=None) -> dict[str, Any]:
+    def histogram(self, path, *, bins=256, channels=None, t=0, scope="volume") -> dict[str, Any]:
+        if semantic_tiff := self._tiff_scalar_engine(path):
+            return semantic_tiff.histogram(path, bins=bins, channels=channels, t=t, scope=scope)
+        normalized_scope = str(scope).strip().lower()
+        if normalized_scope not in {"display", "volume"}:
+            raise ValueError("unsupported histogram scope")
         np = self._np
-        # Read a downsampled copy to bound memory; histogram of the raw values.
-        try:
-            level = _histogram_level_for_meta(dict(self._bim.meta(path, self._cache)))
-        except Exception:  # noqa: BLE001 - preserve the historic bounded fallback on metadata failures
-            level = 2
-        arr = self._bim.read(
-            path,
-            pipelines.build(pipelines.res_level(level) if level is not None else None),
-            self._cache,
-        )
-        if arr.ndim == 2:
-            arr = arr[np.newaxis, ...]
-        out: dict[str, Any] = {"bins": bins, "channels": []}
-        for c in range(arr.shape[0]):
-            if channels is not None and c not in channels:
-                continue
-            counts, edges = np.histogram(arr[c].ravel(), bins=bins)
-            out["channels"].append(
-                {"index": c, "counts": counts.tolist(), "min": float(edges[0]), "max": float(edges[-1])}
+        from ultra_deepagents.imaging import scalar_semantics
+
+        meta = dict(self._bim.meta(path, self._cache))
+        if _native_scene_count(meta) != 1:
+            raise ValueError(
+                "multiple scenes require an explicit scene identity for histogram preview"
             )
-        return out
+        channel_count = _native_axis_count(meta, "channel")
+        time_count = _native_axis_count(meta, "time")
+        time_index = _validate_native_axis(t, "time", time_count)
+        if channels is None:
+            selected_channels = list(range(channel_count))
+        else:
+            selected_channels = [
+                _validate_native_axis(
+                    _exact_semantic_index(channel, "channel") - 1,
+                    "channel",
+                    channel_count,
+                )
+                for channel in channels
+            ]
+            if len(set(selected_channels)) != len(selected_channels):
+                raise ValueError("duplicate channel indices are not allowed")
+        pages = int(viewerinfo.paged_depth(meta) or 0)
+        depth = pages or _native_axis_count(meta, "z")
+        if normalized_scope == "display":
+            z_index = max(0, depth // 2)
+            level = _histogram_level_for_meta(meta)
+            delivered_bytes = _native_level_plane_bytes(meta, level or 0, len(selected_channels))
+            if delivered_bytes > scalar_semantics.MAX_PROFILE_DECODE_WORK_BYTES:
+                raise ValueError("display histogram decode work exceeds its bounded envelope")
+            samples: list[tuple[int, Any]] = []
+            for channel_index in selected_channels:
+                pipeline = (
+                    pipelines.page_plane(
+                        z_index,
+                        level=level,
+                        channels=[channel_index + 1],
+                        out_depth=pipelines.DEPTH_SCALAR_F32,
+                        max_dim=SCRUB_MAX_DIMENSION,
+                    )
+                    if pages
+                    else pipelines.slice_plane(
+                        z=z_index,
+                        t=time_index,
+                        level=level,
+                        channels=[channel_index + 1],
+                        out_depth=pipelines.DEPTH_SCALAR_F32,
+                        max_dim=SCRUB_MAX_DIMENSION,
+                    )
+                )
+                plane = np.asarray(
+                    self._bim.read(path, pipeline, self._cache),
+                    dtype="float32",
+                )
+                if plane.ndim == 3 and plane.shape[0] == 1:
+                    plane = plane[0]
+                if plane.ndim != 2:
+                    raise ValueError(
+                        "native display histogram plane has unexpected channel geometry"
+                    )
+                samples.append((channel_index, plane))
+            return scalar_semantics.display_histogram(
+                samples,
+                dtype=np.dtype("float32"),
+                bins=int(bins),
+                t=time_index,
+                algorithm="native-bounded-center-plane-v1",
+            )
+
+        _require_native_volume_source(meta)
+        source_samples = (
+            max(1, _meta_int(meta, "image_num_x")) * max(1, _meta_int(meta, "image_num_y")) * depth
+        )
+        # Native histograms require a min/max pass and a binning pass. Admit the
+        # complete two-pass float32 work before the first plane is decoded.
+        if source_samples * 4 * 2 > _NATIVE_SEMANTIC_SOURCE_WORK_MAX_BYTES:
+            raise ValueError("histogram source work exceeds the exact native envelope")
+
+        def read_plane(channel: int, z: int):
+            pipeline = (
+                pipelines.page_plane(
+                    z,
+                    channels=[channel + 1],
+                    out_depth=pipelines.DEPTH_SCALAR_F32,
+                )
+                if pages
+                else pipelines.scalar_volume_plane(
+                    z,
+                    t=time_index,
+                    channel=channel,
+                )
+            )
+            plane = np.asarray(self._bim.read(path, pipeline, self._cache), dtype="float32")
+            if plane.ndim == 3 and plane.shape[0] == 1:
+                plane = plane[0]
+            if plane.ndim != 2:
+                raise ValueError("native histogram plane has unexpected channel geometry")
+            if plane.nbytes > _NATIVE_SEMANTIC_SOURCE_PLANE_MAX_BYTES:
+                raise ValueError("native histogram plane exceeds the exact read envelope")
+            return plane
+
+        entries: list[dict[str, Any]] = []
+        threshold: dict[str, Any] | None = None
+        data_semantics: dict[str, Any] | None = None
+        for channel_index in selected_channels:
+            minimum = math.inf
+            maximum = -math.inf
+            sample_count = 0
+            for z_index in range(depth):
+                plane = read_plane(channel_index, z_index)
+                finite = plane[np.isfinite(plane)]
+                if finite.size == 0:
+                    continue
+                minimum = min(minimum, float(finite.min()))
+                maximum = max(maximum, float(finite.max()))
+                sample_count += int(finite.size)
+            if sample_count <= 0 or not math.isfinite(minimum) or not math.isfinite(maximum):
+                raise ValueError("native histogram source contains no finite samples")
+            edges = (
+                np.linspace(minimum - 0.5, maximum + 0.5, int(bins) + 1)
+                if maximum <= minimum
+                else np.linspace(minimum, maximum, int(bins) + 1)
+            )
+            counts = np.zeros(int(bins), dtype="int64")
+            for z_index in range(depth):
+                plane = read_plane(channel_index, z_index)
+                finite = plane[np.isfinite(plane)]
+                if finite.size:
+                    counts += np.histogram(finite, bins=edges)[0]
+            threshold_index = scalar_semantics.imagej_otsu_first_max(counts)
+            threshold_value = scalar_semantics.strict_above_threshold(
+                edges,
+                threshold_index,
+                np.dtype("float32"),
+            )
+            channel_threshold = {
+                "method": "otsu-256-v1",
+                "value": threshold_value,
+                "domain": "raw",
+                "foreground": "above",
+                "sample_scope": "volume",
+                "sample_count": sample_count,
+                "z_samples": list(range(depth)),
+                "channel": channel_index,
+                "t": time_index,
+                "sampling_algorithm": "native-exact-planes-v1",
+            }
+            if threshold is None:
+                threshold = channel_threshold
+                data_semantics = {
+                    "kind": "intensity",
+                    "basis": "exact_volume_histogram",
+                    "strength": "unknown",
+                    "supported_modes": ["intensity"],
+                    "recommended_view": "intensity",
+                    "threshold": channel_threshold,
+                }
+            entries.append(
+                {
+                    "index": channel_index,
+                    "counts": [int(value) for value in counts],
+                    "edges": [float(value) for value in edges],
+                    "min": minimum,
+                    "max": maximum,
+                }
+            )
+        total_samples = sum(sum(entry["counts"]) for entry in entries)
+        return {
+            "bins": int(bins),
+            "dtype": "float32",
+            "channels": entries,
+            "channel": selected_channels[0],
+            "t": time_index,
+            "scope": "volume",
+            "sample_count": total_samples,
+            "sampling": {
+                "algorithm": "native-exact-planes-v1",
+                "scope": "volume",
+                "strategy": "exact",
+                "sample_count": total_samples,
+                "read_count": depth * len(selected_channels) * 2,
+                "returned_bytes": total_samples * 4 * 2,
+            },
+            "threshold": threshold,
+            "data_semantics": data_semantics,
+        }
 
     def viewer_info(self, path, name=None) -> dict[str, Any]:
         # HDF5-data files (.h5/.hdf5/.hdf/.dream3d) are a different viewer entirely —
@@ -821,7 +1223,9 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         if cached is not None:
             return cached
         meta = dict(self._bim.meta(path, self._cache))
-        info = viewerinfo.build_viewer_info(meta, signal_scores=self._channel_signal_scores(path, meta))
+        info = viewerinfo.build_viewer_info(
+            meta, signal_scores=self._channel_signal_scores(path, meta)
+        )
         write_viewerinfo_sidecar(path, info)
         return info
 
@@ -864,9 +1268,13 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             mid = max(0, depth // 2)
             chans = list(range(1, c + 1))  # -remap is 1-based
             if pages:
-                pipeline = pipelines.page_plane(mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32)
+                pipeline = pipelines.page_plane(
+                    mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32
+                )
             else:
-                pipeline = pipelines.slice_plane(z=mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32)
+                pipeline = pipelines.slice_plane(
+                    z=mid, channels=chans, out_depth=pipelines.DEPTH_SCALAR_F32
+                )
             arr = np.asarray(self._bim.read(path, pipeline, self._cache), dtype="float32")
             if arr.ndim == 2:  # single plane came back without a channel axis
                 arr = arr[None]
@@ -890,22 +1298,41 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         except Exception:
             return None
 
-    def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_volume(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         # Sequential reference, sharing scalar_planes + build_scalar_volume_dict with the
         # parallel orchestrator (imaging/atlas.py) so both produce identical bytes.
         from ultra_deepagents.imaging.atlas import build_scalar_volume_dict, validate_scalar_plan
 
-        plan = self.scalar_plan(path, channel=channel, t=t)
+        plan = self.scalar_plan(path, channel=channel, t=t, sampling=sampling)
         validate_scalar_plan(plan)
         planes = self.scalar_planes(
-            path, zs=list(range(plan["depth"])), channel=plan["channel"], t=plan["t"], pages=plan["pages"]
+            path,
+            zs=list(range(plan["depth"])),
+            channel=plan["channel"],
+            t=plan["t"],
+            pages=plan["pages"],
+            sampling=plan.get("sampling", "box"),
+            plan=(
+                plan
+                if plan.get("preview_policy") == "mask-native-integer-v1"
+                else None
+            ),
         )
         return build_scalar_volume_dict(planes, plan["channel"], plan)
 
-    def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_plan(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         """Depth + addressing for a scalar volume (one engine.meta read; no decode)."""
+        sampling_mode = str(sampling or "box").strip().lower()
+        if sampling_mode not in {"box", "nearest"}:
+            raise ValueError("unsupported scalar volume sampling")
         if semantic_tiff := self._tiff_scalar_engine(path):
-            return semantic_tiff.scalar_plan(path, channel=channel, t=t)
+            return semantic_tiff.scalar_plan(
+                path, channel=channel, t=t, sampling=sampling_mode
+            )
+        if sampling_mode == "nearest":
+            raise ValueError(
+                "unsupported nearest scalar sampling: exact Mask source required"
+            )
         from ultra_deepagents.imaging.atlas import plan_scalar_preview
 
         meta = dict(self._bim.meta(path, self._cache))
@@ -939,16 +1366,36 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             "pages": int(pages),
             "channel": channel_index,
             "t": time_index,
+            "sampling": sampling_mode,
+            "preview_policy": preview["preview_policy"],
         }
 
-    def scalar_planes(self, path, *, zs, channel, t, pages):
+    def scalar_planes(
+        self,
+        path,
+        *,
+        zs,
+        channel,
+        t,
+        pages,
+        sampling="box",
+        plan=None,
+    ):
         """Read a contiguous range of single-channel float planes (the unit of parallelism)."""
         if semantic_tiff := self._tiff_scalar_engine(path):
             return semantic_tiff.scalar_planes(
-                path, zs=zs, channel=channel, t=t, pages=pages
+                path,
+                zs=zs,
+                channel=channel,
+                t=t,
+                pages=pages,
+                sampling=sampling,
+                plan=plan,
             )
+        if plan is not None:
+            raise ValueError("validated exact Mask plans require the semantic TIFF decoder")
         np = self._np
-        plan = self.scalar_plan(path, channel=channel, t=t)
+        plan = self.scalar_plan(path, channel=channel, t=t, sampling=sampling)
         factor_x = int(plan["downsample_x"])
         factor_y = int(plan["downsample_y"])
         factor_z = int(plan["downsample_z"])
@@ -960,7 +1407,12 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             expected_shape = (int(plan["source_height"]), int(plan["source_width"]))
             accumulator = np.zeros(expected_shape, dtype="float32")
             source_count = 0
-            for source_z in range(source_start, source_end):
+            source_zs = (
+                [min(source_end - 1, source_start + factor_z // 2)]
+                if plan.get("sampling") == "nearest"
+                else range(source_start, source_end)
+            )
+            for source_z in source_zs:
                 if pages:
                     pipeline = pipelines.page_plane(
                         source_z,
@@ -968,13 +1420,17 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                         channels=[channel + 1],
                     )
                 else:
-                    pipeline = pipelines.scalar_volume_plane(source_z, t=(t or None), channel=channel)
+                    pipeline = pipelines.scalar_volume_plane(
+                        source_z, t=(t or None), channel=channel
+                    )
                 arr = self._bim.read(path, pipeline, self._cache)
                 if arr.ndim == 3:
                     arr = arr[0]
                 plane_array = np.asarray(arr, dtype="float32")
                 if plane_array.shape != expected_shape:
-                    raise ValueError("cannot decode native scalar plane with the advertised source geometry")
+                    raise ValueError(
+                        "cannot decode native scalar plane with the advertised source geometry"
+                    )
                 np.add(accumulator, plane_array, out=accumulator)
                 source_count += 1
             if source_count <= 0:
@@ -983,7 +1439,12 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             if factor_x > 1 or factor_y > 1:
                 plane = np.asarray(
                     self._Image.fromarray(plane, mode="F").resize(
-                        (int(plan["width"]), int(plan["height"])), self._Image.Resampling.BOX
+                        (int(plan["width"]), int(plan["height"])),
+                        (
+                            self._Image.Resampling.NEAREST
+                            if plan.get("sampling") == "nearest"
+                            else self._Image.Resampling.BOX
+                        ),
                     ),
                     dtype="float32",
                 )
@@ -1012,7 +1473,9 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         # ValueError instead of a cryptic fusion/Pillow error — and lets tile()'s
         # level-0 base fallback engage for fused reads too.
         if 0 in getattr(arr, "shape", ()):
-            raise ValueError(f"engine returned an empty region (shape {getattr(arr, 'shape', None)})")
+            raise ValueError(
+                f"engine returned an empty region (shape {getattr(arr, 'shape', None)})"
+            )
         rgb = fusion.composite_channels(arr, colors, np=self._np, windows=windows)
         buf = io.BytesIO()
         self._Image.fromarray(rgb).save(buf, format="PNG")
@@ -1076,25 +1539,90 @@ class StubEngine(_Hdf5EngineMixin):
             "image_pixel_format": "unsigned integer",
         }
 
-    def tile(self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
-        return self._png(tile_size, tile_size, _seed(path, "tile", level, col, row, channels, colors))
+    def tile(
+        self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None
+    ) -> bytes:
+        return self._png(
+            tile_size, tile_size, _seed(path, "tile", level, col, row, channels, colors)
+        )
 
-    def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
-        return self._png(min(x2 - x1, 1024), min(y2 - y1, 1024), _seed(path, "region", x1, y1, x2, y2, colors))
+    def region(
+        self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None
+    ) -> bytes:
+        return self._png(
+            min(x2 - x1, 1024), min(y2 - y1, 1024), _seed(path, "region", x1, y1, x2, y2, colors)
+        )
 
-    def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
+    def slice_plane(
+        self,
+        path,
+        *,
+        z=None,
+        t=None,
+        level=None,
+        plane_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+        full_resolution=True,
+        scalar_render_mode="intensity",
+        scalar_threshold_value=None,
+        scalar_threshold_foreground="above",
+    ) -> bytes:
         return self._png(512, 512, _seed(path, "slice", z, t, level, colors, full_resolution))
 
-    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+    def thumbnail(
+        self,
+        path,
+        *,
+        max_size=256,
+        z=None,
+        t=None,
+        level=None,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         return self._png(max_size, max_size, _seed(path, "thumb", z, t, level, colors))
 
-    def atlas(self, path, *, grid=None, level=None, atlas_scale=None, channels=None, colors=None, windows=None) -> bytes:
+    def atlas(
+        self,
+        path,
+        *,
+        grid=None,
+        level=None,
+        atlas_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         return self._png(512, 512, _seed(path, "atlas", grid, level, channels, colors))
 
-    def histogram(self, path, *, bins=256, channels=None) -> dict[str, Any]:
+    def histogram(self, path, *, bins=256, channels=None, t=0, scope="volume") -> dict[str, Any]:
         seed = _seed(path, "hist", bins)
-        counts = [((seed + i * 2654435761) % 997) for i in range(bins)]
-        return {"bins": bins, "channels": [{"index": 0, "counts": counts, "min": 0.0, "max": 65535.0}]}
+        selected = [int(value) - 1 for value in channels] if channels else [0]
+        edges = [65535.0 * index / int(bins) for index in range(int(bins) + 1)]
+        entries = []
+        for channel in selected:
+            counts = [((seed + channel * 104729 + i * 2654435761) % 997) for i in range(int(bins))]
+            entries.append(
+                {
+                    "index": channel,
+                    "counts": counts,
+                    "edges": edges,
+                    "min": 0.0,
+                    "max": 65535.0,
+                    "sample_count": sum(counts),
+                }
+            )
+        return {
+            "bins": int(bins),
+            "dtype": "uint16",
+            "channels": entries,
+            "t": int(t),
+            "scope": str(scope),
+            "sample_count": sum(entry["sample_count"] for entry in entries),
+        }
 
     def viewer_info(self, path, name=None) -> dict[str, Any]:
         hdf5_info = self._maybe_hdf5_viewer_info(path, name)
@@ -1103,28 +1631,62 @@ class StubEngine(_Hdf5EngineMixin):
         seed = _seed(path)
         # Deterministic meta WITH a pyramid so the tile path is exercisable in tests.
         meta = {
-            "format": "STUB", "image_num_x": 2048, "image_num_y": 2048,
-            "image_num_z": 1 + seed % 16, "image_num_c": 1 + seed % 3, "image_num_t": 1,
-            "image_pixel_depth": 16, "image_pixel_format": "unsigned integer",
-            "image_num_resolution_levels": 4, "image_res_l_scales": "1.0,0.5,0.25,0.125",
+            "format": "STUB",
+            "image_num_x": 2048,
+            "image_num_y": 2048,
+            "image_num_z": 1 + seed % 16,
+            "image_num_c": 1 + seed % 3,
+            "image_num_t": 1,
+            "image_pixel_depth": 16,
+            "image_pixel_format": "unsigned integer",
+            "image_num_resolution_levels": 4,
+            "image_res_l_scales": "1.0,0.5,0.25,0.125",
             "tile_size_x": "256",
-            "pixel_resolution_x": 0.5, "pixel_resolution_y": 0.5, "pixel_resolution_z": 1.0,
+            "pixel_resolution_x": 0.5,
+            "pixel_resolution_y": 0.5,
+            "pixel_resolution_z": 1.0,
         }
         return viewerinfo.build_viewer_info(meta)
 
-    def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_volume(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
+        if str(sampling or "box").strip().lower() == "nearest":
+            raise ValueError(
+                "unsupported nearest scalar sampling: exact Mask source required"
+            )
         seed = _seed(path, "vol", channel, t)
         w = h = 16
         d = 1 + seed % 8
         data = bytes(bytearray(((seed + i) & 0xFF) for i in range(w * h * d * 4)))
         return {
-            "data": data, "width": w, "height": h, "depth": d, "dtype": "float32",
-            "bytes_per_voxel": 4, "raw_min": 0.0, "raw_max": 255.0, "channel": channel or 0,
-            "scl_slope": 1.0, "scl_inter": 0.0, "t": t or 0,
-            "source_width": w, "source_height": h, "source_depth": d,
-            "downsample_x": 1, "downsample_y": 1, "downsample_z": 1,
+            "data": data,
+            "width": w,
+            "height": h,
+            "depth": d,
+            "dtype": "float32",
+            "bytes_per_voxel": 4,
+            "raw_min": 0.0,
+            "raw_max": 255.0,
+            "channel": channel or 0,
+            "scl_slope": 1.0,
+            "scl_inter": 0.0,
+            "t": t or 0,
+            "source_width": w,
+            "source_height": h,
+            "source_depth": d,
+            "downsample_x": 1,
+            "downsample_y": 1,
+            "downsample_z": 1,
             "preview_policy": "stub-exact-v1",
+            "sampling": sampling,
         }
+
+    def scalar_plan(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
+        volume = self.scalar_volume(path, channel=channel, t=t, sampling=sampling)
+        return {
+            key: value
+            for key, value in volume.items()
+            if key not in {"data", "raw_min", "raw_max", "scl_slope", "scl_inter"}
+        } | {"pages": 0}
 
     def _png(self, w: int, h: int, seed: int) -> bytes:
         w = max(1, int(w))
@@ -1195,7 +1757,9 @@ def _meta_int(meta: dict[str, Any], key: str) -> int:
 
 
 def _resolution_level_count(meta: dict[str, Any]) -> int:
-    return _meta_int(meta, "image_num_resolution_levels_actual") or _meta_int(meta, "image_num_resolution_levels")
+    return _meta_int(meta, "image_num_resolution_levels_actual") or _meta_int(
+        meta, "image_num_resolution_levels"
+    )
 
 
 def _resolution_scales(meta: dict[str, Any]) -> list[float]:
@@ -1277,21 +1841,71 @@ class Hdf5OnlyEngine(_Hdf5EngineMixin):
     def meta(self, path: str) -> dict[str, Any]:
         return self._refuse()
 
-    def tile(self, path, *, level=0, col=0, row=0, tile_size=512, channels=None, colors=None, windows=None) -> bytes:
+    def tile(
+        self,
+        path,
+        *,
+        level=0,
+        col=0,
+        row=0,
+        tile_size=512,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         return self._refuse()
 
-    def region(self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None) -> bytes:
+    def region(
+        self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None
+    ) -> bytes:
         return self._refuse()
 
-    def slice_plane(self, path, *, z=None, t=None, level=None, plane_scale=None, channels=None, colors=None, windows=None, full_resolution=True) -> bytes:
+    def slice_plane(
+        self,
+        path,
+        *,
+        z=None,
+        t=None,
+        level=None,
+        plane_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+        full_resolution=True,
+        scalar_render_mode="intensity",
+        scalar_threshold_value=None,
+        scalar_threshold_foreground="above",
+    ) -> bytes:
         hdf5_png = self._maybe_hdf5_slice(path, z)
         return hdf5_png if hdf5_png is not None else self._refuse()
 
-    def thumbnail(self, path, *, max_size=256, z=None, t=None, level=None, channels=None, colors=None, windows=None) -> bytes:
+    def thumbnail(
+        self,
+        path,
+        *,
+        max_size=256,
+        z=None,
+        t=None,
+        level=None,
+        channels=None,
+        colors=None,
+        windows=None,
+    ) -> bytes:
         hdf5_png = self._maybe_hdf5_thumbnail(path, max_size)
         return hdf5_png if hdf5_png is not None else self._refuse()
 
-    def atlas(self, path, *, grid=None, level=None, atlas_scale=None, channels=None, colors=None, windows=None, t=0) -> bytes:
+    def atlas(
+        self,
+        path,
+        *,
+        grid=None,
+        level=None,
+        atlas_scale=None,
+        channels=None,
+        colors=None,
+        windows=None,
+        t=0,
+    ) -> bytes:
         return self._refuse()
 
     def atlas_plan(self, path, *, channels=None, colors=None, level=None, t=0) -> dict[str, Any]:
@@ -1303,23 +1917,35 @@ class Hdf5OnlyEngine(_Hdf5EngineMixin):
     def atlas_cell(self, path, *, z, level, channels, colors, windows, cell_w, cell_h, paged, t=0):
         return self._refuse()
 
-    def atlas_cells(self, path, *, zs, level, channels, colors, windows, cell_w, cell_h, paged, t=0):
+    def atlas_cells(
+        self, path, *, zs, level, channels, colors, windows, cell_w, cell_h, paged, t=0
+    ):
         return self._refuse()
 
-    def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_plan(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         return self._refuse()
 
-    def scalar_planes(self, path, *, zs, channel, t, pages):
+    def scalar_planes(
+        self,
+        path,
+        *,
+        zs,
+        channel,
+        t,
+        pages,
+        sampling="box",
+        plan=None,
+    ):
         return self._refuse()
 
-    def histogram(self, path, *, bins=256, channels=None, t=0) -> dict[str, Any]:
+    def histogram(self, path, *, bins=256, channels=None, t=0, scope="volume") -> dict[str, Any]:
         return self._refuse()
 
     def viewer_info(self, path, name=None) -> dict[str, Any]:
         hdf5_info = self._maybe_hdf5_viewer_info(path, name)
         return hdf5_info if hdf5_info is not None else self._refuse()
 
-    def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_volume(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         return self._refuse()
 
 

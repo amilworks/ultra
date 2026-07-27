@@ -13,7 +13,10 @@ import {
   scalarVolumeIdentityKey,
   scalarVolumeSourceIdentity,
   scalarVolumePayloadToHalfFloatAsync,
+  scalarVolumePayloadToRawInteger,
   scalarVolumePayloadValueAt,
+  validateExactMaskSourcePreflight,
+  validateExactMaskVolume,
   validateScalarVolumeIdentity,
 } from "./scalarVolume";
 import { extractScalarSlice } from "./scalarSlice";
@@ -38,7 +41,82 @@ const makePayload = (overrides: Partial<ScalarVolumePayload> = {}): ScalarVolume
   downsampleY: 1,
   downsampleZ: 1,
   previewPolicy: "exact-v1",
+  sampling: "box",
   ...overrides,
+});
+
+describe("exact Mask volume admission", () => {
+  const sourceGrid = { width: 32, height: 24, depth: 8 };
+  const exact = makePayload({
+    data: new Uint16Array(32 * 24 * 8).buffer,
+    width: 32,
+    height: 24,
+    depth: 8,
+    sourceWidth: 32,
+    sourceHeight: 24,
+    sourceDepth: 8,
+    previewPolicy: "mask-native-integer-v1",
+    sampling: "nearest",
+  });
+
+  it("requires native integer nearest provenance for fresh and prepared data", () => {
+    expect(() =>
+      validateExactMaskVolume(exact, { sourceGrid, dtype: "uint16", max3DTextureSize: 2048 })
+    ).not.toThrow();
+    expect(() =>
+      validateExactMaskVolume(
+        { ...exact, width: 16, downsampleX: 2 },
+        { sourceGrid, dtype: "uint16", max3DTextureSize: 2048 }
+      )
+    ).toThrow(/native integer grid/i);
+    expect(() =>
+      validateExactMaskVolume(
+        { ...exact, textureData: new Uint16Array(1) },
+        { sourceGrid, dtype: "uint16", max3DTextureSize: 2048 }
+      )
+    ).toThrow(/byte size/i);
+  });
+
+  it("fails source preflight before loading when traversal, GPU, or 128 MiB bounds are exceeded", () => {
+    expect(() =>
+      validateExactMaskSourcePreflight({
+        sourceGrid: { width: 1025, height: 1, depth: 1 },
+        dtype: "uint8",
+        max3DTextureSize: 2048,
+      })
+    ).toThrow(/texture\/traversal limit/i);
+    expect(() =>
+      validateExactMaskSourcePreflight({
+        sourceGrid: { width: 512, height: 512, depth: 512 },
+        dtype: "uint16",
+        max3DTextureSize: 2048,
+      })
+    ).toThrow(/byte limit/i);
+    expect(() =>
+      validateExactMaskSourcePreflight({
+        sourceGrid,
+        dtype: "uint16",
+        max3DTextureSize: 16,
+      })
+    ).toThrow(/texture\/traversal limit/i);
+  });
+
+  it("bounds worst-case oblique DDA crossings by the sum of native axes", () => {
+    expect(() =>
+      validateExactMaskSourcePreflight({
+        sourceGrid: { width: 1024, height: 1023, depth: 1 },
+        dtype: "uint8",
+        max3DTextureSize: 2048,
+      })
+    ).not.toThrow();
+    expect(() =>
+      validateExactMaskSourcePreflight({
+        sourceGrid: { width: 1024, height: 1023, depth: 2 },
+        dtype: "uint8",
+        max3DTextureSize: 2048,
+      })
+    ).toThrow(/DDA traversal limit/i);
+  });
 });
 
 describe("prepared scalar volume cache", () => {
@@ -228,6 +306,86 @@ describe("prepared scalar volume cache", () => {
       /no longer active/i
     );
     expect(manager.byteSize).toBe(0);
+  });
+});
+
+describe("raw mask texture conversion", () => {
+  it("preserves uint16 threshold membership in its native integer storage", () => {
+    const values = new Uint16Array([0, 120, 121, 65_535]);
+    const raw = scalarVolumePayloadToRawInteger(
+      makePayload({
+        data: values.buffer,
+        width: values.length,
+        sourceWidth: values.length,
+        rawMin: 0,
+        rawMax: 65_535,
+      })
+    );
+
+    expect(raw).toBeInstanceOf(Uint16Array);
+    expect(Array.from(raw)).toEqual([0, 120, 121, 65_535]);
+    expect(Array.from(raw, (value) => value > 120)).toEqual([
+      false,
+      false,
+      true,
+      true,
+    ]);
+    expect(Array.from(raw, (value) => value > -1)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
+    expect(Array.from(raw, (value) => value > 65_535)).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it("preserves signed int16 boundaries and uses two bytes per prepared voxel", async () => {
+    const values = new Int16Array([-32_768, -1, 0, 32_767]);
+    const prepared = await prepareScalarVolume(
+      makePayload({
+        data: values.buffer,
+        width: values.length,
+        sourceWidth: values.length,
+        dtype: "int16",
+        bytesPerVoxel: 2,
+        rawMin: -32_768,
+        rawMax: 32_767,
+      }),
+      undefined,
+      "raw-integer"
+    );
+    expect(prepared.textureEncoding).toBe("raw-int16");
+    expect(prepared.textureData).toBeInstanceOf(Int16Array);
+    expect(Array.from(prepared.textureData)).toEqual(Array.from(values));
+    expect(prepared.textureData.byteLength).toBe(
+      values.length * Int16Array.BYTES_PER_ELEMENT
+    );
+  });
+
+  it("keeps uint8 mask preparation at one byte per voxel", async () => {
+    const values = new Uint8Array([0, 1, 254, 255]);
+    const prepared = await prepareScalarVolume(
+      makePayload({
+        data: values.buffer,
+        width: values.length,
+        sourceWidth: values.length,
+        dtype: "uint8",
+        bytesPerVoxel: 1,
+        rawMin: 0,
+        rawMax: 255,
+      }),
+      undefined,
+      "raw-integer"
+    );
+
+    expect(prepared.textureEncoding).toBe("raw-uint8");
+    expect(prepared.textureData).toBeInstanceOf(Uint8Array);
+    expect(Array.from(prepared.textureData)).toEqual(Array.from(values));
   });
 });
 

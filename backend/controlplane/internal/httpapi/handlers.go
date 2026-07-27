@@ -2138,8 +2138,10 @@ type resourceResponse struct {
 }
 
 type patchResourceRequest struct {
-	OriginalName string         `json:"original_name"`
-	Metadata     domain.JSONMap `json:"metadata"`
+	OriginalName                          string         `json:"original_name"`
+	Metadata                              domain.JSONMap `json:"metadata"`
+	CalibrationExpectedSourceSHA256       string         `json:"-"`
+	CalibrationSelectionExpectedRevisions map[string]int `json:"-"`
 }
 
 type bulkLifecycleResourcesRequest struct {
@@ -7229,6 +7231,44 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		writeStoreError(w, store.ErrNotFound)
 		return
 	}
+	rawCalibration, calibrationPatch := req.Metadata["ultra_viewer_calibration_v1"]
+	if calibrationPatch {
+		sourcePath, pathErr := resolveCatalogResourcePath(root, resource)
+		if pathErr != nil {
+			writeStoreError(w, pathErr)
+			return
+		}
+		sourceInfo, timeCount, channelCount, _, authorityErr := deps.sourceImageServiceViewerInfo(
+			r.Context(),
+			sourcePath,
+		)
+		if authorityErr != nil {
+			writeImageSourceAuthorityError(w, authorityErr)
+			return
+		}
+		sanitizeScalarMaskCapability(
+			sourceInfo,
+			deps.resourceRecordFromCatalog(root, resource),
+		)
+		if _, capable := jsonObject(sourceInfo["scalar_mask_capability"]); !capable {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("mask calibration is unsupported for this source"))
+			return
+		}
+		sanitized, expectedRevisions, validationErr := validateViewerCalibrationMetadata(
+			rawCalibration,
+			resource.SHA256,
+			timeCount,
+			channelCount,
+			capabilityDtype(sourceInfo),
+		)
+		if validationErr != nil {
+			writeError(w, http.StatusBadRequest, validationErr)
+			return
+		}
+		req.Metadata["ultra_viewer_calibration_v1"] = sanitized
+		req.CalibrationExpectedSourceSHA256 = resource.SHA256
+		req.CalibrationSelectionExpectedRevisions = expectedRevisions
+	}
 	now := domain.Now()
 	updated := resource
 	if len(req.Metadata) > 0 {
@@ -7239,15 +7279,37 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		}
 		metadataKeys := sortedJSONMapKeys(req.Metadata)
 		updated, err = metadataStore.MergeResourceMetadataForUser(r.Context(), domain.MergeResourceMetadataInput{
-			ResourceID: fileID,
-			UserID:     principal.UserID,
-			OrgID:      principal.OrgID,
-			Patch:      req.Metadata,
-			UpdatedAt:  now,
+			ResourceID:                 fileID,
+			UserID:                     principal.UserID,
+			OrgID:                      principal.OrgID,
+			Patch:                      req.Metadata,
+			ExpectedSourceSHA256:       req.CalibrationExpectedSourceSHA256,
+			SelectionExpectedRevisions: req.CalibrationSelectionExpectedRevisions,
+			UpdatedAt:                  now,
 		})
 		if err != nil {
 			writeStoreError(w, err)
 			return
+		}
+		if calibrationPatch {
+			if _, recorded := deps.appendResourceEvent(
+				r.Context(),
+				updated.ResourceID,
+				principal,
+				"resource.viewer_calibration_updated",
+				domain.JSONMap{
+					"source_sha256": resource.SHA256,
+					"calibration":   req.Metadata["ultra_viewer_calibration_v1"],
+					"updated_at":    now.UTC().Format(time.RFC3339Nano),
+				},
+			); !recorded {
+				writeError(
+					w,
+					http.StatusInternalServerError,
+					errors.New("viewer calibration persisted but its audit event could not be recorded"),
+				)
+				return
+			}
 		}
 		deps.recordResourceEvent(r.Context(), updated.ResourceID, principal, "resource.metadata_updated", domain.JSONMap{
 			"metadata_keys":      metadataKeys,
@@ -7866,6 +7928,17 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
 	}
+	volumeBytes := int64(len(volume.Data))
+	if !scalarVolumeInFlightBudget.tryAcquire(volumeBytes) {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			errors.New("scalar volume in-flight byte budget is exhausted"),
+		)
+		return
+	}
+	defer scalarVolumeInFlightBudget.release(volumeBytes)
 	maybeDecompressNiftiSidecar(path, volume.TimeCount)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
@@ -7886,6 +7959,7 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-downsample-y", "1")
 	w.Header().Set("x-volume-downsample-z", "1")
 	w.Header().Set("x-volume-preview-policy", "native-exact-v1")
+	w.Header().Set("x-volume-sampling", "box")
 	// Rescale to physical units (HU/SUV) so the client can window in true
 	// intensities: physical = slope*code + inter.
 	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))

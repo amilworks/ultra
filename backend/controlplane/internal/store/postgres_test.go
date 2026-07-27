@@ -7,12 +7,97 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestPostgresViewerCalibrationCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+	resourceID := "pg-viewer-cas-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	ownerUserID := "pg-viewer-owner-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   resourceID,
+		OriginalName: "mask.ome.tiff",
+		SHA256:       "source-sha",
+		OwnerUserID:  ownerUserID,
+		OwnerOrgID:   "org-viewer-cas",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, threshold := range []int{120, 220} {
+		threshold := threshold
+		go func() {
+			ready.Done()
+			<-start
+			_, err := store.MergeResourceMetadataForUser(
+				ctx,
+				domain.MergeResourceMetadataInput{
+					ResourceID:                 resourceID,
+					UserID:                     ownerUserID,
+					OrgID:                      "org-viewer-cas",
+					Patch:                      viewerCalibrationPatch("source-sha", 1, threshold),
+					ExpectedSourceSHA256:       "source-sha",
+					SelectionExpectedRevisions: map[string]int{"c0:t0": 0},
+				},
+			)
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	successes := 0
+	conflicts := 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("concurrent calibration write: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("concurrent results successes=%d conflicts=%d, want 1/1", successes, conflicts)
+	}
+
+	resource, err := store.GetResourceForUser(ctx, resourceID, ownerUserID, "org-viewer-cas")
+	if err != nil {
+		t.Fatalf("GetResourceForUser: %v", err)
+	}
+	calibration, _ := resourceMetadataMap(resource.Metadata["ultra_viewer_calibration_v1"])
+	selections, _ := resourceMetadataMap(calibration["selections"])
+	selection, _ := resourceMetadataMap(selections["c0:t0"])
+	revision, valid := resourceMetadataInteger(selection["revision"])
+	threshold, thresholdValid := resourceMetadataInteger(selection["threshold_value"])
+	if !valid || revision != 1 || !thresholdValid || (threshold != 120 && threshold != 220) {
+		t.Fatalf("persisted selection = %#v, want revision 1 from one winner", selection)
+	}
+}
 
 func TestPostgresStoreThreadRunEventArtifactFlow(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")

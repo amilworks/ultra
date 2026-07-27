@@ -156,6 +156,8 @@ type ResourceBrowserProps = {
   deletingFileIds: Record<string, boolean>;
   restoringFileIds?: Record<string, boolean>;
   onQueryChange: (value: string) => void;
+  /** Bumped by the mobile nav bar's search action to reveal + focus the field. */
+  focusSearchSignal?: number;
   onKindFilterChange: (value: ResourceKindFilter) => void;
   onSourceFilterChange: (value: ResourceSourceFilter) => void;
   onSharingFilterChange?: (value: ResourceSharingFilter) => void;
@@ -809,6 +811,7 @@ export function ResourceBrowser({
   deletingFileIds,
   restoringFileIds = {},
   onQueryChange,
+  focusSearchSignal = 0,
   onKindFilterChange,
   onSourceFilterChange,
   onSharingFilterChange,
@@ -856,6 +859,24 @@ export function ResourceBrowser({
   onPushCollectionToBisque,
 }: ResourceBrowserProps) {
   const isMobileView = useBreakpoint(721);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  // Seeded with the mount-time value, so a signal that was already spent before
+  // this mount is not replayed. The counter lives in App and never resets, and
+  // this panel unmounts on every panel switch — without the latch, one tap of the
+  // nav-bar search action would silently steal focus into the field on every
+  // later return to Resources.
+  const handledSearchSignalRef = useRef(focusSearchSignal);
+  // The mobile header scrolls away with the list, so by the time you want to
+  // search the field is usually off-screen. The nav bar's search action bumps
+  // this signal: bring the field back into view and focus it.
+  useEffect(() => {
+    if (focusSearchSignal === handledSearchSignalRef.current) return;
+    handledSearchSignalRef.current = focusSearchSignal;
+    const input = searchInputRef.current;
+    if (!input) return;
+    input.scrollIntoView({ block: "nearest" });
+    input.focus();
+  }, [focusSearchSignal]);
   const [resourceFiltersOpen, setResourceFiltersOpen] = useState(false);
   const [expiredUploadDetailsOpen, setExpiredUploadDetailsOpen] = useState(false);
   const [resourceViewMode, setResourceViewMode] = useState<ResourceViewMode>(
@@ -2271,12 +2292,17 @@ export function ResourceBrowser({
               <div className="resource-browser-search-field">
                 <Search data-icon="inline-start" aria-hidden="true" />
                 <Input
+                  ref={searchInputRef}
                   value={query}
                   onChange={(event) => {
                     clearSelection();
                     resetTableScroll();
                     onQueryChange(event.target.value);
                   }}
+                  // The nav bar's search action points here, and the magnifier is
+                  // aria-hidden, so give the control a name of its own rather than
+                  // leaning on the placeholder.
+                  aria-label="Search resources"
                   placeholder="Search resources"
                   className="resource-browser-search"
                 />
@@ -3020,6 +3046,46 @@ export function ResourceBrowser({
                       resourceKindLabel(resource.resource_kind),
                       formatBytes(resource.size_bytes),
                     ].join(" · ");
+                    // Single-slot status chips. The meta box fits exactly three
+                    // text rows (name, type/size, date), so on a tile that has a
+                    // thumbnail these ride the preview's free bottom-left corner
+                    // instead — otherwise a chip row could only be paid for by
+                    // crushing the primary lines. Compact tiles have vertical
+                    // slack, so there they stay in the meta flow.
+                    const statusChipNodes = [
+                      isDeleted ? (
+                        <div
+                          key="lifecycle"
+                          className="resource-browser-lifecycle-chip"
+                          aria-label={`Lifecycle status for ${displayName}`}
+                        >
+                          <span>Deleted</span>
+                        </div>
+                      ) : null,
+                      !isDeleted && duplicateCountFor(resource) > 1 ? (
+                        <div
+                          key="duplicate"
+                          className="resource-browser-dup-chip"
+                          aria-label={`${displayName} has identical copies in view`}
+                          title="Identical content (same checksum and size) appears more than once in this view"
+                        >
+                          <span>Duplicate ×{duplicateCountFor(resource)}</span>
+                        </div>
+                      ) : null,
+                      shareStatusChips.length > 0 ? (
+                        <div
+                          key="share"
+                          className="resource-browser-share-status-chips"
+                          aria-label={`Sharing status for ${displayName}`}
+                        >
+                          {shareStatusChips.map((chip) => (
+                            <span key={chip.key} title={chip.title}>
+                              {chip.label}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null,
+                    ].filter(Boolean);
                     return (
                       <ContextMenu key={resource.file_id}>
                         <ContextMenuTrigger asChild>
@@ -3120,6 +3186,9 @@ export function ResourceBrowser({
                               <span>{resourceKindLabel(resource.resource_kind)}</span>
                             </div>
                           )}
+                          {hasPreviewSurface && statusChipNodes.length > 0 ? (
+                            <div className="resource-browser-status-overlay">{statusChipNodes}</div>
+                          ) : null}
                         </div>
                         <div className="resource-browser-meta">
                           <p className="resource-browser-name" title={displayName}>
@@ -3127,23 +3196,7 @@ export function ResourceBrowser({
                           </p>
                           <p className="resource-browser-details">{secondaryLine}</p>
                           <p className="resource-browser-date">{formatResourceDate(resource.created_at)}</p>
-                          {isDeleted ? (
-                            <div
-                              className="resource-browser-lifecycle-chip"
-                              aria-label={`Lifecycle status for ${displayName}`}
-                            >
-                              <span>Deleted</span>
-                            </div>
-                          ) : null}
-                          {!isDeleted && duplicateCountFor(resource) > 1 ? (
-                            <div
-                              className="resource-browser-dup-chip"
-                              aria-label={`${displayName} has identical copies in view`}
-                              title="Identical content (same checksum and size) appears more than once in this view"
-                            >
-                              <span>Duplicate ×{duplicateCountFor(resource)}</span>
-                            </div>
-                          ) : null}
+                          {hasPreviewSurface ? null : statusChipNodes}
                           {resourceTags.length > 0 ? (
                             <div
                               className="resource-browser-resource-tags"
@@ -3163,18 +3216,6 @@ export function ResourceBrowser({
                                   <span key={tag}>{tag}</span>
                                 )
                               )}
-                            </div>
-                          ) : null}
-                          {shareStatusChips.length > 0 ? (
-                            <div
-                              className="resource-browser-share-status-chips"
-                              aria-label={`Sharing status for ${displayName}`}
-                            >
-                              {shareStatusChips.map((chip) => (
-                                <span key={chip.key} title={chip.title}>
-                                  {chip.label}
-                                </span>
-                              ))}
                             </div>
                           ) : null}
                           {resource.sync_error ? (

@@ -2398,6 +2398,9 @@ func (s *MemoryStore) MergeResourceMetadataForUser(ctx context.Context, input do
 	if !ok || !resourceVisibleToOwner(resource, input.UserID, input.OrgID) {
 		return domain.ResourceRecord{}, ErrNotFound
 	}
+	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
+	}
 	updatedAt := input.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = domain.Now()

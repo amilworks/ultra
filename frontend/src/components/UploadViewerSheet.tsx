@@ -161,6 +161,14 @@ const buildViewerDisplayState = (
   volume_channel: viewerInfo.display_defaults?.volume_channel ?? viewerInfo.selected_indices.C ?? 0,
   volume_view_preset: viewerInfo.display_defaults?.volume_view_preset ?? undefined,
   volume_camera_mode: viewerInfo.display_defaults?.volume_camera_mode ?? undefined,
+  scalar_render_mode: viewerInfo.display_defaults?.scalar_render_mode ?? "auto",
+  scalar_threshold_method:
+    viewerInfo.display_defaults?.scalar_threshold_method ?? "otsu-256-v1",
+  scalar_threshold_value:
+    viewerInfo.display_defaults?.scalar_threshold_value ??
+    viewerInfo.data_semantics?.threshold?.value ??
+    null,
+  scalar_threshold_foreground: "above",
   volume_clip_min: {
     x: Number(viewerInfo.display_defaults?.volume_clip_min?.x ?? 0),
     y: Number(viewerInfo.display_defaults?.volume_clip_min?.y ?? 0),
@@ -173,6 +181,33 @@ const buildViewerDisplayState = (
   },
   ...override,
 });
+
+export const mergeViewerCalibrations = (
+  current: UploadViewerInfo["viewer_calibrations"] | undefined,
+  incoming: UploadViewerInfo["viewer_calibrations"] | undefined
+): UploadViewerInfo["viewer_calibrations"] | undefined => {
+  if (!incoming) {
+    return current;
+  }
+  if (!current) {
+    return incoming;
+  }
+  if (current.source_sha256 !== incoming.source_sha256) {
+    return current;
+  }
+  const selections = { ...current.selections };
+  Object.entries(incoming.selections).forEach(([key, selection]) => {
+    const saved = selections[key];
+    if (!saved || selection.revision >= saved.revision) {
+      selections[key] = selection;
+    }
+  });
+  return {
+    version: 1,
+    source_sha256: current.source_sha256,
+    selections,
+  };
+};
 
 const isPdfUpload = (file: UploadedFileRecord | null | undefined): boolean => {
   const contentType = String(file?.content_type ?? "")
@@ -779,6 +814,26 @@ export function UploadViewerWorkspace({
                     zAxisSize={zAxisSize}
                     tAxisSize={tAxisSize}
                     setSelectedIndex={setSelectedIndex}
+                    onViewerCalibrationsChange={(calibrations) => {
+                      if (!selectedFileId || !calibrations) {
+                        return;
+                      }
+                      setViewerInfoById((previous) => {
+                        const current = previous[selectedFileId];
+                        return current
+                          ? {
+                              ...previous,
+                              [selectedFileId]: {
+                                ...current,
+                                viewer_calibrations: mergeViewerCalibrations(
+                                  current.viewer_calibrations,
+                                  calibrations
+                                ),
+                              },
+                            }
+                          : previous;
+                      });
+                    }}
                     selectedCaption=""
                     captionLoading={false}
                   />

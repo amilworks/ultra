@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,7 +369,7 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 	t.Parallel()
 
 	raw := bytes.Repeat([]byte{1, 2, 3, 4}, 8)
-	var viewerPath, scalarPath, scalarChannel, scalarTime string
+	var viewerPath, scalarPath, scalarChannel, scalarTime, scalarSampling string
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/viewerinfo":
@@ -379,6 +381,7 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 			scalarPath = r.URL.Query().Get("path")
 			scalarChannel = r.URL.Query().Get("channel")
 			scalarTime = r.URL.Query().Get("t")
+			scalarSampling = r.URL.Query().Get("sampling")
 			w.Header().Set("Content-Type", "application/octet-stream")
 			w.Header().Set("x-volume-width", "2")
 			w.Header().Set("x-volume-height", "2")
@@ -416,7 +419,7 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 
 	req := httptest.NewRequest(
 		http.MethodGet,
-		"/v2/uploads/"+fileID+"/scalar-volume?channel=2&t=1",
+		"/v2/uploads/"+fileID+"/scalar-volume?channel=2&t=1&sampling=nearest",
 		nil,
 	)
 	setProxyOwnerHeaders(req)
@@ -448,6 +451,9 @@ func TestV2UploadScalarVolumeForwardsHeaders(t *testing.T) {
 			scalarTime,
 		)
 	}
+	if scalarSampling != "nearest" {
+		t.Fatalf("scalar-volume sampling = %q, want nearest", scalarSampling)
+	}
 }
 
 func TestSourceViewerAxesRequirePositiveIntegers(t *testing.T) {
@@ -471,6 +477,519 @@ func TestSourceViewerAxesRequirePositiveIntegers(t *testing.T) {
 				t.Fatal("sourceViewerAxes accepted malformed source axes")
 			}
 		})
+	}
+}
+
+func testScalarMaskViewerInfo(timeCount, channelCount, depth int, dtype string) map[string]any {
+	return map[string]any{
+		"axis_sizes": map[string]any{"T": timeCount, "C": channelCount, "Z": depth},
+		"metadata":   map[string]any{"array_dtype": dtype},
+		"phys":       map[string]any{},
+		"viewer": map[string]any{
+			"volume_mode":        "slice_stack",
+			"render_policy":      "scalar",
+			"available_surfaces": []any{"2d", "metadata", "mpr", "volume"},
+		},
+		"scalar_mask_capability": map[string]any{
+			"version":              1,
+			"source_authority":     "original",
+			"source_format":        "tiff",
+			"dtype":                dtype,
+			"threshold_domain":     "raw",
+			"threshold_foreground": "above",
+			"slice_delivery":       "thresholded_png",
+			"volume_delivery":      "raw_scalar",
+			"volume_sampling":      "nearest",
+			"channel_selection":    "single",
+			"time_selection":       "single",
+			"surfaces":             []any{"2d", "mpr", "volume"},
+		},
+	}
+}
+
+func TestInjectViewerCalibrationDefaultsRequiresMatchingSourceSHA(t *testing.T) {
+	t.Parallel()
+
+	baseCore := func() map[string]any {
+		core := testScalarMaskViewerInfo(3, 1, 5, "uint8")
+		core["data_semantics"] = map[string]any{
+			"supported_modes": []any{"intensity", "mask"},
+		}
+		core["display_defaults"] = map[string]any{
+			"volume_channel":          0,
+			"time_index":              0,
+			"scalar_render_mode":      "auto",
+			"scalar_threshold_method": "otsu-256-v1",
+			"scalar_threshold_value":  float64(120),
+		}
+		return core
+	}
+	selection := func(timeIndex int, threshold float64) domain.JSONMap {
+		return domain.JSONMap{
+			"channel":              0,
+			"t":                    timeIndex,
+			"render_mode":          "mask",
+			"threshold_method":     "manual",
+			"threshold_value":      threshold,
+			"threshold_foreground": "above",
+			"revision":             1,
+			"threshold_provenance": domain.JSONMap{
+				"method":             "otsu-256-v1",
+				"value":              threshold - 1,
+				"domain":             "raw",
+				"foreground":         "above",
+				"channel":            0,
+				"t":                  timeIndex,
+				"sample_scope":       "volume",
+				"sample_count":       100,
+				"sampling_algorithm": "scalar-profile-otsu-256-v1",
+				"sampling_strategy":  "exact",
+				"z_samples":          []any{0, 1, 2, 3, 4},
+				"source_sha256":      "source-sha",
+				"bins":               256,
+			},
+		}
+	}
+	record := resourceRecord{
+		OriginalName: "source.tif",
+		ContentType:  "image/tiff",
+		SHA256:       "source-sha",
+		Metadata: domain.JSONMap{
+			"ultra_viewer_calibration_v1": domain.JSONMap{
+				"version":       1,
+				"source_sha256": "source-sha",
+				"selections": domain.JSONMap{
+					"c0:t0": selection(0, 133.5),
+					"c0:t2": selection(2, 211.5),
+				},
+			},
+		},
+	}
+	matching := baseCore()
+	injectControlPlaneViewerFields(matching, record)
+	defaults := matching["display_defaults"].(map[string]any)
+	if defaults["scalar_render_mode"] != "mask" || defaults["scalar_threshold_value"] != float64(133) {
+		t.Fatalf("matching calibration defaults = %#v", defaults)
+	}
+	calibrations, ok := matching["viewer_calibrations"].(map[string]any)
+	if !ok {
+		t.Fatalf("sanitized per-selection calibration map missing: %#v", matching)
+	}
+	selections := calibrations["selections"].(map[string]any)
+	if len(selections) != 2 {
+		t.Fatalf("per-selection calibration map = %#v", selections)
+	}
+
+	stale := baseCore()
+	staleRecord := record
+	staleRecord.SHA256 = "new-source-sha"
+	injectControlPlaneViewerFields(stale, staleRecord)
+	staleDefaults := stale["display_defaults"].(map[string]any)
+	if staleDefaults["scalar_render_mode"] != "auto" || staleDefaults["scalar_threshold_value"] != float64(120) {
+		t.Fatalf("stale calibration mutated defaults = %#v", staleDefaults)
+	}
+	if _, exists := stale["viewer_calibrations"]; exists {
+		t.Fatalf("stale calibration map was injected: %#v", stale)
+	}
+
+	malformed := baseCore()
+	malformedRecord := record
+	malformedRecord.Metadata = domain.JSONMap{
+		"ultra_viewer_calibration_v1": domain.JSONMap{
+			"version":       1,
+			"source_sha256": "source-sha",
+			"selections": domain.JSONMap{
+				"c0:t0": selection(0, 133.5),
+				"c0:t2": domain.JSONMap{"threshold_method": "manual"},
+			},
+		},
+	}
+	injectControlPlaneViewerFields(malformed, malformedRecord)
+	malformedDefaults := malformed["display_defaults"].(map[string]any)
+	if malformedDefaults["scalar_render_mode"] != "mask" {
+		t.Fatalf("valid calibration selection was not retained = %#v", malformedDefaults)
+	}
+	malformedCalibrations := malformed["viewer_calibrations"].(map[string]any)
+	malformedSelections := malformedCalibrations["selections"].(map[string]any)
+	if len(malformedSelections) != 1 {
+		t.Fatalf("invalid calibration selection was not skipped individually: %#v", malformedSelections)
+	}
+}
+
+func TestScalarMaskCapabilityFailsClosedForNonTiffOrMalformedDelivery(t *testing.T) {
+	t.Parallel()
+
+	for name, testCase := range map[string]struct {
+		record resourceRecord
+		mutate func(map[string]any)
+	}{
+		"non-tiff": {
+			record: resourceRecord{OriginalName: "volume.nii", ContentType: "application/x-nifti", SHA256: "sha"},
+			mutate: func(map[string]any) {},
+		},
+		"wrong sampling": {
+			record: resourceRecord{OriginalName: "volume.tif", ContentType: "image/tiff", SHA256: "sha"},
+			mutate: func(core map[string]any) {
+				core["scalar_mask_capability"].(map[string]any)["volume_sampling"] = "box"
+			},
+		},
+		"missing surface": {
+			record: resourceRecord{OriginalName: "volume.tif", ContentType: "image/tiff", SHA256: "sha"},
+			mutate: func(core map[string]any) {
+				core["scalar_mask_capability"].(map[string]any)["surfaces"] = []any{"2d"}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := testScalarMaskViewerInfo(1, 1, 3, "uint16")
+			testCase.mutate(core)
+			injectControlPlaneViewerFields(core, testCase.record)
+			if _, exists := core["scalar_mask_capability"]; exists {
+				t.Fatalf("invalid capability survived sanitization: %#v", core["scalar_mask_capability"])
+			}
+		})
+	}
+}
+
+func TestViewerCalibrationPatchValidatesBeforeStoreAndMergesSelections(t *testing.T) {
+	t.Parallel()
+
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/viewerinfo" {
+			http.NotFound(w, r)
+			return
+		}
+		info := testScalarMaskViewerInfo(3, 1, 2, "uint8")
+		info["display_defaults"] = map[string]any{
+			"volume_channel":          0,
+			"time_index":              0,
+			"scalar_render_mode":      "auto",
+			"scalar_threshold_method": "otsu-256-v1",
+			"scalar_threshold_value":  120,
+		}
+		_ = json.NewEncoder(w).Encode(info)
+	}))
+	defer imageSvc.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "calibration.tif", testPNGBytes(t, 4, 4))
+	resource, err := mem.GetResourceForUser(
+		context.Background(),
+		fileID,
+		"field-researcher",
+		"smithsonian",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	selection := func(
+		timeIndex int,
+		method string,
+		threshold float64,
+		provenanceValue float64,
+	) map[string]any {
+		return map[string]any{
+			"channel":              0,
+			"t":                    timeIndex,
+			"render_mode":          "mask",
+			"threshold_method":     method,
+			"threshold_value":      threshold,
+			"threshold_foreground": "above",
+			"expected_revision":    0,
+			"threshold_provenance": map[string]any{
+				"method":             "otsu-256-v1",
+				"value":              provenanceValue,
+				"domain":             "raw",
+				"foreground":         "above",
+				"channel":            0,
+				"t":                  timeIndex,
+				"sample_scope":       "volume",
+				"sample_count":       8,
+				"sampling_algorithm": "scalar-profile-otsu-256-v1",
+				"sampling_strategy":  "exact",
+				"z_samples":          []any{0, 1},
+				"source_sha256":      resource.SHA256,
+				"bins":               256,
+			},
+		}
+	}
+	patch := func(selectionKey string, selected map[string]any) *httptest.ResponseRecorder {
+		body, marshalErr := json.Marshal(map[string]any{
+			"metadata": map[string]any{
+				"ultra_viewer_calibration_v1": map[string]any{
+					"version":       1,
+					"source_sha256": resource.SHA256,
+					"selections": map[string]any{
+						selectionKey: selected,
+					},
+				},
+			},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		req := httptest.NewRequest(
+			http.MethodPatch,
+			"/v2/resources/"+fileID,
+			bytes.NewReader(body),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	invalid := patch("c0:t0", selection(0, "otsu-256-v1", 121, 120))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid Otsu patch status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+	unchanged, err := mem.GetResourceForUser(
+		context.Background(),
+		fileID,
+		"field-researcher",
+		"smithsonian",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := unchanged.Metadata["ultra_viewer_calibration_v1"]; exists {
+		t.Fatalf("invalid calibration mutated resource metadata: %#v", unchanged.Metadata)
+	}
+
+	if rec := patch("c0:t0", selection(0, "otsu-256-v1", 120, 120)); rec.Code != http.StatusOK {
+		t.Fatalf("T0 calibration patch status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	twoSelectionResponse := patch("c0:t2", selection(2, "manual", 230, 220))
+	if twoSelectionResponse.Code != http.StatusOK {
+		t.Fatalf(
+			"T2 calibration patch status=%d body=%s",
+			twoSelectionResponse.Code,
+			twoSelectionResponse.Body.String(),
+		)
+	}
+	var patched resourceResponse
+	if err := json.Unmarshal(twoSelectionResponse.Body.Bytes(), &patched); err != nil {
+		t.Fatal(err)
+	}
+	calibration, ok := jsonObject(patched.Resource.Metadata["ultra_viewer_calibration_v1"])
+	if !ok {
+		t.Fatalf("PATCH response omitted calibration: %#v", patched.Resource.Metadata)
+	}
+	selections, ok := jsonObject(calibration["selections"])
+	if !ok || len(selections) != 2 {
+		t.Fatalf("PATCH response did not preserve T0 while adding T2: %#v", calibration)
+	}
+	for selectionKey, rawSelection := range selections {
+		saved, savedOK := jsonObject(rawSelection)
+		revision, revisionOK := jsonInt(saved["revision"])
+		provenance, provenanceOK := jsonObject(saved["threshold_provenance"])
+		if !savedOK || !revisionOK || revision != 1 || !provenanceOK ||
+			provenance["source_sha256"] != resource.SHA256 ||
+			provenance["sampling_strategy"] != "exact" {
+			t.Fatalf("saved selection %s is not reconstructive: %#v", selectionKey, rawSelection)
+		}
+		if _, exists := saved["expected_revision"]; exists {
+			t.Fatalf("write-only expected revision leaked into selection %s: %#v", selectionKey, saved)
+		}
+	}
+
+	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	setProxyOwnerHeaders(viewerReq)
+	viewerRec := httptest.NewRecorder()
+	router.ServeHTTP(viewerRec, viewerReq)
+	if viewerRec.Code != http.StatusOK {
+		t.Fatalf("viewer reload status=%d body=%s", viewerRec.Code, viewerRec.Body.String())
+	}
+	var viewer map[string]any
+	if err := json.Unmarshal(viewerRec.Body.Bytes(), &viewer); err != nil {
+		t.Fatal(err)
+	}
+	viewerCalibration, ok := jsonObject(viewer["viewer_calibrations"])
+	if !ok {
+		t.Fatalf("viewer reload omitted calibration: %#v", viewer)
+	}
+	viewerSelections, ok := jsonObject(viewerCalibration["selections"])
+	if !ok || len(viewerSelections) != 2 {
+		t.Fatalf("viewer reload selections=%#v, want T0 and T2", viewerCalibration["selections"])
+	}
+
+	outOfBounds := patch("c0:t3", selection(3, "manual", 240, 220))
+	if outOfBounds.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-bounds patch status=%d body=%s", outOfBounds.Code, outOfBounds.Body.String())
+	}
+}
+
+func TestV2MaskSliceUsesOriginalSourceAndCanonicalThreshold(t *testing.T) {
+	t.Parallel()
+
+	var gotPath, gotMode, gotThreshold, gotChannels, gotTime string
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/viewerinfo":
+			_ = json.NewEncoder(w).Encode(testScalarMaskViewerInfo(2, 3, 4, "uint16"))
+			return
+		case "/slice":
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		gotPath = r.URL.Query().Get("path")
+		gotMode = r.URL.Query().Get("scalar_render_mode")
+		gotThreshold = r.URL.Query().Get("scalar_threshold_value")
+		gotChannels = r.URL.Query().Get("channels")
+		gotTime = r.URL.Query().Get("t")
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(testPNGBytes(t, 2, 2))
+	}))
+	defer imageSvc.Close()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      uploadRoot,
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "mask.tif", testPNGBytes(t, 4, 4))
+	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(uploadRoot, "derived", derivedPyramidName(fileID)),
+		[]byte("display derivative"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/v2/uploads/"+fileID+"/slice?z=1&channels=2&t=1&scalar_render_mode=mask&scalar_threshold_value=120.9&scalar_threshold_foreground=above",
+		nil,
+	)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("mask slice status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(gotPath, "__pyramid") || gotMode != "mask" || gotThreshold != "120" ||
+		gotChannels != "2" || gotTime != "1" {
+		t.Fatalf("mask slice path=%q mode=%q threshold=%q channels=%q t=%q", gotPath, gotMode, gotThreshold, gotChannels, gotTime)
+	}
+
+	gotMode, gotThreshold = "unreached", "unreached"
+	intensityReq := httptest.NewRequest(
+		http.MethodGet,
+		"/v2/uploads/"+fileID+"/slice?z=1&channels=0&scalar_render_mode=intensity",
+		nil,
+	)
+	setProxyOwnerHeaders(intensityReq)
+	intensityRec := httptest.NewRecorder()
+	router.ServeHTTP(intensityRec, intensityReq)
+	if intensityRec.Code != http.StatusOK || gotMode != "" || gotThreshold != "" {
+		t.Fatalf(
+			"intensity slice status=%d forwarded_mode=%q forwarded_threshold=%q body=%s",
+			intensityRec.Code,
+			gotMode,
+			gotThreshold,
+			intensityRec.Body.String(),
+		)
+	}
+}
+
+func TestParseMaskSliceRequestRejectsNonCanonicalOrAmbiguousSelectors(t *testing.T) {
+	t.Parallel()
+
+	valid := httptest.NewRequest(
+		http.MethodGet,
+		"/slice?scalar_render_mode=mask&scalar_threshold_value=120.5&scalar_threshold_foreground=above",
+		nil,
+	)
+	parsed, err := parseMaskSliceRequest(valid)
+	if err != nil || !parsed.enabled || parsed.thresholdRaw != "120.5" {
+		t.Fatalf("valid mask selectors parsed as (%+v, %v)", parsed, err)
+	}
+	intensity := httptest.NewRequest(
+		http.MethodGet,
+		"/slice?scalar_render_mode=intensity",
+		nil,
+	)
+	if parsed, err := parseMaskSliceRequest(intensity); err != nil || parsed.enabled {
+		t.Fatalf("canonical intensity selector parsed as (%+v, %v)", parsed, err)
+	}
+
+	for name, rawQuery := range map[string]string{
+		"uppercase mode":         "scalar_render_mode=Mask&scalar_threshold_value=1&scalar_threshold_foreground=above",
+		"unknown mode":           "scalar_render_mode=auto",
+		"intensity with mask":    "scalar_render_mode=intensity&scalar_threshold_value=1",
+		"repeated mode":          "scalar_render_mode=mask&scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above",
+		"missing threshold":      "scalar_render_mode=mask&scalar_threshold_foreground=above",
+		"missing foreground":     "scalar_render_mode=mask&scalar_threshold_value=1",
+		"nonfinite threshold":    "scalar_render_mode=mask&scalar_threshold_value=NaN&scalar_threshold_foreground=above",
+		"unknown foreground":     "scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=below",
+		"threshold without mode": "scalar_threshold_value=1&scalar_threshold_foreground=above",
+		"mixed channel aliases":  "scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above&channel=0&channels=0",
+		"comma channels":         "scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above&channels=0%2C1",
+		"negative channel":       "scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above&channels=-1",
+		"repeated time":          "scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above&t=0&t=0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/slice?"+rawQuery, nil)
+			if _, err := parseMaskSliceRequest(request); err == nil {
+				t.Fatalf("accepted query %q", rawQuery)
+			}
+		})
+	}
+}
+
+func TestMaskSliceFailsClosedWithoutSidecarOrForNifti(t *testing.T) {
+	t.Parallel()
+
+	maskPath := "/v2/uploads/missing/slice?scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above"
+	unconfigured := NewRouter(ServerDeps{})
+	req := httptest.NewRequest(http.MethodGet, maskPath, nil)
+	rec := httptest.NewRecorder()
+	unconfigured.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unconfigured mask status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	serviceRequests := 0
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serviceRequests++
+		http.Error(w, "must not proxy NIfTI mask", http.StatusInternalServerError)
+	}))
+	defer imageSvc.Close()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "volume.nii", []byte("nifti"))
+	req = httptest.NewRequest(
+		http.MethodGet,
+		"/v2/uploads/"+fileID+"/slice?scalar_render_mode=mask&scalar_threshold_value=1&scalar_threshold_foreground=above",
+		nil,
+	)
+	setProxyOwnerHeaders(req)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnprocessableEntity || serviceRequests != 0 {
+		t.Fatalf("NIfTI mask status=%d sidecar_requests=%d body=%s", rec.Code, serviceRequests, rec.Body.String())
 	}
 }
 
@@ -892,14 +1411,31 @@ func TestV2UploadHistogramMicroscopyViaImageService(t *testing.T) {
 	t.Parallel()
 
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"T": 1, "C": 2, "Z": 3},
+			})
+			return
+		}
 		if r.URL.Path != "/histogram" {
 			http.NotFound(w, r)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"bins": 4,
+			"bins": 8, "channel": 0, "t": 0, "scope": "volume",
+			"dtype": "uint8", "sample_count": 10,
+			"sampling": map[string]any{
+				"algorithm": "scalar-profile-otsu-256-v1", "scope": "volume",
+				"strategy": "exact", "sample_count": 10, "z_samples": []any{0, 1, 2},
+			},
+			"threshold": map[string]any{
+				"method": "otsu-256-v1", "value": 120, "domain": "raw",
+				"foreground": "above", "sample_scope": "volume", "sample_count": 10,
+				"channel": 0, "t": 0, "sampling_algorithm": "scalar-profile-otsu-256-v1",
+				"z_samples": []any{0, 1, 2},
+			},
 			"channels": []any{
-				map[string]any{"index": 0, "counts": []any{1, 2, 3, 4}, "min": 0.0, "max": 255.0},
+				map[string]any{"index": 0, "counts": []any{1, 1, 1, 1, 1, 1, 2, 2}, "edges": []any{0, 32, 64, 96, 128, 160, 192, 224, 256}, "min": 0.0, "max": 255.0},
 				map[string]any{"index": 1, "counts": []any{9, 9, 9, 9}, "min": 0.0, "max": 4095.0},
 			},
 		})
@@ -917,7 +1453,7 @@ func TestV2UploadHistogramMicroscopyViaImageService(t *testing.T) {
 	// .czi is a microscopy container the native Go decoder cannot read.
 	fileID := uploadNamedFileForProxyTest(t, router, "cells.czi", testPNGBytes(t, 4, 4))
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/histogram?bins=4&channel=0", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/histogram?bins=8&channel=0&scope=volume", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -925,38 +1461,298 @@ func TestV2UploadHistogramMicroscopyViaImageService(t *testing.T) {
 		t.Fatalf("histogram status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Source    string `json:"source"`
-		Histogram struct {
-			Bins []int   `json:"bins"`
-			Min  float64 `json:"min"`
-			Max  float64 `json:"max"`
+		Source      string         `json:"source"`
+		Dtype       string         `json:"dtype"`
+		Channel     int            `json:"channel"`
+		Time        int            `json:"t"`
+		Scope       string         `json:"scope"`
+		Sampling    map[string]any `json:"sampling"`
+		Threshold   map[string]any `json:"threshold"`
+		SampleCount int            `json:"sample_count"`
+		Histogram   struct {
+			Bins  []int     `json:"bins"`
+			Edges []float64 `json:"edges"`
+			Min   float64   `json:"min"`
+			Max   float64   `json:"max"`
 		} `json:"histogram"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode histogram: %v", err)
 	}
-	if resp.Source != "libbioimage" {
-		t.Fatalf("histogram source = %q, want libbioimage", resp.Source)
+	if resp.Source != "image-service-source" {
+		t.Fatalf("histogram source = %q, want image-service-source", resp.Source)
 	}
-	if len(resp.Histogram.Bins) != 4 || resp.Histogram.Bins[3] != 4 || resp.Histogram.Max != 255.0 {
+	if len(resp.Histogram.Bins) != 8 || resp.Histogram.Bins[7] != 2 || resp.Histogram.Max != 255.0 {
 		t.Fatalf("histogram channel-0 mapping wrong: %+v", resp.Histogram)
+	}
+	if resp.Dtype != "uint8" || resp.Channel != 0 || resp.Time != 0 || resp.Scope != "volume" ||
+		resp.SampleCount != 10 || resp.Sampling["strategy"] != "exact" ||
+		resp.Threshold["method"] != "otsu-256-v1" || len(resp.Histogram.Edges) != 9 {
+		t.Fatalf("histogram provenance was not preserved: %+v", resp)
 	}
 }
 
-func TestV2UploadHistogramPrefersDerivedPyramidImageService(t *testing.T) {
+func TestV2UploadDisplayHistogramPreservesExactScientificSelection(t *testing.T) {
+	t.Parallel()
+
+	for _, filename := range []string{"cells.czi", "cells.ome.tiff"} {
+		filename := filename
+		t.Run(filename, func(t *testing.T) {
+			t.Parallel()
+
+			var gotPath, gotScope, gotChannels, gotTime string
+			imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/viewerinfo":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"axis_sizes": map[string]any{"T": 2, "C": 3, "Z": 4},
+						"viewer":     map[string]any{"render_policy": "scalar"},
+					})
+				case "/histogram":
+					gotPath = r.URL.Query().Get("path")
+					gotScope = r.URL.Query().Get("scope")
+					gotChannels = r.URL.Query().Get("channels")
+					gotTime = r.URL.Query().Get("t")
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"bins": 8, "dtype": "uint16", "scope": "display", "t": 1,
+						"channels": []any{
+							map[string]any{
+								"index": 0, "sample_count": 8,
+								"counts": []any{1, 1, 1, 1, 1, 1, 1, 1},
+								"edges":  []any{0, 1, 2, 3, 4, 5, 6, 7, 8},
+								"min":    0, "max": 7,
+							},
+							map[string]any{
+								"index": 2, "sample_count": 8,
+								"counts": []any{1, 1, 1, 1, 1, 1, 1, 1},
+								"edges":  []any{0, 1, 2, 3, 4, 5, 6, 7, 8},
+								"min":    0, "max": 7,
+							},
+						},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer imageSvc.Close()
+
+			mem := store.NewMemoryStore()
+			router := NewRouter(ServerDeps{
+				Version:         "test-version",
+				Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+				Store:           mem,
+				UploadRoot:      t.TempDir(),
+				ImageServiceURL: imageSvc.URL,
+			})
+			fileID := uploadNamedFileForProxyTest(t, router, filename, testPNGBytes(t, 4, 4))
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"/v2/uploads/"+fileID+"/histogram?bins=8&channels=0,2&t=1",
+				nil,
+			)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("display histogram status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if gotPath == "" || gotScope != "display" || gotChannels != "0,2" || gotTime != "1" {
+				t.Fatalf(
+					"image-service selection path=%q scope=%q channels=%q t=%q",
+					gotPath,
+					gotScope,
+					gotChannels,
+					gotTime,
+				)
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			channels, channelsOK := jsonNonNegativeIntSlice(response["channels"])
+			histogram, histogramOK := jsonObject(response["histogram"])
+			histogramChannels, histogramChannelsOK := jsonNonNegativeIntSlice(
+				histogram["channel_indices"],
+			)
+			timeIndex, timeOK := jsonInt(histogram["time_index"])
+			if !channelsOK || !histogramOK || !histogramChannelsOK ||
+				!slices.Equal(channels, []int{0, 2}) ||
+				!slices.Equal(histogramChannels, []int{0, 2}) ||
+				!timeOK || timeIndex != 1 {
+				t.Fatalf("display histogram lost exact identity: %#v", response)
+			}
+		})
+	}
+}
+
+func TestMapImageServiceDisplayHistogramRejectsIdentityMismatch(t *testing.T) {
+	t.Parallel()
+
+	valid := func() map[string]any {
+		return map[string]any{
+			"bins": 2, "dtype": "uint16", "scope": "display", "t": 1,
+			"channels": []any{
+				map[string]any{
+					"index": 0, "sample_count": 2,
+					"counts": []any{1, 1}, "edges": []any{0, 1, 2},
+					"min": 0, "max": 1,
+				},
+				map[string]any{
+					"index": 2, "sample_count": 2,
+					"counts": []any{1, 1}, "edges": []any{0, 1, 2},
+					"min": 0, "max": 1,
+				},
+			},
+		}
+	}
+	if _, err := mapImageServiceDisplayHistogram(valid(), "file", 2, []int{0, 2}, 1); err != nil {
+		t.Fatalf("valid exact display identity rejected: %v", err)
+	}
+	for name, mutate := range map[string]func(map[string]any){
+		"wrong time": func(core map[string]any) {
+			core["t"] = 0
+		},
+		"reordered channels": func(core map[string]any) {
+			channels := core["channels"].([]any)
+			core["channels"] = []any{channels[1], channels[0]}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := valid()
+			mutate(core)
+			if _, err := mapImageServiceDisplayHistogram(
+				core,
+				"file",
+				2,
+				[]int{0, 2},
+				1,
+			); err == nil {
+				t.Fatalf("accepted %s", name)
+			}
+		})
+	}
+}
+
+func TestParseExactHistogramChannelRejectsRepeatedLegacySelector(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/histogram?channels=0&channels=1", nil)
+	if _, err := parseExactHistogramChannel(req); err == nil {
+		t.Fatal("repeated histogram channels selector was accepted")
+	}
+}
+
+func TestMapImageServiceHistogramRejectsMalformedScientificEvidence(t *testing.T) {
+	t.Parallel()
+
+	valid := func() map[string]any {
+		return map[string]any{
+			"bins": 2, "channel": 0, "t": 2, "scope": "volume",
+			"dtype": "uint16", "sample_count": 4,
+			"sampling": map[string]any{
+				"algorithm": "scalar-profile-otsu-256-v1", "scope": "volume",
+				"strategy": "exact", "sample_count": 4, "z_samples": []any{0, 1, 2},
+			},
+			"threshold": map[string]any{
+				"method": "otsu-256-v1", "value": 120, "domain": "raw",
+				"foreground": "above", "sample_scope": "volume", "sample_count": 4,
+				"channel": 0, "t": 2, "sampling_algorithm": "scalar-profile-otsu-256-v1",
+				"z_samples": []any{0, 1, 2},
+			},
+			"channels": []any{
+				map[string]any{
+					"index": 0, "counts": []any{1, 3}, "edges": []any{0, 128, 256},
+					"min": 0, "max": 255,
+				},
+			},
+		}
+	}
+	encoded, err := json.Marshal(valid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mapImageServiceHistogram(decoded, "file", "source-sha", 0, 2, 2); err != nil {
+		t.Fatalf("valid evidence rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"fractional count": func(core map[string]any) {
+			core["channels"].([]any)[0].(map[string]any)["counts"] = []any{1.5, 2.5}
+		},
+		"sample mismatch": func(core map[string]any) {
+			core["channels"].([]any)[0].(map[string]any)["counts"] = []any{1, 2}
+		},
+		"nonmonotonic edges": func(core map[string]any) {
+			core["channels"].([]any)[0].(map[string]any)["edges"] = []any{0, 128, 127}
+		},
+		"nonfinite extrema": func(core map[string]any) {
+			core["channels"].([]any)[0].(map[string]any)["max"] = math.Inf(1)
+		},
+		"wrong threshold domain": func(core map[string]any) {
+			core["threshold"].(map[string]any)["domain"] = "normalized"
+		},
+		"wrong threshold selection": func(core map[string]any) {
+			core["threshold"].(map[string]any)["t"] = 1
+		},
+		"missing sampling algorithm": func(core map[string]any) {
+			delete(core["sampling"].(map[string]any), "algorithm")
+		},
+		"stratified sampling with exact scope": func(core map[string]any) {
+			core["sampling"].(map[string]any)["strategy"] = "stratified-z-spatial"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core := valid()
+			mutate(core)
+			if _, err := mapImageServiceHistogram(core, "file", "source-sha", 0, 2, 2); err == nil {
+				t.Fatalf("accepted malformed %s evidence", name)
+			}
+		})
+	}
+
+	stratified := valid()
+	stratified["sampling"].(map[string]any)["strategy"] = "stratified-z-spatial"
+	stratified["threshold"].(map[string]any)["sample_scope"] = "stratified_z"
+	if _, err := mapImageServiceHistogram(stratified, "file", "source-sha", 0, 2, 2); err != nil {
+		t.Fatalf("matching stratified sampling provenance rejected: %v", err)
+	}
+}
+
+func TestV2UploadHistogramUsesOriginalSourceImageService(t *testing.T) {
 	t.Parallel()
 
 	var gotPath string
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"T": 1, "C": 1, "Z": 2},
+			})
+			return
+		}
 		if r.URL.Path != "/histogram" {
 			http.NotFound(w, r)
 			return
 		}
 		gotPath = r.URL.Query().Get("path")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"bins": 4,
+			"bins": 8, "channel": 0, "t": 0, "scope": "volume",
+			"dtype": "uint8", "sample_count": 10,
+			"sampling": map[string]any{
+				"algorithm": "scalar-profile-otsu-256-v1", "scope": "volume",
+				"strategy": "exact", "sample_count": 10, "z_samples": []any{0, 1},
+			},
+			"threshold": map[string]any{
+				"method": "otsu-256-v1", "value": 120, "domain": "raw",
+				"foreground": "above", "sample_scope": "volume", "sample_count": 10,
+				"channel": 0, "t": 0, "sampling_algorithm": "scalar-profile-otsu-256-v1",
+				"z_samples": []any{0, 1},
+			},
 			"channels": []any{
-				map[string]any{"index": 0, "counts": []any{1, 2, 3, 4}, "min": 0.0, "max": 255.0},
+				map[string]any{"index": 0, "counts": []any{1, 1, 1, 1, 1, 1, 2, 2}, "edges": []any{0, 32, 64, 96, 128, 160, 192, 224, 256}, "min": 0.0, "max": 255.0},
 			},
 		})
 	}))
@@ -982,15 +1778,15 @@ func TestV2UploadHistogramPrefersDerivedPyramidImageService(t *testing.T) {
 		t.Fatalf("write pyramid: %v", err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/histogram?bins=4", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/histogram?bins=8&scope=volume", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("histogram status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(gotPath, "__pyramid.tif") {
-		t.Fatalf("histogram served from %q, want the derived pyramid", gotPath)
+	if strings.Contains(gotPath, "__pyramid.tif") {
+		t.Fatalf("histogram served from display derivative %q", gotPath)
 	}
 }
 

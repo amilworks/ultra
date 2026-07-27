@@ -254,11 +254,13 @@ type BulkTagResourcesResult struct {
 }
 
 type MergeResourceMetadataInput struct {
-	ResourceID string
-	UserID     string
-	OrgID      string
-	Patch      JSONMap
-	UpdatedAt  time.Time
+	ResourceID                 string
+	UserID                     string
+	OrgID                      string
+	Patch                      JSONMap
+	ExpectedSourceSHA256       string
+	SelectionExpectedRevisions map[string]int
+	UpdatedAt                  time.Time
 }
 
 type RenameResourceInput struct {

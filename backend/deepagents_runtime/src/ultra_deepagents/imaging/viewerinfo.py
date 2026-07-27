@@ -73,7 +73,9 @@ def _resolution_level_count(meta: dict[str, Any]) -> int:
     levels that are truly present in the file. Viewer tiles must follow the actual
     file levels, matching Fiji/Bio-Formats, so we prefer the ``*_actual`` fields.
     """
-    return _int(meta, "image_num_resolution_levels_actual") or _int(meta, "image_num_resolution_levels")
+    return _int(meta, "image_num_resolution_levels_actual") or _int(
+        meta, "image_num_resolution_levels"
+    )
 
 
 def _resolution_scales(meta: dict[str, Any], levels_n: int) -> list[float]:
@@ -151,20 +153,24 @@ def build_tile_scheme(meta: dict[str, Any], tile_size_default: int = 256) -> dic
             continue
         w = max(1, round(x * scale))
         h = max(1, round(y * scale))
-        levels.append({
-            "level": i,
-            "width": w,
-            "height": h,
-            "columns": (w + tile_size - 1) // tile_size,
-            "rows": (h + tile_size - 1) // tile_size,
-            "downsample": max(1, round(1.0 / scale)),
-        })
+        levels.append(
+            {
+                "level": i,
+                "width": w,
+                "height": h,
+                "columns": (w + tile_size - 1) // tile_size,
+                "rows": (h + tile_size - 1) // tile_size,
+                "downsample": max(1, round(1.0 / scale)),
+            }
+        )
     if len(levels) <= 1:
         return None
     return {"tile_size": tile_size, "format": "png", "levels": levels}
 
 
-def atlas_layout(width: int, height: int, depth: int, *, cell_cap: int = ATLAS_CELL_CAP) -> dict[str, int]:
+def atlas_layout(
+    width: int, height: int, depth: int, *, cell_cap: int = ATLAS_CELL_CAP
+) -> dict[str, int]:
     """Compute the texture-atlas grid layout for a z-stack volume.
 
     The atlas packs ``depth`` z-planes into a ``columns x rows`` grid of
@@ -229,7 +235,9 @@ def _convention_color_dict(index: int) -> dict[str, Any]:
     return {"hex": "#%02x%02x%02x" % tuple(rgb), "rgb": rgb}
 
 
-def build_channels(meta: dict[str, Any], channel_count: int) -> tuple[list[str], list[dict[str, Any]]]:
+def build_channels(
+    meta: dict[str, Any], channel_count: int
+) -> tuple[list[str], list[dict[str, Any]]]:
     names: list[str] = []
     colors: list[dict[str, Any]] = []
     for i in range(max(channel_count, 0)):
@@ -241,7 +249,11 @@ def build_channels(meta: dict[str, Any], channel_count: int) -> tuple[list[str],
             # convention color (DAPI->blue, then green/red/magenta/...) so the
             # composite isn't a stack of identical white channels. Single-channel
             # stays white (grayscale).
-            parsed = _convention_color_dict(i) if channel_count > 1 else {"hex": "#ffffff", "rgb": [255, 255, 255]}
+            parsed = (
+                _convention_color_dict(i)
+                if channel_count > 1
+                else {"hex": "#ffffff", "rgb": [255, 255, 255]}
+            )
         colors.append({"index": i, **parsed})
     return names, colors
 
@@ -257,6 +269,7 @@ def build_acquisition(meta: dict[str, Any]) -> dict[str, Any]:
     the flat meta dict collapses per-channel/per-plane keys). Only present fields are
     emitted, so a sparse file yields a short dict (the UI hides empty groups).
     """
+
     def first(*keys: str) -> str | None:
         for k in keys:
             value = meta.get(k)
@@ -271,7 +284,9 @@ def build_acquisition(meta: dict[str, Any]) -> dict[str, Any]:
     software = first("TIFF/Software", "document/application", "OME/Creator")
     if software:
         acq["software"] = software
-    acquired = first("OME/Image/AcquisitionDate", "Xmp/pix4d/AcquisitionDateTimeUTC", "TIFF/DateTime")
+    acquired = first(
+        "OME/Image/AcquisitionDate", "Xmp/pix4d/AcquisitionDateTimeUTC", "TIFF/DateTime"
+    )
     if acquired:
         acq["acquired"] = acquired
     color_space = first("ColorProfile/color_space", "image_mode")
@@ -310,6 +325,7 @@ def build_mosaic(meta: dict[str, Any]) -> dict[str, Any] | None:
     key path is container-specific) — e.g. CZI's ``.../Information/Image/SizeM``,
     ``.../SampleHolder/IsOnlineStitchingEnabled``, ``.../SampleHolder/Overlap``.
     """
+
     def find_suffix(*suffixes: str) -> Any:
         for key, value in meta.items():
             ks = str(key)
@@ -446,7 +462,11 @@ def default_visible_channels(
 
 
 def build_viewer_info(
-    meta: dict[str, Any], signal_scores: list[float] | None = None, reader: str = "libbioimage"
+    meta: dict[str, Any],
+    signal_scores: list[float] | None = None,
+    reader: str = "libbioimage",
+    data_semantics: dict[str, Any] | None = None,
+    scalar_mask_capability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Map a libbioimage-shaped ``meta`` dict to the viewer-info structure.
 
@@ -495,7 +515,9 @@ def build_viewer_info(
         "y": _float(meta, "pixel_resolution_y", 1.0),
         "z": _float(meta, "pixel_resolution_z", 1.0),
     }
-    objective = meta.get("objectives/objective:0/name") or meta.get("objectives/objective:0/magnification")
+    objective = meta.get("objectives/objective:0/name") or meta.get(
+        "objectives/objective:0/magnification"
+    )
     fmt_lower = fmt.lower()
     # An RGB(A) photo (incl. geospatial orthomosaics) is color data, NOT fluorescence
     # microscopy: classify by colorspace/channel-color like BisQue, not by a hardcoded
@@ -503,14 +525,19 @@ def build_viewer_info(
     # RGBA OR whose first three channels are named Red/Green/Blue (a 4th Alpha band is
     # transparency, not a science channel). Real fluorescence (>8-bit, >4 channels, or
     # non-RGB names like DAPI/FITC) is excluded and stays microscopy/composite.
-    color_mode = str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "").strip().lower()
+    color_mode = (
+        str(meta.get("image_mode") or meta.get("ColorProfile/color_space") or "").strip().lower()
+    )
     rgb_named = [n.strip().lower() for n in names[:3]] == ["red", "green", "blue"]
     photo_like = (
-        pixel_format == "u" and depth <= 8 and c in (3, 4)
+        pixel_format == "u"
+        and depth <= 8
+        and c in (3, 4)
         and (color_mode.startswith("rgb") or rgb_named)
     )
     microscopy_format = any(
-        k in fmt_lower for k in ("czi", "fluoview", "lsm", "nd2", "ome", "lif", "oib", "scn", "svs", "ndpi", "vsi")
+        k in fmt_lower
+        for k in ("czi", "fluoview", "lsm", "nd2", "ome", "lif", "oib", "scn", "svs", "ndpi", "vsi")
     )
     # A 2D RGB(A) photo. A z>1 RGB stack is left to the microscopy/volume path so a
     # genuine stack is never flattened onto the single-channel display surface — keep
@@ -548,7 +575,9 @@ def build_viewer_info(
     delivery_mode = "none" if multi_scene else ("deferred_multiscale" if has_tiles else "direct")
     # An RGB(A) photo renders its native colors directly (no per-channel LUT fuse),
     # so it is a single display surface, not a composite of science channels.
-    channel_mode = "single" if multi_scene else ("composite" if (c > 1 and not is_photo) else "single")
+    channel_mode = (
+        "single" if multi_scene else ("composite" if (c > 1 and not is_photo) else "single")
+    )
     visible_channels = default_visible_channels(names, colors, c, channel_mode, signal_scores)
     # Photos use the display (full-colour) render path; scalar science data uses the
     # window/level intensity path. This drives the viewer to a plain zoomable image
@@ -559,7 +588,11 @@ def build_viewer_info(
     # so its existing 2D Z-scrub contract is unchanged.
     volume_surfaces = []
     if can_preview_volume:
-        volume_surfaces = ["mpr", "volume"] if modality == "medical" else ["volume"]
+        volume_surfaces = (
+            ["mpr", "volume"]
+            if modality == "medical" or scalar_mask_capability is not None
+            else ["volume"]
+        )
     available_surfaces = ["metadata"] if multi_scene else ["2d", "metadata"] + volume_surfaces
 
     def _axis_unit(axis: str) -> str:
@@ -578,25 +611,63 @@ def build_viewer_info(
         units_mode = "mixed"
 
     phys = {
-        "x": x, "y": y, "z": z, "t": t, "ch": c,
-        "pixel_depth": depth, "pixel_format": pixel_format,
+        "x": x,
+        "y": y,
+        "z": z,
+        "t": t,
+        "ch": c,
+        "pixel_depth": depth,
+        "pixel_format": pixel_format,
         "pixel_size": [spacing["x"], spacing["y"], spacing["z"], 1.0],
         "pixel_units": [spacing_units["x"], spacing_units["y"], spacing_units["z"], "frame"],
-        "channel_names": names, "display_channels": visible_channels,
-        "channel_colors": colors, "units": units_mode,
+        "channel_names": names,
+        "display_channels": visible_channels,
+        "channel_colors": colors,
+        "units": units_mode,
     }
     display_defaults = {
-        "enhancement": "d", "negative": False, "rotate": 0, "fusion_method": "m",
-        "channel_mode": channel_mode, "channels": visible_channels,
-        "time_index": 0, "z_index": z // 2, "volume_channel": visible_channels[0],
+        "enhancement": "d",
+        "negative": False,
+        "rotate": 0,
+        "fusion_method": "m",
+        "channel_mode": channel_mode,
+        "channels": visible_channels,
+        "time_index": 0,
+        "z_index": z // 2,
+        "volume_channel": visible_channels[0],
     }
+    scalar_semantics = None
+    if c == 1 and z > 1 and render_policy == "scalar":
+        scalar_semantics = data_semantics or {
+            "kind": "intensity",
+            "basis": "authoritative",
+            "strength": "unknown",
+            "supported_modes": ["intensity"],
+            "recommended_view": "intensity",
+        }
+        threshold = scalar_semantics.get("threshold")
+        display_defaults.update(
+            {
+                "scalar_render_mode": "auto",
+                "scalar_threshold_method": "otsu-256-v1",
+                "scalar_threshold_value": (
+                    threshold.get("value") if isinstance(threshold, dict) else None
+                ),
+                "scalar_threshold_foreground": "above",
+            }
+        )
     metadata = {
-        "reader": reader, "dims_order": dims, "array_dtype": dtype,
+        "reader": reader,
+        "dims_order": dims,
+        "array_dtype": dtype,
         # The REAL container format (e.g. "OME-TIFF"/"BigTIFF"), distinct from the
         # reader. The viewer's Format row should show this, not "libbioimage".
         "format": fmt,
-        "physical_spacing": spacing, "spacing_units": spacing_units, "scene_count": scene_count,
-        "source_dims_order": source_dims, "warnings": [],
+        "physical_spacing": spacing,
+        "spacing_units": spacing_units,
+        "scene_count": scene_count,
+        "source_dims_order": source_dims,
+        "warnings": [],
     }
     selected_scene_index = meta.get("selected_scene_index")
     selected_scene_id = meta.get("selected_scene_id")
@@ -619,16 +690,22 @@ def build_viewer_info(
         metadata["mosaic"] = mosaic
     if names and modality == "microscopy":
         metadata["microscopy"] = {
-            "channel_names": names, "objective": str(objective) if objective is not None else None,
+            "channel_names": names,
+            "objective": str(objective) if objective is not None else None,
             "dimensions_present": dims,
         }
-    viewer = {
-        "status": "ready", "warmup_mode": "lazy", "backend_mode": backend_mode,
+    viewer: dict[str, Any] = {
+        "status": "ready",
+        "warmup_mode": "lazy",
+        "backend_mode": backend_mode,
         "default_surface": "metadata" if multi_scene else "2d",
         "available_surfaces": available_surfaces,
         "channel_mode": channel_mode,
-        "volume_mode": volume_mode, "render_policy": render_policy, "delivery_mode": delivery_mode,
-        "first_paint_mode": "webgl", "texture_policy": "linear",
+        "volume_mode": volume_mode,
+        "render_policy": render_policy,
+        "delivery_mode": delivery_mode,
+        "first_paint_mode": "webgl",
+        "texture_policy": "linear",
         "asset_preparation": {
             "status": "unsupported" if multi_scene else "ready",
             "native_supported": not multi_scene,
@@ -649,7 +726,7 @@ def build_viewer_info(
         if atlas_scheme is not None:
             viewer["atlas_scheme"] = atlas_scheme
 
-    return {
+    result = {
         "kind": "unsupported" if multi_scene else "image",
         "decodable": not multi_scene,
         "preview_supported": not multi_scene,
@@ -683,9 +760,15 @@ def build_viewer_info(
             if selected_scene_index is not None
             else {}
         ),
-        **(
-            {"selected_scene_id": selected_scene_id}
-            if selected_scene_id is not None
-            else {}
-        ),
+        **({"selected_scene_id": selected_scene_id} if selected_scene_id is not None else {}),
     }
+    if scalar_semantics is not None:
+        result["data_semantics"] = scalar_semantics
+    if scalar_mask_capability is not None and not multi_scene and render_policy == "scalar":
+        capability = dict(scalar_mask_capability)
+        capability["surfaces"] = [
+            surface for surface in available_surfaces if surface in {"2d", "mpr", "volume"}
+        ]
+        if capability["surfaces"]:
+            result["scalar_mask_capability"] = capability
+    return result

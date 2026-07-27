@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -385,7 +386,16 @@ func (deps ServerDeps) writeUnsupportedFormatViewer(w http.ResponseWriter, recor
 // (honoring z/t/level), which is what makes z-scrub scrub actual planes. NIfTI
 // and the unconfigured case keep the legacy behavior.
 func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *http.Request) {
+	maskRequest, maskErr := parseMaskSliceRequest(r)
+	if maskErr != nil {
+		writeError(w, http.StatusBadRequest, maskErr)
+		return
+	}
 	if !deps.imageServiceConfigured() {
+		if maskRequest.enabled {
+			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
+			return
+		}
 		deps.handleServeUpload(w, r)
 		return
 	}
@@ -394,11 +404,19 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 		return
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		if maskRequest.enabled {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("mask slices are unsupported for NIfTI sources"))
+			return
+		}
 		deps.handleServeUpload(w, r) // serveNiftiSliceAsPNG honors slice params
 		return
 	}
 	// OME-Zarr is rendered natively by the ngff-service from the store (bundle dir path).
 	if deps.servesViaNgff(record, path) {
+		if maskRequest.enabled {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("mask slices are unsupported for NGFF sources"))
+			return
+		}
 		q := url.Values{"path": {path}}
 		for _, key := range []string{"z", "t", "level", "channels", "full_resolution"} {
 			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
@@ -412,23 +430,72 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
 		return
 	}
+	maskMode := maskRequest.enabled
+	if maskMode {
+		sourceInfo, timeCount, channelCount, _, authorityErr := deps.sourceImageServiceViewerInfo(
+			r.Context(),
+			path,
+		)
+		if authorityErr != nil {
+			writeImageSourceAuthorityError(w, authorityErr)
+			return
+		}
+		sanitizeScalarMaskCapability(sourceInfo, record)
+		capability, capable := jsonObject(sourceInfo["scalar_mask_capability"])
+		if !capable {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("mask slices are unsupported for this source"))
+			return
+		}
+		if maskRequest.channel >= channelCount || maskRequest.time >= timeCount {
+			writeError(w, http.StatusBadRequest, errors.New("mask slice channel/time selection is out of range"))
+			return
+		}
+		threshold, parseErr := strconv.ParseFloat(maskRequest.thresholdRaw, 64)
+		dtype, _ := capability["dtype"].(string)
+		canonical, canonicalOK := canonicalIntegerMaskThreshold(threshold, dtype)
+		if parseErr != nil || !canonicalOK {
+			writeError(w, http.StatusBadRequest, errors.New("mask slice threshold is invalid for the source dtype"))
+			return
+		}
+		maskRequest.thresholdRaw = strconv.FormatFloat(canonical, 'f', -1, 64)
+	}
 	// Prefer the derived tiled pyramid when one exists: its native level 0 is
 	// pixel-identical to the source but a bounded (tiled) read, so a z-scrub plane
 	// decodes ~8x faster than re-decoding a full plane from a non-pyramidal source
 	// (1.9s -> 0.23s on the 575MB OME-TIFF). -slice works on the derived OME-BigTIFF
 	// even though its -tile reader does not (atlas/thumbnail read it the same way).
 	servePath := path
-	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-		servePath = dp
+	if !maskMode {
+		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+			servePath = dp
+		}
 	}
 	// channels/colors enable additive multi-channel LUT compositing for fluorescence
 	// microscopy (libbioimage fuses the selected channels). full_resolution=false serves
 	// a bounded pyramid level for fast scrub frames; true reads the native plane.
 	buildSliceQuery := func(p string) url.Values {
 		q := url.Values{"path": {p}}
-		for _, key := range []string{"z", "t", "level", "channels", "channel_colors", "full_resolution"} {
+		for _, key := range []string{
+			"z",
+			"level",
+			"channel_colors",
+			"full_resolution",
+		} {
 			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
 				q.Set(key, v)
+			}
+		}
+		if maskRequest.enabled {
+			q.Set("channels", strconv.Itoa(maskRequest.channel))
+			q.Set("t", strconv.Itoa(maskRequest.time))
+			q.Set("scalar_render_mode", "mask")
+			q.Set("scalar_threshold_value", maskRequest.thresholdRaw)
+			q.Set("scalar_threshold_foreground", "above")
+		} else {
+			for _, key := range []string{"t", "channels"} {
+				if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
+					q.Set(key, v)
+				}
 			}
 		}
 		return q
@@ -437,7 +504,10 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// derived pyramid -> 5xx) retry the SOURCE via the image service — slower but
 	// correct (honors z/channels) — then the native Go path. A bad pyramid degrades to
 	// a working read instead of "Failed to load image".
-	fallback := deps.handleServeUpload
+	var fallback http.HandlerFunc
+	if !maskMode {
+		fallback = deps.handleServeUpload
+	}
 	if servePath != path {
 		fallback = func(w http.ResponseWriter, r *http.Request) {
 			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
@@ -446,6 +516,108 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// Route slices through the dedicated slice cache so a z-scrub burst can't evict
 	// the DeepZoom viewer's tile/atlas working set from the main image cache.
 	deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
+}
+
+type maskSliceRequest struct {
+	enabled      bool
+	thresholdRaw string
+	channel      int
+	time         int
+}
+
+func parseMaskSliceRequest(r *http.Request) (maskSliceRequest, error) {
+	if r == nil {
+		return maskSliceRequest{}, nil
+	}
+	query := r.URL.Query()
+	mode, modePresent, err := exactRawQueryValue(
+		query,
+		[]string{"scalar_render_mode"},
+		"scalar render mode",
+	)
+	if err != nil {
+		return maskSliceRequest{}, err
+	}
+	thresholdRaw, thresholdPresent, thresholdErr := exactRawQueryValue(
+		query,
+		[]string{"scalar_threshold_value"},
+		"scalar threshold value",
+	)
+	if thresholdErr != nil {
+		return maskSliceRequest{}, thresholdErr
+	}
+	foreground, foregroundPresent, foregroundErr := exactRawQueryValue(
+		query,
+		[]string{"scalar_threshold_foreground"},
+		"scalar threshold foreground",
+	)
+	if foregroundErr != nil {
+		return maskSliceRequest{}, foregroundErr
+	}
+	if !modePresent {
+		if thresholdPresent || foregroundPresent {
+			return maskSliceRequest{}, errors.New("mask threshold selectors require scalar_render_mode=mask")
+		}
+		return maskSliceRequest{}, nil
+	}
+	if mode == "intensity" {
+		if thresholdPresent || foregroundPresent {
+			return maskSliceRequest{}, errors.New("intensity slices must not include mask threshold selectors")
+		}
+		return maskSliceRequest{}, nil
+	}
+	if mode != "mask" {
+		return maskSliceRequest{}, errors.New("scalar_render_mode must be intensity or mask")
+	}
+	if !thresholdPresent || !foregroundPresent {
+		return maskSliceRequest{}, errors.New("mask slices require one raw threshold and foreground selector")
+	}
+	threshold, err := strconv.ParseFloat(thresholdRaw, 64)
+	if err != nil || math.IsNaN(threshold) || math.IsInf(threshold, 0) {
+		return maskSliceRequest{}, errors.New("mask slice requires a finite raw threshold")
+	}
+	if foreground != "above" {
+		return maskSliceRequest{}, errors.New("mask slice foreground must be above")
+	}
+	channelRaw, channelPresent, channelErr := exactRawQueryValue(
+		query,
+		[]string{"channel", "c", "channels"},
+		"mask slice channel selector",
+	)
+	if channelErr != nil {
+		return maskSliceRequest{}, channelErr
+	}
+	channel := 0
+	if channelPresent {
+		if strings.Contains(channelRaw, ",") {
+			return maskSliceRequest{}, errors.New("mask slice requires exactly one channel")
+		}
+		channel, err = parseExactNonNegativeDecimal(channelRaw, "mask slice channel index")
+		if err != nil {
+			return maskSliceRequest{}, err
+		}
+	}
+	timeRaw, timePresent, timeErr := exactRawQueryValue(
+		query,
+		[]string{"t", "time", "timepoint"},
+		"mask slice time selector",
+	)
+	if timeErr != nil {
+		return maskSliceRequest{}, timeErr
+	}
+	timeIndex := 0
+	if timePresent {
+		timeIndex, err = parseExactNonNegativeDecimal(timeRaw, "mask slice time index")
+		if err != nil {
+			return maskSliceRequest{}, err
+		}
+	}
+	return maskSliceRequest{
+		enabled:      true,
+		thresholdRaw: thresholdRaw,
+		channel:      channel,
+		time:         timeIndex,
+	}, nil
 }
 
 // handleGetUploadScalarVolumeService backs /scalar-volume for non-NIfTI volumes
@@ -511,6 +683,15 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		"channel": {strconv.Itoa(channelIndex)},
 		"t":       {strconv.Itoa(timeIndex)},
 	}
+	sampling := strings.TrimSpace(r.URL.Query().Get("sampling"))
+	if sampling == "" {
+		sampling = "box"
+	}
+	if sampling != "box" && sampling != "nearest" {
+		writeError(w, http.StatusBadRequest, errors.New("scalar volume sampling must be box or nearest"))
+		return
+	}
+	query.Set("sampling", sampling)
 	deps.proxyImageService(w, r, "/scalar-volume", query, deps.handleGetUploadScalarVolume)
 }
 
@@ -656,41 +837,315 @@ func goCanDecodeHistogram(record resourceRecord) bool {
 	return isTIFFUpload(record.OriginalName, record.ContentType)
 }
 
-// handleGetUploadHistogramService extends /histogram to microscopy formats via
-// libbioimage while keeping standard rasters and NIfTI on the proven native
-// path. The image service's per-channel shape is mapped to the frontend's
-// {histogram:{bins,min,max}} contract.
+// handleGetUploadHistogramService obtains volume calibration from the original
+// source. A display pyramid or Go's first-page decoder cannot be semantic
+// authority for C/T/Z selection.
 func (deps ServerDeps) handleGetUploadHistogramService(w http.ResponseWriter, r *http.Request) {
 	if !deps.imageServiceConfigured() {
 		deps.handleGetUploadHistogram(w, r)
 		return
 	}
-	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	_, record, path, ok := deps.resolveUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
-	histogramPath := path
-	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-		histogramPath = dp
-	} else if isNiftiUpload(record.OriginalName, record.ContentType) || goCanDecodeHistogram(record) {
-		deps.handleGetUploadHistogram(w, r)
+	scope, scopePresent, scopeErr := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"scope"},
+		"histogram scope",
+	)
+	if scopeErr != nil {
+		writeError(w, http.StatusBadRequest, scopeErr)
+		return
+	}
+	if !scopePresent {
+		if isNiftiUpload(record.OriginalName, record.ContentType) || !isTIFFUpload(record.OriginalName, record.ContentType) && goCanDecodeHistogram(record) {
+			deps.handleGetUploadHistogram(w, r)
+			return
+		}
+		sourceInfo, timeCount, channelCount, depth, authorityErr :=
+			deps.sourceImageServiceViewerInfo(r.Context(), path)
+		if authorityErr != nil {
+			writeImageSourceAuthorityError(w, authorityErr)
+			return
+		}
+		viewer, _ := jsonObject(sourceInfo["viewer"])
+		renderPolicy, _ := viewer["render_policy"].(string)
+		if isTIFFUpload(record.OriginalName, record.ContentType) &&
+			timeCount == 1 && channelCount <= 4 && depth == 1 && renderPolicy == "display" {
+			deps.handleGetUploadHistogram(w, r)
+			return
+		}
+		selectedChannels, timeIndex, selectionErr :=
+			parseExactDisplayHistogramSelection(r, channelCount, timeCount)
+		if selectionErr != nil {
+			writeError(w, http.StatusBadRequest, selectionErr)
+			return
+		}
+		bins := parseUploadHistogramBins(r)
+		query := url.Values{
+			"path":     {path},
+			"bins":     {strconv.Itoa(bins)},
+			"scope":    {"display"},
+			"channels": {joinIntCSV(selectedChannels)},
+			"t":        {strconv.Itoa(timeIndex)},
+		}
+		core, err := deps.imageServiceGetJSON(r.Context(), "/histogram", query)
+		if err != nil {
+			writeImageSourceAuthorityError(w, err)
+			return
+		}
+		mapped, err := mapImageServiceDisplayHistogram(
+			core,
+			record.FileID,
+			bins,
+			selectedChannels,
+			timeIndex,
+		)
+		if err != nil {
+			writeImageSourceAuthorityError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, mapped)
+		return
+	}
+	if scope != "volume" {
+		writeError(w, http.StatusBadRequest, errors.New("histogram scope must be volume when supplied"))
+		return
+	}
+	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("source volume calibration is unsupported for NIfTI"))
 		return
 	}
 	bins := parseUploadHistogramBins(r)
-	channelIdx := parseUploadScalarChannelIndex(r)
-	core, err := deps.imageServiceGetJSON(r.Context(), "/histogram", url.Values{
-		"path": {histogramPath}, "bins": {strconv.Itoa(bins)},
-	})
+	channelIdx, err := parseExactHistogramChannel(r)
 	if err != nil {
-		deps.handleGetUploadHistogram(w, r) // preserve prior (likely 415) behavior
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mapImageServiceHistogram(core, record.FileID, channelIdx, bins))
+	timeIdx, err := parseExactScalarIndex(r, []string{"t", "time", "timepoint"})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	_, timeCount, channelCount, _, authorityErr := deps.sourceImageServiceViewerInfo(
+		r.Context(),
+		path,
+	)
+	if authorityErr != nil {
+		writeImageSourceAuthorityError(w, authorityErr)
+		return
+	}
+	if channelIdx >= channelCount || timeIdx >= timeCount {
+		writeError(w, http.StatusBadRequest, errors.New("histogram channel/time selection is out of range"))
+		return
+	}
+	core, err := deps.imageServiceGetJSON(r.Context(), "/histogram", url.Values{
+		"path":    {path},
+		"bins":    {strconv.Itoa(bins)},
+		"channel": {strconv.Itoa(channelIdx)},
+		"t":       {strconv.Itoa(timeIdx)},
+		"scope":   {"volume"},
+	})
+	if err != nil {
+		writeImageSourceAuthorityError(w, err)
+		return
+	}
+	mapped, err := mapImageServiceHistogram(
+		core,
+		record.FileID,
+		strings.TrimSpace(record.SHA256),
+		channelIdx,
+		timeIdx,
+		bins,
+	)
+	if err != nil {
+		writeImageSourceAuthorityError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mapped)
 }
 
-// mapImageServiceHistogram folds libbioimage's per-channel histogram into the
-// single-array shape the upload viewer renders, selecting the requested channel.
-func mapImageServiceHistogram(core map[string]any, fileID string, channelIdx, bins int) map[string]any {
+func mapImageServiceDisplayHistogram(
+	core map[string]any,
+	fileID string,
+	bins int,
+	expectedChannels []int,
+	expectedTime int,
+) (map[string]any, error) {
+	coreBins, binsOK := jsonInt(core["bins"])
+	rawChannels, channelsOK := core["channels"].([]any)
+	scope, scopeOK := core["scope"].(string)
+	if !binsOK || coreBins != bins || !channelsOK || len(rawChannels) == 0 ||
+		!scopeOK || scope != "display" {
+		return nil, errors.New("image service display histogram response is malformed")
+	}
+	channelIndices := make([]int, 0, len(rawChannels))
+	counts := make([]int, bins)
+	sampleCount := 0
+	minimum := math.Inf(1)
+	maximum := math.Inf(-1)
+	var edges []float64
+	for _, raw := range rawChannels {
+		channel, ok := jsonObject(raw)
+		if !ok {
+			return nil, errors.New("image service display histogram channel is malformed")
+		}
+		channelIndex, indexOK := jsonInt(channel["index"])
+		channelSampleCount, sampleOK := jsonInt(channel["sample_count"])
+		if !sampleOK || channelSampleCount <= 0 {
+			channelSampleCount = 0
+		}
+		channelCounts, channelEdges, channelMin, channelMax, err :=
+			validateImageServiceHistogramBins(channel, bins, channelSampleCount)
+		if err != nil {
+			return nil, err
+		}
+		if !indexOK || channelIndex < 0 {
+			return nil, errors.New("image service display histogram channel index is invalid")
+		}
+		if edges == nil {
+			edges = channelEdges
+		} else if !slices.Equal(edges, channelEdges) {
+			return nil, errors.New("image service display histogram channels use different edges")
+		}
+		channelIndices = append(channelIndices, channelIndex)
+		for index, value := range channelCounts {
+			counts[index] += value
+		}
+		sampleCount += channelSampleCount
+		minimum = math.Min(minimum, channelMin)
+		maximum = math.Max(maximum, channelMax)
+	}
+	dtype, dtypeOK := core["dtype"].(string)
+	timeIndex, timeOK := jsonInt(core["t"])
+	if !dtypeOK || strings.TrimSpace(dtype) == "" || !timeOK ||
+		timeIndex != expectedTime || !slices.Equal(channelIndices, expectedChannels) {
+		return nil, errors.New("image service display histogram identity is malformed")
+	}
+	return map[string]any{
+		"file_id":      fileID,
+		"bins":         bins,
+		"dtype":        dtype,
+		"channels":     channelIndices,
+		"source":       "image-service-display",
+		"sample_count": sampleCount,
+		"histogram": map[string]any{
+			"bins":            counts,
+			"edges":           edges,
+			"min":             minimum,
+			"max":             maximum,
+			"channel_indices": channelIndices,
+			"time_index":      timeIndex,
+		},
+	}, nil
+}
+
+func parseExactDisplayHistogramSelection(
+	r *http.Request,
+	channelCount int,
+	timeCount int,
+) ([]int, int, error) {
+	if r == nil || channelCount <= 0 || timeCount <= 0 {
+		return nil, 0, errors.New("display histogram source axes are invalid")
+	}
+	rawChannels, channelsPresent, err := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"channels"},
+		"histogram channels selector",
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	channels := make([]int, 0, channelCount)
+	if !channelsPresent {
+		for channel := 0; channel < channelCount; channel++ {
+			channels = append(channels, channel)
+		}
+	} else {
+		seen := make(map[int]struct{}, channelCount)
+		for _, part := range strings.Split(rawChannels, ",") {
+			channel, parseErr := parseExactNonNegativeDecimal(
+				strings.TrimSpace(part),
+				"histogram channel index",
+			)
+			if parseErr != nil || channel >= channelCount {
+				return nil, 0, errors.New("histogram channel selection is out of range")
+			}
+			if _, duplicate := seen[channel]; duplicate {
+				return nil, 0, errors.New("duplicate histogram channel index")
+			}
+			seen[channel] = struct{}{}
+			channels = append(channels, channel)
+		}
+		if len(channels) == 0 {
+			return nil, 0, errors.New("histogram channel selection is empty")
+		}
+	}
+	timeIndex, err := parseExactScalarIndex(r, []string{"t", "time", "timepoint"})
+	if err != nil || timeIndex >= timeCount {
+		return nil, 0, errors.New("histogram time selection is out of range")
+	}
+	return channels, timeIndex, nil
+}
+
+func joinIntCSV(values []int) string {
+	parts := make([]string, len(values))
+	for index, value := range values {
+		parts[index] = strconv.Itoa(value)
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseExactHistogramChannel(r *http.Request) (int, error) {
+	value, err := parseExactScalarIndex(r, []string{"channel", "c"})
+	if err != nil {
+		return 0, err
+	}
+	if r == nil {
+		return value, nil
+	}
+	rawChannels, channelsPresent, channelsErr := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"channels"},
+		"histogram channels selector",
+	)
+	if channelsErr != nil {
+		return 0, channelsErr
+	}
+	if !channelsPresent {
+		return value, nil
+	}
+	if _, present, aliasErr := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"channel", "c"},
+		"histogram channel index",
+	); aliasErr != nil || present {
+		if aliasErr != nil {
+			return 0, aliasErr
+		}
+		return 0, errors.New("histogram channel must use one unambiguous selector")
+	}
+	if strings.Contains(rawChannels, ",") {
+		return 0, errors.New("volume histogram requires exactly one channel")
+	}
+	return parseExactNonNegativeDecimal(rawChannels, "histogram channel index")
+}
+
+// mapImageServiceHistogram preserves source dtype/bin edges and profiling
+// provenance while failing closed if the sidecar did not honor exact C/T.
+func mapImageServiceHistogram(
+	core map[string]any,
+	fileID string,
+	sourceSHA string,
+	channelIdx, timeIdx, bins int,
+) (map[string]any, error) {
+	coreChannel, channelOK := jsonInt(core["channel"])
+	coreTime, timeOK := jsonInt(core["t"])
+	scope, _ := core["scope"].(string)
+	if !channelOK || !timeOK || coreChannel != channelIdx || coreTime != timeIdx || scope != "volume" {
+		return nil, errors.New("image service histogram identity did not match the requested source C/T")
+	}
 	channels, _ := core["channels"].([]any)
 	var chosen map[string]any
 	for _, c := range channels {
@@ -703,41 +1158,271 @@ func mapImageServiceHistogram(core map[string]any, fileID string, channelIdx, bi
 			break
 		}
 	}
-	if chosen == nil && len(channels) > 0 {
-		chosen, _ = channels[0].(map[string]any)
+	if chosen == nil {
+		return nil, errors.New("image service histogram omitted the requested source channel")
 	}
-	counts := []int{}
-	var minV, maxV float64
-	if chosen != nil {
-		if raw, ok := chosen["counts"].([]any); ok {
-			counts = make([]int, 0, len(raw))
-			for _, v := range raw {
-				counts = append(counts, int(jsonFloat(v)))
-			}
-		}
-		minV = jsonFloat(chosen["min"])
-		maxV = jsonFloat(chosen["max"])
+	coreBins, binsOK := jsonInt(core["bins"])
+	if !binsOK || coreBins != bins {
+		return nil, errors.New("image service histogram bin count did not match the request")
 	}
-	sampleCount := 0
-	for _, n := range counts {
-		sampleCount += n
+	dtype, dtypeOK := core["dtype"].(string)
+	if !dtypeOK || strings.TrimSpace(dtype) == "" {
+		return nil, errors.New("image service histogram omitted its source dtype")
 	}
+	sampleCount, sampleOK := jsonInt(core["sample_count"])
+	if !sampleOK || sampleCount <= 0 {
+		return nil, errors.New("image service histogram sample count is invalid")
+	}
+	counts, edges, minV, maxV, err := validateImageServiceHistogramBins(
+		chosen,
+		bins,
+		sampleCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	sampling, err := validateImageServiceHistogramSampling(core["sampling"], sampleCount)
+	if err != nil {
+		return nil, err
+	}
+	threshold, err := validateImageServiceHistogramThreshold(
+		core["threshold"],
+		channelIdx,
+		timeIdx,
+		sampleCount,
+		sampling,
+	)
+	if err != nil {
+		return nil, err
+	}
+	threshold["source_sha256"] = sourceSHA
+	threshold["bins"] = bins
+	threshold["sampling_strategy"] = sampling["strategy"]
+	dataSemantics := sanitizeImageServiceDataSemantics(
+		core["data_semantics"],
+		threshold,
+	)
 	return map[string]any{
-		"file_id":      fileID,
-		"bins":         bins,
-		"dtype":        "uint16",
-		"channels":     []int{channelIdx},
-		"source":       "libbioimage",
-		"sample_count": sampleCount,
+		"file_id":        fileID,
+		"bins":           bins,
+		"dtype":          dtype,
+		"channels":       []int{channelIdx},
+		"channel":        channelIdx,
+		"t":              timeIdx,
+		"source":         "image-service-source",
+		"scope":          "volume",
+		"sample_count":   sampleCount,
+		"sampling":       sampling,
+		"threshold":      threshold,
+		"data_semantics": dataSemantics,
 		"histogram": map[string]any{
 			"bins":            counts,
-			"edges":           []float64{},
+			"edges":           edges,
 			"min":             minV,
 			"max":             maxV,
 			"channel_indices": []int{channelIdx},
-			"time_index":      0,
+			"time_index":      timeIdx,
+			"sampling":        sampling,
+			"threshold":       threshold,
 		},
+	}, nil
+}
+
+func sanitizeImageServiceDataSemantics(
+	value any,
+	validatedThreshold map[string]any,
+) map[string]any {
+	semantics, ok := jsonObject(value)
+	if !ok {
+		return nil
 	}
+	kind, kindOK := semantics["kind"].(string)
+	strength, strengthOK := semantics["strength"].(string)
+	basis, basisOK := semantics["basis"].(string)
+	recommended, recommendedOK := semantics["recommended_view"].(string)
+	modes, modesOK := jsonStringSlice(semantics["supported_modes"])
+	threshold, thresholdOK := jsonObject(semantics["threshold"])
+	if !kindOK || (kind != "intensity" && kind != "binary_mask" && kind != "probability_mask") ||
+		!strengthOK || (strength != "authoritative" && strength != "exact" &&
+		strength != "suggested" && strength != "unknown") ||
+		!basisOK || strings.TrimSpace(basis) == "" ||
+		!recommendedOK || (recommended != "intensity" && recommended != "mask") ||
+		!modesOK || len(modes) == 0 || !thresholdOK {
+		return nil
+	}
+	for _, mode := range modes {
+		if mode != "intensity" && mode != "mask" {
+			return nil
+		}
+	}
+	for _, key := range []string{
+		"method",
+		"value",
+		"domain",
+		"foreground",
+		"sample_scope",
+		"sample_count",
+		"channel",
+		"t",
+		"sampling_algorithm",
+	} {
+		if fmt.Sprint(threshold[key]) != fmt.Sprint(validatedThreshold[key]) {
+			return nil
+		}
+	}
+	return map[string]any{
+		"kind":             kind,
+		"basis":            basis,
+		"strength":         strength,
+		"supported_modes":  modes,
+		"recommended_view": recommended,
+		"threshold":        validatedThreshold,
+	}
+}
+
+func validateImageServiceHistogramBins(
+	chosen map[string]any,
+	bins int,
+	sampleCount int,
+) ([]int, []float64, float64, float64, error) {
+	rawCounts, countsOK := chosen["counts"].([]any)
+	rawEdges, edgesOK := chosen["edges"].([]any)
+	if !countsOK || len(rawCounts) != bins || !edgesOK || len(rawEdges) != bins+1 {
+		return nil, nil, 0, 0, errors.New("image service histogram bins or edges are malformed")
+	}
+	counts := make([]int, len(rawCounts))
+	total := 0
+	for index, raw := range rawCounts {
+		value, ok := jsonInt(raw)
+		if !ok || value < 0 || total > math.MaxInt-value {
+			return nil, nil, 0, 0, errors.New("image service histogram counts must be non-negative integers")
+		}
+		counts[index] = value
+		total += value
+	}
+	if total != sampleCount {
+		return nil, nil, 0, 0, errors.New("image service histogram counts do not match sample_count")
+	}
+	edges := make([]float64, len(rawEdges))
+	for index, raw := range rawEdges {
+		value, ok := jsonFiniteFloat(raw)
+		if !ok || index > 0 && value <= edges[index-1] {
+			return nil, nil, 0, 0, errors.New("image service histogram edges must be finite and strictly increasing")
+		}
+		edges[index] = value
+	}
+	minimum, minOK := jsonFiniteFloat(chosen["min"])
+	maximum, maxOK := jsonFiniteFloat(chosen["max"])
+	if !minOK || !maxOK || maximum < minimum {
+		return nil, nil, 0, 0, errors.New("image service histogram extrema are invalid")
+	}
+	return counts, edges, minimum, maximum, nil
+}
+
+func validateImageServiceHistogramSampling(
+	value any,
+	sampleCount int,
+) (map[string]any, error) {
+	sampling, ok := jsonObject(value)
+	if !ok {
+		return nil, errors.New("image service histogram sampling provenance is missing")
+	}
+	algorithm, algorithmOK := sampling["algorithm"].(string)
+	scope, scopeOK := sampling["scope"].(string)
+	strategy, strategyOK := sampling["strategy"].(string)
+	provenanceCount, countOK := jsonInt(sampling["sample_count"])
+	zSamples, zSamplesOK := jsonNonNegativeIntSlice(sampling["z_samples"])
+	if !algorithmOK || strings.TrimSpace(algorithm) == "" ||
+		!scopeOK || scope != "volume" ||
+		!strategyOK || (strategy != "exact" && strategy != "stratified-z-spatial") ||
+		!countOK || provenanceCount != sampleCount ||
+		!zSamplesOK || len(zSamples) == 0 {
+		return nil, errors.New("image service histogram sampling provenance is invalid")
+	}
+	return map[string]any{
+		"algorithm":    algorithm,
+		"scope":        "volume",
+		"strategy":     strategy,
+		"sample_count": provenanceCount,
+		"z_samples":    zSamples,
+	}, nil
+}
+
+func validateImageServiceHistogramThreshold(
+	value any,
+	channelIdx int,
+	timeIdx int,
+	sampleCount int,
+	sampling map[string]any,
+) (map[string]any, error) {
+	threshold, ok := jsonObject(value)
+	if !ok {
+		return nil, errors.New("image service histogram threshold provenance is missing")
+	}
+	method, methodOK := threshold["method"].(string)
+	domain, domainOK := threshold["domain"].(string)
+	foreground, foregroundOK := threshold["foreground"].(string)
+	scope, scopeOK := threshold["sample_scope"].(string)
+	thresholdValue, valueOK := jsonFiniteFloat(threshold["value"])
+	thresholdCount, countOK := jsonInt(threshold["sample_count"])
+	thresholdChannel, channelOK := jsonInt(threshold["channel"])
+	thresholdTime, timeOK := jsonInt(threshold["t"])
+	algorithm, algorithmOK := threshold["sampling_algorithm"].(string)
+	zSamples, zSamplesOK := jsonNonNegativeIntSlice(threshold["z_samples"])
+	samplingZSamples, _ := jsonNonNegativeIntSlice(sampling["z_samples"])
+	samplingAlgorithm, _ := sampling["algorithm"].(string)
+	samplingStrategy, _ := sampling["strategy"].(string)
+	expectedScope := "volume"
+	if samplingStrategy == "stratified-z-spatial" {
+		expectedScope = "stratified_z"
+	}
+	if !methodOK || method != "otsu-256-v1" ||
+		!domainOK || domain != "raw" ||
+		!foregroundOK || foreground != "above" ||
+		!scopeOK || scope != expectedScope ||
+		!valueOK || math.IsNaN(thresholdValue) || math.IsInf(thresholdValue, 0) ||
+		!countOK || thresholdCount != sampleCount ||
+		!channelOK || thresholdChannel != channelIdx ||
+		!timeOK || thresholdTime != timeIdx ||
+		!algorithmOK || algorithm == "" || algorithm != samplingAlgorithm ||
+		!zSamplesOK || !slices.Equal(zSamples, samplingZSamples) {
+		return nil, errors.New("image service histogram threshold provenance is invalid")
+	}
+	return map[string]any{
+		"method":             "otsu-256-v1",
+		"value":              thresholdValue,
+		"domain":             "raw",
+		"foreground":         "above",
+		"sample_scope":       scope,
+		"sample_count":       thresholdCount,
+		"z_samples":          zSamples,
+		"channel":            thresholdChannel,
+		"t":                  thresholdTime,
+		"sampling_algorithm": algorithm,
+	}, nil
+}
+
+func jsonNonNegativeIntSlice(value any) ([]int, bool) {
+	raw, ok := value.([]any)
+	if !ok {
+		if values, typed := value.([]int); typed {
+			raw = make([]any, len(values))
+			for index, item := range values {
+				raw[index] = item
+			}
+		} else {
+			return nil, false
+		}
+	}
+	out := make([]int, len(raw))
+	for index, item := range raw {
+		parsed, valid := jsonInt(item)
+		if !valid || parsed < 0 || index > 0 && parsed <= out[index-1] {
+			return nil, false
+		}
+		out[index] = parsed
+	}
+	return out, true
 }
 
 // jsonInt/jsonFloat coerce decoded JSON numbers to Go numerics. Integer fields
@@ -804,6 +1489,447 @@ func injectControlPlaneViewerFields(core map[string]any, record resourceRecord) 
 	if phys, ok := core["phys"].(map[string]any); ok {
 		phys["name"] = record.OriginalName
 	}
+	sanitizeScalarMaskCapability(core, record)
+	injectViewerCalibrationDefaults(core, record)
+}
+
+func sanitizeScalarMaskCapability(core map[string]any, record resourceRecord) {
+	raw := core["scalar_mask_capability"]
+	delete(core, "scalar_mask_capability")
+	sourceSHA := strings.TrimSpace(record.SHA256)
+	if sourceSHA == "" || !isTIFFUpload(record.OriginalName, record.ContentType) {
+		return
+	}
+	capability, ok := jsonObject(raw)
+	if !ok || !hasOnlyJSONKeys(
+		capability,
+		"version",
+		"source_authority",
+		"source_format",
+		"dtype",
+		"threshold_domain",
+		"threshold_foreground",
+		"slice_delivery",
+		"volume_delivery",
+		"volume_sampling",
+		"channel_selection",
+		"time_selection",
+		"surfaces",
+	) {
+		return
+	}
+	version, versionOK := jsonInt(capability["version"])
+	sourceAuthority, authorityOK := capability["source_authority"].(string)
+	sourceFormat, formatOK := capability["source_format"].(string)
+	dtype, dtypeOK := capability["dtype"].(string)
+	metadata, metadataOK := jsonObject(core["metadata"])
+	metadataDtype, metadataDtypeOK := metadata["array_dtype"].(string)
+	viewer, viewerOK := jsonObject(core["viewer"])
+	renderPolicy, renderPolicyOK := viewer["render_policy"].(string)
+	if !versionOK || version != 1 ||
+		!authorityOK || sourceAuthority != "original" ||
+		!formatOK || (sourceFormat != "tiff" && sourceFormat != "ome-tiff") ||
+		!dtypeOK || !isExactScalarMaskDtype(dtype) ||
+		!metadataOK || !metadataDtypeOK || metadataDtype != dtype ||
+		!viewerOK || !renderPolicyOK || renderPolicy != "scalar" ||
+		capability["threshold_domain"] != "raw" ||
+		capability["threshold_foreground"] != "above" ||
+		capability["slice_delivery"] != "thresholded_png" ||
+		capability["volume_delivery"] != "raw_scalar" ||
+		capability["volume_sampling"] != "nearest" ||
+		capability["channel_selection"] != "single" ||
+		capability["time_selection"] != "single" {
+		return
+	}
+	rawSurfaces, surfacesOK := jsonStringSlice(capability["surfaces"])
+	rawAvailable, availableOK := jsonStringSlice(viewer["available_surfaces"])
+	if !surfacesOK || !availableOK {
+		return
+	}
+	expected := make([]string, 0, len(rawAvailable))
+	for _, surface := range rawAvailable {
+		if surface == "2d" || surface == "mpr" || surface == "volume" {
+			expected = append(expected, surface)
+		}
+	}
+	surfaces := rawSurfaces
+	requiredSurfaces := []string{"2d", "mpr", "volume"}
+	if !slices.Equal(expected, requiredSurfaces) ||
+		!slices.Equal(surfaces, requiredSurfaces) {
+		return
+	}
+	sanitized := map[string]any{
+		"version":              1,
+		"source_authority":     "original",
+		"source_format":        sourceFormat,
+		"dtype":                dtype,
+		"threshold_domain":     "raw",
+		"threshold_foreground": "above",
+		"slice_delivery":       "thresholded_png",
+		"volume_delivery":      "raw_scalar",
+		"volume_sampling":      "nearest",
+		"channel_selection":    "single",
+		"time_selection":       "single",
+		"surfaces":             surfaces,
+	}
+	sanitized["source_sha256"] = sourceSHA
+	core["scalar_mask_capability"] = sanitized
+}
+
+func isExactScalarMaskDtype(dtype string) bool {
+	switch strings.TrimSpace(strings.ToLower(dtype)) {
+	case "uint8", "uint16", "int16":
+		return true
+	default:
+		return false
+	}
+}
+
+func jsonStringSlice(value any) ([]string, bool) {
+	switch values := value.(type) {
+	case []string:
+		return append([]string(nil), values...), true
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			text, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, text)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func jsonObject(value any) (map[string]any, bool) {
+	switch object := value.(type) {
+	case map[string]any:
+		return object, true
+	case domain.JSONMap:
+		return map[string]any(object), true
+	default:
+		return nil, false
+	}
+}
+
+func hasOnlyJSONKeys(object map[string]any, allowed ...string) bool {
+	allow := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allow[key] = struct{}{}
+	}
+	for key := range object {
+		if _, ok := allow[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// injectViewerCalibrationDefaults applies only the reserved, versioned,
+// source-SHA-bound calibration record. Malformed or stale metadata is ignored;
+// no camera, projection, clip, density, or navigation state is accepted here.
+func injectViewerCalibrationDefaults(core map[string]any, record resourceRecord) {
+	if strings.TrimSpace(record.SHA256) == "" || len(record.Metadata) == 0 {
+		return
+	}
+	if _, capable := jsonObject(core["scalar_mask_capability"]); !capable {
+		return
+	}
+	raw, ok := jsonObject(record.Metadata["ultra_viewer_calibration_v1"])
+	if !ok || !hasOnlyJSONKeys(raw, "version", "source_sha256", "selections") {
+		return
+	}
+	version, versionOK := jsonInt(raw["version"])
+	sourceSHA, shaOK := raw["source_sha256"].(string)
+	if !versionOK || version != 1 || !shaOK || sourceSHA == "" || sourceSHA != record.SHA256 {
+		return
+	}
+	selections, selectionsOK := jsonObject(raw["selections"])
+	if !selectionsOK || len(selections) == 0 {
+		return
+	}
+	timeCount, channelCount, _, axesOK := sourceViewerAxes(core)
+	if !axesOK {
+		return
+	}
+	sanitizedSelections := make(map[string]any, len(selections))
+	for key, value := range selections {
+		selection, valid := sanitizeViewerCalibrationSelection(
+			key,
+			value,
+			timeCount,
+			channelCount,
+			sourceSHA,
+			capabilityDtype(core),
+			false,
+		)
+		if !valid {
+			continue
+		}
+		sanitizedSelections[key] = selection
+	}
+	if len(sanitizedSelections) == 0 {
+		return
+	}
+	sanitized := map[string]any{
+		"version":       1,
+		"source_sha256": sourceSHA,
+		"selections":    sanitizedSelections,
+	}
+	core["viewer_calibrations"] = sanitized
+
+	// Keep the selected default projection rolling-compatible while the frontend
+	// migrates to the complete per-selection map.
+	defaults, defaultsOK := jsonObject(core["display_defaults"])
+	if !defaultsOK {
+		return
+	}
+	channelIndex, _ := jsonInt(defaults["volume_channel"])
+	timeIndex, _ := jsonInt(defaults["time_index"])
+	current, currentOK := sanitizedSelections[viewerCalibrationSelectionKey(channelIndex, timeIndex)].(map[string]any)
+	if !currentOK {
+		return
+	}
+	defaults["scalar_render_mode"] = current["render_mode"]
+	defaults["scalar_threshold_method"] = current["threshold_method"]
+	defaults["scalar_threshold_value"] = current["threshold_value"]
+	defaults["scalar_threshold_foreground"] = "above"
+}
+
+func viewerCalibrationSelectionKey(channel, timeIndex int) string {
+	return fmt.Sprintf("c%d:t%d", channel, timeIndex)
+}
+
+func sanitizeViewerCalibrationSelection(
+	key string,
+	value any,
+	timeCount int,
+	channelCount int,
+	sourceSHA string,
+	dtype string,
+	incoming bool,
+) (map[string]any, bool) {
+	selection, ok := jsonObject(value)
+	if !ok || !hasOnlyJSONKeys(
+		selection,
+		"channel",
+		"t",
+		"render_mode",
+		"threshold_method",
+		"threshold_value",
+		"threshold_foreground",
+		"threshold_provenance",
+		"revision",
+		"expected_revision",
+	) {
+		return nil, false
+	}
+	channel, channelOK := jsonInt(selection["channel"])
+	timeIndex, timeOK := jsonInt(selection["t"])
+	renderMode, modeOK := selection["render_mode"].(string)
+	method, methodOK := selection["threshold_method"].(string)
+	foreground, foregroundOK := selection["threshold_foreground"].(string)
+	threshold, thresholdOK := jsonFiniteFloat(selection["threshold_value"])
+	revisionField := "revision"
+	if incoming {
+		revisionField = "expected_revision"
+	}
+	revision, revisionOK := jsonInt(selection[revisionField])
+	if !channelOK || channel < 0 || channel >= channelCount ||
+		!timeOK || timeIndex < 0 || timeIndex >= timeCount ||
+		key != viewerCalibrationSelectionKey(channel, timeIndex) ||
+		!modeOK || (renderMode != "auto" && renderMode != "intensity" && renderMode != "mask") ||
+		!methodOK || (method != "otsu-256-v1" && method != "manual") ||
+		!foregroundOK || foreground != "above" || !thresholdOK ||
+		!revisionOK || incoming && revision < 0 || !incoming && revision <= 0 {
+		return nil, false
+	}
+	threshold, thresholdOK = canonicalIntegerMaskThreshold(threshold, dtype)
+	if !thresholdOK {
+		return nil, false
+	}
+	provenance, provenanceOK := jsonObject(selection["threshold_provenance"])
+	if !provenanceOK || !hasOnlyJSONKeys(
+		provenance,
+		"method",
+		"value",
+		"domain",
+		"foreground",
+		"channel",
+		"t",
+		"sample_scope",
+		"sample_count",
+		"sampling_algorithm",
+		"sampling_strategy",
+		"z_samples",
+		"source_sha256",
+		"bins",
+	) {
+		return nil, false
+	}
+	provenanceMethod, provenanceMethodOK := provenance["method"].(string)
+	provenanceValue, provenanceValueOK := jsonFiniteFloat(provenance["value"])
+	domain, domainOK := provenance["domain"].(string)
+	provenanceForeground, provenanceForegroundOK := provenance["foreground"].(string)
+	provenanceChannel, provenanceChannelOK := jsonInt(provenance["channel"])
+	provenanceTime, provenanceTimeOK := jsonInt(provenance["t"])
+	sampleScope, scopeOK := provenance["sample_scope"].(string)
+	sampleCount, sampleCountOK := jsonInt(provenance["sample_count"])
+	samplingAlgorithm, samplingAlgorithmOK := provenance["sampling_algorithm"].(string)
+	samplingStrategy, samplingStrategyOK := provenance["sampling_strategy"].(string)
+	zSamples, zSamplesOK := jsonNonNegativeIntSlice(provenance["z_samples"])
+	provenanceSHA, provenanceSHAOK := provenance["source_sha256"].(string)
+	provenanceBins, provenanceBinsOK := jsonInt(provenance["bins"])
+	provenanceValue, provenanceValueOK = canonicalIntegerMaskThreshold(
+		provenanceValue,
+		dtype,
+	)
+	expectedScope := "volume"
+	if samplingStrategy == "stratified-z-spatial" {
+		expectedScope = "stratified_z"
+	}
+	if !provenanceMethodOK || provenanceMethod != "otsu-256-v1" ||
+		!provenanceValueOK ||
+		!domainOK || domain != "raw" ||
+		!provenanceForegroundOK || provenanceForeground != "above" ||
+		!provenanceChannelOK || provenanceChannel != channel ||
+		!provenanceTimeOK || provenanceTime != timeIndex ||
+		!scopeOK || sampleScope != expectedScope ||
+		!sampleCountOK || sampleCount <= 0 ||
+		!samplingAlgorithmOK || strings.TrimSpace(samplingAlgorithm) == "" ||
+		!samplingStrategyOK ||
+		(samplingStrategy != "exact" && samplingStrategy != "stratified-z-spatial") ||
+		!zSamplesOK || len(zSamples) == 0 ||
+		!provenanceSHAOK || strings.TrimSpace(provenanceSHA) != sourceSHA ||
+		!provenanceBinsOK || provenanceBins < uploadHistogramMinBins ||
+		provenanceBins > uploadHistogramMaxBins ||
+		method == "otsu-256-v1" && threshold != provenanceValue {
+		return nil, false
+	}
+	storedRevision := revision
+	if incoming {
+		storedRevision++
+	}
+	return map[string]any{
+		"channel":              channel,
+		"t":                    timeIndex,
+		"render_mode":          renderMode,
+		"threshold_method":     method,
+		"threshold_value":      threshold,
+		"threshold_foreground": "above",
+		"revision":             storedRevision,
+		"threshold_provenance": map[string]any{
+			"method":             "otsu-256-v1",
+			"value":              provenanceValue,
+			"domain":             "raw",
+			"foreground":         "above",
+			"channel":            channel,
+			"t":                  timeIndex,
+			"sample_scope":       sampleScope,
+			"sample_count":       sampleCount,
+			"sampling_algorithm": samplingAlgorithm,
+			"sampling_strategy":  samplingStrategy,
+			"z_samples":          zSamples,
+			"source_sha256":      sourceSHA,
+			"bins":               provenanceBins,
+		},
+	}, true
+}
+
+func validateViewerCalibrationMetadata(
+	value any,
+	sourceSHA string,
+	timeCount int,
+	channelCount int,
+	dtype string,
+) (map[string]any, map[string]int, error) {
+	raw, ok := jsonObject(value)
+	if !ok || !hasOnlyJSONKeys(raw, "version", "source_sha256", "selections") {
+		return nil, nil, errors.New("viewer calibration metadata is malformed")
+	}
+	version, versionOK := jsonInt(raw["version"])
+	calibrationSHA, shaOK := raw["source_sha256"].(string)
+	selections, selectionsOK := jsonObject(raw["selections"])
+	if !versionOK || version != 1 ||
+		!shaOK || calibrationSHA == "" || calibrationSHA != sourceSHA ||
+		!selectionsOK || len(selections) == 0 {
+		return nil, nil, errors.New("viewer calibration metadata is invalid for this source")
+	}
+	sanitizedSelections := make(map[string]any, len(selections))
+	expectedRevisions := make(map[string]int, len(selections))
+	for key, value := range selections {
+		rawSelection, _ := jsonObject(value)
+		expectedRevision, revisionOK := jsonInt(rawSelection["expected_revision"])
+		selection, valid := sanitizeViewerCalibrationSelection(
+			key,
+			value,
+			timeCount,
+			channelCount,
+			sourceSHA,
+			dtype,
+			true,
+		)
+		if !valid || !revisionOK {
+			return nil, nil, fmt.Errorf("viewer calibration selection %q is invalid", key)
+		}
+		sanitizedSelections[key] = selection
+		expectedRevisions[key] = expectedRevision
+	}
+	return map[string]any{
+		"version":       1,
+		"source_sha256": calibrationSHA,
+		"selections":    sanitizedSelections,
+	}, expectedRevisions, nil
+}
+
+func capabilityDtype(core map[string]any) string {
+	capability, _ := jsonObject(core["scalar_mask_capability"])
+	dtype, _ := capability["dtype"].(string)
+	return strings.TrimSpace(strings.ToLower(dtype))
+}
+
+func canonicalIntegerMaskThreshold(value float64, dtype string) (float64, bool) {
+	if !numberIsFinite(value) {
+		return 0, false
+	}
+	var minimum, maximum float64
+	switch strings.TrimSpace(strings.ToLower(dtype)) {
+	case "uint8":
+		minimum, maximum = -1, math.MaxUint8
+	case "uint16":
+		minimum, maximum = -1, math.MaxUint16
+	case "int16":
+		minimum, maximum = math.MinInt16-1, math.MaxInt16
+	default:
+		return 0, false
+	}
+	return math.Min(maximum, math.Max(minimum, math.Floor(value))), true
+}
+
+func jsonFiniteFloat(value any) (float64, bool) {
+	var parsed float64
+	switch number := value.(type) {
+	case float64:
+		parsed = number
+	case float32:
+		parsed = float64(number)
+	case int:
+		parsed = float64(number)
+	case int64:
+		parsed = float64(number)
+	case json.Number:
+		var err error
+		parsed, err = number.Float64()
+		if err != nil {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	return parsed, !math.IsNaN(parsed) && !math.IsInf(parsed, 0)
 }
 
 // mergePyramidTileScheme folds a derived pyramid's tile_scheme into a source's

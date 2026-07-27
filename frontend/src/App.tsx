@@ -294,6 +294,7 @@ import {
   Pencil,
   Plus,
   PlusIcon,
+  Search,
   Shield,
   Square,
   SquarePen,
@@ -5160,6 +5161,10 @@ export function App() {
   const pausedResourceUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const resourceListKeyRef = useRef("");
   const [resourceQuery, setResourceQuery] = useState("");
+  // Bumped by the mobile nav bar's search action; ResourceBrowser watches it and
+  // reveals + focuses its search field. The Resources header is not sticky on
+  // mobile, so this is what keeps search reachable from anywhere in the list.
+  const [resourceSearchFocusSignal, setResourceSearchFocusSignal] = useState(0);
   const [debouncedResourceQuery, setDebouncedResourceQuery] = useState("");
   const [composerResourceQuery, setComposerResourceQuery] = useState("");
   const [composerResources, setComposerResources] = useState<ResourceRecord[]>([]);
@@ -12545,6 +12550,18 @@ export function App() {
               >
                 <SquarePen className="size-5" aria-hidden />
               </button>
+            ) : activePanel === "resources" ? (
+              // The Resources header scrolls away on mobile, so search lives here
+              // in the nav bar — the one row that is always on screen.
+              <button
+                type="button"
+                className="app-mobile-shell-action"
+                onClick={() => setResourceSearchFocusSignal((signal) => signal + 1)}
+                aria-label="Search resources"
+                title="Search resources"
+              >
+                <Search className="size-5" aria-hidden />
+              </button>
             ) : (
               <span className="app-mobile-shell-action-spacer" aria-hidden />
             )}
@@ -12644,6 +12661,7 @@ export function App() {
                 hasMore={resourceHasMore}
                 error={resourcesError}
                 query={resourceQuery}
+                focusSearchSignal={resourceSearchFocusSignal}
                 kindFilter={resourceKindFilter}
                 sourceFilter={resourceSourceFilter}
                 sharingFilter={resourceSharingFilter}

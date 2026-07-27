@@ -73,15 +73,37 @@ def test_parse_fusion_request_gates_and_aligns():
     assert remap == [1]
     assert colors is None
 
-    # Two channels -> fusion; colors realigned to the SELECTED channels (0 and 2).
-    remap, colors = _parse_fusion_request("0,2", "#ff0000,#00ff00,#0000ff")
-    assert remap == [1, 3]
-    assert colors == [fusion.parse_hex_color("#ff0000"), fusion.parse_hex_color("#0000ff")]
+    # Colors already arrive in selected-channel order; sparse absolute channel
+    # indices must not index into the compact color list a second time.
+    remap, colors = _parse_fusion_request(
+        "1,3,5",
+        "#ff0000,#00ff00,#0000ff",
+    )
+    assert remap == [2, 4, 6]
+    assert colors == [
+        fusion.parse_hex_color("#ff0000"),
+        fusion.parse_hex_color("#00ff00"),
+        fusion.parse_hex_color("#0000ff"),
+    ]
 
     # Colors absent -> no fusion even with multiple channels.
     remap, colors = _parse_fusion_request("0,1", None)
     assert remap == [1, 2]
     assert colors is None
+
+
+@pytest.mark.parametrize(
+    "channel_colors",
+    [
+        "#ff0000,#00ff00",
+        "#ff0000,#00ff00,#0000ff,#ffffff",
+    ],
+)
+def test_parse_fusion_request_rejects_mismatched_selected_color_count(channel_colors):
+    from ultra_deepagents.imaging.service import _parse_fusion_request
+
+    with pytest.raises(ValueError, match="channel colors.*selected channel count"):
+        _parse_fusion_request("1,3,5", channel_colors)
 
 
 def test_service_threads_channels_and_colors():
@@ -99,3 +121,14 @@ def test_service_threads_channels_and_colors():
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/png"
     assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+
+    mismatch = client.get(
+        "/slice",
+        params={
+            "path": "stub://multichannel",
+            "z": 0,
+            "channels": "0,1",
+            "channel_colors": "#0000ff",
+        },
+    )
+    assert mismatch.status_code == 422

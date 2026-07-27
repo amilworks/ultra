@@ -6800,9 +6800,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 /* Losing the border and shadow took the focus state with them, and the textarea's
    own outline is none — so the rule itself has to carry it. The inset line doubles
    the hairline to a visible 2px WITHOUT widening the border, which would shove the
-   whole row down 1px on every focus. --text-muted (#737373) measures 4.42:1 on
-   the composer ground, clearing the 3:1 and 2px WCAG 2.4.11 asks of a focus
-   indicator with margin. */
+   whole row down 1px on every focus. --text-muted (#787f78 since the ink pass)
+   measures 4.11:1 on the composer's white ground, clearing the 3:1 and 2px WCAG
+   2.4.11 asks of a focus indicator with margin. Re-measure this if --text-muted
+   moves again: the indicator borrows the token, so a colour decision made for
+   body text silently sets the focus contrast too. */
 .app-composer-shell .app-composer-card:focus-within {
   border-top-color: var(--text-muted);
   box-shadow: inset 0 1px 0 var(--text-muted);

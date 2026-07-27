@@ -1290,6 +1290,38 @@ type RunLeaseRecord struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// Mid-run steering statuses. A steer is pending until the worker injects it
+// into the running agent loop (applied) or the run reaches a terminal state
+// without it ever being seen (missed).
+const (
+	RunSteerStatusPending = "pending"
+	RunSteerStatusApplied = "applied"
+	RunSteerStatusMissed  = "missed"
+)
+
+type RunSteerMessageRecord struct {
+	SteerID   string     `json:"steer_id"`
+	RunID     string     `json:"run_id"`
+	ThreadID  string     `json:"thread_id"`
+	UserID    string     `json:"user_id,omitempty"`
+	MessageID string     `json:"message_id"`
+	Content   string     `json:"content"`
+	Status    string     `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
+	AppliedAt *time.Time `json:"applied_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+type CreateRunSteerMessageInput struct {
+	SteerID   string
+	RunID     string
+	ThreadID  string
+	UserID    string
+	MessageID string
+	Content   string
+	CreatedAt time.Time
+}
+
 type WorkerHeartbeatRecord struct {
 	WorkerID        string    `json:"worker_id"`
 	WorkerKind      string    `json:"worker_kind"`

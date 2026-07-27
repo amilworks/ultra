@@ -3016,6 +3016,85 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2RunRecord"
+  /v2/runs/{run_id}/steer:
+    post:
+      operationId: steerRun
+      description: >
+        Accept a mid-run steering message from the run's owner. The worker
+        folds it into the running agent loop at its next model-call boundary.
+        409 with code "steering_closed" means the run is terminal or
+        finalizing; clients fall back to queueing the text as the next turn.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2RunSteerRequest"
+      responses:
+        "200":
+          description: Accepted steering message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunSteerMessageRecord"
+        "409":
+          description: Run no longer accepts steering messages
+    get:
+      operationId: listRunSteerMessages
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Steering messages for the run
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  steer_messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/V2RunSteerMessageRecord"
+  /v2/runs/{run_id}/steer/barrier:
+    post:
+      operationId: closeRunSteerBarrier
+      description: >
+        Worker-only finalization gate: atomically stop steer acceptance and
+        return still-pending steers for one final continuation.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Barrier closed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/V2RunSteerMessageRecord"
+  /v2/runs/{run_id}/steer/{steer_id}/ack:
+    post:
+      operationId: ackRunSteerMessage
+      description: Worker-only; records that the running agent saw the steer.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+        - name: steer_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Steering message record after the ack
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2RunSteerMessageRecord"
   /v2/runs/{run_id}/lease:
     post:
       operationId: acquireRunLease
@@ -4974,6 +5053,26 @@ components:
         metadata:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
+    V2RunSteerRequest:
+      type: object
+      required: [text]
+      properties:
+        steer_id: { type: string, nullable: true }
+        text: { type: string }
+    V2RunSteerMessageRecord:
+      type: object
+      required: [steer_id, run_id, thread_id, message_id, content, status, created_at, updated_at]
+      properties:
+        steer_id: { type: string }
+        run_id: { type: string }
+        thread_id: { type: string }
+        user_id: { type: string, nullable: true }
+        message_id: { type: string }
+        content: { type: string }
+        status: { type: string, enum: [pending, applied, missed] }
+        created_at: { type: string, format: date-time }
+        applied_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time }
     V2UploadedFileRecord:
       type: object
       required: [file_id, original_name, size_bytes, sha256, created_at]

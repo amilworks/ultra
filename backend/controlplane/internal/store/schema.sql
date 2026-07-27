@@ -188,6 +188,35 @@ CREATE TABLE IF NOT EXISTS control_worker_heartbeats (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+-- Mid-run steering (Phase 1). One row per accepted steering message. The
+-- message_id references the steer's control_thread_messages row AND doubles as
+-- the LangGraph message id, so every copy of the steer — middleware-injected,
+-- requeue-seeded, continuation-appended — collapses to a single graph message
+-- via the add_messages id-upsert.
+CREATE TABLE IF NOT EXISTS control_run_steer_messages (
+  steer_id text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  thread_id text NOT NULL,
+  user_id text NOT NULL,
+  message_id text NOT NULL,
+  content text NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  created_at timestamptz NOT NULL,
+  applied_at timestamptz,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_run_steer_messages_run
+  ON control_run_steer_messages(run_id);
+
+-- A row here means the run is finalizing: the worker closed the steer barrier
+-- and no further steers are accepted (clients fall back to Phase 0 queueing).
+-- Recovery requeue deletes the row so a fresh attempt accepts steers again.
+CREATE TABLE IF NOT EXISTS control_run_steer_barriers (
+  run_id text PRIMARY KEY REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  closed_at timestamptz NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS control_artifacts (
   artifact_id text PRIMARY KEY,
   run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,

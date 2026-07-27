@@ -66,6 +66,8 @@ type MemoryStore struct {
 	orgs                   map[string]domain.Organization
 	bisque                 map[string]domain.BisqueCredentialRecord
 	leases                 map[string]domain.RunLeaseRecord
+	steerMessages          map[string][]domain.RunSteerMessageRecord
+	steerBarriers          map[string]time.Time
 	workers                map[string]domain.WorkerHeartbeatRecord
 	training               *memoryTrainingState
 }
@@ -107,6 +109,8 @@ func NewMemoryStore() *MemoryStore {
 		orgs:                   map[string]domain.Organization{},
 		bisque:                 map[string]domain.BisqueCredentialRecord{},
 		leases:                 map[string]domain.RunLeaseRecord{},
+		steerMessages:          map[string][]domain.RunSteerMessageRecord{},
+		steerBarriers:          map[string]time.Time{},
 		workers:                map[string]domain.WorkerHeartbeatRecord{},
 		training:               newMemoryTrainingState(),
 	}

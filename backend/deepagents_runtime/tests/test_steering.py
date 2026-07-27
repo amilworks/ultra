@@ -22,8 +22,10 @@ from ultra_deepagents.runner import (
 )
 from ultra_deepagents.schemas import RunJobEnvelope
 from ultra_deepagents.steering import (
+    STEER_CONTENT_PREFIX,
     SteeringInboxMiddleware,
     build_steering_inbox,
+    steer_agent_content,
     steer_ids_in_messages,
 )
 
@@ -76,7 +78,10 @@ class TestMiddlewareInjection:
         (injected,) = update["messages"]
         assert injected["id"] == "msg_a"
         assert injected["role"] == "user"
-        assert injected["content"] == "Also compare baselines."
+        # Framed, not raw: a bare mid-run user message gets rationalized away
+        # ("that was not in the user's request") — live-trace finding.
+        assert injected["content"] == steer_agent_content("Also compare baselines.")
+        assert injected["content"].startswith(STEER_CONTENT_PREFIX)
         assert inbox.acked == ["steer_a"]
 
     def test_present_id_never_reinjects_but_heals_lost_ack(self) -> None:
@@ -175,6 +180,11 @@ class TestSeedNormalization:
         messages = _effective_job_messages(job)
         assert "id" not in messages[0]  # ordinary rows untouched
         assert messages[1]["id"] == "msg_steer"
+        # Seeded copies speak with the same framed voice as live injections.
+        assert messages[1]["content"] == steer_agent_content("Label the axes.")
+        # Re-normalizing never double-frames.
+        again = _effective_job_messages(self.make_job(messages))
+        assert again[1]["content"] == messages[1]["content"]
 
     def test_request_classification_skips_steers_but_keeps_their_demands(self) -> None:
         # The reversed scan must not let "also label the axes" REPLACE the
@@ -241,7 +251,11 @@ class TestBarrierContinuation:
         inbox = FakeInbox([], barrier=[steer("steer_a", "msg_a", "Last thing.")])
         messages = [{"role": "user", "content": "original"}]
         assert self.run_barrier(inbox, messages) is True
-        assert messages[-1] == {"role": "user", "content": "Last thing.", "id": "msg_a"}
+        assert messages[-1] == {
+            "role": "user",
+            "content": steer_agent_content("Last thing."),
+            "id": "msg_a",
+        }
         # The prior answer stays in the conversation the steer responds to.
         assert any(m.get("role") == "assistant" for m in messages)
         # Visible on the event stream — no silent application.

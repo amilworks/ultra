@@ -74,7 +74,9 @@ from ultra_deepagents.progress_guard import (
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
 from ultra_deepagents.steering import (
+    STEER_CONTENT_PREFIX,
     build_steering_inbox,
+    steer_agent_content,
     steer_ids_in_messages,
     steer_message_id,
 )
@@ -1100,7 +1102,7 @@ async def _steer_barrier_continuation(
         messages.append(
             {
                 "role": "user",
-                "content": str(steer.get("content") or ""),
+                "content": steer_agent_content(str(steer.get("content") or "")),
                 "id": steer_message_id(steer),
             }
         )
@@ -2369,6 +2371,9 @@ def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
             row_id = str(message.get("message_id") or "").strip()
             if row_id and not message.get("id"):
                 message = {**message, "id": row_id}
+            content = str(message.get("content") or "")
+            if content and not content.startswith(STEER_CONTENT_PREFIX):
+                message = {**message, "content": steer_agent_content(content)}
         normalized.append(message)
     return normalized
 

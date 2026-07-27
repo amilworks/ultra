@@ -163,6 +163,22 @@ def steer_message_id(steer: dict[str, Any]) -> str:
     return str(steer.get("message_id") or "").strip()
 
 
+# Live-trace finding: injected RAW, a mid-run steer gets rationalized away —
+# the model's reasoning literally said "that was not in the user's request.
+# I'm done!" and skipped it. The frame makes authority explicit. It is applied
+# identically by every worker-side path (middleware injection, finalization
+# barrier, requeue seed normalization) so the model sees one consistent voice;
+# the UI transcript renders the raw text from the thread row.
+STEER_CONTENT_PREFIX = (
+    "[Mid-run steering update from the user — this is now part of the request. "
+    "Apply it to the current work without discarding progress.]"
+)
+
+
+def steer_agent_content(text: str) -> str:
+    return f"{STEER_CONTENT_PREFIX}\n{text}"
+
+
 def steer_ids_in_messages(messages: Any) -> set[str]:
     """Every steer message id already represented in the state's messages.
 
@@ -235,7 +251,11 @@ class SteeringInboxMiddleware(AgentMiddleware):
                 content = str(steer.get("content") or "")
                 if content.strip():
                     to_inject.append(
-                        {"role": "user", "content": content, "id": message_id}
+                        {
+                            "role": "user",
+                            "content": steer_agent_content(content),
+                            "id": message_id,
+                        }
                     )
                     injecting = True
             if status == "pending" and (in_state or injecting):

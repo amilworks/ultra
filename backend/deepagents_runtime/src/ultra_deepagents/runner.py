@@ -1335,7 +1335,10 @@ async def _stream_agent_attempt(
             await publish_event(sequencer.stamp(tool_event))
             execute_progress_streamer.bind_tool_event(tool_event)
             saw_tool_event = True
-            post_tool_response_parts = []
+            # A bookkeeping call (marking todos done after writing the report)
+            # must not wipe answer text the model already streamed.
+            if _tool_event_name(tool_event) not in _BOOKKEEPING_TOOL_NAMES:
+                post_tool_response_parts = []
             if progress_detector is not None:
                 observation = progress_detector.observe(tool_event)
                 if observation is not None:
@@ -1862,6 +1865,20 @@ def _artifact_kind(path: Path, mime_type: str) -> str:
     return "artifact"
 
 
+# Tools whose calls are pure bookkeeping and never invalidate answer text the
+# model has already written. A trailing call to one of these (e.g. marking the
+# todo list complete after writing the report) must not reset the post-tool
+# stream buffer nor split the final answer in the state-based extraction —
+# both resets were how a full report got truncated to its short coda (the
+# truncated-response incident; re-fixed here after the original fix was
+# stranded on an unmerged lineage).
+_BOOKKEEPING_TOOL_NAMES = frozenset({"write_todos"})
+
+
+def _whitespace_collapsed(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _choose_response_text(
     *,
     final_response_text: str,
@@ -1869,9 +1886,23 @@ def _choose_response_text(
     post_tool_streamed_response_text: str,
     artifact_events: list[dict[str, Any]],
 ) -> str:
-    if final_response_text.strip():
+    final = final_response_text.strip()
+    post_tool = post_tool_streamed_response_text.strip()
+    if final:
+        # Safety net for turn shapes the trailing-segment collector doesn't
+        # recognize: when the final-state text is just a short tail of what
+        # streamed after the last substantive tool call, the fuller streamed
+        # text is the real answer (a trailing bookkeeping-style call split the
+        # turn). Never fall back to streamed_response_text here — it spans the
+        # whole run and would persist mid-run narration as the answer.
+        if (
+            post_tool
+            and len(final) * 2 <= len(post_tool)
+            and _whitespace_collapsed(post_tool).endswith(_whitespace_collapsed(final))
+        ):
+            return post_tool_streamed_response_text
         return final_response_text
-    if post_tool_streamed_response_text.strip():
+    if post_tool:
         return post_tool_streamed_response_text
     artifact_fallback = _fallback_response_from_artifacts(artifact_events)
     if artifact_fallback.strip():
@@ -2644,6 +2675,13 @@ def _is_coordinator_stream(event: dict[str, Any]) -> bool:
     if agent_name and agent_name not in {"ultra-research-agent", "main-agent", "coordinator"}:
         return False
     return not namespace
+
+
+def _tool_event_name(tool_event: dict[str, Any]) -> str:
+    payload = tool_event.get("payload")
+    if isinstance(payload, dict):
+        return str(payload.get("tool_name") or "")
+    return ""
 
 
 def _tool_event_from_stream_event(
@@ -3529,6 +3567,16 @@ def _stream_text_delta(event: dict[str, Any]) -> str:
 
 
 def _response_text_from_final_state(state: dict[str, Any] | None) -> str:
+    """Text of the turn's closing assistant segment(s), not just the last one.
+
+    A finished turn can be shaped ``[report AIMessage(tool_calls=[write_todos]),
+    ToolMessage(write_todos), coda AIMessage]``: the model writes its report,
+    marks its todos complete, then signs off. Taking only the last AIMessage
+    persists the coda and silently drops the report (the truncated-response
+    incident). Walk back from the end collecting every trailing assistant
+    segment, treating bookkeeping-only tool results as transparent, and stop at
+    the first substantive boundary so mid-turn narration stays out.
+    """
     if not isinstance(state, dict):
         return ""
     messages = state.get("messages")
@@ -3536,13 +3584,21 @@ def _response_text_from_final_state(state: dict[str, Any] | None) -> str:
         return ""
     last_user_index = _last_user_message_index(messages)
     candidate_messages = messages[last_user_index + 1 :] if last_user_index >= 0 else messages
+    segments: list[str] = []
     for message in reversed(candidate_messages):
-        if not _is_assistant_message(message):
+        if _is_assistant_message(message):
+            text = _message_content_text(message)
+            if text.strip():
+                segments.append(text)
             continue
-        text = _message_content_text(message)
-        if text.strip():
-            return text
-    return ""
+        if (
+            _is_tool_message(message)
+            and _tool_message_name(message) in _BOOKKEEPING_TOOL_NAMES
+        ):
+            continue
+        if segments:
+            break
+    return "\n\n".join(reversed(segments))
 
 
 def _last_user_message_index(messages: list[Any] | tuple[Any, ...]) -> int:
@@ -3570,6 +3626,22 @@ def _is_assistant_message(message: Any) -> bool:
     if role in {"assistant", "ai"}:
         return True
     return message.__class__.__name__ == "AIMessage"
+
+
+def _is_tool_message(message: Any) -> bool:
+    if isinstance(message, dict):
+        role = str(message.get("role") or message.get("type") or "").lower()
+        return role == "tool"
+    role = str(getattr(message, "role", "") or getattr(message, "type", "") or "").lower()
+    if role == "tool":
+        return True
+    return message.__class__.__name__ == "ToolMessage"
+
+
+def _tool_message_name(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("name") or "")
+    return str(getattr(message, "name", "") or "")
 
 
 def _message_content_text(message: Any) -> str:

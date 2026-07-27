@@ -10756,6 +10756,28 @@ details {
   }
 }
 
+/* Mid-run steering (Phase 1): the lifecycle eyebrow above a steered user
+   bubble. Same voice as the queued-followup eyebrow — a label may never be
+   louder than its content — with color reserved for the one state that needs
+   attention (missed). */
+.chat-steering-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  padding-inline: 6px;
+  color: color-mix(in oklab, var(--text-muted) 72%, var(--text-main) 28%);
+  transition: color 200ms var(--motion-ease);
+}
+
+.chat-steering-eyebrow[data-steering="missed"] {
+  color: color-mix(in oklab, var(--warning, #a16207) 70%, var(--text-main) 30%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-steering-eyebrow {
+    transition: none;
+  }
+}
+
 /* ⌘F find bar: the slim composer's sibling. A centered stadium pill floating
    at the top of the transcript — same surface, same hairline, same radius
    grammar as the idle composer, so it reads as part of the family rather than

@@ -383,7 +383,12 @@ function assertTypographyMetrics(typography, testCase) {
     action: "500",
     reading: "400",
     readingItalic: "400",
-    readingStrong: "700",
+    // 600, matching the reading heading rather than exceeding it. At 700 an
+    // inline **emphasis** rendered HEAVIER than every heading above it (h2/h3/h4
+    // are all 600), and at h4's 16px it beat the heading at identical size.
+    // Emphasis must not outrank structure. Mirrors the source-side pin in
+    // check-typography-contract.mjs.
+    readingStrong: "600",
     brandBisque: "400",
     brandUltra: "600",
     resourcePageHeading: "600",

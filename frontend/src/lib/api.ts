@@ -2130,6 +2130,15 @@ export class ApiClient {
     );
   }
 
+  /** The run's steering messages — used to verify whether a steer POST whose
+   * response was lost actually landed before returning text to the draft. */
+  async listRunSteerMessages(runId: string): Promise<RunSteerMessageRecord[]> {
+    const response = await this.fetchJson<{ steer_messages?: RunSteerMessageRecord[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/steer`
+    );
+    return response.steer_messages ?? [];
+  }
+
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
     const response = await fetch(
       buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/cancel`),

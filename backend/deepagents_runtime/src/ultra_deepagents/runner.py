@@ -621,6 +621,11 @@ async def run_job(
             if evaluation_policy is None
             else None
         )
+        if steering_inbox is not None:
+            # A fresh attempt accepts steers again: a JetStream redelivery
+            # (no control-plane requeue) would otherwise inherit the crashed
+            # attempt's closed finalization barrier for the whole retry.
+            await steering_inbox.reopen_barrier()
         agent = _build_agent_with_optional_checkpointer(
             agent_factory,
             settings,
@@ -707,6 +712,11 @@ async def run_job(
         model_stream_recoveries_used = 0
         progress_stall_recoveries_used = 0
         steer_barrier_rounds_used = 0
+        # Answers produced BEFORE a barrier continuation. The continuation's
+        # model reply is typically just the steer delta; the published answer
+        # must keep the full pre-steer response (review-critical: the barrier
+        # otherwise REPLACED a complete report with "I've added the labels").
+        steer_barrier_answer_parts: list[str] = []
         previous_missing_kinds: set[str] | None = None
         previous_artifact_signature: frozenset[tuple[str, str]] | None = None
         run_usage = _usage_from_prior_payload(prior_usage)
@@ -906,6 +916,7 @@ async def run_job(
                     sequencer=sequencer,
                     publish_event=publish_event,
                     rounds_used=steer_barrier_rounds_used,
+                    prior_answer_parts=steer_barrier_answer_parts,
                 ):
                     steer_barrier_rounds_used += 1
                     continue
@@ -932,6 +943,7 @@ async def run_job(
                     sequencer=sequencer,
                     publish_event=publish_event,
                     rounds_used=steer_barrier_rounds_used,
+                    prior_answer_parts=steer_barrier_answer_parts,
                 ):
                     steer_barrier_rounds_used += 1
                     continue
@@ -979,6 +991,9 @@ async def run_job(
             post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
             artifact_events=artifact_events,
         )
+        response_text = _stitch_steer_barrier_answers(
+            steer_barrier_answer_parts, response_text
+        )
         for artifact_event in artifact_events:
             await publish_event(sequencer.stamp(artifact_event))
     except asyncio.CancelledError:
@@ -1023,6 +1038,24 @@ def _cancel_title_task(task: asyncio.Task | None) -> None:
 _STEER_BARRIER_MAX_ROUNDS = 3
 
 
+def _stitch_steer_barrier_answers(parts: list[str], final_text: str) -> str:
+    """Publish the FULL answer after barrier continuations.
+
+    The continuation's model reply is typically an incremental addendum to
+    the steer; the durable response must keep every pre-steer answer part it
+    does not already contain (a model that re-emitted the whole thing wins).
+    """
+    if not parts:
+        return final_text
+    stitched: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if text and text not in final_text:
+            stitched.append(text)
+    stitched.append(final_text)
+    return "\n\n".join(piece for piece in stitched if piece)
+
+
 async def _steer_barrier_continuation(
     steering_inbox: Any | None,
     *,
@@ -1033,6 +1066,7 @@ async def _steer_barrier_continuation(
     sequencer: RunEventSequencer,
     publish_event: PublishEvent,
     rounds_used: int,
+    prior_answer_parts: list[str] | None = None,
 ) -> bool:
     """Close the steer barrier; feed still-unseen steers into one more pass.
 
@@ -1098,6 +1132,10 @@ async def _steer_barrier_continuation(
     )
     if current_response_text.strip():
         messages.append({"role": "assistant", "content": current_response_text})
+        if prior_answer_parts is not None:
+            # The published answer must keep this — the continuation's reply
+            # is usually just the steer delta.
+            prior_answer_parts.append(current_response_text)
     for steer in fresh:
         messages.append(
             {
@@ -2352,8 +2390,14 @@ def _run_request_text(job: RunJobEnvelope) -> str:
             parts.append(_chunk_text(message.get("content")))
             break
     for message in job.messages or []:
-        if isinstance(message, dict) and _is_steering_seed_message(message):
-            parts.append(_chunk_text(message.get("content")))
+        if not isinstance(message, dict) or not _is_steering_seed_message(message):
+            continue
+        # Only THIS run's steers add demands. Prior turns' steering rows are
+        # ordinary history — folding them in resurrected long-satisfied
+        # artifact demands on every requeue (review finding).
+        if str(message.get("run_id") or "").strip() != job.run_id:
+            continue
+        parts.append(_chunk_text(message.get("content")))
     return "\n".join(part for part in parts if part)
 
 

@@ -3077,6 +3077,16 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/V2RunSteerMessageRecord"
+    delete:
+      operationId: reopenRunSteerBarrier
+      description: >
+        Worker-only: a fresh attempt (JetStream redelivery) re-arms steer
+        acceptance closed by the crashed attempt's finalization barrier.
+      parameters:
+        - $ref: "#/components/parameters/RunID"
+      responses:
+        "200":
+          description: Barrier reopened
   /v2/runs/{run_id}/steer/{steer_id}/ack:
     post:
       operationId: ackRunSteerMessage

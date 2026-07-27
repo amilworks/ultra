@@ -1514,10 +1514,16 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 	if ts.IsZero() {
 		ts = domain.Now()
 	}
+	sourceSequence := sourceSequenceOrDefault(input.SourceSequence, seq)
+	if input.NoSourceSequence {
+		// Control-plane authored events live outside the worker's
+		// source_sequence space (zero = none in the record shape).
+		sourceSequence = 0
+	}
 	event := domain.RunEventRecord{
 		EventID:        eventID,
 		Sequence:       seq,
-		SourceSequence: sourceSequenceOrDefault(input.SourceSequence, seq),
+		SourceSequence: sourceSequence,
 		RunID:          input.RunID,
 		ThreadID:       input.ThreadID,
 		EventKind:      input.EventKind,

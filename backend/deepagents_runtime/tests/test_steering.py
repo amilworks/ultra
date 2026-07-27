@@ -55,6 +55,9 @@ class FakeInbox:
         self.barrier_calls += 1
         return None if self.barrier_result is None else list(self.barrier_result)
 
+    async def reopen_barrier(self) -> bool:
+        return True
+
 
 def steer(steer_id: str, message_id: str, content: str, status: str = "pending") -> dict[str, Any]:
     return {
@@ -197,6 +200,7 @@ class TestSeedNormalization:
                     "role": "user",
                     "content": "Also save it as a CSV.",
                     "message_id": "msg_steer",
+                    "run_id": "run_1",
                     "metadata": {"kind": "steering", "steer_id": "steer_a"},
                 },
             ]
@@ -205,6 +209,27 @@ class TestSeedNormalization:
         assert "Plot the data as a figure." in text
         assert "Also save it as a CSV." in text
 
+    def test_prior_turns_steers_add_no_demands(self) -> None:
+        # A steer from a PAST run is ordinary history: folding it into the
+        # demand classification resurrected long-satisfied artifact demands
+        # on every requeue.
+        job = self.make_job(
+            [
+                {
+                    "role": "user",
+                    "content": "Make a 3D model of the part.",
+                    "message_id": "msg_old_steer",
+                    "run_id": "run_0_previous",
+                    "metadata": {"kind": "steering", "steer_id": "steer_old"},
+                },
+                {"role": "assistant", "content": "Model built."},
+                {"role": "user", "content": "Now just summarize the findings."},
+            ]
+        )
+        text = _run_request_text(job)
+        assert "Now just summarize the findings." in text
+        assert "Make a 3D model" not in text
+
 
 class TestBarrierContinuation:
     def run_barrier(
@@ -212,6 +237,7 @@ class TestBarrierContinuation:
         inbox: FakeInbox | None,
         messages: list[dict[str, Any]],
         rounds_used: int = 0,
+        prior_answer_parts: list[str] | None = None,
     ) -> bool:
         from ultra_deepagents.context import AgentRunContext
         from ultra_deepagents.runner import AgentAttemptResult, RunEventSequencer
@@ -239,6 +265,7 @@ class TestBarrierContinuation:
                 sequencer=RunEventSequencer("run_test"),
                 publish_event=publish,
                 rounds_used=rounds_used,
+                prior_answer_parts=prior_answer_parts,
             )
         )
         self.events = events
@@ -275,6 +302,25 @@ class TestBarrierContinuation:
     def test_barrier_failure_finishes_run_without_steers(self) -> None:
         inbox = FakeInbox([], barrier=None)  # close_barrier -> None (unreachable)
         assert self.run_barrier(inbox, []) is False
+
+    def test_prior_answer_is_kept_for_stitching(self) -> None:
+        # The continuation's reply is usually just the steer delta; the
+        # published answer must keep the pre-steer response.
+        from ultra_deepagents.runner import _stitch_steer_barrier_answers
+
+        inbox = FakeInbox([], barrier=[steer("steer_a", "msg_a", "Add a title.")])
+        messages = [{"role": "user", "content": "original"}]
+        parts: list[str] = []
+        assert self.run_barrier(inbox, messages, prior_answer_parts=parts) is True
+        assert parts == ["The answer."]
+        stitched = _stitch_steer_barrier_answers(parts, "Done — added the title.")
+        assert stitched == "The answer.\n\nDone — added the title."
+        # A model that re-emitted the full answer wins without duplication.
+        assert (
+            _stitch_steer_barrier_answers(parts, "The answer. And the title.")
+            == "The answer. And the title."
+        )
+        assert _stitch_steer_barrier_answers([], "unchanged") == "unchanged"
 
 
 class TestInboxGating:

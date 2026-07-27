@@ -60,9 +60,15 @@ func (s *PostgresStore) CreateRunSteerMessage(
 	).Scan(&status); err != nil {
 		return domain.RunSteerMessageRecord{}, mapPgError(err)
 	}
+	// Idempotency lookup is scoped to THIS run: steer_id is client-supplied,
+	// and an unscoped match would return (and 200-acknowledge) another run's —
+	// potentially another user's — steer record. A cross-run collision falls
+	// through to the INSERT below, whose global primary key rejects it with a
+	// conflict instead of a disclosure.
 	existing, err := scanRunSteerMessage(tx.QueryRow(ctx,
-		`SELECT `+runSteerMessageColumns+` FROM control_run_steer_messages WHERE steer_id = $1`,
+		`SELECT `+runSteerMessageColumns+` FROM control_run_steer_messages WHERE steer_id = $1 AND run_id = $2`,
 		input.SteerID,
+		input.RunID,
 	))
 	if err == nil {
 		return existing, tx.Commit(ctx)
@@ -81,6 +87,16 @@ func (s *PostgresStore) CreateRunSteerMessage(
 		return domain.RunSteerMessageRecord{}, mapPgError(err)
 	}
 	if barrierClosed {
+		return domain.RunSteerMessageRecord{}, ErrSteeringClosed
+	}
+	var steerCount int
+	if err := tx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM control_run_steer_messages WHERE run_id = $1`,
+		input.RunID,
+	).Scan(&steerCount); err != nil {
+		return domain.RunSteerMessageRecord{}, mapPgError(err)
+	}
+	if steerCount >= maxSteerMessagesPerRun {
 		return domain.RunSteerMessageRecord{}, ErrSteeringClosed
 	}
 	now := input.CreatedAt

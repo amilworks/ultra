@@ -157,7 +157,7 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 		return true
 	case r.Method == http.MethodGet && workerRunSteerListPattern.MatchString(path):
 		return true
-	case r.Method == http.MethodPost && workerRunSteerBarrierPattern.MatchString(path):
+	case (r.Method == http.MethodPost || r.Method == http.MethodDelete) && workerRunSteerBarrierPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && workerRunSteerAckPattern.MatchString(path):
 		return true
@@ -710,6 +710,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/runs/{run_id}/steer", deps.handleSteerRun)
 			r.Get("/runs/{run_id}/steer", deps.handleListRunSteerMessages)
 			r.Post("/runs/{run_id}/steer/barrier", deps.handleCloseRunSteerBarrier)
+			r.Delete("/runs/{run_id}/steer/barrier", deps.handleReopenRunSteerBarrier)
 			r.Post("/runs/{run_id}/steer/{steer_id}/ack", deps.handleAckRunSteerMessage)
 			r.Get("/runs/{run_id}/events", deps.handleListRunEvents)
 			r.Get("/runs/{run_id}/artifacts", deps.handleListRunArtifacts)
@@ -10791,6 +10792,24 @@ func (deps ServerDeps) handleCloseRunSteerBarrier(w http.ResponseWriter, r *http
 		pending = []domain.RunSteerMessageRecord{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"pending": pending})
+}
+
+// handleReopenRunSteerBarrier is worker-only: a fresh attempt (JetStream
+// redelivery without a control-plane requeue) re-arms steer acceptance that
+// the crashed attempt's finalization barrier closed.
+func (deps ServerDeps) handleReopenRunSteerBarrier(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	if deps.workerRequestAuth(r) != workerAuthValid {
+		writeError(w, http.StatusForbidden, errors.New("steer barrier is worker-only"))
+		return
+	}
+	if err := deps.Runs.ReopenRunSteerBarrier(r.Context(), chi.URLParam(r, "run_id")); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
 func (deps ServerDeps) handleAckRunSteerMessage(w http.ResponseWriter, r *http.Request) {

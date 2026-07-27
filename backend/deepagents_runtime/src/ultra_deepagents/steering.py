@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import urllib.error as urllib_error
+import urllib.parse as urllib_parse
 import urllib.request as urllib_request
 from typing import Any
 
@@ -106,7 +107,9 @@ class SteeringInbox:
         try:
             await asyncio.to_thread(
                 self._request_sync,
-                self._url(f"/{steer_id}/ack"),
+                # The id is client-supplied (validated CP-side, but encode
+                # anyway): it must never rewrite this privileged URL's path.
+                self._url(f"/{urllib_parse.quote(steer_id, safe='')}/ack"),
                 method="POST",
                 payload={"worker_id": ""},
             )
@@ -120,13 +123,36 @@ class SteeringInbox:
         self._acked_steer_ids.add(steer_id)
         return True
 
+    async def reopen_barrier(self) -> bool:
+        """Re-arm steer acceptance at attempt start.
+
+        A pure JetStream redelivery (crash during the finalization window,
+        no control-plane requeue involved) would otherwise inherit a closed
+        barrier and reject every steer for the whole retried attempt.
+        Best-effort: failure only degrades late steers to the 409→queue path.
+        """
+        try:
+            await asyncio.to_thread(
+                self._request_sync, self._url("/barrier"), method="DELETE"
+            )
+        except Exception:
+            logger.warning(
+                "Steer barrier reopen failed; a redelivered attempt may reject steers.",
+                extra={"run_id": self._run_id},
+                exc_info=True,
+            )
+            return False
+        return True
+
     async def close_barrier(self) -> list[dict[str, Any]] | None:
         """Atomically stop steer acceptance; return still-pending steers.
 
         None (not []) on failure so the caller can tell "nothing pending"
         from "could not ask" — the latter is loud, and the control plane's
         terminal sweep will mark any stranded steer missed rather than let
-        it vanish silently.
+        it vanish silently. Only non-retryable 4xx rejections give up
+        immediately; transient 5xx/connection failures retry — a single 502
+        at completion must not demote an accepted steer to missed.
         """
         for attempt in range(3):
             try:
@@ -137,12 +163,24 @@ class SteeringInbox:
                     payload={},
                 )
             except urllib_error.HTTPError as exc:
-                logger.error(
-                    "Steer barrier request rejected (HTTP %s); finishing without it.",
-                    exc.code,
-                    extra={"run_id": self._run_id},
-                )
-                return None
+                if exc.code < 500:
+                    logger.error(
+                        "Steer barrier request rejected (HTTP %s); finishing without it.",
+                        exc.code,
+                        extra={"run_id": self._run_id},
+                    )
+                    return None
+                if attempt == 2:
+                    logger.error(
+                        "Steer barrier failed with HTTP %s after retries; finishing "
+                        "without it. Pending steers will be marked missed by the "
+                        "terminal sweep.",
+                        exc.code,
+                        extra={"run_id": self._run_id},
+                    )
+                    return None
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
             except Exception:
                 if attempt == 2:
                     logger.error(

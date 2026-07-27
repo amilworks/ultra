@@ -9,9 +9,14 @@ import (
 )
 
 // ErrSteeringClosed reports that a run no longer accepts steering messages:
-// it is terminal, or the worker has closed the finalization barrier. Clients
-// fall back to Phase 0 queueing on this error.
+// it is terminal, the worker has closed the finalization barrier, or the
+// per-run cap is reached. Clients fall back to Phase 0 queueing on this error.
 var ErrSteeringClosed = errors.New("run no longer accepts steering messages")
+
+// maxSteerMessagesPerRun bounds context/token amplification: every accepted
+// steer is injected into the coordinator's model context. Past the cap the
+// client's Phase 0 queue is the right home for further thoughts.
+const maxSteerMessagesPerRun = 32
 
 // CreateRunSteerMessage atomically records an accepted steer: the steer row
 // AND its thread-transcript message commit together, so a recovery requeue
@@ -33,10 +38,25 @@ func (s *MemoryStore) CreateRunSteerMessage(
 			return existing, nil
 		}
 	}
+	// steer_id is a global key (client-supplied): a collision with another
+	// run's steer is a conflict, never a disclosure of that run's record.
+	for runID, rows := range s.steerMessages {
+		if runID == input.RunID {
+			continue
+		}
+		for _, existing := range rows {
+			if existing.SteerID == input.SteerID {
+				return domain.RunSteerMessageRecord{}, ErrConflict
+			}
+		}
+	}
 	if isTerminalRunStatus(run.Status) {
 		return domain.RunSteerMessageRecord{}, ErrSteeringClosed
 	}
 	if _, closed := s.steerBarriers[input.RunID]; closed {
+		return domain.RunSteerMessageRecord{}, ErrSteeringClosed
+	}
+	if len(s.steerMessages[input.RunID]) >= maxSteerMessagesPerRun {
 		return domain.RunSteerMessageRecord{}, ErrSteeringClosed
 	}
 	now := input.CreatedAt

@@ -1477,8 +1477,15 @@ type CompleteRunInput struct {
 }
 
 type AppendRunEventInput struct {
-	EventID        string    `json:"event_id,omitempty"`
-	SourceSequence int64     `json:"sequence,omitempty"`
+	EventID string `json:"event_id,omitempty"`
+	// SourceSequence is the WORKER's per-run counter stamp. Control-plane
+	// authored events (steer lifecycle) must set NoSourceSequence instead of
+	// leaving this zero: the append SQL otherwise defaults source_sequence to
+	// the new sequence_number, silently CLAIMING the worker's next slot under
+	// the (run_id, source_sequence) unique index — and ingest then DROPS the
+	// worker event that arrives carrying that stamp.
+	SourceSequence   int64 `json:"sequence,omitempty"`
+	NoSourceSequence bool  `json:"-"`
 	RunID          string    `json:"run_id"`
 	ThreadID       string    `json:"thread_id,omitempty"`
 	EventKind      string    `json:"event_kind"`

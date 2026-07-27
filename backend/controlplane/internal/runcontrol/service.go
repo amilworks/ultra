@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -620,6 +621,11 @@ type SteerRunRequest struct {
 
 const maxSteerTextLength = 32_000
 
+// steerIDPattern bounds the CLIENT-supplied idempotency id: it becomes a URL
+// path segment on worker-token-authenticated requests and a primary key, so
+// it must never carry slashes, dots, or anything URL-hostile.
+var steerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // SteerRun accepts a mid-run steering message (Phase 1). The store call is
 // the atomic gate: it locks the run row, verifies the run is live and the
 // finalization barrier open, and commits the steer row together with its
@@ -636,10 +642,18 @@ func (s *Service) SteerRun(ctx context.Context, req SteerRunRequest) (domain.Run
 	steerID := strings.TrimSpace(req.SteerID)
 	if steerID == "" {
 		steerID = domain.NewID("steer")
+	} else if !steerIDPattern.MatchString(steerID) {
+		return domain.RunSteerMessageRecord{}, fmt.Errorf("%w: steer_id must match %s", ErrInvalidSteer, steerIDPattern)
 	}
 	run, err := s.store.GetRun(ctx, req.RunID)
 	if err != nil {
 		return domain.RunSteerMessageRecord{}, err
+	}
+	// Cleanroom evaluation runs execute with a sealed surface — their workers
+	// never construct a steering inbox, so accepting would only ever produce
+	// a misleading pending→missed lifecycle.
+	if storedEvaluationProfile(run) != "" {
+		return domain.RunSteerMessageRecord{}, store.ErrSteeringClosed
 	}
 	record, err := s.store.CreateRunSteerMessage(ctx, domain.CreateRunSteerMessageInput{
 		SteerID:   steerID,
@@ -657,7 +671,32 @@ func (s *Service) SteerRun(ctx context.Context, req SteerRunRequest) (domain.Run
 }
 
 func (s *Service) ListRunSteerMessages(ctx context.Context, runID string) ([]domain.RunSteerMessageRecord, error) {
-	return s.store.ListRunSteerMessages(ctx, runID)
+	records, err := s.store.ListRunSteerMessages(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	// Read-repair: the terminal sweep is otherwise one-shot — if its store
+	// call failed during terminal processing, accepted steers would sit
+	// pending forever with no event. Any read of a terminal run's steers
+	// re-runs the idempotent sweep.
+	hasPending := false
+	for _, record := range records {
+		if record.Status == domain.RunSteerStatusPending {
+			hasPending = true
+			break
+		}
+	}
+	if hasPending {
+		if run, err := s.store.GetRun(ctx, runID); err == nil && isTerminalRunStatus(run.Status) {
+			s.sweepMissedSteerMessages(ctx, domain.AppendRunEventInput{
+				RunID:     runID,
+				ThreadID:  run.ThreadID,
+				EventKind: "run." + string(run.Status),
+			})
+			return s.store.ListRunSteerMessages(ctx, runID)
+		}
+	}
+	return records, nil
 }
 
 type AckRunSteerRequest struct {
@@ -688,6 +727,21 @@ func (s *Service) AckRunSteerMessage(ctx context.Context, req AckRunSteerRequest
 // accepted steer can never silently miss the run.
 func (s *Service) CloseRunSteerBarrier(ctx context.Context, runID string) ([]domain.RunSteerMessageRecord, error) {
 	return s.store.CloseRunSteerBarrier(ctx, runID, domain.Now())
+}
+
+// ReopenRunSteerBarrier re-arms steer acceptance for a fresh attempt. The
+// worker calls it at run start: a pure JetStream redelivery (crash during the
+// finalization window, no RequeueRun involved) would otherwise inherit a
+// closed barrier and 409 every steer for the whole retried attempt.
+func (s *Service) ReopenRunSteerBarrier(ctx context.Context, runID string) error {
+	run, err := s.store.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if isTerminalRunStatus(run.Status) {
+		return store.ErrConflict
+	}
+	return s.store.OpenRunSteerBarrier(ctx, runID)
 }
 
 // sweepMissedSteerMessages marks leftover pending steers at run-terminal
@@ -727,13 +781,17 @@ func (s *Service) appendSteerLifecycleEvent(
 ) {
 	suffix := strings.TrimPrefix(eventKind, "steer.")
 	input := domain.AppendRunEventInput{
-		EventID:   fmt.Sprintf("evt_%s_steer_%s_%s", runID, record.SteerID, suffix),
-		RunID:     runID,
-		ThreadID:  threadID,
-		EventKind: eventKind,
-		EventType: "run",
-		Level:     "info",
-		Message:   message,
+		EventID: fmt.Sprintf("evt_%s_steer_%s_%s", runID, record.SteerID, suffix),
+		RunID:   runID,
+		// CP-authored mid-run events must NOT claim a worker source_sequence
+		// slot: doing so makes ingest silently drop the worker event that
+		// arrives carrying the stolen stamp (review-critical finding).
+		NoSourceSequence: true,
+		ThreadID:         threadID,
+		EventKind:        eventKind,
+		EventType:        "run",
+		Level:            "info",
+		Message:          message,
 		Payload: domain.JSONMap{
 			"steer_id":   record.SteerID,
 			"message_id": record.MessageID,
@@ -741,18 +799,26 @@ func (s *Service) appendSteerLifecycleEvent(
 			"text":       record.Content,
 		},
 	}
+	// Serialize the get-then-append on the deterministic id: without the lock
+	// two concurrent duplicate requests both miss the lookup and the memory
+	// store (no event_id uniqueness) appends the event twice.
+	lock := s.eventIDLock(input.EventID)
+	lock.Lock()
 	event, found, err := s.store.GetRunEvent(ctx, input.EventID)
 	if err != nil {
+		lock.Unlock()
 		slog.Error("steer lifecycle event lookup failed", "run_id", runID, "event_id", input.EventID, "error", err)
 		return
 	}
 	if !found {
 		event, err = s.store.AppendRunEvent(ctx, input)
 		if err != nil {
+			lock.Unlock()
 			slog.Error("steer lifecycle event append failed", "run_id", runID, "event_id", input.EventID, "error", err)
 			return
 		}
 	}
+	lock.Unlock()
 	_ = s.bus.PublishRunEvent(ctx, event)
 }
 

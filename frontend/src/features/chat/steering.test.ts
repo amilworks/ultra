@@ -76,9 +76,16 @@ describe("the optimistic steering message", () => {
       "const steerFollowup = useCallback",
       "composerResourcePickerOpen,\n    queueFollowup,"
     );
-    const catchAt = steer.indexOf(".catch((error: unknown) => {");
+    const catchAt = steer.indexOf(".catch(async (error: unknown) => {");
     expect(catchAt).toBeGreaterThan(-1);
     const failure = steer.slice(catchAt);
+    // A lost RESPONSE is not a lost steer: verify server-side before
+    // restoring the draft, or a re-send duplicates the transcript.
+    expect(failure).toMatch(/listRunSteerMessages\(runId\)/);
+    const verifyAt = failure.indexOf("listRunSteerMessages");
+    const restoreAt = failure.indexOf("filter((item) => item.steerId !== steerId)");
+    expect(verifyAt).toBeGreaterThan(-1);
+    expect(verifyAt).toBeLessThan(restoreAt);
     expect(failure).toMatch(/filter\(\(item\) => item\.steerId !== steerId\)/);
     // steering_closed → Phase 0 queue with the growing-message rule.
     expect(failure).toMatch(/isSteeringClosedError\(error\)/);
@@ -92,6 +99,19 @@ describe("steer lifecycle events", () => {
   it("routes steer.* run events away from the assistant fold in BOTH stream consumers", () => {
     const matches = appSource.match(/if \(applySteerRunEvent\((?:target\.conversationId|conversationId), runEvent\)\) \{\s*return;/g);
     expect(matches?.length).toBe(2);
+  });
+
+  it("routes steer.* events in the no-stream poll fallback too — the eyebrow must not stick at pending", () => {
+    // The 1250ms poll is the ONLY consumer when no SSE stream is registered.
+    expect(appSource).toMatch(/if \(applySteerRunEvent\(conversationId, event\)\) \{\s*continue;/);
+  });
+
+  it("Retry/Edit resolves the ORIGINATING prompt, never the steer, and folds the turn's steers in", () => {
+    const retry = blockFrom("const retryAssistantResponse = useCallback", "pendingRetryRef.current = { conversationId, prompt };");
+    expect(retry).toMatch(/if \(candidate\.steering\) \{\s*turnSteerTexts\.unshift\(candidate\.content\);/);
+    expect(retry).toMatch(/\[originatingUserMessage\.content, \.\.\.turnSteerTexts\]/);
+    // The removal takes the turn's steering bubbles with it — no orphans.
+    expect(appSource).toMatch(/candidate\.role === "user" && candidate\.steering/);
   });
 
   it("only moves the lifecycle forward — a replayed steer.received cannot demote applied", () => {

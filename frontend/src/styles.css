@@ -12,29 +12,50 @@
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
+  /* Reading MEASURE, which is the half of legibility that font-size alone can't
+     buy. The chat column is 49rem so tables, code and figures have room; at that
+     width prose ran a measured mean of 86.5 characters per line (sampled across
+     8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
+     comfortably. Past ~75 the return sweep starts finding the wrong next line and
+     the reader re-reads. This lands ~72 — the roomy end of comfortable, so the
+     column still feels generous rather than cramped.
+     In rem, NOT ch, even though ch looks like the natural unit for a measure:
+     `ch` resolves against each ELEMENT's font-size, so one shared token handed
+     the h2 an 867px measure and the h3 763px while body prose got 654px — three
+     different right edges instead of one column. A measure is a property of the
+     column, not of the type inside it.
+     Applies to PROSE only; block content that genuinely needs width keeps the
+     full 49rem column. */
+  --reading-measure: 37.5rem;
   --font-weight-body: 400;
   --font-weight-reading-body: 400;
   --font-weight-strong: 700;
   --font-weight-reading-heading: 600;
-  --font-weight-reading-strong: 700;
+  /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
+     **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
+     600, so a bolded phrase out-shouted the section it sat under, and at h4's
+     16px it beat the heading at identical size. Ultra's answers are emphasis-dense
+     (findings, verdicts, method names), so 700 also stippled long passages with
+     dark blots and cost more than it marked. 400 → 600 is still an unmistakable
+     step at reading size; nothing now outweighs a heading.
+     --font-weight-strong (UI chrome) stays 700 — different job, sparse use. */
+  --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
   --font-weight-action: 500;
   --font-weight-data: 500;
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
-  /* Inter's recommended pairing ("liga"/"calt") plus one deliberate addition.
-     "ss02" is Inter's Disambiguation set: it separates the characters that
-     collide in this product's actual content — capital I, lowercase l and
-     numeral 1; letter O and slashed zero. Ultra's text is accession IDs, run
-     IDs, dataset paths, channel indices and parameter values, where a misread
-     Il1 or 0O is a real error, not a cosmetic one. It doubles as identity:
-     these letterforms are visibly not stock Inter, so the type is ours without
-     changing typeface.
-     ss02 already includes the slashed zero, so "zero" is not set separately.
+  /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
+     Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
+     was previously enabled to buy identity from the letterforms. In use it read
+     as a stylistic quirk rather than the clean, professional voice this product
+     wants, so the type is stock Inter again. Identity comes from the type
+     system — the scale, the weights, the tracking curve below — not from
+     substituted glyphs.
      NOTE: font-feature-settings REPLACES rather than merges — any component
      that sets its own would drop these. Keep this the only declaration. */
-  font-feature-settings: "liga" 1, "calt" 1, "ss02" 1;
+  font-feature-settings: "liga" 1, "calt" 1;
 
   /* TRACKING — derive, don't eyeball.
      Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
@@ -55,8 +76,20 @@
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
   --bg-main: #f8f8f7;
-  --text-main: #171717;
-  --text-muted: #737373;
+  /* Ink, not black. #171717 measured 16.4:1 on --bg-page — technically superb
+     and visually heavy: at that weight body text stamps itself onto the page
+     instead of sitting on it. #3b383c is 10.59:1, still far past AA for every
+     size, with a faint warm-violet cast that keeps long reading sessions
+     softer. The whole light theme reads airier for it. */
+  --text-main: #3b383c;
+  /* Secondary text people actually READ (timestamps, counts, meta lines, the
+     sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
+     clears AA for large text and sits just under it for small — a deliberate
+     step down from the old neutral #737373 (4.35:1) toward the sage family,
+     without dropping to the ghost weight that genuinely-inactive chrome uses.
+     Things that are inactive rather than secondary go to --composer-placeholder
+     territory instead; see the note there. */
+  --text-muted: #787f78;
   --line: rgba(23, 23, 23, 0.08);
   --brand: #171717;
   --brand-strong: #0a0a0a;
@@ -100,20 +133,30 @@
   --sidebar-radius-row: calc(var(--radius) - 0.125rem);
   --sidebar-radius-menu: calc(var(--radius) + 0.2rem);
   --sidebar-radius-menu-item: calc(var(--radius) - 0.15rem);
+  /* The shadcn foreground tokens defer to the house ink tokens rather than
+     carrying their own oklch greys. Two palettes for the same job is how a
+     theme drifts: the app draws most text through --text-main/--text-muted
+     while Tailwind utilities and shadcn primitives draw through these, so an
+     ink change touching only one set leaves the other behind — which is exactly
+     what happened here before they were wired together.
+     LIGHT ONLY, deliberately: the dark block still carries its own oklch values
+     because this pass is a light-theme change and re-pointing dark's tokens
+     would shift dark colours nobody asked to move. If dark is ever retuned,
+     wire it the same way rather than editing two palettes. */
   --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --foreground: var(--text-main);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: var(--text-main);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
+  --popover-foreground: var(--text-main);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
+  --secondary-foreground: var(--text-main);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: var(--text-muted);
   --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --accent-foreground: var(--text-main);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
@@ -144,11 +187,18 @@
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
   --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
+  /* Navigation is not content. At rest the rows sit at ink so they stop
+     competing with the transcript for attention; pointing at one — or being on
+     that page — is what makes it go crisp. The darkening IS the affordance,
+     which is why hover has somewhere to go now that rest is no longer black. */
+  --sidebar-foreground: var(--text-main);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
+  /* True black, and one step past --text-main on purpose. Drives BOTH hover and
+     data-[active=true], so the current page reads at full strength too. */
+  --sidebar-ink-hover: #0a0a0a;
+  --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-item-hover-bg: color-mix(in oklab, var(--sidebar-accent) 92%, var(--text-main) 8%);
   --sidebar-item-active-bg: color-mix(in oklab, var(--sidebar-accent) 88%, var(--text-main) 12%);
   --collapsed-sidebar-bg: var(--sidebar);
@@ -189,14 +239,17 @@
   --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
-  /* True ghost weight: resolves to #b1b1b1, 2.14:1 on the white card, matching
-     the reference composers this was tuned against. Deliberately below 3:1 —
-     the textarea now carries its own aria-label, so nothing about the control's
-     name or operability depends on how faint this hint is drawn; it is
-     decoration over an input that is obvious on its own.
-     Paired with the dark value by perceptual lightness, not by contrast ratio:
-     this sits L* 27.8 below its background, dark sits 28.2 below its. */
-  --composer-placeholder: color-mix(in oklab, var(--text-muted) 54%, #ffffff 46%);
+  /* True ghost weight, and NO LONGER derived from --text-muted. That derivation
+     assumed one grey served both roles; it doesn't. Secondary text is read, so
+     it went to a deeper sage (3.77:1); a placeholder is genuinely inactive, and
+     low contrast is the correct signal there rather than a compromise. Splitting
+     them is the point — pinning this value is what keeps a future --text-muted
+     change from dragging the ghost weight along with it.
+     1.57:1 on --bg-page. Deliberately below 3:1, on the same reasoning the old
+     #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so nothing
+     about the control's name or operability depends on how faint this hint is
+     drawn — it is decoration over an input that is obvious on its own. */
+  --composer-placeholder: #c3c7c3;
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
@@ -839,11 +892,14 @@ body {
   transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
+/* Same ink-goes-crisp promise as its expanded twin .app-history-button — the
+   collapsed rail is the same navigation, so hovering a recent has to darken
+   identically rather than stopping at --accent-foreground's resting ink. */
 .app-collapsed-recent-item:hover,
 .app-collapsed-recent-item:focus-visible,
 .app-collapsed-recent-item[data-active="true"] {
   background: var(--collapsed-sidebar-popover-item-bg);
-  color: var(--accent-foreground);
+  color: var(--sidebar-ink-hover);
   outline: none;
 }
 
@@ -1721,11 +1777,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--sidebar-accent) 74%, transparent);
 }
 
+/* Colour has to be a real declaration here, not just the --sidebar-accent-foreground
+   token: the rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
+   beats Tailwind v4's layered `hover:text-sidebar-accent-foreground` utility no
+   matter its specificity. The shared row rule already transitions `color`, so
+   the darkening animates for free. */
 .app-new-chat-button:hover,
 .app-resource-browser-button:hover,
 .app-bisque-browser-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 86%, var(--sidebar-foreground) 4%);
   border-color: transparent;
+  color: var(--sidebar-ink-hover);
 }
 
 .app-new-chat-button[data-variant="secondary"],
@@ -1769,6 +1831,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-bisque-link-button:hover {
   background: var(--sidebar-item-hover-bg);
+  color: var(--sidebar-ink-hover);
 }
 
 .app-history-group {
@@ -2160,12 +2223,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-history-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent);
-  color: var(--text-main);
+  color: var(--sidebar-ink-hover);
 }
 
 .app-history-button[data-active="true"] {
   background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
-  color: var(--text-main);
+  color: var(--sidebar-ink-hover);
   box-shadow: none;
 }
 
@@ -6737,9 +6800,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 /* Losing the border and shadow took the focus state with them, and the textarea's
    own outline is none — so the rule itself has to carry it. The inset line doubles
    the hairline to a visible 2px WITHOUT widening the border, which would shove the
-   whole row down 1px on every focus. --text-muted (#737373) measures 4.42:1 on
-   the composer ground, clearing the 3:1 and 2px WCAG 2.4.11 asks of a focus
-   indicator with margin. */
+   whole row down 1px on every focus. --text-muted (#787f78 since the ink pass)
+   measures 4.11:1 on the composer's white ground, clearing the 3:1 and 2px WCAG
+   2.4.11 asks of a focus indicator with margin. Re-measure this if --text-muted
+   moves again: the indicator borrows the token, so a colour decision made for
+   body text silently sets the focus contrast too. */
 .app-composer-shell .app-composer-card:focus-within {
   border-top-color: var(--text-muted);
   box-shadow: inset 0 1px 0 var(--text-muted);
@@ -10707,6 +10772,40 @@ details {
   hyphens: auto;
 }
 
+/* Prose stops hyphenating now that it has a measure. `hyphens: auto` was earning
+   its keep at ~86 characters a line, where it absorbed the big ragged gaps; at
+   ~70 it fires constantly instead — one Summary paragraph broke as "bur-rows",
+   "enhance-ment" and "bur-row-like", which reads as a rendering defect rather
+   than as typesetting, and technical compounds are exactly what it mangles.
+   Measured after: 0 browser-inserted hyphens across 25 paragraphs, with the only
+   two mid-word line breaks falling at real hyphens in compounds ("domain-" /
+   "specific"), which is correct.
+   `overflow-wrap: break-word` on the rule above still catches tokens too long to
+   fit, so nothing overflows. Scope is prose only — table cells already opt out
+   through .pk-table-cell's `hyphens: none`, so they are untouched here. */
+.pk-markdown :where(p, li, blockquote) {
+  hyphens: manual;
+}
+
+/* Give prose the reading measure; leave everything that needs the width alone.
+   Direct children only, and deliberately NOT :where() — a 0-specificity wrapper
+   would lose the max-width to any later rule. Tables, code blocks, figures and
+   the tool carousel are absent from this list on purpose: a table narrowed to a
+   prose measure starts wrapping cells that were readable at full width, which
+   trades one legibility problem for a worse one.
+   The left edges stay aligned, so wide blocks simply reach further right. */
+.pk-markdown > p,
+.pk-markdown > ul,
+.pk-markdown > ol,
+.pk-markdown > blockquote,
+.pk-markdown > h1,
+.pk-markdown > h2,
+.pk-markdown > h3,
+.pk-markdown > h4,
+.pk-message-content-plain {
+  max-width: var(--reading-measure);
+}
+
 .pk-markdown :where(strong, b),
 .pk-message-content-plain :where(strong, b) {
   font-family: inherit;
@@ -11468,7 +11567,13 @@ details {
   --sidebar-primary: oklch(0.488 0.243 264.376);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
+  /* Dark's half of the ink-goes-crisp promise. The rules that darken a hovered
+     sidebar row in light theme brighten it here, so this MUST be defined for
+     both themes — an undefined var() makes `color` invalid at computed-value
+     time and the row silently inherits instead. One step past dark's
+     --text-main (#f5f5f5), the same way #0a0a0a sits past light's. */
+  --sidebar-ink-hover: #ffffff;
+  --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
   --collapsed-sidebar-bg: color-mix(in oklab, var(--sidebar) 94%, var(--background) 6%);

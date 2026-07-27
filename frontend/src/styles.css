@@ -17,8 +17,11 @@
      width prose ran a measured mean of 86.5 characters per line (sampled across
      8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
      comfortably. Past ~75 the return sweep starts finding the wrong next line and
-     the reader re-reads. This lands ~72 — the roomy end of comfortable, so the
-     column still feels generous rather than cramped.
+     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so
+     the numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
+     unconstrained (49rem) = 92.9. 40rem sits at the TOP of the comfortable band
+     instead of the middle — the right trade when the column is already a modest
+     share of a wide screen — while 42.5rem would cross it for 5 more characters.
      In rem, NOT ch, even though ch looks like the natural unit for a measure:
      `ch` resolves against each ELEMENT's font-size, so one shared token handed
      the h2 an 867px measure and the h3 763px while body prose got 654px — three
@@ -26,7 +29,7 @@
      column, not of the type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
      full 49rem column. */
-  --reading-measure: 37.5rem;
+  --reading-measure: 40rem;
   --font-weight-body: 400;
   --font-weight-reading-body: 400;
   --font-weight-strong: 700;
@@ -76,12 +79,12 @@
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
   --bg-main: #f8f8f7;
-  /* Ink, not black. #171717 measured 16.4:1 on --bg-page — technically superb
-     and visually heavy: at that weight body text stamps itself onto the page
-     instead of sitting on it. #3b383c is 10.59:1, still far past AA for every
-     size, with a faint warm-violet cast that keeps long reading sessions
-     softer. The whole light theme reads airier for it. */
-  --text-main: #3b383c;
+  /* Body ink. 16.12:1 on --bg-page — deliberately near-black: this is the
+     reading surface for scientific answers, and the earlier lift to #3b383c
+     (10.59:1) traded more legibility than the airiness was worth. Airiness is
+     bought elsewhere now — a quieter sidebar and a real reading measure — so
+     the text itself does not have to give any up. */
+  --text-main: #191919;
   /* Secondary text people actually READ (timestamps, counts, meta lines, the
      sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
      clears AA for large text and sits just under it for small — a deliberate
@@ -187,11 +190,19 @@
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
   --sidebar: oklch(0.985 0 0);
-  /* Navigation is not content. At rest the rows sit at ink so they stop
-     competing with the transcript for attention; pointing at one — or being on
-     that page — is what makes it go crisp. The darkening IS the affordance,
-     which is why hover has somewhere to go now that rest is no longer black. */
-  --sidebar-foreground: var(--text-main);
+  /* Navigation is not content, and it no longer follows --text-main. Body ink is
+     near-black (16.12:1) because answers are for reading; a sidebar at that same
+     weight competes with them for attention, and every row shouting at full
+     strength is what makes a chrome-heavy app feel busy. This sits at 6.6:1 —
+     unmistakably quieter than the transcript, still comfortably past AA's 4.5:1
+     for the 14px/500 row labels, which are essential navigation and must not be
+     decorative.
+     It also gives hover somewhere to go: rest 6.6:1 -> --sidebar-ink-hover
+     18.15:1 is a large, obvious step, so the darkening reads as the affordance.
+     Pinned to --text-main it would have been a 1.13:1 no-op.
+     Faintly sage rather than pure grey so it shares a family with --text-muted
+     (#787f78), which the section eyebrows already use. */
+  --sidebar-foreground: #575a57;
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
@@ -10695,6 +10706,34 @@ details {
    readers still see the MathML, which does not depend on selectability. */
 .katex-mathml {
   user-select: none;
+}
+
+/* A wide equation has to scroll INSIDE its own block. KaTeX sets
+   `white-space: nowrap` on display math, so a formula wider than the column
+   spills out of it; html and body are both `overflow-x: clip` to stop the page
+   itself scrolling sideways, and `clip` — unlike `auto` — creates no scrollport.
+   The two together silently AMPUTATE the formula: measured on a 390px phone, a
+   radar-equation display ran to 728px and 338px of it was unreachable, with no
+   scrollbar and no gesture that could reveal it.
+   `overflow-x: auto` here gives the equation its own scrollport, so the overflow
+   becomes a swipe instead of a truncation, and the page still never scrolls.
+   Applied at every width: the same formula overflows a 680px desktop measure
+   too, just less often.
+   overflow-y stays hidden because a horizontal scrollport would otherwise report
+   a fractional vertical overflow from KaTeX's negative struts and show a useless
+   vertical scrollbar on tall math. Height is content-driven, so nothing clips. */
+.pk-markdown .katex-display,
+.pk-message-content-plain .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Room for the scrollbar so it never sits on top of the glyphs, and a hair of
+     side padding so a centred formula is not flush against the scroll edges. */
+  padding-block-end: 0.35rem;
+  padding-inline: 0.125rem;
+  /* Touch momentum on iOS, and keep the swipe from turning into a page-back
+     gesture at the ends of the scroll. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
 }
 
 /* Queued follow-up ("send when this run finishes"): a user-bubble-shaped card

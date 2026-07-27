@@ -22,10 +22,12 @@ const darkBlock = (() => {
 })();
 
 describe("light theme ink", () => {
-  it("moves body ink off black and secondary text to the sage tone", () => {
-    // 10.59:1 on --bg-page, down from #171717's 16.4:1 — still far past AA at
-    // every size, and the whole theme reads airier for it.
-    expect(lightRoot).toMatch(/--text-main:\s*#3b383c;/);
+  it("keeps body ink near-black and secondary text on the sage tone", () => {
+    // 16.12:1 on --bg-page. Deliberately near-black: this is the reading surface
+    // for scientific answers, and the earlier #3b383c (10.59:1) gave up more
+    // legibility than the airiness was worth. Airiness is bought elsewhere — a
+    // quieter sidebar and a real reading measure — not out of the text itself.
+    expect(lightRoot).toMatch(/--text-main:\s*#191919;/);
     // 3.77:1 — clears AA for large text, deliberately just under it for small.
     expect(lightRoot).toMatch(/--text-muted:\s*#787f78;/);
   });
@@ -69,8 +71,13 @@ describe("light theme ink", () => {
     expect(stylesSource).toMatch(
       /\.app-history-button\[data-active="true"\]\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
     );
-    // The sidebar rows must be ink at REST, or hover has nowhere to go.
-    expect(lightRoot).toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // The sidebar must be QUIETER than body ink at rest — that is what keeps
+    // navigation from competing with the transcript, and what gives hover
+    // somewhere to go. #575a57 measures 6.41:1 (past AA's 4.5:1 for the 14px/500
+    // row labels) against body ink's 16.12:1, a 2.83:1 rest-to-hover separation.
+    // Pinned to var(--text-main) it was a 1.13:1 no-op — hover did nothing.
+    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#575a57;/);
+    expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
   });
 
   it("drops the ss02 stylistic set for stock Inter", () => {
@@ -83,10 +90,12 @@ describe("light theme ink", () => {
 
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
-    // 49rem of column ran prose to a measured mean of 86.5 characters a line
-    // (8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks.
-    // 37.5rem lands ~70.6.
-    expect(lightRoot).toMatch(/--reading-measure:\s*37\.5rem;/);
+    // Measured on ONE fixed set of 5 answer paragraphs so the values compare:
+    // 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, unconstrained = 92.9.
+    // 40rem sits at the top of the comfortable band rather than the middle, which
+    // is the right trade when the column is a modest share of a wide screen;
+    // 42.5rem crosses it for 5 more characters.
+    expect(lightRoot).toMatch(/--reading-measure:\s*40rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.
@@ -117,6 +126,32 @@ describe("response reading typography", () => {
     expect(Number(strong)).toBeLessThanOrEqual(Number(heading));
     // UI chrome keeps 700 — different job, sparse use.
     expect(lightRoot).toMatch(/--font-weight-strong:\s*700;/);
+  });
+
+  it("gives wide equations their own scrollport instead of amputating them", () => {
+    // KaTeX sets `white-space: nowrap` on display math, and html/body are both
+    // `overflow-x: clip` so the page never scrolls sideways. `clip` creates NO
+    // scrollport, so the two together silently truncate a wide formula: measured
+    // on a 390px phone, a radar-equation display ran to 728px with 338px
+    // unreachable — no scrollbar, no gesture that could reveal it.
+    const rule = stylesSource.match(
+      /\.pk-markdown \.katex-display,[\s\S]*?\{[^}]*\}/
+    )?.[0];
+    expect(rule).toBeTruthy();
+    expect(rule).toMatch(/overflow-x:\s*auto;/);
+    // Must NOT be `hidden`/`clip` — those re-create the amputation.
+    expect(rule).not.toMatch(/overflow-x:\s*(hidden|clip|visible);/);
+    // A horizontal scrollport reports fractional vertical overflow from KaTeX's
+    // negative struts, which would show a useless vertical scrollbar on tall math.
+    expect(rule).toMatch(/overflow-y:\s*hidden;/);
+    // The page itself must still never scroll sideways.
+    expect(stylesSource).toMatch(/overflow-x:\s*clip;/);
+    // Equations are NOT in the reading-measure list — a formula needs the full
+    // column, and narrowing it only makes the scroll longer.
+    const measureRule = stylesSource.match(
+      /\n\.pk-markdown > p,[\s\S]*?\{[^}]*max-width:\s*var\(--reading-measure\);[^}]*\}/
+    )?.[0];
+    expect(measureRule).not.toMatch(/katex/);
   });
 
   it("stops auto-hyphenating prose once it has a measure", () => {

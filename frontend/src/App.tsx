@@ -13169,8 +13169,17 @@ export function App() {
 
           <div
             className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
+            /* Every width, not just phones. Reading back through a long answer
+               is when the toolbar is pure distraction, and that is as true on a
+               1440px screen as on a 390px one.
+               Driven by scrolled-AWAY rather than actively-scrolling on purpose:
+               an is-scrolling trigger would re-expand the composer the instant
+               you stop to actually read a paragraph, which is exactly when you
+               want it out of the way. The signal already carries hysteresis
+               (collapse past 160px from the bottom, expand again within 48px),
+               so it does not flutter on small scrolls. */
             data-composer-compact={
-              isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
+              composerScrolledAway && !activeSending ? "true" : undefined
             }
             data-composer-slim={
               activeConversationHydrated &&
@@ -13282,7 +13291,18 @@ export function App() {
                     ) : null}
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
-                      placeholder={activeConversationHydrated ? "Ask Ultra" : "Loading chat…"}
+                      /* The collapsed state hides the attach, model and send
+                         controls, so the hint changes to say what still works.
+                         "Ask Ultra" names the product next to a toolbar; with
+                         the toolbar gone, an instruction is more use than a
+                         label. Swaps once on collapse, not per scroll event. */
+                      placeholder={
+                        !activeConversationHydrated
+                          ? "Loading chat…"
+                          : composerScrolledAway && !activeSending
+                            ? "Just start typing"
+                            : "Ask Ultra"
+                      }
                       /* Explicit name so the field is not relying on its
                          placeholder for one: the placeholder is deliberately
                          ghost-weight (~2.1:1) and a control's accessible name

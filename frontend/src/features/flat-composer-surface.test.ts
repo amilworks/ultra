@@ -54,9 +54,12 @@ describe("flat composer surface", () => {
     // The one-line resting row only exists at >=641px (data-composer-slim is
     // itself a min-width: 641px feature). Forcing a centred single-line row on
     // the phone clipped the placeholder and scattered the controls.
-    const desktopBlock = stylesSource.match(
-      /@media \(min-width:\s*641px\)\s*\{[\s\S]*?\n\}\n/
-    )?.[0];
+    // Pick the min-width:641px block that actually carries the resting-row
+    // rules, not simply the first one in the file — there is now more than one
+    // (the read-mode collapse added its own), and matching the first made this
+    // assert against whichever block happened to come earlier.
+    const desktopBlock = (stylesSource.match(/@media \(min-width:\s*641px\)\s*\{[\s\S]*?\n\}\n/g) ?? [])
+      .find((block) => block.includes(".app-composer-shell .app-composer-card-body"));
     expect(desktopBlock).toBeTruthy();
     expect(desktopBlock).toMatch(
       /\.app-composer-shell \.app-composer-card-body\s*\{[^}]*justify-content:\s*center;[^}]*min-height:\s*4\.75rem;/s

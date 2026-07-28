@@ -2075,6 +2075,69 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overflow: visible;
 }
 
+/* Desktop half of the read-mode collapse. Reading back through a long answer is
+   when the toolbar is pure distraction, so the composer drops to a hairline and
+   a hint — no attach, no model chip, no send — and comes back the moment you
+   focus it, reach the bottom, or a run starts.
+   The phone block below already did this by collapsing .app-composer-actions.
+   Desktop cannot reuse that: in the slim state .app-composer-actions is ALREADY
+   max-height 0, and the controls you actually see are three separately
+   positioned elements — the idle attach, the idle model echo, and the
+   absolutely-positioned send cluster. Those are what have to go.
+   Horizontal padding is deliberately NOT relaxed even though the + and send are
+   gone: keeping --composer-slim-pad-* means the placeholder collapses straight
+   down instead of also sliding sideways, and a hint that moves in two axes while
+   you scroll is the distraction this is meant to remove. */
+@media (min-width: 641px) {
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-card-body {
+    min-height: 1.8rem;
+    /* The expanded row's 0.6rem block padding is 19.2px of the 49px it was still
+       measuring — zeroing it is what actually gets the strip to ~30px. The
+       textarea's own padding still centres the line inside the box. */
+    padding-block: 0;
+  }
+  /* Half the resting strip: the card goes 77px -> ~30px. The hint takes the
+     run-meta line's type (12px / 400 / 20px — the "487K tokens · 1m 6s" footer)
+     rather than the composer's 15px reading size, because while collapsed it is
+     marginalia about a control, not the control's own voice. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-textarea {
+    min-height: 1.8rem;
+    max-height: 1.8rem;
+    font-size: 0.75rem;
+    line-height: 20px;
+    /* Centres the 20px line box in the 1.8rem strip; stated in px against a rem
+       box on purpose, so the hint stays centred if the reading size moves. */
+    padding-top: calc((1.8rem - 20px) / 2);
+    padding-bottom: calc((1.8rem - 20px) / 2);
+  }
+  /* Takes the run-meta line's COLOUR as well as its type. The ghost-weight
+     --composer-placeholder is tuned for 15px; at 12px its 1.57:1 stops being a
+     quiet hint and becomes an unreadable one. --text-muted is 3.77:1 — still
+     clearly secondary, but legible at this size. Scoped to the desktop strip on
+     purpose: the phone collapse keeps 16px text, where the ghost weight still
+     reads and the established placeholder treatment should stand. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-textarea::placeholder {
+    color: var(--text-muted);
+  }
+  /* visibility, not just opacity: these are real controls, and a 0-opacity
+     button is still tabbable and still announced. Exactly one set of composer
+     controls should ever be in the a11y tree. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-idle-attach,
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-idle-mode,
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-actions-end {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 160ms var(--motion-ease), visibility 0s linear 160ms;
+  }
+}
+
 /* Phone-only: collapse the composer to a slim line while the user reads back
    through a long answer (data-composer-compact set when scrolled away). It
    re-expands instantly on focus (keyboard up) via :focus-within, and when

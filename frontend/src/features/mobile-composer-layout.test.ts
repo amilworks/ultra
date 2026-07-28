@@ -11,12 +11,16 @@ const chatAutoScrollSource = readFileSync(
 const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 
 describe("mobile composer layout", () => {
-  it("wires scroll-away state to a phone-only compact composer", () => {
+  it("wires scroll-away state to the compact composer", () => {
     expect(chatAutoScrollSource).toMatch(/onScrolledAwayChange\?: \(away: boolean\) => void;/);
     expect(appSource).toMatch(/const \[composerScrolledAway,\s*setComposerScrolledAway\]/);
     expect(appSource).toMatch(/onScrolledAwayChange=\{setComposerScrolledAway\}/);
+    // No longer phone-gated: reading back through a long answer makes the
+    // toolbar a distraction at every width, so the attribute is width-agnostic
+    // and the two size regimes are expressed in CSS instead. The phone-specific
+    // COLLAPSE STYLING below is still phone-only and still asserted.
     expect(appSource).toMatch(
-      /data-composer-compact=\{\s*isPhoneView && composerScrolledAway && !activeSending \? "true" : undefined\s*\}/s
+      /data-composer-compact=\{\s*composerScrolledAway && !activeSending \? "true" : undefined\s*\}/s
     );
   });
 

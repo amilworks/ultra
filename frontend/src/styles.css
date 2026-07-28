@@ -17,11 +17,18 @@
      width prose ran a measured mean of 86.5 characters per line (sampled across
      8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
      comfortably. Past ~75 the return sweep starts finding the wrong next line and
-     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so
-     the numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
-     unconstrained (49rem) = 92.9. 40rem sits at the TOP of the comfortable band
-     instead of the middle — the right trade when the column is already a modest
-     share of a wide screen — while 42.5rem would cross it for 5 more characters.
+     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
+     numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
+     44rem = 83.9, unconstrained (49rem) = 92.9.
+     44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
+     column is a modest share of a wide screen and reads cramped when held to the
+     middle of the band. Note 42.5rem and 44rem measured identically here — the
+     extra 24px moved no wrap points in this sample — so 44rem is not buying more
+     characters than 42.5 so much as more slack before the next wrap. The cap
+     still does real work: unconstrained is 92.9, and that was the measure that
+     made readers re-scan.
+     Do not read the 45–75 band as violated silently — it is exceeded knowingly,
+     and the number to re-measure against is 92.9, not 75.
      In rem, NOT ch, even though ch looks like the natural unit for a measure:
      `ch` resolves against each ELEMENT's font-size, so one shared token handed
      the h2 an 867px measure and the h3 763px while body prose got 654px — three
@@ -29,7 +36,7 @@
      column, not of the type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
      full 49rem column. */
-  --reading-measure: 40rem;
+  --reading-measure: 44rem;
   --font-weight-body: 400;
   --font-weight-reading-body: 400;
   --font-weight-strong: 700;
@@ -201,8 +208,21 @@
      18.15:1 is a large, obvious step, so the darkening reads as the affordance.
      Pinned to --text-main it would have been a 1.13:1 no-op.
      Faintly sage rather than pure grey so it shares a family with --text-muted
-     (#787f78), which the section eyebrows already use. */
+     (#787f78), which the section eyebrows already use.
+     This is the QUIET half of the sidebar: the Recents list, which is long,
+     repetitive and the actual source of sidebar noise. The fixed structural nav
+     opts back up to full ink via --sidebar-nav-foreground below. */
   --sidebar-foreground: #575a57;
+  /* Structural navigation — brand, New chat, Resources/Training/Admin/Lens, the
+     BisQue links — at body ink. There are only ever a handful of these, they do
+     not scroll, and they are the app's spine: making them recede treats
+     wayfinding as noise. Quieting the 20-plus Recents rows is what buys the
+     calm; flattening the six nav items with them just made the sidebar mushy.
+     NOTE: these rows deliberately keep a background-only hover. At full ink the
+     colour darkening to --sidebar-ink-hover would be a 1.13:1 no-op, so the
+     background carries the affordance here; the quiet Recents rows still darken,
+     because from 6.41:1 that step is worth 2.83:1 and reads clearly. */
+  --sidebar-nav-foreground: var(--text-main);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
@@ -1779,7 +1799,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.875rem;
   line-height: 1.35;
   font-weight: var(--font-weight-action);
-  color: var(--sidebar-foreground);
+  color: var(--sidebar-nav-foreground);
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
@@ -1788,17 +1808,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--sidebar-accent) 74%, transparent);
 }
 
-/* Colour has to be a real declaration here, not just the --sidebar-accent-foreground
-   token: the rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
-   beats Tailwind v4's layered `hover:text-sidebar-accent-foreground` utility no
-   matter its specificity. The shared row rule already transitions `color`, so
-   the darkening animates for free. */
+/* Background-only hover, deliberately. These rows sit at full ink
+   (--sidebar-nav-foreground), so darkening the text to --sidebar-ink-hover would
+   be a 1.13:1 change — invisible, and misleading to leave in as though it did
+   something. The background shift is the affordance here. The Recents rows are
+   the ones that darken, because from 6.41:1 that step is a legible 2.83:1. */
 .app-new-chat-button:hover,
 .app-resource-browser-button:hover,
 .app-bisque-browser-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 86%, var(--sidebar-foreground) 4%);
   border-color: transparent;
-  color: var(--sidebar-ink-hover);
 }
 
 .app-new-chat-button[data-variant="secondary"],
@@ -1833,6 +1852,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border-radius: var(--sidebar-radius-row);
   min-height: 2.3rem;
   padding-inline: var(--sidebar-item-padding-x);
+  /* Structural nav, so full ink rather than the inherited quiet
+     --sidebar-foreground. Stated explicitly because this rule never set a colour
+     and simply inherited the sidebar root's. */
+  color: var(--sidebar-nav-foreground);
   font-family: var(--font-sans);
   font-size: var(--font-size-nav);
   line-height: 1.35;
@@ -1840,9 +1863,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
+/* Background-only, same reasoning as the nav rows above: already at full ink. */
 .app-bisque-link-button:hover {
   background: var(--sidebar-item-hover-bg);
-  color: var(--sidebar-ink-hover);
 }
 
 .app-history-group {
@@ -1883,7 +1906,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 0.25rem 0.6rem 0.25rem 0.25rem;
   border-radius: var(--sidebar-radius-action);
   background: transparent;
-  color: var(--sidebar-foreground);
+  color: var(--sidebar-nav-foreground);
   box-shadow: none;
   font-family: var(--font-sans);
   line-height: 1.35;

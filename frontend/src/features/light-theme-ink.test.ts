@@ -58,26 +58,56 @@ describe("light theme ink", () => {
     expect(darkBlock).toMatch(/--sidebar-accent-foreground:\s*var\(--sidebar-ink-hover\);/);
   });
 
-  it("darkens sidebar rows on hover with real declarations, not just a token", () => {
-    // The rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
-    // beats Tailwind v4's LAYERED hover:text-sidebar-accent-foreground utility
-    // no matter its specificity — so the token alone never fires.
+  it("splits the sidebar: structural nav at full ink, Recents quiet", () => {
+    // Only the Recents list is quieted. It is long, repetitive and the actual
+    // source of sidebar noise; the handful of fixed nav rows are the app's spine
+    // and reading them as noise made the whole sidebar mushy.
+    expect(lightRoot).toMatch(/--sidebar-nav-foreground:\s*var\(--text-main\);/);
+    // 6.41:1 vs body ink's 16.12:1, and past AA's 4.5:1 for the 14px/500 labels.
+    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#575a57;/);
+    expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Structural nav draws the nav token, not the quiet one.
     expect(stylesSource).toMatch(
-      /\.app-new-chat-button:hover,\s*\.app-resource-browser-button:hover,\s*\.app-bisque-browser-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
+      /\.app-new-chat-button,\s*\.app-resource-browser-button,\s*\.app-bisque-browser-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
     );
+    expect(stylesSource).toMatch(
+      /\.app-bisque-link-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-sidebar-brand-button\[data-slot="button"\]\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    // Recents keeps the quiet token.
+    expect(stylesSource).toMatch(
+      /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-foreground\);/s
+    );
+  });
+
+  it("puts the hover affordance where it can actually be seen", () => {
+    // Recents rows darken: from 6.41:1 to --sidebar-ink-hover's 18.15:1 is a
+    // legible 2.83:1 step. This must be a real declaration, not just the
+    // --sidebar-accent-foreground token: the rows pin `color:
+    // var(--sidebar-foreground)` in unlayered CSS, which beats Tailwind v4's
+    // LAYERED hover:text-sidebar-accent-foreground utility at any specificity.
     expect(stylesSource).toMatch(
       /\.app-history-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
     );
     expect(stylesSource).toMatch(
       /\.app-history-button\[data-active="true"\]\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
     );
-    // The sidebar must be QUIETER than body ink at rest — that is what keeps
-    // navigation from competing with the transcript, and what gives hover
-    // somewhere to go. #575a57 measures 6.41:1 (past AA's 4.5:1 for the 14px/500
-    // row labels) against body ink's 16.12:1, a 2.83:1 rest-to-hover separation.
-    // Pinned to var(--text-main) it was a 1.13:1 no-op — hover did nothing.
-    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#575a57;/);
-    expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Structural nav must NOT darken on hover: already at full ink, so the step
+    // to #0a0a0a is 1.13:1 — invisible, and misleading to keep as if it worked.
+    // Its background shift carries the affordance instead.
+    const navHover = stylesSource.match(
+      /\.app-new-chat-button:hover,\s*\.app-resource-browser-button:hover,\s*\.app-bisque-browser-button:hover\s*\{[^}]*\}/s
+    )?.[0];
+    // Lookbehind so `border-color: transparent` does not count as a text colour.
+    const TEXT_COLOR = /(?<![-\w])color\s*:/;
+    expect(navHover).toBeTruthy();
+    expect(navHover).toMatch(/background:/);
+    expect(navHover).not.toMatch(TEXT_COLOR);
+    const linkHover = stylesSource.match(/\.app-bisque-link-button:hover\s*\{[^}]*\}/s)?.[0];
+    expect(linkHover).toMatch(/background:/);
+    expect(linkHover).not.toMatch(TEXT_COLOR);
   });
 
   it("drops the ss02 stylistic set for stock Inter", () => {
@@ -91,11 +121,12 @@ describe("light theme ink", () => {
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
     // Measured on ONE fixed set of 5 answer paragraphs so the values compare:
-    // 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, unconstrained = 92.9.
-    // 40rem sits at the top of the comfortable band rather than the middle, which
-    // is the right trade when the column is a modest share of a wide screen;
-    // 42.5rem crosses it for 5 more characters.
-    expect(lightRoot).toMatch(/--reading-measure:\s*40rem;/);
+    // 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9,
+    // unconstrained = 92.9. 44rem sits KNOWINGLY above the 45–75 guideline at
+    // ~84 — the column is a modest share of a wide screen and reads cramped when
+    // held to the middle of the band. The cap still does real work: the measure
+    // that made readers re-scan was the unconstrained 92.9, not 75.
+    expect(lightRoot).toMatch(/--reading-measure:\s*44rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.

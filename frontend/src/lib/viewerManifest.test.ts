@@ -83,6 +83,160 @@ describe("thumbnailScrubAxis", () => {
 });
 
 describe("normalizeUploadViewerInfo scalar medical defaults", () => {
+  it("does not repair malformed mask provenance into authoritative semantics", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "malformed-mask",
+      original_name: "malformed.tif",
+      axis_sizes: { T: 1, C: 1, Z: 2, Y: 2, X: 2 },
+      is_volume: true,
+      data_semantics: {
+        kind: "binary_mask",
+        basis: "exact",
+        strength: "exact",
+        supported_modes: ["intensity", "mask"],
+        recommended_view: "mask",
+        threshold: {
+          method: "otsu-256-v1",
+          value: 120,
+          domain: "normalized",
+          foreground: "below",
+          sample_scope: "volume",
+          sample_count: 8,
+          channel: -1,
+          t: 0,
+          sampling_algorithm: "scalar-profile-otsu-256-v1",
+        },
+      },
+      metadata: { array_dtype: "uint8" },
+      viewer: { volume_mode: "slice_stack", render_policy: "scalar" },
+    });
+
+    expect(viewer.data_semantics?.threshold).toBeUndefined();
+  });
+
+  it("preserves mask semantics, raw Otsu provenance, SHA, and restored calibration defaults", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-mask",
+      original_name: "tomm-mask.tif",
+      dims_order: "ZYX",
+      axis_sizes: { T: 3, C: 1, Z: 65, Y: 312, X: 462 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      is_volume: true,
+      data_semantics: {
+        kind: "probability_mask",
+        basis: "bounded_scalar_profile",
+        strength: "suggested",
+        supported_modes: ["intensity", "mask"],
+        recommended_view: "intensity",
+        threshold: {
+          method: "otsu-256-v1",
+          value: 120,
+          domain: "raw",
+          foreground: "above",
+          sample_scope: "stratified_z",
+          sample_count: 1048576,
+          z_samples: [0, 32, 64],
+          channel: 0,
+          t: 0,
+          sampling_algorithm: "scalar-profile-otsu-256-v1",
+        },
+      },
+      viewer_calibrations: {
+        version: 1,
+        source_sha256: "source-sha",
+        selections: {
+          "c0:t0": {
+            revision: 1,
+            channel: 0,
+            t: 0,
+            render_mode: "mask",
+            threshold_method: "manual",
+            threshold_value: 133,
+            threshold_foreground: "above",
+            threshold_provenance: {
+              method: "otsu-256-v1",
+              value: 120,
+              domain: "raw",
+              foreground: "above",
+              channel: 0,
+              t: 0,
+              sample_scope: "stratified_z",
+              sample_count: 1048576,
+              sampling_algorithm: "scalar-profile-otsu-256-v1",
+              sampling_strategy: "stratified-z-spatial",
+              z_samples: [0, 32, 64],
+              source_sha256: "source-sha",
+              bins: 256,
+            },
+          },
+          "c0:t2": {
+            revision: 1,
+            channel: 0,
+            t: 2,
+            render_mode: "mask",
+            threshold_method: "manual",
+            threshold_value: 231,
+            threshold_foreground: "above",
+            threshold_provenance: {
+              method: "otsu-256-v1",
+              value: 220,
+              domain: "raw",
+              foreground: "above",
+              channel: 0,
+              t: 2,
+              sample_scope: "stratified_z",
+              sample_count: 1048576,
+              sampling_algorithm: "scalar-profile-otsu-256-v1",
+              sampling_strategy: "stratified-z-spatial",
+              z_samples: [0, 32, 64],
+              source_sha256: "source-sha",
+              bins: 256,
+            },
+          },
+        },
+      },
+      display_defaults: {
+        scalar_render_mode: "mask",
+        scalar_threshold_method: "manual",
+        scalar_threshold_value: 133,
+        scalar_threshold_foreground: "above",
+      },
+      metadata: {
+        array_dtype: "uint8",
+        sha256: "source-sha",
+        size_bytes: 12345,
+      },
+      viewer: {
+        volume_mode: "slice_stack",
+        render_policy: "scalar",
+        default_surface: "volume",
+      },
+    });
+
+    expect(viewer.data_semantics).toMatchObject({
+      kind: "probability_mask",
+      basis: "bounded_scalar_profile",
+      strength: "suggested",
+      recommended_view: "intensity",
+      threshold: { value: 120, domain: "raw", foreground: "above" },
+    });
+    expect(viewer.display_defaults).toMatchObject({
+      scalar_render_mode: "mask",
+      scalar_threshold_method: "manual",
+      scalar_threshold_value: 133,
+    });
+    expect(viewer.metadata.sha256).toBe("source-sha");
+    expect(viewer.metadata.size_bytes).toBe(12345);
+    expect(viewer.viewer_calibrations?.selections["c0:t0"].threshold_value).toBe(133);
+    expect(viewer.viewer_calibrations?.selections["c0:t2"]).toMatchObject({
+      t: 2,
+      threshold_value: 231,
+      threshold_provenance: { value: 220, t: 2 },
+    });
+  });
+
   it("preserves the backend physical spacing unit for derived volume extents", () => {
     const viewer = normalizeUploadViewerInfo({
       kind: "image",

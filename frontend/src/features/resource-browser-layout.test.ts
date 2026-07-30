@@ -27,6 +27,66 @@ describe("resource browser responsive layout", () => {
     );
   });
 
+  it("does not pin the resources header over the mobile list", () => {
+    // Search lives in the app nav bar on mobile, so this row scrolls away instead
+    // of permanently occupying ~63px of the viewport.
+    expect(stylesSource).toMatch(
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-header\s*\{[^}]*position:\s*static;/s
+    );
+  });
+
+  it("sizes mobile resource rows to their content", () => {
+    // `grid-auto-rows: 1fr` resolves as minmax(auto, 1fr), so in one column every
+    // card inherited the tallest card's height — a compact card that wants ~92px
+    // was stretched past 300px of empty panel.
+    expect(stylesSource).toMatch(
+      /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-grid\s*\{[^}]*grid-auto-rows:\s*min-content;/s
+    );
+  });
+
+  it("keeps tag pills reachable on mobile tiles", () => {
+    // Hiding tags is only justified where the tile height is fixed. Below 721px the
+    // card is height:auto AND the table is downgraded to cards, so an unscoped rule
+    // would make tags unreachable rather than tidy.
+    expect(stylesSource).toMatch(
+      /@media \(min-width:\s*721px\)\s*\{\s*\.resource-browser-card\[data-preview="true"\]\s*\.resource-browser-resource-tags\s*\{[^}]*display:\s*none;/s
+    );
+  });
+
+  it("keeps the tile status overlay legible over any thumbnail", () => {
+    // Overlaid on unpredictable image content, so it cannot be translucent: the
+    // 92% wash measured 3.96:1 over a dark thumbnail in light theme.
+    expect(stylesSource).toMatch(
+      /\.resource-browser-status-overlay > div > span\s*\{[^}]*background:\s*var\(--bg-panel-strong\);[^}]*color:\s*var\(--text-main\);/s
+    );
+  });
+
+  it("keeps the desktop tile geometry out of the mobile block", () => {
+    const mobileBlockStart = stylesSource.indexOf("@media (max-width: 720px)");
+    const cardRule = stylesSource.indexOf(".resource-browser-card {");
+    // The fixed desktop card + its meta row floor live outside any media query.
+    expect(cardRule).toBeGreaterThan(-1);
+    expect(cardRule).toBeLessThan(mobileBlockStart);
+    expect(stylesSource).toMatch(
+      /\.resource-browser-card\s*\{[^}]*height:\s*17\.75rem;[^}]*grid-template-rows:\s*10\.75rem minmax\(0, 1fr\);/s
+    );
+    // Content-sized meta rows are what stop a chip from crushing the type/size and
+    // date lines. Never silently revert this.
+    expect(stylesSource).toMatch(
+      /\.resource-browser-meta\s*\{[^}]*grid-auto-rows:\s*min-content;/s
+    );
+  });
+
+  it("keeps one source of truth for the mobile resources toolbar", () => {
+    // A later `max-width: 640px` copy of these rules used to win on cascade order,
+    // so edits to the 720px block silently no-op'd on small phones.
+    const narrowBlocks = stylesSource.split(/@media \(max-width:\s*640px\)/).slice(1);
+    for (const block of narrowBlocks) {
+      const body = block.slice(0, block.indexOf("\n}\n"));
+      expect(body).not.toMatch(/\.resource-browser-toolbar\s*\{[^}]*grid-template-columns:/s);
+    }
+  });
+
   it("keeps the mobile resources header compact under the shell nav", () => {
     expect(stylesSource).toMatch(
       /@media \(max-width:\s*720px\)\s*\{[\s\S]*\.resource-browser-header\s*\{[^}]*gap:\s*0\.55rem;[^}]*padding:\s*0\.65rem 0\.9rem 0\.55rem;[\s\S]*\.resource-browser-title\s*\{[^}]*display:\s*none;[\s\S]*\.resource-browser-result-summary\s*\{[^}]*font-size:\s*0\.8rem;/s

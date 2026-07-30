@@ -12,29 +12,50 @@
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
+  /* Reading MEASURE, which is the half of legibility that font-size alone can't
+     buy. The chat column is 49rem so tables, code and figures have room; at that
+     width prose ran a measured mean of 86.5 characters per line (sampled across
+     8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
+     comfortably. Past ~75 the return sweep starts finding the wrong next line and
+     the reader re-reads. This lands ~72 — the roomy end of comfortable, so the
+     column still feels generous rather than cramped.
+     In rem, NOT ch, even though ch looks like the natural unit for a measure:
+     `ch` resolves against each ELEMENT's font-size, so one shared token handed
+     the h2 an 867px measure and the h3 763px while body prose got 654px — three
+     different right edges instead of one column. A measure is a property of the
+     column, not of the type inside it.
+     Applies to PROSE only; block content that genuinely needs width keeps the
+     full 49rem column. */
+  --reading-measure: 37.5rem;
   --font-weight-body: 400;
   --font-weight-reading-body: 400;
   --font-weight-strong: 700;
   --font-weight-reading-heading: 600;
-  --font-weight-reading-strong: 700;
+  /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
+     **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
+     600, so a bolded phrase out-shouted the section it sat under, and at h4's
+     16px it beat the heading at identical size. Ultra's answers are emphasis-dense
+     (findings, verdicts, method names), so 700 also stippled long passages with
+     dark blots and cost more than it marked. 400 → 600 is still an unmistakable
+     step at reading size; nothing now outweighs a heading.
+     --font-weight-strong (UI chrome) stays 700 — different job, sparse use. */
+  --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
   --font-weight-action: 500;
   --font-weight-data: 500;
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
-  /* Inter's recommended pairing ("liga"/"calt") plus one deliberate addition.
-     "ss02" is Inter's Disambiguation set: it separates the characters that
-     collide in this product's actual content — capital I, lowercase l and
-     numeral 1; letter O and slashed zero. Ultra's text is accession IDs, run
-     IDs, dataset paths, channel indices and parameter values, where a misread
-     Il1 or 0O is a real error, not a cosmetic one. It doubles as identity:
-     these letterforms are visibly not stock Inter, so the type is ours without
-     changing typeface.
-     ss02 already includes the slashed zero, so "zero" is not set separately.
+  /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
+     Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
+     was previously enabled to buy identity from the letterforms. In use it read
+     as a stylistic quirk rather than the clean, professional voice this product
+     wants, so the type is stock Inter again. Identity comes from the type
+     system — the scale, the weights, the tracking curve below — not from
+     substituted glyphs.
      NOTE: font-feature-settings REPLACES rather than merges — any component
      that sets its own would drop these. Keep this the only declaration. */
-  font-feature-settings: "liga" 1, "calt" 1, "ss02" 1;
+  font-feature-settings: "liga" 1, "calt" 1;
 
   /* TRACKING — derive, don't eyeball.
      Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
@@ -55,8 +76,20 @@
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
   --bg-main: #f8f8f7;
-  --text-main: #171717;
-  --text-muted: #737373;
+  /* Ink, not black. #171717 measured 16.4:1 on --bg-page — technically superb
+     and visually heavy: at that weight body text stamps itself onto the page
+     instead of sitting on it. #3b383c is 10.59:1, still far past AA for every
+     size, with a faint warm-violet cast that keeps long reading sessions
+     softer. The whole light theme reads airier for it. */
+  --text-main: #3b383c;
+  /* Secondary text people actually READ (timestamps, counts, meta lines, the
+     sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
+     clears AA for large text and sits just under it for small — a deliberate
+     step down from the old neutral #737373 (4.35:1) toward the sage family,
+     without dropping to the ghost weight that genuinely-inactive chrome uses.
+     Things that are inactive rather than secondary go to --composer-placeholder
+     territory instead; see the note there. */
+  --text-muted: #787f78;
   --line: rgba(23, 23, 23, 0.08);
   --brand: #171717;
   --brand-strong: #0a0a0a;
@@ -100,20 +133,30 @@
   --sidebar-radius-row: calc(var(--radius) - 0.125rem);
   --sidebar-radius-menu: calc(var(--radius) + 0.2rem);
   --sidebar-radius-menu-item: calc(var(--radius) - 0.15rem);
+  /* The shadcn foreground tokens defer to the house ink tokens rather than
+     carrying their own oklch greys. Two palettes for the same job is how a
+     theme drifts: the app draws most text through --text-main/--text-muted
+     while Tailwind utilities and shadcn primitives draw through these, so an
+     ink change touching only one set leaves the other behind — which is exactly
+     what happened here before they were wired together.
+     LIGHT ONLY, deliberately: the dark block still carries its own oklch values
+     because this pass is a light-theme change and re-pointing dark's tokens
+     would shift dark colours nobody asked to move. If dark is ever retuned,
+     wire it the same way rather than editing two palettes. */
   --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --foreground: var(--text-main);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+  --card-foreground: var(--text-main);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
+  --popover-foreground: var(--text-main);
   --primary: oklch(0.205 0 0);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
+  --secondary-foreground: var(--text-main);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: var(--text-muted);
   --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --accent-foreground: var(--text-main);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
@@ -144,11 +187,18 @@
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
   --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
+  /* Navigation is not content. At rest the rows sit at ink so they stop
+     competing with the transcript for attention; pointing at one — or being on
+     that page — is what makes it go crisp. The darkening IS the affordance,
+     which is why hover has somewhere to go now that rest is no longer black. */
+  --sidebar-foreground: var(--text-main);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
+  /* True black, and one step past --text-main on purpose. Drives BOTH hover and
+     data-[active=true], so the current page reads at full strength too. */
+  --sidebar-ink-hover: #0a0a0a;
+  --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-item-hover-bg: color-mix(in oklab, var(--sidebar-accent) 92%, var(--text-main) 8%);
   --sidebar-item-active-bg: color-mix(in oklab, var(--sidebar-accent) 88%, var(--text-main) 12%);
   --collapsed-sidebar-bg: var(--sidebar);
@@ -189,16 +239,17 @@
   --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
   --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
-  --composer-shell-shadow: 0 18px 38px rgba(12, 12, 12, 0.07), 0 2px 6px rgba(12, 12, 12, 0.04);
-  --composer-shell-shadow-rest: 0 8px 20px rgba(12, 12, 12, 0.05), 0 1px 3px rgba(12, 12, 12, 0.03);
-  /* True ghost weight: resolves to #b1b1b1, 2.14:1 on the white card, matching
-     the reference composers this was tuned against. Deliberately below 3:1 —
-     the textarea now carries its own aria-label, so nothing about the control's
-     name or operability depends on how faint this hint is drawn; it is
-     decoration over an input that is obvious on its own.
-     Paired with the dark value by perceptual lightness, not by contrast ratio:
-     this sits L* 27.8 below its background, dark sits 28.2 below its. */
-  --composer-placeholder: color-mix(in oklab, var(--text-muted) 54%, #ffffff 46%);
+  /* True ghost weight, and NO LONGER derived from --text-muted. That derivation
+     assumed one grey served both roles; it doesn't. Secondary text is read, so
+     it went to a deeper sage (3.77:1); a placeholder is genuinely inactive, and
+     low contrast is the correct signal there rather than a compromise. Splitting
+     them is the point — pinning this value is what keeps a future --text-muted
+     change from dragging the ghost weight along with it.
+     1.57:1 on --bg-page. Deliberately below 3:1, on the same reasoning the old
+     #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so nothing
+     about the control's name or operability depends on how faint this hint is
+     drawn — it is decoration over an input that is obvious on its own. */
+  --composer-placeholder: #c3c7c3;
   --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
@@ -841,11 +892,14 @@ body {
   transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
+/* Same ink-goes-crisp promise as its expanded twin .app-history-button — the
+   collapsed rail is the same navigation, so hovering a recent has to darken
+   identically rather than stopping at --accent-foreground's resting ink. */
 .app-collapsed-recent-item:hover,
 .app-collapsed-recent-item:focus-visible,
 .app-collapsed-recent-item[data-active="true"] {
   background: var(--collapsed-sidebar-popover-item-bg);
-  color: var(--accent-foreground);
+  color: var(--sidebar-ink-hover);
   outline: none;
 }
 
@@ -1723,11 +1777,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--sidebar-accent) 74%, transparent);
 }
 
+/* Colour has to be a real declaration here, not just the --sidebar-accent-foreground
+   token: the rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
+   beats Tailwind v4's layered `hover:text-sidebar-accent-foreground` utility no
+   matter its specificity. The shared row rule already transitions `color`, so
+   the darkening animates for free. */
 .app-new-chat-button:hover,
 .app-resource-browser-button:hover,
 .app-bisque-browser-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 86%, var(--sidebar-foreground) 4%);
   border-color: transparent;
+  color: var(--sidebar-ink-hover);
 }
 
 .app-new-chat-button[data-variant="secondary"],
@@ -1771,6 +1831,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-bisque-link-button:hover {
   background: var(--sidebar-item-hover-bg);
+  color: var(--sidebar-ink-hover);
 }
 
 .app-history-group {
@@ -2059,17 +2120,31 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
   /* animate the card's own padding so the idle padding trim collapses in sync
      with the textarea/action-row (overrides the base 160ms card transition).
-     border-radius animates too — see the slim rule: the surface is a true pill
-     at rest and a rounded card once it grows, and the shape morphs with the
-     height rather than snapping. The radius is restated here because the
-     element also carries .pk-prompt-input, whose later rule would otherwise
-     win; scoping to .app-composer-shell out-specifies it without touching the
-     phone composer (this whole block is min-width: 641px). */
+     The radius no longer animates because there is no radius: the flat surface
+     is the same shape at rest and expanded, so height is the only thing that
+     rides the 220ms. */
   .app-composer-shell .app-composer-card {
-    border-radius: calc(var(--radius) + 0.65rem);
     transition: border-color 160ms var(--motion-ease),
-      box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease),
-      padding 220ms var(--motion-ease), border-radius 220ms var(--motion-ease);
+      box-shadow 160ms var(--motion-ease), padding 220ms var(--motion-ease);
+  }
+
+  /* Room, and one optical line. The resting row is 77px (was 49px), and the
+     placeholder's first text line, the attach +, the model echo and the send
+     button all centre on it — measured spread 0.9px.
+     .app-composer-card-body is a COLUMN flex, so the vertical axis is the MAIN
+     axis: justify-content is what centres the field in the taller row.
+     align-items would only centre it horizontally, and would shrink it off
+     full width. */
+  .app-composer-shell .app-composer-card-body {
+    justify-content: center;
+    min-height: 4.75rem;
+    padding-block: 0.6rem;
+  }
+
+  /* The field keeps its own padding: its height is set inline by the auto-resize
+     JS, and that padding is what centres the line inside its own box. */
+  .app-composer-shell .app-composer-textarea {
+    flex: 0 0 auto;
   }
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
@@ -2109,22 +2184,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   /* keep the submit affordance on the slim line to balance the placeholder.
      Offsets ONLY — the positioning model never changes, so the button glides
      to/from the toolbar anchor instead of jumping when slim flips mid-type.
-     bottom centers the 2.5rem button in the 3rem pill (card padding is 0). */
+     The old 0.25rem centred a 2.5rem button in a 3rem pill; against the taller
+     flat row that left the model echo and send button sitting low. 1.125rem
+     centres them in the 76px row instead — (76 − 40) / 2 — and stays a plain
+     `bottom` so the glide survives. `top: 50%; bottom: auto` would centre it too,
+     but `auto` is not animatable, so the button would jump. The "Pro" echo is
+     already centred inside this cluster, so both move together. */
   .app-composer-shell[data-composer-slim="true"] .app-composer-actions-end {
     right: 1rem;
-    bottom: 0.25rem;
+    bottom: 1.125rem;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-card {
-    border-color: color-mix(in oklab, var(--line) 70%, transparent);
-    box-shadow: var(--composer-shell-shadow-rest);
     padding-top: 0;
     padding-bottom: 0;
-    /* A real pill, not 90% of one. At 3rem tall the inherited 22.4px radius
-       landed 2.6px short of the semicircle — the "almost round" zone that reads
-       as a mistake. 999px is the house idiom for stadium shapes (the most-used
-       radius in this file), and it makes the resting composer state a
-       deliberate pill that the expanded card visibly grows out of. */
-    border-radius: 999px;
   }
   .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
     opacity: 1;
@@ -2151,12 +2223,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-history-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent);
-  color: var(--text-main);
+  color: var(--sidebar-ink-hover);
 }
 
 .app-history-button[data-active="true"] {
   background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
-  color: var(--text-main);
+  color: var(--sidebar-ink-hover);
   box-shadow: none;
 }
 
@@ -3455,6 +3527,20 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-width: 0;
 }
 
+/* Only where the tile height is fixed: a thumbnail tile has room for exactly three
+   text rows there, so tag pills could only render as a clipped sliver of borders.
+   Tags are interactive filter buttons with a touch-target obligation, so they
+   can't join the corner overlay either — they stay on compact tiles (which have
+   slack), and in the table's name cell. The table has no tags column, so this
+   matches it. Mobile is deliberately excluded: below 721px the card is height:auto
+   and the table is downgraded to cards, so hiding tags there would make them
+   unreachable rather than merely tidy. */
+@media (min-width: 721px) {
+  .resource-browser-card[data-preview="true"] .resource-browser-resource-tags {
+    display: none;
+  }
+}
+
 .resource-browser-resource-tags > button,
 .resource-browser-resource-tags > span {
   display: inline-flex;
@@ -3748,6 +3834,36 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 0.05rem 0.42rem;
+}
+
+/* Single-slot status (duplicate / lifecycle / sharing) rides the preview's free
+   bottom-left corner instead of the meta stack. The meta track is a fixed
+   5.555rem that fits exactly three rows — name, type/size, date (79.7px of
+   79.7px + 9.2px slack) — while one chip row costs 26.6px, so any chip in that
+   flow could only be bought by crushing the primary lines. The other three
+   corners are taken: select top-left, quick-peek top-right, thumb-chip
+   bottom-right. */
+.resource-browser-status-overlay {
+  position: absolute;
+  bottom: 0.45rem;
+  left: 0.45rem;
+  z-index: 2;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.24rem;
+  min-width: 0;
+  max-width: calc(100% - 0.9rem);
+  overflow: hidden;
+}
+
+/* Overlaid on unpredictable thumbnail content — a black volume slice, a white
+   microscopy field — so unlike the in-flow chips it cannot be translucent: at the
+   92% wash the label measured 3.96:1 over a dark thumbnail in light theme, under
+   the 4.5:1 floor for 10.88px text. Opaque panel + primary ink instead, so the
+   contrast is the panel's own regardless of what is behind it. */
+.resource-browser-status-overlay > div > span {
+  background: var(--bg-panel-strong);
+  color: var(--text-main);
 }
 
 .resource-thumb-fallback {
@@ -4159,6 +4275,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-meta {
   display: grid;
   align-content: start;
+  /* Every row takes its own content height. Without this the implicit `auto`
+     rows shrink inside the card's fixed meta track: the name (min-height 2.5em)
+     and any chip (min-height 1.32rem) are effectively fixed, so grid stole the
+     leftover from the flexible text rows — the type/size and date lines were
+     squeezed to 7.7px against a 16px line box and clipped mid-glyph whenever a
+     chip was present. Content-sized rows keep the primary lines whole; if the
+     stack ever exceeds the track, overflow clips the trailing (least important)
+     row instead of mangling every line. */
+  grid-auto-rows: min-content;
   gap: 0.34rem;
   min-height: 0;
   overflow: hidden;
@@ -4173,6 +4298,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-name {
   margin: 0;
   min-height: 2.5em;
+  /* Filenames are unbreakable underscore tokens, so without this they overflow
+     the column horizontally with no ellipsis (measured 274px of text in a 213px
+     box at the 240px minimum column). The 2-line clamp still governs height, so
+     the meta budget is unchanged. */
+  overflow-wrap: anywhere;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -4413,9 +4543,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 
   .resource-browser-header {
-    position: sticky;
-    top: 0;
-    z-index: 3;
+    /* Not pinned on mobile. This row used to be sticky, permanently spending
+       ~63px of a ~844px viewport and — being translucent — letting the list ghost
+       through it. The app nav bar now carries the persistent "Search resources"
+       action instead, so the row can simply scroll away and the whole viewport
+       below the nav bar belongs to the resources. */
+    position: static;
     margin: 0 -1px;
     /* Tighter than the desktop header: the leaked 1.25rem gap + tall padding
        wasted ~40px before the list. */
@@ -4649,6 +4782,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .resource-browser-card {
     height: auto;
     grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  /* The desktop grid uses `grid-auto-rows: 1fr` to keep the tile matrix uniform,
+     but `1fr` resolves as minmax(auto, 1fr): every row grows to the tallest row's
+     size. In one column that means each card inherits the height of the tallest
+     card on the page — a compact, thumbnail-less card that wants 92px was being
+     stretched to 315px of mostly empty panel. Content-sized rows put that space
+     back into the scroll area (measured ~2.7 -> ~5 cards per screen). */
+  .resource-browser-grid {
+    grid-auto-rows: min-content;
   }
 
   .resource-browser-preview {
@@ -6627,28 +6770,44 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
-.app-composer-card {
+/* The composer is the bottom EDGE of the page, not an object floating above it.
+   It used to carry five decorative devices — a full border, a 26–32px radius
+   (999px at rest), a two-stop gradient, and a two-layer 18px shadow — which made
+   an empty input the most decorated thing on a screen whose actual content is
+   the user's data and tables. All of it collapses to one hairline, so the cards
+   and tables in the transcript are the heaviest objects, as they should be.
+
+   Scoped through .app-composer-shell on purpose. The element also carries
+   .pk-prompt-input, which sets border + a 22.4px radius + its own panel
+   background ~4300 lines LATER at equal specificity — a bare .app-composer-card
+   loses to it, and the background is the dangerous one: it paints a visible
+   panel block in dark theme instead of reading as the page edge. */
+.app-composer-shell .app-composer-card {
   position: relative;
   overflow: hidden;
   padding: 0;
-  border: 1px solid color-mix(in oklab, var(--line) 94%, transparent);
-  border-radius: clamp(1.65rem, 1.25rem + 0.9vw, 2rem);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--bg-panel-strong) 97%, #ffffff 3%) 0%,
-      color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-main) 6%) 100%
-    );
-  box-shadow: var(--composer-shell-shadow);
+  border: 0;
+  border-top: 1px solid color-mix(in oklab, var(--line) 88%, transparent);
+  border-radius: 0;
+  background: transparent;
+  /* No visible boundary any more, so the whole region has to read as the field. */
+  cursor: text;
   transition:
     border-color 160ms var(--motion-ease),
-    box-shadow 160ms var(--motion-ease),
-    transform 160ms var(--motion-ease);
+    box-shadow 160ms var(--motion-ease);
 }
 
-.app-composer-card:focus-within {
-  border-color: color-mix(in oklab, var(--line) 76%, var(--text-muted) 24%);
-  box-shadow: 0 20px 42px rgba(12, 12, 12, 0.08), 0 2px 8px rgba(12, 12, 12, 0.05);
+/* Losing the border and shadow took the focus state with them, and the textarea's
+   own outline is none — so the rule itself has to carry it. The inset line doubles
+   the hairline to a visible 2px WITHOUT widening the border, which would shove the
+   whole row down 1px on every focus. --text-muted (#787f78 since the ink pass)
+   measures 4.11:1 on the composer's white ground, clearing the 3:1 and 2px WCAG
+   2.4.11 asks of a focus indicator with margin. Re-measure this if --text-muted
+   moves again: the indicator borrows the token, so a colour decision made for
+   body text silently sets the focus contrast too. */
+.app-composer-shell .app-composer-card:focus-within {
+  border-top-color: var(--text-muted);
+  box-shadow: inset 0 1px 0 var(--text-muted);
 }
 
 .app-composer-card-body {
@@ -6659,7 +6818,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-textarea {
   min-height: 78px;
-  padding: 1.1rem 1.35rem 0.35rem;
+  /* 0.85rem, not 1.1rem: the pill used to supply the top inset, so without it
+     the first line would start hard against the hairline. */
+  padding: 0.85rem 1.35rem 0.35rem;
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
   /* Metric for the size this ACTUALLY renders at. The clamp above is dead —
@@ -6821,11 +6982,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 /* Composer drop affordance: pk-file-upload-drag lands on the FileUpload
    wrapper while an OS file drag is over the composer card. Ink, not color —
-   a drop target is chrome, and the strengthened border + faint ring is the
-   same voice as :focus-within, which is exactly the promise a drop makes. */
+   a drop target is chrome, and the strengthened rule is the same voice as
+   :focus-within, which is exactly the promise a drop makes. The old outer
+   `0 0 0 3px` ring traced the pill; on a flat full-width surface it drew a
+   rectangle around the whole dock, so the weight moves inside the top rule —
+   3px of it, one step louder than focus's 2px. */
 .pk-file-upload-drag .app-composer-card {
-  border-color: color-mix(in oklab, var(--text-main) 40%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in oklab, var(--text-main) 8%, transparent);
+  border-top-color: color-mix(in oklab, var(--text-main) 40%, transparent);
+  box-shadow: inset 0 2px 0 color-mix(in oklab, var(--text-main) 40%, transparent);
 }
 
 /* Chat drop overlay ("dump files anywhere"): viewport scrim + one quiet card.
@@ -10592,6 +10756,28 @@ details {
   }
 }
 
+/* Mid-run steering (Phase 1): the lifecycle eyebrow above a steered user
+   bubble. Same voice as the queued-followup eyebrow — a label may never be
+   louder than its content — with color reserved for the one state that needs
+   attention (missed). */
+.chat-steering-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  padding-inline: 6px;
+  color: color-mix(in oklab, var(--text-muted) 72%, var(--text-main) 28%);
+  transition: color 200ms var(--motion-ease);
+}
+
+.chat-steering-eyebrow[data-steering="missed"] {
+  color: color-mix(in oklab, var(--warning, #a16207) 70%, var(--text-main) 30%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-steering-eyebrow {
+    transition: none;
+  }
+}
+
 /* ⌘F find bar: the slim composer's sibling. A centered stadium pill floating
    at the top of the transcript — same surface, same hairline, same radius
    grammar as the idle composer, so it reads as part of the family rather than
@@ -10863,6 +11049,40 @@ details {
   overflow-wrap: break-word;
   word-break: normal;
   hyphens: auto;
+}
+
+/* Prose stops hyphenating now that it has a measure. `hyphens: auto` was earning
+   its keep at ~86 characters a line, where it absorbed the big ragged gaps; at
+   ~70 it fires constantly instead — one Summary paragraph broke as "bur-rows",
+   "enhance-ment" and "bur-row-like", which reads as a rendering defect rather
+   than as typesetting, and technical compounds are exactly what it mangles.
+   Measured after: 0 browser-inserted hyphens across 25 paragraphs, with the only
+   two mid-word line breaks falling at real hyphens in compounds ("domain-" /
+   "specific"), which is correct.
+   `overflow-wrap: break-word` on the rule above still catches tokens too long to
+   fit, so nothing overflows. Scope is prose only — table cells already opt out
+   through .pk-table-cell's `hyphens: none`, so they are untouched here. */
+.pk-markdown :where(p, li, blockquote) {
+  hyphens: manual;
+}
+
+/* Give prose the reading measure; leave everything that needs the width alone.
+   Direct children only, and deliberately NOT :where() — a 0-specificity wrapper
+   would lose the max-width to any later rule. Tables, code blocks, figures and
+   the tool carousel are absent from this list on purpose: a table narrowed to a
+   prose measure starts wrapping cells that were readable at full width, which
+   trades one legibility problem for a worse one.
+   The left edges stay aligned, so wide blocks simply reach further right. */
+.pk-markdown > p,
+.pk-markdown > ul,
+.pk-markdown > ol,
+.pk-markdown > blockquote,
+.pk-markdown > h1,
+.pk-markdown > h2,
+.pk-markdown > h3,
+.pk-markdown > h4,
+.pk-message-content-plain {
+  max-width: var(--reading-measure);
 }
 
 .pk-markdown :where(strong, b),
@@ -11301,13 +11521,13 @@ details {
       );
   }
 
-  .app-composer-card {
-    border-radius: 1.55rem;
-  }
+  /* No phone radius override: the flat surface is the same edge at every width.
+     The phone composer keeps its own two-row rhythm (field above, toolbar
+     below) — only the surface is shared with desktop. */
 
   .app-composer-textarea {
     min-height: 72px;
-    padding: 1rem 1rem 0.24rem;
+    padding: 0.85rem 1rem 0.24rem;
     font-size: 1rem;
   }
 
@@ -11381,18 +11601,10 @@ details {
     padding: 0.65rem 0.95rem 0.15rem;
   }
 
-  .resource-browser-toolbar {
-    grid-template-columns: minmax(0, 1fr) 2.75rem 2.75rem;
-    gap: 0.45rem;
-  }
-
-  .resource-browser-search-field {
-    min-width: 0;
-  }
-
-  .resource-browser-filter-trigger {
-    padding-inline: 0;
-  }
+  /* The Resources toolbar rules that used to live here were duplicates of the
+     `max-width: 720px` block (which already covers every width this one does).
+     Being later in source order they silently won, so a future edit to the 720px
+     block would no-op below 640px. Deleted: 720px is the single source of truth. */
 
   .resource-browser-filter-sheet {
     gap: 0.9rem;
@@ -11581,8 +11793,6 @@ details {
   --viewer-bg: #2a2a2f;
   --viewer-panel-bg: rgba(30, 30, 34, 0.92);
   --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
-  --composer-shell-shadow: 0 20px 44px rgba(0, 0, 0, 0.34), 0 2px 8px rgba(0, 0, 0, 0.2);
-  --composer-shell-shadow-rest: 0 8px 22px rgba(0, 0, 0, 0.22), 0 1px 4px rgba(0, 0, 0, 0.16);
   /* Fades toward the panel it sits on, NOT toward white — mixing with white on
      a dark surface brightens a hint rather than dimming it (this token once
      measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was
@@ -11636,7 +11846,13 @@ details {
   --sidebar-primary: oklch(0.488 0.243 264.376);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
+  /* Dark's half of the ink-goes-crisp promise. The rules that darken a hovered
+     sidebar row in light theme brighten it here, so this MUST be defined for
+     both themes — an undefined var() makes `color` invalid at computed-value
+     time and the row silently inherits instead. One step past dark's
+     --text-main (#f5f5f5), the same way #0a0a0a sits past light's. */
+  --sidebar-ink-hover: #ffffff;
+  --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
   --collapsed-sidebar-bg: color-mix(in oklab, var(--sidebar) 94%, var(--background) 6%);

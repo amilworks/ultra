@@ -1871,6 +1871,74 @@ export type UploadViewerInfo = {
   is_volume: boolean;
   is_timeseries: boolean;
   is_multichannel: boolean;
+  data_semantics?: {
+    kind: "intensity" | "binary_mask" | "probability_mask";
+    basis: "authoritative" | "exact" | "suggested" | "unknown" | string;
+    strength: "authoritative" | "exact" | "suggested" | "unknown" | string;
+    supported_modes: Array<"intensity" | "mask">;
+    recommended_view: "intensity" | "mask";
+    threshold?: {
+      method: "otsu-256-v1";
+      value: number;
+      domain: "raw";
+      foreground: "above";
+      sample_scope: string;
+      sample_count: number;
+      z_samples: number[];
+      channel: number;
+      t: number;
+      sampling_algorithm: string;
+      sampling_strategy?: "exact" | "stratified-z-spatial";
+      source_sha256?: string;
+      bins?: number;
+    };
+  };
+  scalar_mask_capability?: {
+    version: 1;
+    source_authority: "original";
+    source_format: "tiff" | "ome-tiff";
+    source_sha256: string;
+    dtype: "uint8" | "uint16" | "int16";
+    threshold_domain: "raw";
+    threshold_foreground: "above";
+    slice_delivery: "thresholded_png";
+    volume_delivery: "raw_scalar";
+    volume_sampling: "nearest";
+    channel_selection: "single";
+    time_selection: "single";
+    surfaces: Array<"2d" | "mpr" | "volume">;
+  };
+  viewer_calibrations?: {
+    version: 1;
+    source_sha256: string;
+    selections: Record<
+      string,
+      {
+        revision: number;
+        channel: number;
+        t: number;
+        render_mode: "auto" | "intensity" | "mask";
+        threshold_method: "otsu-256-v1" | "manual";
+        threshold_value: number;
+        threshold_foreground: "above";
+        threshold_provenance: {
+          method: "otsu-256-v1";
+          value: number;
+          domain: "raw";
+          foreground: "above";
+          channel: number;
+          t: number;
+          sample_scope: "volume" | "stratified_z";
+          sample_count: number;
+          sampling_algorithm: string;
+          sampling_strategy: "exact" | "stratified-z-spatial";
+          z_samples: number[];
+          source_sha256: string;
+          bins: number;
+        };
+      }
+    >;
+  };
   phys?: {
     resource_uniq?: string;
     name?: string;
@@ -1934,6 +2002,10 @@ export type UploadViewerInfo = {
     // Gamma tone-curve exponent for the multichannel volume (vole-core GAMMA_SCALE):
     // default 1 (linear); >1 darkens midtones, <1 lifts faint structure.
     volume_gamma?: number | null;
+    scalar_render_mode?: "auto" | "intensity" | "mask";
+    scalar_threshold_method?: "otsu-256-v1" | "manual";
+    scalar_threshold_value?: number | null;
+    scalar_threshold_foreground?: "above";
   };
   service_urls?: {
     preview?: string;
@@ -2219,8 +2291,28 @@ export type UploadViewerHistogramResponse = {
   bins: number;
   dtype?: string;
   channels?: number[];
+  channel?: number;
+  t?: number;
   source?: string;
   sample_count?: number;
+  scope?: "volume" | string;
+  sampling?: Record<string, unknown>;
+  threshold?: {
+    method: "otsu-256-v1" | string;
+    value: number;
+    domain?: "raw" | string;
+    foreground?: "above" | string;
+    sample_scope?: string;
+    sample_count?: number;
+    z_samples?: number[];
+    channel?: number;
+    t?: number;
+    sampling_algorithm?: string;
+    sampling_strategy?: "exact" | "stratified-z-spatial" | string;
+    source_sha256?: string;
+    bins?: number;
+  };
+  data_semantics?: UploadViewerInfo["data_semantics"];
   histogram: {
     bins: number[];
     edges: number[];
@@ -2228,6 +2320,8 @@ export type UploadViewerHistogramResponse = {
     max: number;
     channel_indices: number[];
     time_index: number;
+    sampling?: Record<string, unknown>;
+    threshold?: UploadViewerHistogramResponse["threshold"];
   };
 };
 

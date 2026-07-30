@@ -42,9 +42,179 @@ export type ScalarSliceImage = {
   data: Uint8ClampedArray;
 };
 
+export type ScalarNearestAxisMapping = {
+  deliveryIndex: number;
+  sampledSourceIndex: number;
+  exact: boolean;
+};
+
+export type ScalarNearestVoxelMapping = {
+  delivery: { x: number; y: number; z: number };
+  sampledSource: { x: number; y: number; z: number };
+  exact: boolean;
+};
+
+export type ScalarPlanePoint = {
+  row: number;
+  col: number;
+};
+
+export type ScalarNearestPlaneMapping = {
+  delivery: ScalarPlanePoint;
+  sampledSource: ScalarPlanePoint;
+  exact: boolean;
+};
+
 const MAX_SCALAR_SLICE_PIXELS = 16 * 1024 * 1024;
 
 const safeDim = (value: number): number => Math.max(1, Math.floor(Number(value) || 1));
+
+const nearestAxisGeometry = (
+  payload: ScalarVolumePayload,
+  axis: ScalarSliceAxis
+): { sourceExtent: number; deliveryExtent: number; factor: number } => {
+  if (axis === "x") {
+    return {
+      sourceExtent: safeDim(payload.sourceWidth),
+      deliveryExtent: safeDim(payload.width),
+      factor: safeDim(payload.downsampleX),
+    };
+  }
+  if (axis === "y") {
+    return {
+      sourceExtent: safeDim(payload.sourceHeight),
+      deliveryExtent: safeDim(payload.height),
+      factor: safeDim(payload.downsampleY),
+    };
+  }
+  return {
+    sourceExtent: safeDim(payload.sourceDepth),
+    deliveryExtent: safeDim(payload.depth),
+    factor: safeDim(payload.downsampleZ),
+  };
+};
+
+export const mapSourceSliceToNearestDelivery = (
+  payload: ScalarVolumePayload,
+  axis: ScalarSliceAxis,
+  sourceIndex: number
+): ScalarNearestAxisMapping => {
+  const { sourceExtent, deliveryExtent, factor } = nearestAxisGeometry(payload, axis);
+  const clampedSourceIndex = Math.max(
+    0,
+    Math.min(sourceExtent - 1, Math.floor(Number(sourceIndex) || 0))
+  );
+  const deliveryIndex = Math.max(
+    0,
+    Math.min(deliveryExtent - 1, Math.floor(clampedSourceIndex / factor))
+  );
+  const sampledSourceIndex = Math.min(
+    sourceExtent - 1,
+    deliveryIndex * factor + Math.floor(factor / 2)
+  );
+  return {
+    deliveryIndex,
+    sampledSourceIndex,
+    exact: clampedSourceIndex === sampledSourceIndex,
+  };
+};
+
+export const mapSourceVoxelToNearestDelivery = (
+  payload: ScalarVolumePayload,
+  source: { x: number; y: number; z: number }
+): ScalarNearestVoxelMapping => {
+  const x = mapSourceSliceToNearestDelivery(payload, "x", source.x);
+  const y = mapSourceSliceToNearestDelivery(payload, "y", source.y);
+  const z = mapSourceSliceToNearestDelivery(payload, "z", source.z);
+  return {
+    delivery: {
+      x: x.deliveryIndex,
+      y: y.deliveryIndex,
+      z: z.deliveryIndex,
+    },
+    sampledSource: {
+      x: x.sampledSourceIndex,
+      y: y.sampledSourceIndex,
+      z: z.sampledSourceIndex,
+    },
+    exact: x.exact && y.exact && z.exact,
+  };
+};
+
+const scalarPlaneAxes = (
+  axis: ScalarSliceAxis
+): { row: ScalarSliceAxis; col: ScalarSliceAxis } => {
+  if (axis === "y") {
+    return { row: "z", col: "x" };
+  }
+  if (axis === "x") {
+    return { row: "z", col: "y" };
+  }
+  return { row: "y", col: "x" };
+};
+
+const mapNearestDeliveryIndexToSource = (
+  payload: ScalarVolumePayload,
+  axis: ScalarSliceAxis,
+  deliveryIndex: number
+): number => {
+  const { sourceExtent, deliveryExtent, factor } = nearestAxisGeometry(
+    payload,
+    axis
+  );
+  const clampedDeliveryIndex = Math.max(
+    0,
+    Math.min(
+      deliveryExtent - 1,
+      Math.floor(Number(deliveryIndex) || 0)
+    )
+  );
+  return Math.min(
+    sourceExtent - 1,
+    clampedDeliveryIndex * factor + Math.floor(factor / 2)
+  );
+};
+
+export const mapSourcePlanePointToNearestDelivery = (
+  payload: ScalarVolumePayload,
+  axis: ScalarSliceAxis,
+  point: ScalarPlanePoint
+): ScalarNearestPlaneMapping => {
+  const axes = scalarPlaneAxes(axis);
+  const row = mapSourceSliceToNearestDelivery(payload, axes.row, point.row);
+  const col = mapSourceSliceToNearestDelivery(payload, axes.col, point.col);
+  return {
+    delivery: {
+      row: row.deliveryIndex,
+      col: col.deliveryIndex,
+    },
+    sampledSource: {
+      row: row.sampledSourceIndex,
+      col: col.sampledSourceIndex,
+    },
+    exact: row.exact && col.exact,
+  };
+};
+
+export const mapNearestDeliveryPlanePointToSource = (
+  payload: ScalarVolumePayload,
+  axis: ScalarSliceAxis,
+  point: ScalarPlanePoint
+): ScalarPlanePoint => {
+  const axes = scalarPlaneAxes(axis);
+  return {
+    row: mapNearestDeliveryIndexToSource(payload, axes.row, point.row),
+    col: mapNearestDeliveryIndexToSource(payload, axes.col, point.col),
+  };
+};
+
+export const scalarPayloadUsesNativeGrid = (payload: ScalarVolumePayload): boolean =>
+  safeDim(payload.downsampleX) === 1 &&
+  safeDim(payload.downsampleY) === 1 &&
+  safeDim(payload.downsampleZ) === 1 &&
+  safeDim(payload.sourceWidth) === safeDim(payload.width) &&
+  safeDim(payload.sourceHeight) === safeDim(payload.height) &&
+  safeDim(payload.sourceDepth) === safeDim(payload.depth);
 
 export const scalarSliceDimensions = (
   payload: Pick<ScalarVolumePayload, "width" | "height" | "depth">,

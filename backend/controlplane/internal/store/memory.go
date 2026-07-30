@@ -66,6 +66,8 @@ type MemoryStore struct {
 	orgs                   map[string]domain.Organization
 	bisque                 map[string]domain.BisqueCredentialRecord
 	leases                 map[string]domain.RunLeaseRecord
+	steerMessages          map[string][]domain.RunSteerMessageRecord
+	steerBarriers          map[string]time.Time
 	workers                map[string]domain.WorkerHeartbeatRecord
 	training               *memoryTrainingState
 }
@@ -107,6 +109,8 @@ func NewMemoryStore() *MemoryStore {
 		orgs:                   map[string]domain.Organization{},
 		bisque:                 map[string]domain.BisqueCredentialRecord{},
 		leases:                 map[string]domain.RunLeaseRecord{},
+		steerMessages:          map[string][]domain.RunSteerMessageRecord{},
+		steerBarriers:          map[string]time.Time{},
 		workers:                map[string]domain.WorkerHeartbeatRecord{},
 		training:               newMemoryTrainingState(),
 	}
@@ -1510,10 +1514,16 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 	if ts.IsZero() {
 		ts = domain.Now()
 	}
+	sourceSequence := sourceSequenceOrDefault(input.SourceSequence, seq)
+	if input.NoSourceSequence {
+		// Control-plane authored events live outside the worker's
+		// source_sequence space (zero = none in the record shape).
+		sourceSequence = 0
+	}
 	event := domain.RunEventRecord{
 		EventID:        eventID,
 		Sequence:       seq,
-		SourceSequence: sourceSequenceOrDefault(input.SourceSequence, seq),
+		SourceSequence: sourceSequence,
 		RunID:          input.RunID,
 		ThreadID:       input.ThreadID,
 		EventKind:      input.EventKind,
@@ -2397,6 +2407,9 @@ func (s *MemoryStore) MergeResourceMetadataForUser(ctx context.Context, input do
 	resource, ok := s.resources[resourceID]
 	if !ok || !resourceVisibleToOwner(resource, input.UserID, input.OrgID) {
 		return domain.ResourceRecord{}, ErrNotFound
+	}
+	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
 	}
 	updatedAt := input.UpdatedAt
 	if updatedAt.IsZero() {

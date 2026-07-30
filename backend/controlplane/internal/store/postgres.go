@@ -2088,7 +2088,15 @@ RETURNING run_id, worker_id, lease_token, lease_expires_at, created_at, updated_
 //
 // $1 event_id, $2 run_id, $3 thread_id, $4 event_kind, $5 event_type,
 // $6 node_name, $7 task_id, $8 checkpoint_id, $9 scope_id, $10 agent_role,
-// $11 level, $12 ts, $13 message, $14 payload, $15 source_sequence
+// $11 level, $12 ts, $13 message, $14 payload, $15 source_sequence,
+// $16 no_source_sequence.
+//
+// $16 stores source_sequence as NULL: control-plane authored events (steer
+// lifecycle) live OUTSIDE the worker's source_sequence space. Defaulting them
+// to the new sequence_number would claim the worker's next stamp under the
+// partial unique (run_id, source_sequence) index, and ingest would then DROP
+// the worker event arriving with that stamp — one lost worker event (possibly
+// the terminal one) per CP append on a live run.
 const appendRunEventSQL = `
 WITH next AS (
   INSERT INTO control_run_event_sequences AS s (run_id, last_sequence)
@@ -2104,7 +2112,7 @@ INSERT INTO control_run_events (
   event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
   node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
-SELECT $1, next.last_sequence, COALESCE($15::bigint, next.last_sequence), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+SELECT $1, next.last_sequence, CASE WHEN $16::boolean THEN NULL ELSE COALESCE($15::bigint, next.last_sequence) END, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 FROM next
 RETURNING event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 `
@@ -2143,7 +2151,7 @@ WITH live_run AS (
 	    event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type,
 	    node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 	  )
-	  SELECT $1, next.last_sequence, COALESCE($15::bigint, next.last_sequence), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+	  SELECT $1, next.last_sequence, CASE WHEN $16::boolean THEN NULL ELSE COALESCE($15::bigint, next.last_sequence) END, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
 	  FROM next
 	  RETURNING event_id, sequence_number, source_sequence, run_id, thread_id, event_kind, event_type, node_name, task_id, checkpoint_id, scope_id, agent_role, level, ts, message, payload
 )
@@ -2245,6 +2253,7 @@ func appendRunEventArgs(input domain.AppendRunEventInput) []any {
 		nullableText(input.Message),
 		jsonBytes(input.Payload),
 		nullableInt8(input.SourceSequence),
+		input.NoSourceSequence,
 	}
 }
 
@@ -3768,6 +3777,9 @@ FOR UPDATE`, resourceID, userID, orgID))
 		return domain.ResourceRecord{}, mapPgError(err)
 	}
 	resource := resourceFromRow(selected)
+	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
+	}
 	updatedAt := input.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = domain.Now()

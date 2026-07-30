@@ -53,6 +53,7 @@ from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.progress_guard import read_attempt_ledger_digest
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
+from ultra_deepagents.steering import SteeringInboxMiddleware
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
 from ultra_deepagents.vision import build_vision_tools
 
@@ -1780,6 +1781,7 @@ def build_research_agent(
     context: AgentRunContext | None = None,
     checkpointer: Any | None = None,
     surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
+    steering_inbox: Any | None = None,
 ) -> Any:
     ensure_ultra_harness_profile()
     cleanroom = bool(
@@ -1813,6 +1815,12 @@ def build_research_agent(
         SubagentFailureIsolationMiddleware(timeout_seconds=settings.subagent_task_timeout_seconds)
     )
     middleware.append(build_runtime_prompt_middleware())
+    if steering_inbox is not None:
+        # Mid-run steering (Phase 1): a checkpointed before_model node that
+        # folds user steers into COORDINATOR state between steps. Deliberately
+        # absent from every subagent middleware stack — a steer lands between
+        # coordinator steps, never inside a delegation.
+        middleware.append(SteeringInboxMiddleware(steering_inbox))
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 

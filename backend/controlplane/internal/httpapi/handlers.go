@@ -102,6 +102,9 @@ var (
 	workerRunEventsPathPattern   = regexp.MustCompile(`^/v[12]/runs/[^/]+/events$`)
 	workerLeasePathPattern       = regexp.MustCompile(`^/v[12]/runs/[^/]+/lease$`)
 	workerRunUserProfilePattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/user-profile$`)
+	workerRunSteerListPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/steer$`)
+	workerRunSteerBarrierPattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/steer/barrier$`)
+	workerRunSteerAckPattern     = regexp.MustCompile(`^/v[12]/runs/[^/]+/steer/[^/]+/ack$`)
 	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
 	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
 	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
@@ -151,6 +154,12 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 	case r.Method == http.MethodGet && workerRunEventsPathPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodGet && workerRunUserProfilePattern.MatchString(path):
+		return true
+	case r.Method == http.MethodGet && workerRunSteerListPattern.MatchString(path):
+		return true
+	case (r.Method == http.MethodPost || r.Method == http.MethodDelete) && workerRunSteerBarrierPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerRunSteerAckPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && workerEpisodicSearchPattern.MatchString(path):
 		return true
@@ -698,6 +707,11 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
 			r.Post("/runs/{run_id}/cancel", deps.handleCancelRun)
+			r.Post("/runs/{run_id}/steer", deps.handleSteerRun)
+			r.Get("/runs/{run_id}/steer", deps.handleListRunSteerMessages)
+			r.Post("/runs/{run_id}/steer/barrier", deps.handleCloseRunSteerBarrier)
+			r.Delete("/runs/{run_id}/steer/barrier", deps.handleReopenRunSteerBarrier)
+			r.Post("/runs/{run_id}/steer/{steer_id}/ack", deps.handleAckRunSteerMessage)
 			r.Get("/runs/{run_id}/events", deps.handleListRunEvents)
 			r.Get("/runs/{run_id}/artifacts", deps.handleListRunArtifacts)
 			r.Get("/runs/{run_id}/artifacts/download", deps.handleDownloadRunArtifactByPath)
@@ -2138,8 +2152,10 @@ type resourceResponse struct {
 }
 
 type patchResourceRequest struct {
-	OriginalName string         `json:"original_name"`
-	Metadata     domain.JSONMap `json:"metadata"`
+	OriginalName                          string         `json:"original_name"`
+	Metadata                              domain.JSONMap `json:"metadata"`
+	CalibrationExpectedSourceSHA256       string         `json:"-"`
+	CalibrationSelectionExpectedRevisions map[string]int `json:"-"`
 }
 
 type bulkLifecycleResourcesRequest struct {
@@ -7229,6 +7245,44 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		writeStoreError(w, store.ErrNotFound)
 		return
 	}
+	rawCalibration, calibrationPatch := req.Metadata["ultra_viewer_calibration_v1"]
+	if calibrationPatch {
+		sourcePath, pathErr := resolveCatalogResourcePath(root, resource)
+		if pathErr != nil {
+			writeStoreError(w, pathErr)
+			return
+		}
+		sourceInfo, timeCount, channelCount, _, authorityErr := deps.sourceImageServiceViewerInfo(
+			r.Context(),
+			sourcePath,
+		)
+		if authorityErr != nil {
+			writeImageSourceAuthorityError(w, authorityErr)
+			return
+		}
+		sanitizeScalarMaskCapability(
+			sourceInfo,
+			deps.resourceRecordFromCatalog(root, resource),
+		)
+		if _, capable := jsonObject(sourceInfo["scalar_mask_capability"]); !capable {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("mask calibration is unsupported for this source"))
+			return
+		}
+		sanitized, expectedRevisions, validationErr := validateViewerCalibrationMetadata(
+			rawCalibration,
+			resource.SHA256,
+			timeCount,
+			channelCount,
+			capabilityDtype(sourceInfo),
+		)
+		if validationErr != nil {
+			writeError(w, http.StatusBadRequest, validationErr)
+			return
+		}
+		req.Metadata["ultra_viewer_calibration_v1"] = sanitized
+		req.CalibrationExpectedSourceSHA256 = resource.SHA256
+		req.CalibrationSelectionExpectedRevisions = expectedRevisions
+	}
 	now := domain.Now()
 	updated := resource
 	if len(req.Metadata) > 0 {
@@ -7239,15 +7293,37 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		}
 		metadataKeys := sortedJSONMapKeys(req.Metadata)
 		updated, err = metadataStore.MergeResourceMetadataForUser(r.Context(), domain.MergeResourceMetadataInput{
-			ResourceID: fileID,
-			UserID:     principal.UserID,
-			OrgID:      principal.OrgID,
-			Patch:      req.Metadata,
-			UpdatedAt:  now,
+			ResourceID:                 fileID,
+			UserID:                     principal.UserID,
+			OrgID:                      principal.OrgID,
+			Patch:                      req.Metadata,
+			ExpectedSourceSHA256:       req.CalibrationExpectedSourceSHA256,
+			SelectionExpectedRevisions: req.CalibrationSelectionExpectedRevisions,
+			UpdatedAt:                  now,
 		})
 		if err != nil {
 			writeStoreError(w, err)
 			return
+		}
+		if calibrationPatch {
+			if _, recorded := deps.appendResourceEvent(
+				r.Context(),
+				updated.ResourceID,
+				principal,
+				"resource.viewer_calibration_updated",
+				domain.JSONMap{
+					"source_sha256": resource.SHA256,
+					"calibration":   req.Metadata["ultra_viewer_calibration_v1"],
+					"updated_at":    now.UTC().Format(time.RFC3339Nano),
+				},
+			); !recorded {
+				writeError(
+					w,
+					http.StatusInternalServerError,
+					errors.New("viewer calibration persisted but its audit event could not be recorded"),
+				)
+				return
+			}
 		}
 		deps.recordResourceEvent(r.Context(), updated.ResourceID, principal, "resource.metadata_updated", domain.JSONMap{
 			"metadata_keys":      metadataKeys,
@@ -7866,6 +7942,17 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
 	}
+	volumeBytes := int64(len(volume.Data))
+	if !scalarVolumeInFlightBudget.tryAcquire(volumeBytes) {
+		w.Header().Set("Retry-After", "1")
+		writeError(
+			w,
+			http.StatusServiceUnavailable,
+			errors.New("scalar volume in-flight byte budget is exhausted"),
+		)
+		return
+	}
+	defer scalarVolumeInFlightBudget.release(volumeBytes)
 	maybeDecompressNiftiSidecar(path, volume.TimeCount)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
@@ -7886,6 +7973,7 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-downsample-y", "1")
 	w.Header().Set("x-volume-downsample-z", "1")
 	w.Header().Set("x-volume-preview-policy", "native-exact-v1")
+	w.Header().Set("x-volume-sampling", "box")
 	// Rescale to physical units (HU/SUV) so the client can window in true
 	// intensities: physical = slope*code + inter.
 	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))
@@ -10612,6 +10700,142 @@ func (deps ServerDeps) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+type steerRunRequest struct {
+	SteerID string `json:"steer_id"`
+	Text    string `json:"text"`
+}
+
+type ackRunSteerRequest struct {
+	WorkerID string `json:"worker_id"`
+}
+
+// handleSteerRun accepts a mid-run steering message from the run's owner.
+// 409 with code "steering_closed" means the run is terminal or finalizing —
+// the client falls back to Phase 0 queueing.
+func (deps ServerDeps) handleSteerRun(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	var req steerRunRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	runID := chi.URLParam(r, "run_id")
+	principal := deps.principalFromRequest(r, "")
+	if _, err := deps.Store.GetRunForUser(r.Context(), runID, principal.UserID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	record, err := deps.Runs.SteerRun(r.Context(), runcontrol.SteerRunRequest{
+		RunID:   runID,
+		UserID:  principal.UserID,
+		SteerID: req.SteerID,
+		Text:    req.Text,
+	})
+	if err != nil {
+		if errors.Is(err, runcontrol.ErrInvalidSteer) {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if errors.Is(err, store.ErrSteeringClosed) {
+			writeJSON(w, http.StatusConflict, map[string]string{
+				"error": err.Error(),
+				"code":  "steering_closed",
+			})
+			return
+		}
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
+}
+
+func (deps ServerDeps) handleListRunSteerMessages(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	runID := chi.URLParam(r, "run_id")
+	if _, ok := deps.runForWorkerOrUser(w, r, runID); !ok {
+		return
+	}
+	records, err := deps.Runs.ListRunSteerMessages(r.Context(), runID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if records == nil {
+		records = []domain.RunSteerMessageRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"steer_messages": records})
+}
+
+// handleCloseRunSteerBarrier is worker-only: it atomically stops steer
+// acceptance for a finalizing run and returns the still-pending steers the
+// worker must apply before its terminal event.
+func (deps ServerDeps) handleCloseRunSteerBarrier(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	if deps.workerRequestAuth(r) != workerAuthValid {
+		writeError(w, http.StatusForbidden, errors.New("steer barrier is worker-only"))
+		return
+	}
+	runID := chi.URLParam(r, "run_id")
+	pending, err := deps.Runs.CloseRunSteerBarrier(r.Context(), runID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if pending == nil {
+		pending = []domain.RunSteerMessageRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pending": pending})
+}
+
+// handleReopenRunSteerBarrier is worker-only: a fresh attempt (JetStream
+// redelivery without a control-plane requeue) re-arms steer acceptance that
+// the crashed attempt's finalization barrier closed.
+func (deps ServerDeps) handleReopenRunSteerBarrier(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	if deps.workerRequestAuth(r) != workerAuthValid {
+		writeError(w, http.StatusForbidden, errors.New("steer barrier is worker-only"))
+		return
+	}
+	if err := deps.Runs.ReopenRunSteerBarrier(r.Context(), chi.URLParam(r, "run_id")); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
+}
+
+func (deps ServerDeps) handleAckRunSteerMessage(w http.ResponseWriter, r *http.Request) {
+	if !deps.ready(w) {
+		return
+	}
+	if deps.workerRequestAuth(r) != workerAuthValid {
+		writeError(w, http.StatusForbidden, errors.New("steer ack is worker-only"))
+		return
+	}
+	var req ackRunSteerRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if !decodeJSON(w, r, &req) {
+			return
+		}
+	}
+	record, err := deps.Runs.AckRunSteerMessage(r.Context(), runcontrol.AckRunSteerRequest{
+		RunID:    chi.URLParam(r, "run_id"),
+		SteerID:  chi.URLParam(r, "steer_id"),
+		WorkerID: req.WorkerID,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, record)
 }
 
 func (deps ServerDeps) handleAcquireRunLease(w http.ResponseWriter, r *http.Request) {

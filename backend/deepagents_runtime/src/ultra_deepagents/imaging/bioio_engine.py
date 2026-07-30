@@ -40,15 +40,17 @@ Design notes
 
 from __future__ import annotations
 
+import bisect
 import io
 import math
 import operator
 import os
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any, NoReturn
 
 from ultra_deepagents.imaging import atlas as atlas_mod
-from ultra_deepagents.imaging import fusion, viewerinfo
+from ultra_deepagents.imaging import fusion, scalar_semantics, viewerinfo
 from ultra_deepagents.imaging.engine import (
     SCRUB_MAX_DIMENSION,
     EngineUnavailable,
@@ -86,7 +88,8 @@ _WINDOW_SAMPLE_EDGE = 1024
 _SOURCE_REGION_MAX_BYTES = 4 * 1024 * 1024
 _ATLAS_SOURCE_PLANE_MAX_BYTES = 64 * 1024 * 1024
 _VOLUME_DECODED_CHUNK_MAX_BYTES = 64 * 1024 * 1024
-_SCALAR_SOURCE_WORK_MAX_BYTES = 512 * 1024 * 1024 + _SOURCE_REGION_MAX_BYTES
+_SCALAR_SOURCE_WORK_MAX_BYTES = atlas_mod.SCALAR_DECODE_WORK_MAX_BYTES
+_MAX_DECODE_ADMISSION_READS = 4096
 
 # Mirrors service.py's _DECODE_ERROR_MARKERS: a ValueError whose message carries
 # one of these maps to 422 "preview unavailable" instead of a 500 server fault.
@@ -166,6 +169,8 @@ def _max_chunk_bytes(chunks: Any, dtype: Any) -> int:
         values = axis if isinstance(axis, (tuple, list)) else (axis,)
         sizes: list[int] = []
         for raw in values:
+            if isinstance(raw, bool):
+                raise ValueError("decoded chunk geometry is invalid")
             try:
                 size = operator.index(raw)
             except TypeError as exc:
@@ -174,7 +179,183 @@ def _max_chunk_bytes(chunks: Any, dtype: Any) -> int:
                 raise ValueError("decoded chunk geometry is invalid")
             sizes.append(size)
         shape.append(max(sizes))
-    return int(math.prod(shape)) * int(np.dtype(dtype).itemsize)
+    try:
+        itemsize = operator.index(np.dtype(dtype).itemsize)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("decoded chunk geometry is invalid") from exc
+    if isinstance(itemsize, bool) or itemsize <= 0:
+        raise ValueError("decoded chunk geometry is invalid")
+    return int(math.prod(shape)) * itemsize
+
+
+@dataclass(frozen=True)
+class _PreparedChunkAxis:
+    size: int
+    uniform_chunk_size: int | None
+    boundaries: tuple[int, ...] | None
+    max_chunk_size: int
+
+    def touched_size(self, start: int, stop: int) -> int:
+        if self.uniform_chunk_size is not None:
+            chunk_size = self.uniform_chunk_size
+            first_chunk = start // chunk_size
+            last_chunk = (stop - 1) // chunk_size
+            return (last_chunk - first_chunk + 1) * chunk_size
+
+        boundaries = self.boundaries
+        if boundaries is None:
+            raise ValueError("decoded chunk geometry is invalid")
+        first_chunk = bisect.bisect_right(boundaries, start)
+        last_chunk = bisect.bisect_left(boundaries, stop)
+        first_chunk_start = boundaries[first_chunk - 1] if first_chunk else 0
+        return boundaries[last_chunk] - first_chunk_start
+
+
+@dataclass(frozen=True)
+class _PreparedDecodedChunkGeometry:
+    axes: tuple[_PreparedChunkAxis, ...]
+    itemsize: int
+    max_chunk_bytes: int
+
+    def estimate(self, selection: Sequence[Any]) -> int:
+        try:
+            selection_rank = len(selection)
+        except TypeError as exc:
+            raise ValueError("decoded selection is invalid") from exc
+        if selection_rank != len(self.axes):
+            raise ValueError("decoded selection is invalid")
+
+        touched_axis_sizes: list[int] = []
+        for axis, selector in zip(self.axes, selection, strict=True):
+            if isinstance(selector, bool):
+                raise ValueError("decoded selection is invalid")
+            if isinstance(selector, slice):
+                if any(
+                    isinstance(value, bool)
+                    for value in (selector.start, selector.stop, selector.step)
+                ):
+                    raise ValueError("decoded selection is invalid")
+                try:
+                    start, stop, step = selector.indices(axis.size)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("decoded selection is invalid") from exc
+                if step != 1 or start >= stop:
+                    raise ValueError("decoded selection is invalid")
+            else:
+                try:
+                    index = operator.index(selector)
+                except TypeError as exc:
+                    raise ValueError("decoded selection is invalid") from exc
+                if index < 0 or index >= axis.size:
+                    raise ValueError("decoded selection is invalid")
+                start, stop = index, index + 1
+            touched = axis.touched_size(start, stop)
+            if touched <= 0:
+                raise ValueError("decoded selection is invalid")
+            touched_axis_sizes.append(touched)
+        return int(math.prod(touched_axis_sizes)) * self.itemsize
+
+
+@dataclass(frozen=True)
+class _PreparedGeometryFailure:
+    message: str
+
+    def raise_error(self) -> NoReturn:
+        raise ValueError(self.message)
+
+
+def _positive_geometry_integer(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError("decoded chunk geometry is invalid")
+    try:
+        normalized = operator.index(value)
+    except TypeError as exc:
+        raise ValueError("decoded chunk geometry is invalid") from exc
+    if normalized <= 0:
+        raise ValueError("decoded chunk geometry is invalid")
+    return normalized
+
+
+def _prepare_decoded_chunk_geometry(
+    shape: Any,
+    chunks: Any,
+    dtype: Any,
+) -> _PreparedDecodedChunkGeometry:
+    """Snapshot and validate chunk geometry once for repeated admission estimates."""
+    import numpy as np
+
+    if (
+        not isinstance(shape, (tuple, list))
+        or not shape
+        or not isinstance(chunks, (tuple, list))
+        or len(chunks) != len(shape)
+    ):
+        raise ValueError("decoded chunk geometry is invalid")
+    axis_sizes = tuple(_positive_geometry_integer(value) for value in shape)
+    try:
+        itemsize = operator.index(np.dtype(dtype).itemsize)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("decoded chunk geometry is invalid") from exc
+    if isinstance(itemsize, bool) or itemsize <= 0:
+        raise ValueError("decoded chunk geometry is invalid")
+
+    axes: list[_PreparedChunkAxis] = []
+    for size, raw_chunks in zip(axis_sizes, chunks, strict=True):
+        if isinstance(raw_chunks, (tuple, list)):
+            if not raw_chunks:
+                raise ValueError("decoded chunk geometry is invalid")
+            boundaries: list[int] = []
+            total = 0
+            maximum = 0
+            for raw_chunk_size in raw_chunks:
+                chunk_size = _positive_geometry_integer(raw_chunk_size)
+                total += chunk_size
+                maximum = max(maximum, chunk_size)
+                boundaries.append(total)
+            if total != size:
+                raise ValueError("decoded chunk geometry is invalid")
+            axes.append(
+                _PreparedChunkAxis(
+                    size=size,
+                    uniform_chunk_size=None,
+                    boundaries=tuple(boundaries),
+                    max_chunk_size=maximum,
+                )
+            )
+            continue
+
+        chunk_size = _positive_geometry_integer(raw_chunks)
+        axes.append(
+            _PreparedChunkAxis(
+                size=size,
+                uniform_chunk_size=chunk_size,
+                boundaries=None,
+                max_chunk_size=chunk_size,
+            )
+        )
+
+    frozen_axes = tuple(axes)
+    max_chunk_bytes = int(math.prod(axis.max_chunk_size for axis in frozen_axes)) * itemsize
+    return _PreparedDecodedChunkGeometry(
+        axes=frozen_axes,
+        itemsize=itemsize,
+        max_chunk_bytes=max_chunk_bytes,
+    )
+
+
+def _decoded_selection_work_bytes(
+    shape: Any,
+    chunks: Any,
+    dtype: Any,
+    selection: Sequence[Any],
+) -> int:
+    """Sum every decoded chunk intersected by an N-D selection.
+
+    Chunk bytes, including smaller edge chunks, are charged in full because
+    TIFF/Zarr and Dask decompress the complete intersected chunk even for a
+    one-pixel crop.
+    """
+    return _prepare_decoded_chunk_geometry(shape, chunks, dtype).estimate(selection)
 
 
 def _zero_based(channels: Sequence[int] | None, count: int) -> list[int]:
@@ -229,6 +410,174 @@ def _require_bounded_volume_source(source: Any) -> None:
         raise ValueError("scalar volume source work exceeds the bounded per-channel limit")
 
 
+def _exact_plane_regions(source: Any) -> list[tuple[int, int, int, int]]:
+    itemsize = max(1, int(getattr(source.dtype, "itemsize", 0) or 0))
+    max_voxels = max(1, _SOURCE_REGION_MAX_BYTES // itemsize)
+    block_width = min(int(source.x), max_voxels)
+    block_height = max(1, min(int(source.y), max_voxels // block_width))
+    return [
+        (y0, min(int(source.y), y0 + block_height), x0, min(int(source.x), x0 + block_width))
+        for y0 in range(0, int(source.y), block_height)
+        for x0 in range(0, int(source.x), block_width)
+    ]
+
+
+def _nearest_plane_regions(source: Any, plan: dict[str, Any]) -> list[tuple[int, int, int, int]]:
+    import numpy as np
+
+    factor_x = int(plan["downsample_x"])
+    factor_y = int(plan["downsample_y"])
+    width = int(plan["width"])
+    height = int(plan["height"])
+    x_indices = np.minimum(
+        int(source.x) - 1,
+        np.arange(width, dtype="int64") * factor_x + factor_x // 2,
+    )
+    y_indices = np.minimum(
+        int(source.y) - 1,
+        np.arange(height, dtype="int64") * factor_y + factor_y // 2,
+    )
+    itemsize = max(1, int(np.dtype(source.dtype).itemsize))
+    max_voxels = max(1, _SOURCE_REGION_MAX_BYTES // itemsize)
+    regions: list[tuple[int, int, int, int]] = []
+    output_x0 = 0
+    while output_x0 < width:
+        output_x1 = output_x0 + 1
+        while (
+            output_x1 < width
+            and int(x_indices[output_x1]) - int(x_indices[output_x0]) + 1 <= max_voxels
+        ):
+            output_x1 += 1
+        selected_x = x_indices[output_x0:output_x1]
+        x0 = int(selected_x[0])
+        x1 = int(selected_x[-1]) + 1
+        max_source_height = max(1, max_voxels // (x1 - x0))
+        output_y0 = 0
+        while output_y0 < height:
+            output_y1 = output_y0 + 1
+            while (
+                output_y1 < height
+                and int(y_indices[output_y1]) - int(y_indices[output_y0]) + 1 <= max_source_height
+            ):
+                output_y1 += 1
+            selected_y = y_indices[output_y0:output_y1]
+            regions.append((int(selected_y[0]), int(selected_y[-1]) + 1, x0, x1))
+            output_y0 = output_y1
+        output_x0 = output_x1
+    return regions
+
+
+def _admit_decode_reads(
+    source: Any,
+    reads: Iterable[tuple[int, int, int, tuple[int, int, int, int] | None]],
+    *,
+    expected_read_count: int,
+    label: str,
+    max_work_bytes: int = _SCALAR_SOURCE_WORK_MAX_BYTES,
+) -> int:
+    if (
+        isinstance(expected_read_count, bool)
+        or not isinstance(expected_read_count, int)
+        or expected_read_count <= 0
+        or expected_read_count > _MAX_DECODE_ADMISSION_READS
+    ):
+        raise ValueError(f"{label} read count exceeds its bounded envelope")
+    estimate_read_work = getattr(source, "estimate_read_work", None)
+    if not callable(estimate_read_work):
+        raise ValueError(f"{label} decoded chunk geometry is unavailable")
+    total = 0
+    actual_read_count = 0
+    for t, channel, z, region in reads:
+        actual_read_count += 1
+        if actual_read_count > expected_read_count:
+            raise ValueError(f"{label} read plan does not match its bounded envelope")
+        work = estimate_read_work(t=t, c=channel, z=z, level=0, box=region)
+        if isinstance(work, bool) or not isinstance(work, int) or work <= 0:
+            raise ValueError(f"{label} decoded chunk geometry is invalid")
+        total += work
+        if total > max_work_bytes:
+            raise ValueError(f"{label} decode work exceeds its bounded envelope")
+    if actual_read_count != expected_read_count:
+        raise ValueError(f"{label} read plan does not match its bounded envelope")
+    return total
+
+
+def _source_generation(path: str) -> tuple[int, int, int, int, int, int]:
+    try:
+        stat = os.stat(path)
+    except OSError as exc:
+        raise ValueError(f"cannot decode {os.path.basename(path)}: {exc}") from exc
+    return (
+        atlas_mod.SCALAR_SOURCE_GENERATION_VERSION,
+        operator.index(stat.st_dev),
+        operator.index(stat.st_ino),
+        operator.index(stat.st_size),
+        operator.index(stat.st_mtime_ns),
+        operator.index(stat.st_ctime_ns),
+    )
+
+
+def _require_source_generation(
+    path: str,
+    expected: Any,
+) -> tuple[int, int, int, int, int, int]:
+    generation = atlas_mod.validate_scalar_source_generation(expected)
+    if _source_generation(path) != generation:
+        raise ValueError("exact Mask source generation changed")
+    return generation
+
+
+def _complete_exact_mask_decode_admission(
+    source: Any,
+    plan: dict[str, Any],
+) -> tuple[int, int]:
+    """Recompute all reads for the selected C/T across the complete native Z grid."""
+    atlas_mod.validate_scalar_plan(plan)
+    if str(plan.get("preview_policy", "")).strip().lower() != atlas_mod.SCALAR_MASK_NATIVE_POLICY:
+        raise ValueError("complete decoder admission requires an exact Mask plan")
+    regions = _nearest_plane_regions(source, plan)
+    depth = int(plan["depth"])
+    read_count = depth * len(regions)
+    work = _admit_decode_reads(
+        source,
+        (
+            (
+                int(plan["t"]),
+                int(plan["channel"]),
+                min(
+                    int(source.z) - 1,
+                    output_z * int(plan["downsample_z"])
+                    + int(plan["downsample_z"]) // 2,
+                ),
+                region,
+            )
+            for output_z in range(depth)
+            for region in regions
+        ),
+        expected_read_count=read_count,
+        label="nearest scalar volume",
+    )
+    return work, read_count
+
+
+def _bounded_output_indices(zs: Iterable[Any], depth: int) -> list[int]:
+    output_indices: list[int] = []
+    seen: set[int] = set()
+    for position, output_z in enumerate(zs):
+        if position >= depth:
+            raise ValueError("scalar volume output selection exceeds its bounded envelope")
+        index = _exact_index(output_z, "z")
+        if index < 0 or index >= depth:
+            raise ValueError(f"scalar volume z index {index} is out of range")
+        if index in seen:
+            raise ValueError(f"duplicate scalar volume z index {index}")
+        seen.add(index)
+        output_indices.append(index)
+    if not output_indices:
+        raise ValueError("scalar volume output selection is empty")
+    return output_indices
+
+
 class _Plane:
     """A normalized view of one source: 5-D geometry + bounded plane reads."""
 
@@ -259,6 +608,7 @@ class _Plane:
         self.scene_count = max(1, int(scene_count))
         self.source_order = str(source_order or "")
         self.max_decoded_chunk_bytes = max_decoded_chunk_bytes
+        self.source_generation: tuple[int, int, int, int, int, int] | None = None
         # An interleaved RGB(A) photo: rendered with a full-range map, never a
         # percentile stretch (that would destroy colour fidelity).
         self.is_photo = is_photo
@@ -275,6 +625,17 @@ class _Plane:
         self, *, t: int, c: int, z: int, level: int, box: tuple[int, int, int, int] | None = None
     ):  # pragma: no cover - overridden
         raise NotImplementedError
+
+    def estimate_read_work(
+        self,
+        *,
+        t: int,
+        c: int,
+        z: int,
+        level: int,
+        box: tuple[int, int, int, int] | None = None,
+    ) -> int:  # pragma: no cover - overridden
+        raise ValueError("decoded chunk geometry is unavailable")
 
     def close(self) -> None:  # pragma: no cover - overridden
         pass
@@ -375,6 +736,9 @@ class _TiffPlane(_Plane):
             max_decoded_chunk_bytes=max_decoded_chunk_bytes,
         )
         self._zarr_cache: dict[int, Any] = {}
+        self._decoded_chunk_geometry_cache: dict[
+            int, _PreparedDecodedChunkGeometry | _PreparedGeometryFailure
+        ] = {}
 
     def _level_array(self, level: int):
         cached = self._zarr_cache.get(level)
@@ -432,8 +796,75 @@ class _TiffPlane(_Plane):
             plane = plane[..., 0] if plane.shape[-1] <= 4 else plane[0]
         return plane
 
+    def estimate_read_work(
+        self,
+        *,
+        t: int,
+        c: int,
+        z: int,
+        level: int,
+        box: tuple[int, int, int, int] | None = None,
+    ) -> int:
+        time_index = _axis_index(t, "time", self.t)
+        channel_index = _axis_index(c, "channel", self.c)
+        depth_index = _axis_index(z, "z", self.z)
+        level_index = _axis_index(level, "level", self.level_count)
+        arr = self._level_array(level_index)
+        geometry = self._level_decoded_chunk_geometry(level_index, arr)
+        selection: list[Any] = []
+        for position, axis in enumerate(self._axes):
+            if position >= len(geometry.axes):
+                break
+            if axis == "T":
+                selection.append(time_index)
+            elif axis == "C":
+                selection.append(channel_index)
+            elif axis == "Z" or axis in self._PAGE_AXES:
+                selection.append(depth_index)
+            elif axis == "Y":
+                selection.append(slice(box[0], box[1]) if box else slice(None))
+            elif axis == "X":
+                selection.append(slice(box[2], box[3]) if box else slice(None))
+            elif axis == "S":
+                selection.append(channel_index if self._samples_as_channels else 0)
+            else:
+                selection.append(0)
+        while len(selection) < len(geometry.axes):
+            selection.append(slice(None))
+        return geometry.estimate(selection)
+
+    def _level_decoded_chunk_geometry(
+        self,
+        level: int,
+        array: Any,
+    ) -> _PreparedDecodedChunkGeometry:
+        cache = self._decoded_chunk_geometry_cache
+        cached = cache.get(level)
+        if isinstance(cached, _PreparedGeometryFailure):
+            cached.raise_error()
+        if cached is not None:
+            return cached
+        chunks = getattr(array, "chunks", None)
+        if chunks is None:
+            failure = _PreparedGeometryFailure("decoded chunk geometry is unavailable")
+            cache[level] = failure
+            failure.raise_error()
+        try:
+            prepared = _prepare_decoded_chunk_geometry(
+                getattr(array, "shape", ()),
+                chunks,
+                getattr(array, "dtype", self.dtype),
+            )
+        except ValueError as exc:
+            failure = _PreparedGeometryFailure(str(exc))
+            cache[level] = failure
+            failure.raise_error()
+        cache[level] = prepared
+        return prepared
+
     def close(self) -> None:
         self._zarr_cache.clear()
+        self._decoded_chunk_geometry_cache.clear()
         try:
             self._tf.close()
         except Exception:  # noqa: BLE001
@@ -479,6 +910,11 @@ class _BioioPlane(_Plane):
             names = []
             spacing = (1.0, 1.0, 1.0)
             spacing_units = ("voxel", "voxel", "voxel")
+        prepared_chunk_geometry = _prepare_decoded_chunk_geometry(
+            self._dask.shape,
+            self._dask.chunks,
+            self._dask.dtype,
+        )
         super().__init__(
             shape5=(shape[0], shape[1], shape[2], shape[3], shape[4]),
             dtype=self._dask.dtype,
@@ -491,8 +927,11 @@ class _BioioPlane(_Plane):
             scene_count=scene_count,
             source_order=source_order,
             spacing_units_zyx=spacing_units,
-            max_decoded_chunk_bytes=_max_chunk_bytes(self._dask.chunks, self._dask.dtype),
+            max_decoded_chunk_bytes=prepared_chunk_geometry.max_chunk_bytes,
         )
+        self._decoded_chunk_geometry_cache: (
+            _PreparedDecodedChunkGeometry | _PreparedGeometryFailure | None
+        ) = prepared_chunk_geometry
 
     def read(
         self, *, t: int, c: int, z: int, level: int, box: tuple[int, int, int, int] | None = None
@@ -512,9 +951,48 @@ class _BioioPlane(_Plane):
             sub = sub[box[0] : box[1], box[2] : box[3]]
         return np.asarray(sub.compute())
 
+    def estimate_read_work(
+        self,
+        *,
+        t: int,
+        c: int,
+        z: int,
+        level: int,
+        box: tuple[int, int, int, int] | None = None,
+    ) -> int:
+        time_index = _axis_index(t, "time", self.t)
+        channel_index = _axis_index(c, "channel", self.c)
+        depth_index = _axis_index(z, "z", self.z)
+        _axis_index(level, "level", self.level_count)
+        y_selection = slice(box[0], box[1]) if box else slice(None)
+        x_selection = slice(box[2], box[3]) if box else slice(None)
+        return self._decoded_chunk_geometry().estimate(
+            (time_index, channel_index, depth_index, y_selection, x_selection)
+        )
+
+    def _decoded_chunk_geometry(self) -> _PreparedDecodedChunkGeometry:
+        cached = self._decoded_chunk_geometry_cache
+        if isinstance(cached, _PreparedGeometryFailure):
+            cached.raise_error()
+        if cached is not None:
+            return cached
+        try:
+            prepared = _prepare_decoded_chunk_geometry(
+                self._dask.shape,
+                self._dask.chunks,
+                self._dask.dtype,
+            )
+        except ValueError as exc:
+            failure = _PreparedGeometryFailure(str(exc))
+            self._decoded_chunk_geometry_cache = failure
+            failure.raise_error()
+        self._decoded_chunk_geometry_cache = prepared
+        return prepared
+
     def close(self) -> None:
         self._img = None
         self._dask = None
+        self._decoded_chunk_geometry_cache = None
 
 
 def _tiff_channel_names(tf: Any, channel_count: int, samples_as_channels: bool) -> list[str]:
@@ -687,14 +1165,12 @@ class BioioEngine(_Hdf5EngineMixin):
         self._sources: dict[Any, _Plane] = {}
         self._windows = _BoundedDict(_engine_cache_entries())
         self._signal_scores = _BoundedDict(_engine_cache_entries())
+        self._scalar_profiles = _BoundedDict(_engine_cache_entries())
 
     # -- source handling ------------------------------------------------------
     def _source(self, path: str) -> _Plane:
-        try:
-            stamp = os.stat(path).st_mtime_ns
-        except OSError as exc:
-            raise ValueError(f"cannot decode {os.path.basename(path)}: {exc}") from exc
-        key = (str(path), stamp)
+        generation_before = _source_generation(path)
+        key = (str(path), generation_before)
         cached = self._sources.get(key)
         if cached is not None:
             return cached
@@ -708,6 +1184,11 @@ class BioioEngine(_Hdf5EngineMixin):
                 raise ValueError(f"unsupported format for the bioio engine: {ext or 'unknown'}")
         except Exception as exc:  # noqa: BLE001
             raise _as_decode_error(path, exc) from exc
+        generation_after = _source_generation(path)
+        if generation_after != generation_before:
+            source.close()
+            raise ValueError("cannot decode source because its generation changed while opening")
+        source.source_generation = generation_after
         if source.x <= 0 or source.y <= 0:
             source.close()
             raise ValueError(
@@ -826,7 +1307,7 @@ class BioioEngine(_Hdf5EngineMixin):
             out = self._downscale(out, max_dim)
         return self._encode_png(out)
 
-    def _downscale(self, arr, max_dim: int):
+    def _downscale(self, arr, max_dim: int, *, sampling: str = "linear"):
         np = self._np
         h, w = int(arr.shape[0]), int(arr.shape[1])
         long_edge = max(h, w)
@@ -835,7 +1316,12 @@ class BioioEngine(_Hdf5EngineMixin):
         scale = max_dim / float(long_edge)
         size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
         img = self._Image.fromarray(np.asarray(arr, dtype="uint8"))
-        return np.asarray(img.resize(size, self._Image.BILINEAR))
+        resample = (
+            self._Image.Resampling.NEAREST
+            if sampling == "nearest"
+            else self._Image.Resampling.BILINEAR
+        )
+        return np.asarray(img.resize(size, resample))
 
     def _encode_png(self, arr) -> bytes:
         np = self._np
@@ -900,6 +1386,40 @@ class BioioEngine(_Hdf5EngineMixin):
         # must not credit libbioimage for a tifffile/bioio read.
         reader = "tifffile" if _lower_ext(path) in TIFF_EXTENSIONS else "bioio"
         meta = self.meta(path)
+        source = self._source(path)
+        membership_dtype = scalar_semantics.mask_membership_dtype(source.dtype)
+        scalar_mask_capability = None
+        if isinstance(source, _TiffPlane) and membership_dtype is not None:
+            try:
+                self._admit_scalar_mask_surfaces(path, source)
+            except (TypeError, ValueError):
+                pass
+            else:
+                scalar_mask_capability = {
+                    "version": 1,
+                    "source_authority": "original",
+                    "source_format": (
+                        "ome-tiff" if str(source.format).strip().lower() == "ome-tiff" else "tiff"
+                    ),
+                    "dtype": membership_dtype,
+                    "threshold_domain": "raw",
+                    "threshold_foreground": "above",
+                    "slice_delivery": "thresholded_png",
+                    "volume_delivery": "raw_scalar",
+                    "volume_sampling": "nearest",
+                    "channel_selection": "single",
+                    "time_selection": "single",
+                }
+        data_semantics = None
+        if (
+            int(meta.get("image_num_scenes", 1) or 1) == 1
+            and int(meta.get("image_num_c", 1) or 1) == 1
+            and int(meta.get("image_num_z", 1) or 1) > 1
+        ):
+            try:
+                data_semantics = self._scalar_profile(path, channel=0, t=0)["data_semantics"]
+            except Exception:  # noqa: BLE001 - semantic profiling is best effort
+                data_semantics = None
         return viewerinfo.build_viewer_info(
             meta,
             signal_scores=(
@@ -908,7 +1428,76 @@ class BioioEngine(_Hdf5EngineMixin):
                 else None
             ),
             reader=reader,
+            data_semantics=data_semantics,
+            scalar_mask_capability=scalar_mask_capability,
         )
+
+    def _admit_scalar_mask_surfaces(self, path: str, source: _Plane) -> dict[str, Any]:
+        if (
+            source.scene_count != 1
+            or source.is_photo
+            or source.z <= 1
+            or scalar_semantics.mask_membership_dtype(source.dtype) is None
+        ):
+            raise ValueError("source cannot preserve exact mask membership")
+        plan = self.scalar_plan(path, channel=0, t=0, sampling="nearest")
+        atlas_mod.validate_scalar_plan(plan)
+        exact_regions = _exact_plane_regions(source)
+        profile_zs, profile_regions = scalar_semantics.profile_decode_plan(source)
+        exact_work = _admit_decode_reads(
+            source,
+            ((0, 0, 0, region) for region in exact_regions),
+            expected_read_count=len(exact_regions),
+            label="exact mask plane",
+        )
+        profile_read_count = len(profile_zs) * len(profile_regions)
+        profile_work = _admit_decode_reads(
+            source,
+            ((0, 0, source_z, region) for source_z in profile_zs for region in profile_regions),
+            expected_read_count=profile_read_count,
+            label="scalar histogram",
+            max_work_bytes=scalar_semantics.MAX_PROFILE_DECODE_WORK_BYTES,
+        )
+        nearest_work = atlas_mod.validate_scalar_decoder_admission(plan)
+        nearest_read_count = int(plan["admitted_decode_read_count"])
+        return {
+            "plan": plan,
+            "surfaces": {
+                "exact_plane": {
+                    "admitted_decode_work_bytes": exact_work,
+                    "read_count": len(exact_regions),
+                },
+                "histogram": {
+                    "admitted_decode_work_bytes": profile_work,
+                    "read_count": profile_read_count,
+                },
+                "nearest_volume": {
+                    "admitted_decode_work_bytes": nearest_work,
+                    "read_count": nearest_read_count,
+                },
+            },
+        }
+
+    def _scalar_profile(
+        self, path: str, *, channel: int, t: int, bins: int = 256
+    ) -> dict[str, Any]:
+        source = self._source(path)
+        _require_single_scene(source)
+        channel_index = _axis_index(channel, "channel", source.c)
+        time_index = _axis_index(t, "time", source.t)
+        key = scalar_semantics.profile_cache_key(path, channel_index, time_index, int(bins))
+        cached = self._scalar_profiles.get(key)
+        if cached is not None:
+            return cached
+        profile = scalar_semantics.profile_scalar_volume(
+            source,
+            path,
+            channel=channel_index,
+            t=time_index,
+            bins=int(bins),
+        )
+        self._scalar_profiles[key] = profile
+        return profile
 
     def _channel_signal_scores(self, path: str) -> list[float] | None:
         """Bounded per-channel spatial correlation from one centered mid-Z crop."""
@@ -1026,6 +1615,9 @@ class BioioEngine(_Hdf5EngineMixin):
         colors=None,
         windows=None,
         full_resolution=True,
+        scalar_render_mode="intensity",
+        scalar_threshold_value=None,
+        scalar_threshold_foreground="above",
     ) -> bytes:
         hdf5_png = self._maybe_hdf5_slice(path, z)
         if hdf5_png is not None:
@@ -1034,7 +1626,42 @@ class BioioEngine(_Hdf5EngineMixin):
         _require_single_scene(source)
         time_index = _axis_index(0 if t is None else t, "time", source.t)
         depth_index = _axis_index(0 if z is None else z, "z", source.z)
-        _zero_based(channels, source.c)
+        selected_channels = _zero_based(channels, source.c)
+        mask_mode = str(scalar_render_mode or "intensity").strip().lower() == "mask"
+        if mask_mode:
+            if not isinstance(source, _TiffPlane):
+                raise ValueError("unsupported mask slice for this source decoder")
+            if len(selected_channels) != 1:
+                raise ValueError("mask slice requires exactly one selected channel")
+            if scalar_threshold_foreground != "above":
+                raise ValueError("unsupported mask threshold foreground")
+            try:
+                threshold = float(scalar_threshold_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("mask slice threshold must be finite") from exc
+            if not math.isfinite(threshold):
+                raise ValueError("mask slice threshold must be finite")
+            try:
+                source_itemsize = max(1, self._np.dtype(source.dtype).itemsize)
+                work_bytes = (
+                    int(source.x)
+                    * int(source.y)
+                    * (source_itemsize + self._np.dtype("uint8").itemsize)
+                )
+                if work_bytes > _SCALAR_SOURCE_WORK_MAX_BYTES:
+                    raise ValueError("mask slice exceeds the bounded exact source-read envelope")
+                rendered = self._bounded_mask_plane(
+                    source,
+                    t=time_index,
+                    channel=selected_channels[0],
+                    z=depth_index,
+                    threshold=threshold,
+                )
+                if not full_resolution:
+                    rendered = self._downscale(rendered, SCRUB_MAX_DIMENSION, sampling="nearest")
+                return self._encode_png(rendered)
+            except Exception as exc:  # noqa: BLE001
+                raise _as_decode_error(path, exc) from exc
         lvl = (
             int(level)
             if level is not None
@@ -1232,7 +1859,7 @@ class BioioEngine(_Hdf5EngineMixin):
         except Exception as exc:  # noqa: BLE001
             raise _as_decode_error(path, exc) from exc
 
-    def scalar_plan(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_plan(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         source = self._source(path)
         _require_bounded_volume_source(source)
         channel_index = _exact_index(0 if channel is None else channel, "channel")
@@ -1245,21 +1872,68 @@ class BioioEngine(_Hdf5EngineMixin):
             raise ValueError(
                 f"scalar volume time index {time_index} is out of range for T={source.t}"
             )
+        sampling_mode = str(sampling or "box").strip().lower()
+        if sampling_mode not in {"box", "nearest"}:
+            raise ValueError("unsupported scalar volume sampling")
         dtype, bytes_per_voxel, _canonical_dtype = _scalar_dtype(source.dtype)
-        preview = atlas_mod.plan_scalar_preview(
-            source.x,
-            source.y,
-            max(1, source.z),
-            spacing=(source.spacing_zyx[2], source.spacing_zyx[1], source.spacing_zyx[0]),
+        if (
+            sampling_mode == "nearest"
+            and scalar_semantics.mask_membership_dtype(source.dtype) is None
+        ):
+            raise ValueError(
+                "unsupported nearest scalar sampling: exact Mask integer source required"
+            )
+        preview = (
+            atlas_mod.plan_scalar_mask_native(
+                source.x,
+                source.y,
+                max(1, source.z),
+                dtype=dtype,
+                bytes_per_voxel=bytes_per_voxel,
+            )
+            if sampling_mode == "nearest"
+            else atlas_mod.plan_scalar_preview(
+                source.x,
+                source.y,
+                max(1, source.z),
+                spacing=(
+                    source.spacing_zyx[2],
+                    source.spacing_zyx[1],
+                    source.spacing_zyx[0],
+                ),
+            )
         )
-        return {
+        plan = {
             **preview,
             "dtype": dtype,
             "bytes_per_voxel": bytes_per_voxel,
             "pages": 0,
             "channel": channel_index,
             "t": time_index,
+            "sampling": sampling_mode,
+            "preview_policy": preview["preview_policy"],
         }
+        if plan["preview_policy"] == atlas_mod.SCALAR_MASK_NATIVE_POLICY:
+            generation = getattr(source, "source_generation", None)
+            if generation is None:
+                generation = _source_generation(path)
+            generation = atlas_mod.validate_scalar_source_generation(generation)
+            admitted_work, read_count = _complete_exact_mask_decode_admission(
+                source, plan
+            )
+            plan.update(
+                {
+                    "decode_admission": atlas_mod.SCALAR_DECODE_ADMISSION,
+                    "admitted_decode_work_bytes": admitted_work,
+                    "admitted_decode_read_count": read_count,
+                    "admitted_source_dtype": dtype,
+                    "admitted_source_bytes_per_voxel": bytes_per_voxel,
+                    "source_generation": generation,
+                }
+            )
+            _require_source_generation(path, generation)
+            atlas_mod.validate_scalar_decoder_admission(plan)
+        return plan
 
     def _bounded_scalar_plane(self, source: _Plane, plan: dict[str, Any], output_z: int):
         """BOX-average one delivered plane without materializing a source plane.
@@ -1277,6 +1951,65 @@ class BioioEngine(_Hdf5EngineMixin):
         width = int(plan["width"])
         source_start = output_z * factor_z
         source_end = min(source.z, source_start + factor_z)
+        if plan.get("sampling") == "nearest":
+            source_z = min(
+                source.z - 1,
+                source_start + factor_z // 2,
+            )
+            x_indices = np.minimum(
+                source.x - 1,
+                np.arange(width, dtype="int64") * factor_x + factor_x // 2,
+            )
+            y_indices = np.minimum(
+                source.y - 1,
+                np.arange(height, dtype="int64") * factor_y + factor_y // 2,
+            )
+            output = np.empty((height, width), dtype=source.dtype)
+            source_itemsize = max(1, self._np.dtype(source.dtype).itemsize)
+            max_voxels = max(1, _SOURCE_REGION_MAX_BYTES // source_itemsize)
+            output_x0 = 0
+            while output_x0 < width:
+                output_x1 = output_x0 + 1
+                while (
+                    output_x1 < width
+                    and int(x_indices[output_x1]) - int(x_indices[output_x0]) + 1 <= max_voxels
+                ):
+                    output_x1 += 1
+                selected_x = x_indices[output_x0:output_x1]
+                x0 = int(selected_x[0])
+                x1 = int(selected_x[-1]) + 1
+                source_width = x1 - x0
+                max_source_height = max(1, max_voxels // source_width)
+                output_y0 = 0
+                while output_y0 < height:
+                    output_y1 = output_y0 + 1
+                    while (
+                        output_y1 < height
+                        and int(y_indices[output_y1]) - int(y_indices[output_y0]) + 1
+                        <= max_source_height
+                    ):
+                        output_y1 += 1
+                    selected_y = y_indices[output_y0:output_y1]
+                    y0 = int(selected_y[0])
+                    y1 = int(selected_y[-1]) + 1
+                    raw = np.asarray(
+                        source.read(
+                            t=plan["t"],
+                            c=plan["channel"],
+                            z=source_z,
+                            level=0,
+                            box=(y0, y1, x0, x1),
+                        )
+                    )
+                    if raw.shape != (y1 - y0, x1 - x0) or raw.nbytes > _SOURCE_REGION_MAX_BYTES:
+                        raise ValueError("cannot decode a bounded nearest source region")
+                    output[output_y0:output_y1, output_x0:output_x1] = raw[selected_y - y0][
+                        :, selected_x - x0
+                    ]
+                    output_y0 = output_y1
+                output_x0 = output_x1
+            return output
+
         accumulator = np.zeros((height, width), dtype="float64")
         counts = np.zeros((height, width), dtype="uint32")
 
@@ -1316,26 +2049,172 @@ class BioioEngine(_Hdf5EngineMixin):
             raise ValueError("cannot decode scalar preview with empty delivery cells")
         return accumulator / counts
 
-    def scalar_planes(self, path, *, zs, channel, t, pages):
+    def _bounded_mask_plane(
+        self,
+        source: _Plane,
+        *,
+        t: int,
+        channel: int,
+        z: int,
+        threshold: float,
+    ):
+        """Threshold one exact source plane while bounding every decoder region."""
         np = self._np
+        if scalar_semantics.mask_membership_dtype(source.dtype) is None:
+            raise ValueError("source dtype cannot preserve exact mask membership")
+        canonical_threshold = scalar_semantics.canonical_mask_threshold(threshold, source.dtype)
+        regions = _exact_plane_regions(source)
+        _admit_decode_reads(
+            source,
+            ((t, channel, z, region) for region in regions),
+            expected_read_count=len(regions),
+            label="mask plane",
+        )
+        output = np.empty((int(source.y), int(source.x)), dtype="uint8")
+        for y0, y1, x0, x1 in regions:
+            raw = np.asarray(
+                source.read(
+                    t=t,
+                    c=channel,
+                    z=z,
+                    level=0,
+                    box=(y0, y1, x0, x1),
+                )
+            )
+            if raw.shape != (y1 - y0, x1 - x0) or raw.nbytes > _SOURCE_REGION_MAX_BYTES:
+                raise ValueError("cannot decode a bounded exact mask region")
+            output[y0:y1, x0:x1] = np.where(raw > canonical_threshold, 255, 0)
+        return output
+
+    def scalar_planes(
+        self,
+        path,
+        *,
+        zs,
+        channel,
+        t,
+        pages,
+        sampling="box",
+        plan: dict[str, Any] | None = None,
+    ):
+        np = self._np
+        if plan is None:
+            plan = self.scalar_plan(path, channel=channel, t=t, sampling=sampling)
         source = self._source(path)
-        plan = self.scalar_plan(path, channel=channel, t=t)
+        if str(plan.get("sampling", "box")).strip().lower() == "nearest":
+            atlas_mod.validate_scalar_decoder_admission(plan)
+            generation = _require_source_generation(path, plan.get("source_generation"))
+            source_generation = atlas_mod.validate_scalar_source_generation(
+                getattr(source, "source_generation", None)
+            )
+            if source_generation != generation:
+                raise ValueError(
+                    "exact Mask selected source generation does not match its plan"
+                )
+            source_dtype, source_bytes_per_voxel, _canonical_dtype = _scalar_dtype(
+                source.dtype
+            )
+            plan_channel = _exact_index(plan.get("channel"), "channel")
+            plan_time = _exact_index(plan.get("t"), "time")
+            plan_pages = _exact_index(plan.get("pages"), "pages")
+            worker_channel = _exact_index(channel, "channel")
+            worker_time = _exact_index(t, "time")
+            worker_pages = _exact_index(pages, "pages")
+            if (
+                int(plan["source_width"]) != int(source.x)
+                or int(plan["source_height"]) != int(source.y)
+                or int(plan["source_depth"]) != int(source.z)
+                or plan_channel < 0
+                or plan_channel >= int(source.c)
+                or plan_time < 0
+                or plan_time >= int(source.t)
+                or plan_pages != 0
+                or plan_channel != worker_channel
+                or plan_time != worker_time
+                or plan_pages != worker_pages
+                or str(plan["sampling"]).strip().lower()
+                != str(sampling).strip().lower()
+                or str(plan["dtype"]).strip().lower() != source_dtype
+                or int(plan["bytes_per_voxel"]) != source_bytes_per_voxel
+                or str(plan["admitted_source_dtype"]).strip().lower()
+                != source_dtype
+                or int(plan["admitted_source_bytes_per_voxel"])
+                != source_bytes_per_voxel
+            ):
+                raise ValueError(
+                    "exact Mask worker plan does not match the selected source"
+                )
+            complete_work, complete_read_count = _complete_exact_mask_decode_admission(
+                source, plan
+            )
+            if complete_work != int(plan["admitted_decode_work_bytes"]):
+                raise ValueError("exact Mask decode work does not match its admission plan")
+            if complete_read_count != int(plan["admitted_decode_read_count"]):
+                raise ValueError(
+                    "exact Mask read count does not match its admission plan"
+                )
         _dtype_name, _bytes_per_voxel, canonical_dtype = _scalar_dtype(source.dtype)
+        output_indices = _bounded_output_indices(zs, int(plan["depth"]))
+        if plan["sampling"] == "nearest":
+            regions = _nearest_plane_regions(source, plan)
+            _admit_decode_reads(
+                source,
+                (
+                    (
+                        int(plan["t"]),
+                        int(plan["channel"]),
+                        min(
+                            int(source.z) - 1,
+                            output_z * int(plan["downsample_z"]) + int(plan["downsample_z"]) // 2,
+                        ),
+                        region,
+                    )
+                    for output_z in output_indices
+                    for region in regions
+                ),
+                expected_read_count=len(output_indices) * len(regions),
+                label="nearest scalar volume",
+            )
+        else:
+            regions = _exact_plane_regions(source)
+            factor_z = int(plan["downsample_z"])
+            read_count = sum(
+                min(int(source.z), (output_z + 1) * factor_z) - output_z * factor_z
+                for output_z in output_indices
+            ) * len(regions)
+            _admit_decode_reads(
+                source,
+                (
+                    (
+                        int(plan["t"]),
+                        int(plan["channel"]),
+                        source_z,
+                        region,
+                    )
+                    for output_z in output_indices
+                    for source_z in range(
+                        output_z * factor_z,
+                        min(int(source.z), (output_z + 1) * factor_z),
+                    )
+                    for region in regions
+                ),
+                expected_read_count=read_count,
+                label="box scalar volume",
+            )
         out: list[Any] = []
-        for output_z in zs:
-            output_z = _exact_index(output_z, "z")
-            if output_z < 0 or output_z >= int(plan["depth"]):
-                raise ValueError(f"scalar volume z index {output_z} is out of range")
+        for output_z in output_indices:
             plane = self._bounded_scalar_plane(source, plan, output_z)
             if canonical_dtype.kind in ("u", "i"):
                 limits = np.iinfo(canonical_dtype)
                 plane = np.clip(np.rint(plane), limits.min, limits.max)
             out.append(np.ascontiguousarray(plane, dtype=canonical_dtype))
+        if plan["sampling"] == "nearest":
+            _require_source_generation(path, generation)
         return out
 
-    def scalar_volume(self, path, *, channel=0, t=0) -> dict[str, Any]:
+    def scalar_volume(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         try:
-            plan = self.scalar_plan(path, channel=channel, t=t)
+            plan = self.scalar_plan(path, channel=channel, t=t, sampling=sampling)
             # Validate BEFORE materializing: an over-budget volume must be refused
             # up front, not after allocating hundreds of megabytes.
             atlas_mod.validate_scalar_plan(plan)
@@ -1345,43 +2224,85 @@ class BioioEngine(_Hdf5EngineMixin):
                 channel=plan["channel"],
                 t=plan["t"],
                 pages=plan["pages"],
+                sampling=plan["sampling"],
+                plan=(
+                    plan
+                    if plan["preview_policy"] == atlas_mod.SCALAR_MASK_NATIVE_POLICY
+                    else None
+                ),
             )
             return atlas_mod.build_scalar_volume_dict(planes, plan["channel"], plan)
         except Exception as exc:  # noqa: BLE001
             raise _as_decode_error(path, exc) from exc
 
-    def histogram(self, path, *, bins=256, channels=None, t=0) -> dict[str, Any]:
-        np = self._np
+    def histogram(self, path, *, bins=256, channels=None, t=0, scope="volume") -> dict[str, Any]:
         source = self._source(path)
         _require_single_scene(source)
+        normalized_scope = str(scope).strip().lower()
+        if normalized_scope not in {"display", "volume"}:
+            raise ValueError("unsupported histogram scope")
         time_index = _axis_index(t, "time", source.t)
         zero_based = _zero_based(channels, source.c)
-        lvl = self._level_for_size(source, 1024)
-        height, width = source.level_shapes[lvl]
-        crop_h, crop_w = min(height, 1024), min(width, 1024)
-        y0, x0 = max(0, (height - crop_h) // 2), max(0, (width - crop_w) // 2)
-        try:
-            out = []
-            for c in zero_based:
-                plane = np.asarray(
+        if normalized_scope == "display":
+            level = self._level_for_size(source, _WINDOW_SAMPLE_EDGE)
+            height, width = source.level_shapes[level]
+            crop_h = min(height, _WINDOW_SAMPLE_EDGE)
+            crop_w = min(width, _WINDOW_SAMPLE_EDGE)
+            box = (
+                max(0, (height - crop_h) // 2),
+                max(0, (height - crop_h) // 2) + crop_h,
+                max(0, (width - crop_w) // 2),
+                max(0, (width - crop_w) // 2) + crop_w,
+            )
+            z_index = max(0, source.z // 2)
+            planned_work = [
+                source.estimate_read_work(
+                    t=time_index,
+                    c=channel,
+                    z=z_index,
+                    level=level,
+                    box=box,
+                )
+                for channel in zero_based
+            ]
+            if (
+                any(
+                    isinstance(work, bool) or not isinstance(work, int) or work <= 0
+                    for work in planned_work
+                )
+                or sum(planned_work) > scalar_semantics.MAX_PROFILE_DECODE_WORK_BYTES
+            ):
+                raise ValueError("display histogram decode work exceeds its bounded envelope")
+            samples = [
+                (
+                    channel,
                     source.read(
                         t=time_index,
-                        c=c,
-                        z=max(source.z // 2, 0),
-                        level=lvl,
-                        box=(y0, y0 + crop_h, x0, x0 + crop_w),
-                    )
-                ).astype("float32")
-                counts, edges = np.histogram(plane.reshape(-1), bins=int(bins))
-                out.append(
-                    {
-                        "index": c,
-                        "counts": [int(v) for v in counts],
-                        "min": float(edges[0]),
-                        "max": float(edges[-1]),
-                    }
+                        c=channel,
+                        z=z_index,
+                        level=level,
+                        box=box,
+                    ),
                 )
-            return {"bins": int(bins), "channels": out}
+                for channel in zero_based
+            ]
+            return scalar_semantics.display_histogram(
+                samples,
+                dtype=source.dtype,
+                bins=int(bins),
+                t=time_index,
+                algorithm="bounded-center-plane-v1",
+            )
+        try:
+            profiles = [
+                self._scalar_profile(path, channel=channel, t=time_index, bins=int(bins))
+                for channel in zero_based
+            ]
+            first = profiles[0]
+            return {
+                **first,
+                "channels": [profile["channels"][0] for profile in profiles],
+            }
         except Exception as exc:  # noqa: BLE001
             raise _as_decode_error(path, exc) from exc
 

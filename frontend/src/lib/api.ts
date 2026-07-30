@@ -194,6 +194,26 @@ export class ApiError extends Error {
   }
 }
 
+export type RunSteerMessageRecord = {
+  steer_id: string;
+  run_id: string;
+  thread_id: string;
+  message_id: string;
+  content: string;
+  status: "pending" | "applied" | "missed";
+  created_at: string;
+  applied_at?: string;
+  updated_at: string;
+};
+
+/** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
+export const isSteeringClosedError = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  error.status === 409 &&
+  typeof error.detail === "object" &&
+  error.detail !== null &&
+  (error.detail as { code?: string }).code === "steering_closed";
+
 export class UploadPausedError extends Error {
   readonly sessionId: string;
   readonly fileToken?: string | null;
@@ -224,6 +244,7 @@ export type ScalarVolumePayload = {
   downsampleY: number;
   downsampleZ: number;
   previewPolicy: string;
+  sampling: "box" | "nearest";
   /** NIfTI physical intensity = sclSlope * stored code + sclInter. */
   sclSlope: number;
   sclInter: number;
@@ -232,6 +253,7 @@ export type ScalarVolumePayload = {
 const MAX_SCALAR_VOLUME_BYTES = 256 * 1024 * 1024;
 const MAX_SCALAR_VOLUME_WORKING_SET_BYTES = 256 * 1024 * 1024;
 const SCALAR_HALF_FLOAT_BYTES_PER_VOXEL = 2;
+const SCALAR_RAW_FLOAT_BYTES_PER_VOXEL = 4;
 const SCALAR_DTYPE_BYTES: Readonly<Record<string, number>> = {
   uint8: 1,
   uint16: 2,
@@ -380,6 +402,12 @@ const parseScalarVolumeResponse = async (
   if (!previewPolicy) {
     throw invalidScalarVolumeResponse("invalid x-volume-preview-policy");
   }
+  // Rolling compatibility: older intensity servers omitted this header and used
+  // BOX delivery. Nearest remains fail-closed because mask membership depends on it.
+  const sampling = String(response.headers.get("x-volume-sampling") ?? "").trim() || "box";
+  if (sampling !== "box" && sampling !== "nearest") {
+    throw invalidScalarVolumeResponse("invalid x-volume-sampling");
+  }
   const previewAxes = [
     ["x", sourceWidth, downsampleX, width],
     ["y", sourceHeight, downsampleY, height],
@@ -392,7 +420,23 @@ const parseScalarVolumeResponse = async (
   }
   const voxelCount = width * height * depth;
   const expectedLength = voxelCount * bytesPerVoxel;
-  const stagingLength = voxelCount * SCALAR_HALF_FLOAT_BYTES_PER_VOXEL;
+  const nativeIntegerMaskZeroCopy =
+    previewPolicy === "mask-native-integer-v1" &&
+    sampling === "nearest" &&
+    (dtype === "uint8" || dtype === "uint16" || dtype === "int16") &&
+    width === sourceWidth &&
+    height === sourceHeight &&
+    depth === sourceDepth &&
+    downsampleX === 1 &&
+    downsampleY === 1 &&
+    downsampleZ === 1;
+  const stagingLength =
+    nativeIntegerMaskZeroCopy
+      ? 0
+      : voxelCount *
+        (sampling === "nearest"
+          ? SCALAR_RAW_FLOAT_BYTES_PER_VOXEL
+          : SCALAR_HALF_FLOAT_BYTES_PER_VOXEL);
   const workingSetLength = expectedLength + stagingLength;
   if (
     !Number.isSafeInteger(voxelCount) ||
@@ -410,7 +454,7 @@ const parseScalarVolumeResponse = async (
   }
   if (workingSetLength > MAX_SCALAR_VOLUME_WORKING_SET_BYTES) {
     throw invalidScalarVolumeResponse(
-      `wire plus R16F staging requires ${workingSetLength} bytes, exceeding the ${MAX_SCALAR_VOLUME_WORKING_SET_BYTES} byte working-set limit`
+      `wire plus scalar texture staging requires ${workingSetLength} bytes, exceeding the ${MAX_SCALAR_VOLUME_WORKING_SET_BYTES} byte working-set limit`
     );
   }
   const declaredLengthRaw = response.headers.get("content-length");
@@ -442,6 +486,7 @@ const parseScalarVolumeResponse = async (
     downsampleY,
     downsampleZ,
     previewPolicy,
+    sampling,
   };
 };
 
@@ -893,13 +938,23 @@ const threadMessageToStateMessage = (
   threadId: string,
   conversationId: string,
   fallbackTime: number
-): Record<string, unknown> => ({
-  id: asOptionalString(message.message_id) ?? `${threadId || conversationId}-message-${index}`,
-  role: asOptionalString(message.role) ?? "user",
-  content: asPlainString(message.content),
-  createdAt: asMillis(message.created_at, fallbackTime),
-  runId: asOptionalString(message.run_id) ?? undefined,
-});
+): Record<string, unknown> => {
+  const state: Record<string, unknown> = {
+    id: asOptionalString(message.message_id) ?? `${threadId || conversationId}-message-${index}`,
+    role: asOptionalString(message.role) ?? "user",
+    content: asPlainString(message.content),
+    createdAt: asMillis(message.created_at, fallbackTime),
+    runId: asOptionalString(message.run_id) ?? undefined,
+  };
+  // Steering rows keep their identity through hydration: the transcript shows
+  // "Steered mid-run" instead of a bare user bubble.
+  const metadata = isRecord(message.metadata) ? message.metadata : {};
+  if (asOptionalString(metadata.kind) === "steering") {
+    state.steering = "historic";
+    state.steerId = asOptionalString(metadata.steer_id) ?? undefined;
+  }
+  return state;
+};
 
 const findAssistantPatchIndex = (
   messages: Array<Record<string, unknown>>,
@@ -2053,6 +2108,35 @@ export class ApiClient {
         }),
       }
     );
+  }
+
+  /**
+   * Steer an in-flight run (Phase 1 of double texting): the text is applied
+   * to the RUNNING agent at its next model-call boundary instead of waiting
+   * for the turn to finish. A 409 with code "steering_closed" means the run
+   * is terminal or finalizing — callers fall back to Phase 0 queueing.
+   */
+  async steerRun(
+    runId: string,
+    input: { steerId: string; text: string }
+  ): Promise<RunSteerMessageRecord> {
+    return await this.fetchJson<RunSteerMessageRecord>(
+      `/v2/runs/${encodeURIComponent(runId)}/steer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ steer_id: input.steerId, text: input.text }),
+      }
+    );
+  }
+
+  /** The run's steering messages — used to verify whether a steer POST whose
+   * response was lost actually landed before returning text to the draft. */
+  async listRunSteerMessages(runId: string): Promise<RunSteerMessageRecord[]> {
+    const response = await this.fetchJson<{ steer_messages?: RunSteerMessageRecord[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/steer`
+    );
+    return response.steer_messages ?? [];
   }
 
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
@@ -4561,6 +4645,9 @@ export class ApiClient {
       channelColors?: string[];
       fullResolution?: boolean;
       cacheKey?: string;
+      scalarRenderMode?: "intensity" | "mask";
+      scalarThresholdValue?: number | null;
+      scalarThresholdForeground?: "above";
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -4596,6 +4683,18 @@ export class ApiClient {
     if (typeof indices?.fullResolution === "boolean") {
       params.full_resolution = indices.fullResolution ? "true" : "false";
     }
+    if (indices?.scalarRenderMode) {
+      params.scalar_render_mode = indices.scalarRenderMode;
+    }
+    if (
+      typeof indices?.scalarThresholdValue === "number" &&
+      Number.isFinite(indices.scalarThresholdValue)
+    ) {
+      params.scalar_threshold_value = String(indices.scalarThresholdValue);
+    }
+    if (indices?.scalarThresholdForeground) {
+      params.scalar_threshold_foreground = indices.scalarThresholdForeground;
+    }
     const cacheKey = String(indices?.cacheKey ?? "").trim();
     if (cacheKey) {
       params.cache_key = cacheKey;
@@ -4605,7 +4704,12 @@ export class ApiClient {
 
   async getUploadScalarVolume(
     fileId: string,
-    config?: { t?: number | null; channel?: number | null; signal?: AbortSignal }
+    config?: {
+      t?: number | null;
+      channel?: number | null;
+      sampling?: "box" | "nearest";
+      signal?: AbortSignal;
+    }
   ): Promise<ScalarVolumePayload> {
     const safeFileId = encodeURIComponent(fileId);
     const params: Record<string, string> = {};
@@ -4615,7 +4719,10 @@ export class ApiClient {
     if (config?.channel != null) {
       params.channel = String(requireNonNegativeSafeInteger(config.channel, "channel index"));
     }
-    return this.fetchScalarVolumeWithTimeout(
+    if (config?.sampling) {
+      params.sampling = config.sampling;
+    }
+    const payload = await this.fetchScalarVolumeWithTimeout(
       buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scalar-volume`, params),
       {
         method: "GET",
@@ -4629,6 +4736,13 @@ export class ApiClient {
       120000, // generous: a large volume read is legitimately slow; only a true hang trips it
       "Volume request",
     );
+    const expectedSampling = config?.sampling ?? "box";
+    if (payload.sampling !== expectedSampling) {
+      throw invalidScalarVolumeResponse(
+        `sampling mismatch: requested ${expectedSampling}, received ${payload.sampling}`
+      );
+    }
+    return payload;
   }
 
   uploadTileUrl(
@@ -4705,15 +4819,48 @@ export class ApiClient {
 
   async getUploadHistogram(
     fileId: string,
-    config?: { channels?: number[]; t?: number | null; bins?: number | null }
+    config?: {
+      channel?: number | null;
+      channels?: number[];
+      t?: number | null;
+      bins?: number | null;
+      scope?: "volume";
+      signal?: AbortSignal;
+    }
   ): Promise<UploadViewerHistogramResponse> {
     const safeFileId = encodeURIComponent(fileId);
     const params: Record<string, string> = {};
-    if (Array.isArray(config?.channels) && config.channels.length > 0) {
-      params.channels = config.channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => String(Math.max(0, Math.floor(value))))
-        .join(",");
+    if (config?.scope === "volume") {
+      if (
+        config.channel != null &&
+        Array.isArray(config.channels) &&
+        config.channels.length > 0
+      ) {
+        throw new RangeError(
+          "volume histogram requires one unambiguous channel selector"
+        );
+      }
+      const volumeChannel =
+        config.channel ??
+        (Array.isArray(config.channels) && config.channels.length === 1
+          ? config.channels[0]
+          : null);
+      if (volumeChannel == null) {
+        throw new RangeError("volume histogram requires exactly one channel");
+      }
+      params.channel = String(
+        requireNonNegativeSafeInteger(volumeChannel, "histogram channel")
+      );
+    } else if (config?.channel != null) {
+      params.channel = String(requireNonNegativeSafeInteger(config.channel, "histogram channel"));
+    } else if (Array.isArray(config?.channels) && config.channels.length > 0) {
+      const channels = config.channels.map((channel) =>
+        requireNonNegativeSafeInteger(channel, "histogram channel")
+      );
+      if (new Set(channels).size !== channels.length) {
+        throw new RangeError("histogram channels must not contain duplicates");
+      }
+      params.channels = channels.join(",");
     }
     if (typeof config?.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
@@ -4721,9 +4868,17 @@ export class ApiClient {
     if (typeof config?.bins === "number" && Number.isFinite(config.bins)) {
       params.bins = String(Math.max(8, Math.floor(config.bins)));
     }
+    if (config?.scope) {
+      params.scope = config.scope;
+    }
     const response = await this.fetchWithTimeout(
       buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/histogram`, params),
-      { method: "GET", headers: this.headers(), credentials: "include" },
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: config?.signal,
+      },
       30000,
       "Histogram request",
     );

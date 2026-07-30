@@ -19,6 +19,11 @@ export type ScalarVolumeWindow = {
   invert: boolean;
 };
 
+export const SCALAR_MASK_NATIVE_POLICY = "mask-native-integer-v1";
+export const SCALAR_MASK_MAX_AXIS = 1024;
+export const SCALAR_MASK_MAX_DDA_STEPS = 2048;
+export const SCALAR_MASK_MAX_BYTES = 128 * 1024 * 1024;
+
 export type ScalarVolumeDataPayload = Pick<
   ScalarVolumePayload,
   | "data"
@@ -34,13 +39,143 @@ export type ScalarVolumeDataPayload = Pick<
   | "sclInter"
 >;
 
+export type PreparedScalarVolumeTextureEncoding =
+  | "normalized-half"
+  | "raw-float"
+  | "raw-uint8"
+  | "raw-uint16"
+  | "raw-int16";
+
+export type ScalarVolumePreparationEncoding =
+  | "normalized-half"
+  | "raw-float"
+  | "raw-integer";
+
 export type PreparedScalarVolume = Omit<ScalarVolumePayload, "data"> & {
-  textureData: Uint16Array;
+  textureData: Uint8Array | Uint16Array | Int16Array | Float32Array;
+  textureEncoding: PreparedScalarVolumeTextureEncoding;
   autoWindow: { low: number; high: number };
 };
 
 export const MAX_PREPARED_SCALAR_VOLUME_CACHE_BYTES = 128 * 1024 * 1024;
 export const MAX_ACTIVE_SCALAR_VOLUME_GPU_BYTES = 128 * 1024 * 1024;
+
+const EXACT_MASK_DTYPES = new Map([
+  ["uint8", 1],
+  ["uint16", 2],
+  ["int16", 2],
+] as const);
+
+export const validateExactMaskSourcePreflight = ({
+  sourceGrid,
+  dtype,
+  max3DTextureSize,
+}: {
+  sourceGrid: { width: number; height: number; depth: number };
+  dtype: string;
+  max3DTextureSize: number;
+}): number => {
+  const normalizedDtype = String(dtype).trim().toLowerCase();
+  const bytesPerVoxel = EXACT_MASK_DTYPES.get(
+    normalizedDtype as "uint8" | "uint16" | "int16"
+  );
+  if (!bytesPerVoxel) {
+    throw new RangeError("Exact Mask rendering requires an integer uint8, uint16, or int16 source.");
+  }
+  const dimensions = [sourceGrid.width, sourceGrid.height, sourceGrid.depth];
+  if (dimensions.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
+    throw new RangeError("Exact Mask source grid must contain positive safe integers.");
+  }
+  const largestDimension = Math.max(...dimensions);
+  const effectiveAxisLimit =
+    Number.isFinite(max3DTextureSize) && max3DTextureSize > 0
+      ? Math.min(SCALAR_MASK_MAX_AXIS, max3DTextureSize)
+      : SCALAR_MASK_MAX_AXIS;
+  if (largestDimension > effectiveAxisLimit) {
+    throw new RangeError(
+      `Exact Mask source grid exceeds the supported 3D texture/traversal limit (${largestDimension} > ${effectiveAxisLimit}).`
+    );
+  }
+  const traversalCrossings =
+    sourceGrid.width + sourceGrid.height + sourceGrid.depth;
+  if (
+    !Number.isSafeInteger(traversalCrossings) ||
+    traversalCrossings > SCALAR_MASK_MAX_DDA_STEPS
+  ) {
+    throw new RangeError(
+      `Exact Mask source grid exceeds the DDA traversal limit (${traversalCrossings} > ${SCALAR_MASK_MAX_DDA_STEPS}).`
+    );
+  }
+  const bytes = preparedScalarVolumeByteLength(sourceGrid, bytesPerVoxel);
+  if (bytes > SCALAR_MASK_MAX_BYTES) {
+    throw new RangeError(
+      `Exact Mask source requires ${bytes} bytes, exceeding the ${SCALAR_MASK_MAX_BYTES} byte limit.`
+    );
+  }
+  return bytes;
+};
+
+export const validateExactMaskVolume = (
+  volume: Pick<
+    ScalarVolumePayload,
+    | "width"
+    | "height"
+    | "depth"
+    | "sourceWidth"
+    | "sourceHeight"
+    | "sourceDepth"
+    | "downsampleX"
+    | "downsampleY"
+    | "downsampleZ"
+    | "previewPolicy"
+    | "sampling"
+    | "dtype"
+    | "bytesPerVoxel"
+  > & { textureData?: ArrayBufferView },
+  {
+    sourceGrid,
+    dtype,
+    max3DTextureSize,
+  }: {
+    sourceGrid: { width: number; height: number; depth: number };
+    dtype: string;
+    max3DTextureSize: number;
+  }
+): void => {
+  const expectedBytes = validateExactMaskSourcePreflight({
+    sourceGrid,
+    dtype,
+    max3DTextureSize,
+  });
+  if (
+    volume.previewPolicy !== SCALAR_MASK_NATIVE_POLICY ||
+    volume.sampling !== "nearest" ||
+    volume.width !== sourceGrid.width ||
+    volume.height !== sourceGrid.height ||
+    volume.depth !== sourceGrid.depth ||
+    volume.sourceWidth !== sourceGrid.width ||
+    volume.sourceHeight !== sourceGrid.height ||
+    volume.sourceDepth !== sourceGrid.depth ||
+    volume.downsampleX !== 1 ||
+    volume.downsampleY !== 1 ||
+    volume.downsampleZ !== 1
+  ) {
+    throw new RangeError("Exact Mask volume must preserve the native integer grid with nearest sampling.");
+  }
+  const expectedDtype = String(dtype).trim().toLowerCase();
+  if (String(volume.dtype).trim().toLowerCase() !== expectedDtype) {
+    throw new RangeError("Exact Mask volume dtype does not match its advertised capability.");
+  }
+  const bytesPerVoxel = EXACT_MASK_DTYPES.get(
+    expectedDtype as "uint8" | "uint16" | "int16"
+  );
+  if (volume.bytesPerVoxel !== bytesPerVoxel) {
+    throw new RangeError("Exact Mask volume byte width does not match its integer dtype.");
+  }
+  if (volume.textureData && volume.textureData.byteLength !== expectedBytes) {
+    throw new RangeError("Exact Mask prepared texture does not match its native-grid byte size.");
+  }
+};
 
 const apiClientNamespaceIds = new WeakMap<object, number>();
 let nextApiClientNamespaceId = 1;
@@ -107,12 +242,16 @@ export const preparedScalarVolumeByteLength = (grid: {
   width: number;
   height: number;
   depth: number;
-}): number => {
+}, bytesPerPreparedVoxel = Uint16Array.BYTES_PER_ELEMENT): number => {
   const width = checkedPositiveSafeInteger(grid.width, "Scalar volume width");
   const height = checkedPositiveSafeInteger(grid.height, "Scalar volume height");
   const depth = checkedPositiveSafeInteger(grid.depth, "Scalar volume depth");
   const voxelCount = width * height * depth;
-  const bytes = voxelCount * Uint16Array.BYTES_PER_ELEMENT;
+  const preparedBytes = checkedPositiveSafeInteger(
+    bytesPerPreparedVoxel,
+    "Scalar volume prepared bytes per voxel"
+  );
+  const bytes = voxelCount * preparedBytes;
   if (!Number.isSafeInteger(voxelCount) || !Number.isSafeInteger(bytes)) {
     throw new RangeError("Scalar volume prepared geometry overflows safe integer bounds.");
   }
@@ -446,6 +585,19 @@ export const validateScalarVolumeIdentity = (
   ) {
     throw new RangeError("Scalar volume delivered grid does not match its preview provenance.");
   }
+  if (
+    payload.previewPolicy === SCALAR_MASK_NATIVE_POLICY &&
+    (
+      payload.downsampleX !== 1 ||
+      payload.downsampleY !== 1 ||
+      payload.downsampleZ !== 1 ||
+      payload.width !== payload.sourceWidth ||
+      payload.height !== payload.sourceHeight ||
+      payload.depth !== payload.sourceDepth
+    )
+  ) {
+    throw new RangeError("Exact Mask volume delivery must preserve the native source grid.");
+  }
 };
 
 export const resolveScalarVolumeRescale = (
@@ -506,16 +658,19 @@ const scalarVolumeSampleValue = (view: DataView, offset: number, payload: Scalar
     payload.bytesPerVoxel,
     "Scalar volume bytes per voxel"
   );
-  if (dtype === "float32" || bytesPerVoxel === 4) {
+  if (dtype === "float32" && bytesPerVoxel === 4) {
     return view.getFloat32(offset, true);
   }
-  if (dtype === "int16") {
+  if (dtype === "int16" && bytesPerVoxel === 2) {
     return view.getInt16(offset, true);
   }
-  if (dtype === "uint16" || bytesPerVoxel === 2) {
+  if (dtype === "uint16" && bytesPerVoxel === 2) {
     return view.getUint16(offset, true);
   }
-  return view.getUint8(offset);
+  if (dtype === "uint8" && bytesPerVoxel === 1) {
+    return view.getUint8(offset);
+  }
+  throw new RangeError(`Scalar volume dtype ${dtype}/${bytesPerVoxel} is not exactly representable for rendering.`);
 };
 
 export const scalarVolumePayloadValueAt = (
@@ -777,12 +932,114 @@ export const scalarVolumePayloadToHalfFloatAsync = async (
   return output;
 };
 
+export const scalarVolumePayloadToRawFloat32 = (
+  payload: ScalarVolumeDataPayload
+): Float32Array => {
+  const bytesPerVoxel = checkedPositiveSafeInteger(
+    payload.bytesPerVoxel,
+    "Scalar volume bytes per voxel"
+  );
+  const output = new Float32Array(scalarVolumeOutputLength(payload));
+  const view = new DataView(payload.data);
+  for (let voxelIndex = 0; voxelIndex < output.length; voxelIndex += 1) {
+    const value = scalarVolumeSampleValue(view, voxelIndex * bytesPerVoxel, payload);
+    if (!Number.isFinite(value)) {
+      throw new RangeError("Mask volume contains a non-finite raw sample.");
+    }
+    output[voxelIndex] = value;
+  }
+  return output;
+};
+
+export const scalarVolumePayloadToRawInteger = (
+  payload: ScalarVolumeDataPayload
+): Uint8Array | Uint16Array | Int16Array => {
+  const voxelCount = scalarVolumeOutputLength(payload);
+  const dtype = String(payload.dtype ?? "").trim().toLowerCase();
+  const bytesPerVoxel = checkedPositiveSafeInteger(
+    payload.bytesPerVoxel,
+    "Scalar volume bytes per voxel"
+  );
+  const littleEndian = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+  if (!littleEndian) {
+    throw new RangeError("Exact integer Mask textures require a little-endian browser.");
+  }
+  if (dtype === "uint8" && bytesPerVoxel === 1) {
+    return new Uint8Array(payload.data, 0, voxelCount);
+  }
+  if (dtype === "uint16" && bytesPerVoxel === 2) {
+    return new Uint16Array(payload.data, 0, voxelCount);
+  }
+  if (dtype === "int16" && bytesPerVoxel === 2) {
+    return new Int16Array(payload.data, 0, voxelCount);
+  }
+  throw new RangeError(
+    `Scalar Mask dtype ${dtype}/${bytesPerVoxel} cannot be uploaded as an exact integer texture.`
+  );
+};
+
+export const scalarVolumePayloadToRawFloat32Async = async (
+  payload: ScalarVolumeDataPayload,
+  signal?: AbortSignal,
+  chunkVoxels = 262_144
+): Promise<Float32Array> => {
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new DOMException("The volume conversion was aborted.", "AbortError");
+    }
+  };
+  throwIfAborted();
+  const bytesPerVoxel = checkedPositiveSafeInteger(
+    payload.bytesPerVoxel,
+    "Scalar volume bytes per voxel"
+  );
+  const output = new Float32Array(scalarVolumeOutputLength(payload));
+  const view = new DataView(payload.data);
+  const safeChunk = Math.max(1, Math.floor(Number(chunkVoxels) || 1));
+  for (let chunkStart = 0; chunkStart < output.length; chunkStart += safeChunk) {
+    const chunkEnd = Math.min(output.length, chunkStart + safeChunk);
+    for (let voxelIndex = chunkStart; voxelIndex < chunkEnd; voxelIndex += 1) {
+      const value = scalarVolumeSampleValue(view, voxelIndex * bytesPerVoxel, payload);
+      if (!Number.isFinite(value)) {
+        throw new RangeError("Mask volume contains a non-finite raw sample.");
+      }
+      output[voxelIndex] = value;
+    }
+    throwIfAborted();
+    if (chunkEnd < output.length) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+      throwIfAborted();
+    }
+  }
+  return output;
+};
+
 export const prepareScalarVolume = async (
   payload: ScalarVolumePayload,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  requestedEncoding: ScalarVolumePreparationEncoding = "normalized-half"
 ): Promise<PreparedScalarVolume> => {
-  const autoWindow = computeScalarVolumeAutoContrast(payload);
-  const textureData = await scalarVolumePayloadToHalfFloatAsync(payload, signal);
+  if (signal?.aborted) {
+    throw new DOMException("The volume conversion was aborted.", "AbortError");
+  }
+  const textureData =
+    requestedEncoding === "raw-integer"
+      ? scalarVolumePayloadToRawInteger(payload)
+      : requestedEncoding === "raw-float"
+        ? await scalarVolumePayloadToRawFloat32Async(payload, signal)
+        : await scalarVolumePayloadToHalfFloatAsync(payload, signal);
+  const textureEncoding: PreparedScalarVolumeTextureEncoding =
+    requestedEncoding !== "raw-integer"
+      ? requestedEncoding
+      : textureData instanceof Uint8Array
+        ? "raw-uint8"
+        : textureData instanceof Int16Array
+          ? "raw-int16"
+          : "raw-uint16";
+  const autoWindow =
+    requestedEncoding === "raw-integer"
+      ? { low: 0, high: 1 }
+      : computeScalarVolumeAutoContrast(payload);
   return {
     width: payload.width,
     height: payload.height,
@@ -800,9 +1057,11 @@ export const prepareScalarVolume = async (
     downsampleY: payload.downsampleY,
     downsampleZ: payload.downsampleZ,
     previewPolicy: payload.previewPolicy,
+    sampling: payload.sampling,
     sclSlope: payload.sclSlope,
     sclInter: payload.sclInter,
     textureData,
+    textureEncoding,
     autoWindow,
   };
 };

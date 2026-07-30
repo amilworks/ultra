@@ -10612,6 +10612,263 @@ details {
   background: color-mix(in oklab, var(--destructive) 10%, transparent);
 }
 
+/* Ask-about-selection chip: floats above a transcript selection and quotes it
+   into the composer. Quiet by design — muted ink on the panel surface, the
+   house raised-hover, no colour. It is an offer, not an announcement.
+
+   The lift rides a custom property because the base transform already carries
+   the centring translate: hover raises --selection-ask-lift instead of
+   re-declaring (and breaking) translate(-50%, -100%). */
+.chat-selection-ask {
+  --selection-ask-lift: 0px;
+  position: fixed;
+  /* Below every Radix overlay (dialogs, sheets, menus are z-50): the chip only
+     needs to clear in-transcript stacking, and must never float over a modal. */
+  z-index: 40;
+  transform: translate(-50%, calc(-100% - 8px - var(--selection-ask-lift)));
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-panel-strong);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  box-shadow: 0 6px 16px rgba(12, 12, 12, 0.1);
+  animation: chat-selection-ask-in 160ms var(--motion-ease);
+  transition:
+    color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease),
+    transform 160ms var(--motion-ease);
+}
+
+.chat-selection-ask:hover {
+  --selection-ask-lift: 1px;
+  color: var(--text-main);
+  border-color: color-mix(in oklab, var(--text-main) 18%, var(--line));
+  box-shadow: 0 8px 20px rgba(12, 12, 12, 0.14);
+}
+
+.chat-selection-ask:active {
+  --selection-ask-lift: 0px;
+}
+
+.chat-selection-ask:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 42%, transparent);
+  outline-offset: 2px;
+  color: var(--text-main);
+}
+
+.dark .chat-selection-ask {
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
+}
+
+.dark .chat-selection-ask:hover {
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes chat-selection-ask-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-selection-ask {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* KaTeX renders math twice — visible HTML plus an accessibility MathML layer —
+   and a DOM selection captures BOTH, so quoting a selected formula garbled it
+   doubled (review finding). Selection sticks to the visible layer only; screen
+   readers still see the MathML, which does not depend on selectability. */
+.katex-mathml {
+  user-select: none;
+}
+
+/* Queued follow-up ("send when this run finishes"): a user-bubble-shaped card
+   at reduced presence — real ink, but visibly not yet part of the record. The
+   eyebrow states the contract; the × un-queues back to the composer. */
+.chat-queued-followup {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.chat-queued-followup-bubble {
+  max-width: 88%;
+  border: 1px solid var(--line);
+  /* The user bubble's radius, so dispatch reads as the SAME object being
+     promoted into the record rather than morphing into a different one. */
+  border-radius: 1.5rem;
+  /* A visible SURFACE, not a wash: panel-strong is white in light theme, where
+     a transparent mix rendered the bubble nearly invisible (caught in a live
+     screenshot). The reduced presence lives in the TEXT opacity instead. */
+  background: color-mix(in oklab, var(--bg-panel-strong) 92%, var(--text-main) 8%);
+  padding: 8px 12px 12px 16px;
+  animation: chat-selection-ask-in 160ms var(--motion-ease);
+}
+
+.dark .chat-queued-followup-bubble {
+  background: color-mix(in oklab, var(--bg-panel-strong) 86%, var(--text-main) 14%);
+}
+
+.chat-queued-followup-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 2px;
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  /* Deepened past --text-muted: on this ink-mixed surface plain muted measured
+     3.94:1 in light theme — under WCAG AA for text this small. This mix lands
+     ~5.1:1 light and only improves dark. */
+  color: color-mix(in oklab, var(--text-muted) 72%, var(--text-main) 28%);
+}
+
+.chat-queued-followup-eyebrow .chat-message-action {
+  width: 26px;
+  height: 26px;
+}
+
+.chat-queued-followup-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-main);
+  opacity: 0.82;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-queued-followup-bubble {
+    animation: none;
+  }
+}
+
+/* ⌘F find bar: the slim composer's sibling. A centered stadium pill floating
+   at the top of the transcript — same surface, same hairline, same radius
+   grammar as the idle composer, so it reads as part of the family rather than
+   an afterthought pinned to a corner. Anchored to the non-scrolling chat
+   wrapper (the scroll container would carry it away with the content). */
+.chat-find-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  /* The pill yields to the pane, not the reverse — measured 428px wide with a
+     three-digit count, which clipped a 375px viewport. */
+  max-width: calc(100% - 24px);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 44px;
+  padding: 0 6px 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-panel-strong);
+  box-shadow: 0 10px 28px rgba(12, 12, 12, 0.12);
+  animation: chat-selection-ask-in 160ms var(--motion-ease);
+  transition: border-color 160ms var(--motion-ease);
+}
+
+/* Focus lives on the pill's border — the composer's grammar — never on a ring
+   around the input. The shadow deepens one step alongside it: the review
+   measured the border shift alone at 1.46:1 focused-vs-not, too subtle to
+   locate the keyboard. */
+.chat-find-bar:focus-within {
+  border-color: color-mix(in oklab, var(--line) 40%, var(--text-muted) 60%);
+  box-shadow: 0 12px 32px rgba(12, 12, 12, 0.16);
+}
+
+.dark .chat-find-bar:focus-within {
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+}
+
+.dark .chat-find-bar {
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+
+.chat-find-icon {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.chat-find-bar input {
+  flex: 1 1 220px;
+  min-width: 72px;
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 0 10px 0 8px;
+  font-size: 0.85rem;
+  color: var(--text-main);
+}
+
+/* Kill every focus treatment the browser or a global reset might paint on the
+   inner input — the review screenshot showed a stray blue UA ring here. The
+   pill's :focus-within border above is the one and only focus signal. */
+.chat-find-bar input:focus,
+.chat-find-bar input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.chat-find-bar input::placeholder {
+  color: var(--text-muted);
+}
+
+/* Ticks while navigating — tabular figures keep the pill from reflowing. A
+   hairline separates data from controls. */
+.chat-find-count {
+  margin-left: 6px;
+  padding: 0 10px;
+  border-left: 1px solid var(--line);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-find-bar {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* Find highlights ride the CSS Custom Highlight API — pure paint, no DOM
+   mutation, so streaming re-renders can never orphan a wrapper span. The tint
+   reuses the code-selection precedent (color-mix over --brand): a find match
+   IS data meaning, which is what the colour budget is reserved for. */
+::highlight(ultra-find-match) {
+  background-color: color-mix(in oklab, var(--brand) 20%, transparent);
+}
+
+::highlight(ultra-find-current) {
+  background-color: color-mix(in oklab, var(--brand) 45%, transparent);
+  color: var(--text-main);
+}
+
+/* Dark theme runs a lighter wash: --brand IS the ink colour in this palette,
+   so at 45% over the dark panel the current match's own text fell to ~4.3:1 —
+   under WCAG AA. 32% measures ~6:1. (The current range is also excluded from
+   the match set in code, so the two tints can never stack.) */
+.dark ::highlight(ultra-find-current) {
+  background-color: color-mix(in oklab, var(--brand) 32%, transparent);
+}
+
 .pk-markdown {
   display: flex;
   flex-direction: column;

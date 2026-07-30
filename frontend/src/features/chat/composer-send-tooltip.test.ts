@@ -37,8 +37,11 @@ describe("composer send tooltip contract", () => {
   });
 
   it("wraps only enabled send with the existing asChild tooltip primitive", () => {
+    // The running branch now opens a fragment: an optional ghost Queue action
+    // renders BEFORE Stop (left of it), and Stop keeps its anchored slot,
+    // aria-label and title. The idle branch is unchanged.
     expect(appSource).toMatch(
-      /\{activeSending \? \(\s*<Button[\s\S]*?aria-label="Stop response"[\s\S]*?title="Stop response"[\s\S]*?\) : \(\s*<PromptInputAction/
+      /\{activeSending \? \(\s*<>[\s\S]*?aria-label="Queue follow-up"[\s\S]*?aria-label="Stop response"[\s\S]*?title="Stop response"[\s\S]*?<\/>\s*\) : \(\s*<PromptInputAction/
     );
     expect(appSource).toMatch(
       /<PromptInputAction[\s\S]*?disabled=\{composerSubmitDisabled\}[\s\S]*?side="top"[\s\S]*?sideOffset=\{8\}[\s\S]*?delayDuration=\{350\}[\s\S]*?className="app-composer-submit-tooltip"/

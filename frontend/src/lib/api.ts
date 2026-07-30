@@ -853,6 +853,36 @@ const isActiveV2RunStatus = (status: unknown): boolean => {
   );
 };
 
+/**
+ * Runs the user deliberately removed, so hydration stops resurrecting them.
+ *
+ * Deleting or editing away the most recent turn leaves the saved state with no
+ * assistant message carrying `thread.latest_run_id` — which is exactly the
+ * condition reconciliation treats as "the snapshot is stale, refetch the run".
+ * It then pushes the deleted answer back from `control_runs.response_text`, so
+ * the message reappears on the next load and the delete looks broken.
+ *
+ * Capped, because this rides along in thread metadata on every snapshot write.
+ * Oldest ids fall off first; losing an ancient tombstone is harmless, since the
+ * run it names is long past being `latest_run_id`.
+ */
+const DELETED_RUN_ID_LIMIT = 200;
+
+export const readDeletedRunIds = (state: Record<string, unknown>): string[] => {
+  const raw = state.deletedRunIds;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  for (const entry of raw) {
+    const id = asOptionalString(entry);
+    if (id) {
+      seen.add(id);
+    }
+  }
+  return [...seen].slice(-DELETED_RUN_ID_LIMIT);
+};
+
 const frontendStateNeedsV2RunReconciliation = (
   thread: Record<string, unknown>,
   state: Record<string, unknown>
@@ -860,6 +890,12 @@ const frontendStateNeedsV2RunReconciliation = (
   const latestRunId = asOptionalString(thread.latest_run_id);
   if (!latestRunId) {
     return Boolean(state.sending) || Boolean(asOptionalString(state.streamingMessageId));
+  }
+
+  // The user removed this turn on purpose. Its absence is the intended state,
+  // not a stale snapshot to be repaired.
+  if (readDeletedRunIds(state).includes(latestRunId)) {
+    return false;
   }
 
   const messages = stateMessagesFromState(state);
@@ -1423,7 +1459,13 @@ export class ApiClient {
     const latestAssistantText =
       latestRunResponseText ?? asOptionalString(durableLatestAssistant?.content) ?? "";
 
-    if (latestRunId) {
+    // A tombstoned run must not be rebuilt from the durable transcript. This
+    // guard matters more than the one in the gate above: findAssistantPatchIndex
+    // falls back to "last assistant with no runId", so without it the deleted
+    // answer can be written over an unrelated surviving message rather than
+    // merely reappearing.
+    const tombstonedRunIds = readDeletedRunIds(existingState);
+    if (latestRunId && !tombstonedRunIds.includes(latestRunId)) {
       if (!stateMessages.some((message) => stateMessageRole(message) === "assistant" && stateMessageRunId(message) === latestRunId)) {
         const patchIndex = findAssistantPatchIndex(stateMessages, latestRunId);
         const createdAt = asMillis(

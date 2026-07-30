@@ -1231,7 +1231,7 @@ func TestV2ThreadUpsertIsTenantScopedAndPersistsManualTitleState(t *testing.T) {
 	}
 }
 
-func TestV2ThreadDeleteSoftDeletesAndHidesFromUserHistory(t *testing.T) {
+func TestV2ThreadDeleteErasesThreadAndTranscript(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -1287,6 +1287,14 @@ func TestV2ThreadDeleteSoftDeletesAndHidesFromUserHistory(t *testing.T) {
 		t.Fatalf("get deleted status = %d body=%s, want 404", getRec.Code, getRec.Body.String())
 	}
 
+	// This block used to assert the OPPOSITE — that ?status=deleted returns the
+	// deleted thread. That assertion was the proof the product was concealing
+	// rather than erasing: the row survived with the whole transcript in
+	// metadata.frontend_state, and its owner could read it straight back over
+	// the authenticated API.
+	//
+	// Delete is now true erasure, so there is nothing to list. If this ever goes
+	// back to returning a row, the dialog is lying again.
 	deletedReq := httptest.NewRequest(http.MethodGet, "/v2/threads?status=deleted&limit=20", nil)
 	deletedReq.Header.Set("X-Ultra-User-Id", "alice")
 	deletedRec := httptest.NewRecorder()
@@ -1298,8 +1306,17 @@ func TestV2ThreadDeleteSoftDeletesAndHidesFromUserHistory(t *testing.T) {
 	if err := json.Unmarshal(deletedRec.Body.Bytes(), &deletedList); err != nil {
 		t.Fatalf("decode deleted list: %v", err)
 	}
-	if deletedList.TotalCount != 1 || len(deletedList.Threads) != 1 || deletedList.Threads[0].Status != domain.ThreadStatusDeleted {
-		t.Fatalf("deleted threads = %+v, want one deleted thread", deletedList.Threads)
+	if deletedList.TotalCount != 0 || len(deletedList.Threads) != 0 {
+		t.Fatalf("deleted threads = %+v, want none — delete must erase, not conceal", deletedList.Threads)
+	}
+
+	// The transcript itself must be unreachable too, not merely unlisted.
+	messagesReq := httptest.NewRequest(http.MethodGet, "/v2/threads/"+thread.ThreadID+"/messages", nil)
+	messagesReq.Header.Set("X-Ultra-User-Id", "alice")
+	messagesRec := httptest.NewRecorder()
+	router.ServeHTTP(messagesRec, messagesReq)
+	if messagesRec.Code == http.StatusOK && strings.Contains(messagesRec.Body.String(), "Segment") {
+		t.Fatalf("transcript still readable after delete: %s", messagesRec.Body.String())
 	}
 }
 

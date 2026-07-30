@@ -1051,6 +1051,200 @@ SET title = COALESCE(NULLIF($3, ''), title),
 	return threadFromRow(thread), nil
 }
 
+// HardDeleteThreadForUser permanently removes a conversation and everything
+// derived from it. There is no undo.
+//
+// This exists because the product promised erasure and performed concealment:
+// the old path ran `UPDATE control_threads SET status='deleted'`, so not one row
+// was removed, the schema's ON DELETE CASCADE chains never fired, and the whole
+// transcript stayed readable in control_threads.metadata.frontend_state.
+//
+// The cascades were already declared and correct — they were simply unreachable.
+// Deleting the thread row now does most of the work:
+//
+//	control_threads
+//	  └─ control_thread_messages   (schema.sql:85)
+//	  └─ control_runs              (schema.sql:95)
+//	       └─ run event sequences  (schema.sql:127)
+//	       └─ control_run_events   (schema.sql:135)
+//	       └─ run leases           (schema.sql:170)
+//	       └─ control_artifacts    (schema.sql:193)
+//
+// Two things the cascades cannot reach, and why they are handled explicitly:
+//
+//  1. control_run_token_usage and control_run_token_usage_finalized key on
+//     run_id with NO foreign key, so they would survive as orphans. They are
+//     deleted here by run id, collected before the parent row goes.
+//  2. Artifact blobs live outside Postgres behind control_artifacts.storage_uri.
+//     The rows cascade; the bytes do not. The URIs are returned so the caller
+//     can unlink them after the transaction commits — deliberately outside the
+//     tx, because a blob-store failure must not roll back a deletion the user
+//     has already been told is permanent.
+//
+// Deliberately NOT touched: control_resources. Uploaded files are independent of
+// conversations by design (no thread FK) and have their own hard-delete path in
+// PurgeResource. Deleting a conversation must never delete the user's data.
+//
+// deepagents_checkpoint_threads is owned by the Python runtime, which already
+// deletes on terminal ack and GCs at 72h; it is not reachable from this pool's
+// schema and is left to that owner.
+func (s *PostgresStore) HardDeleteThreadForUser(ctx context.Context, threadID string, userID string) ([]string, error) {
+	threadID = strings.TrimSpace(threadID)
+	userID = strings.TrimSpace(userID)
+	if threadID == "" || userID == "" {
+		return nil, ErrNotFound
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Ownership is asserted here, before anything is removed, so a mismatched
+	// user can never cause a partial delete.
+	var owned string
+	if err := tx.QueryRow(ctx,
+		`SELECT thread_id FROM control_threads WHERE thread_id = $1 AND user_id = $2 FOR UPDATE`,
+		threadID, userID,
+	).Scan(&owned); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, mapPgError(err)
+	}
+
+	// Collect before deleting: after the cascade these rows are gone.
+	runRows, err := tx.Query(ctx, `SELECT run_id FROM control_runs WHERE thread_id = $1`, threadID)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	runIDs := make([]string, 0, 8)
+	for runRows.Next() {
+		var id string
+		if err := runRows.Scan(&id); err != nil {
+			runRows.Close()
+			return nil, mapPgError(err)
+		}
+		runIDs = append(runIDs, id)
+	}
+	runRows.Close()
+	if err := runRows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	blobRows, err := tx.Query(ctx,
+		`SELECT COALESCE(storage_uri, '') FROM control_artifacts WHERE thread_id = $1 OR run_id = ANY($2::text[])`,
+		threadID, runIDs,
+	)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	storageURIs := make([]string, 0, 8)
+	for blobRows.Next() {
+		var uri string
+		if err := blobRows.Scan(&uri); err != nil {
+			blobRows.Close()
+			return nil, mapPgError(err)
+		}
+		if uri = strings.TrimSpace(uri); uri != "" {
+			storageURIs = append(storageURIs, uri)
+		}
+	}
+	blobRows.Close()
+	if err := blobRows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	// Tables with NO foreign key at all. Nothing in the catalog points at these,
+	// so they cannot be discovered below — they must be listed. They key on
+	// run_id and would simply be orphaned, invisibly.
+	if len(runIDs) > 0 {
+		for _, table := range []string{"control_run_token_usage", "control_run_token_usage_finalized"} {
+			// Fixed identifiers from a literal slice, never user input.
+			if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE run_id = ANY($1::text[])`, runIDs); err != nil {
+				return nil, mapPgError(err)
+			}
+		}
+	}
+
+	// Tables that DO reference us but without ON DELETE CASCADE. These are worse
+	// than orphans: a NO ACTION foreign key makes Postgres raise on the parent
+	// delete, so the transaction aborts and the user's delete fails outright.
+	//
+	// Discovered from the catalog rather than hardcoded, because the set is not
+	// knowable from the checked-in schema and differs per deployment. schema.sql
+	// declares none of them; the local compose database has two
+	// (control_run_specs, control_calphad_validation_events) while the real
+	// application database has nine, including several control_ultra_admission_*
+	// tables that reference threads by thread_id rather than runs by run_id. A
+	// hardcoded list was wrong the moment it was written and would rot again.
+	//
+	// Identifiers come from pg_class/pg_attribute — the catalog, never user
+	// input — and are quoted with quote_ident before interpolation.
+	refRows, err := tx.Query(ctx, `
+SELECT quote_ident(src.relname), quote_ident(a.attname), tgt.relname
+FROM pg_constraint c
+JOIN pg_class src ON src.oid = c.conrelid
+JOIN pg_class tgt ON tgt.oid = c.confrelid
+JOIN unnest(c.conkey) AS k(attnum) ON true
+JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+WHERE c.contype = 'f'
+  AND tgt.relname IN ('control_runs', 'control_threads')
+  -- Only NO ACTION ('a') and RESTRICT ('r') actually block the parent delete.
+  -- CASCADE ('c') and SET NULL ('n') resolve themselves, and trying to DELETE
+  -- from a SET NULL referencer would be actively wrong here: several of these
+  -- tables are append-only ledgers whose triggers raise on DELETE, so a sweep
+  -- that touched them would abort the whole transaction.
+  AND c.confdeltype IN ('a', 'r')`)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	type dependent struct{ table, column, parent string }
+	dependents := make([]dependent, 0, 8)
+	for refRows.Next() {
+		var d dependent
+		if err := refRows.Scan(&d.table, &d.column, &d.parent); err != nil {
+			refRows.Close()
+			return nil, mapPgError(err)
+		}
+		dependents = append(dependents, d)
+	}
+	refRows.Close()
+	if err := refRows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+
+	for _, d := range dependents {
+		var err error
+		if d.parent == "control_threads" {
+			_, err = tx.Exec(ctx, `DELETE FROM `+d.table+` WHERE `+d.column+` = $1`, threadID)
+		} else {
+			if len(runIDs) == 0 {
+				continue
+			}
+			_, err = tx.Exec(ctx, `DELETE FROM `+d.table+` WHERE `+d.column+` = ANY($1::text[])`, runIDs)
+		}
+		if err != nil {
+			return nil, mapPgError(err)
+		}
+	}
+
+	// The parent row last: everything above depends on it still existing.
+	tag, err := tx.Exec(ctx, `DELETE FROM control_threads WHERE thread_id = $1 AND user_id = $2`, threadID, userID)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, ErrNotFound
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, mapPgError(err)
+	}
+	return storageURIs, nil
+}
+
 func (s *PostgresStore) SoftDeleteThreadForUser(ctx context.Context, threadID string, userID string, deletedAt time.Time) (domain.ThreadRecord, error) {
 	if deletedAt.IsZero() {
 		deletedAt = domain.Now()
@@ -1486,6 +1680,16 @@ FROM control_runs r
 LEFT JOIN control_threads t ON t.thread_id = r.thread_id
 WHERE r.user_id = $1
   AND r.status = 'succeeded'
+  -- This backs the agent's episodic-memory tool, so anything it returns the
+  -- model may quote back at the user. Without this clause a deleted
+  -- conversation could resurface in a later answer.
+  --
+  -- Hard delete removes these runs outright, so for anything deleted from now
+  -- on the clause is redundant. It is here for the rows already soft-deleted
+  -- before that shipped, which still carry their runs, and as a standing guard
+  -- if any soft-delete path is ever reintroduced. IS NULL keeps runs whose
+  -- thread row is genuinely absent (the LEFT JOIN case) visible.
+  AND (t.thread_id IS NULL OR t.status <> 'deleted')
   AND (cardinality($2::text[]) = 0 OR NOT EXISTS (
         SELECT 1 FROM unnest($2::text[]) AS term
         WHERE (r.goal || ' ' || COALESCE(r.response_text, '') || ' ' || COALESCE(t.title, ''))

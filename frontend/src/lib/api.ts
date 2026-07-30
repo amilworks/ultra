@@ -194,6 +194,26 @@ export class ApiError extends Error {
   }
 }
 
+export type RunSteerMessageRecord = {
+  steer_id: string;
+  run_id: string;
+  thread_id: string;
+  message_id: string;
+  content: string;
+  status: "pending" | "applied" | "missed";
+  created_at: string;
+  applied_at?: string;
+  updated_at: string;
+};
+
+/** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
+export const isSteeringClosedError = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  error.status === 409 &&
+  typeof error.detail === "object" &&
+  error.detail !== null &&
+  (error.detail as { code?: string }).code === "steering_closed";
+
 export class UploadPausedError extends Error {
   readonly sessionId: string;
   readonly fileToken?: string | null;
@@ -918,13 +938,23 @@ const threadMessageToStateMessage = (
   threadId: string,
   conversationId: string,
   fallbackTime: number
-): Record<string, unknown> => ({
-  id: asOptionalString(message.message_id) ?? `${threadId || conversationId}-message-${index}`,
-  role: asOptionalString(message.role) ?? "user",
-  content: asPlainString(message.content),
-  createdAt: asMillis(message.created_at, fallbackTime),
-  runId: asOptionalString(message.run_id) ?? undefined,
-});
+): Record<string, unknown> => {
+  const state: Record<string, unknown> = {
+    id: asOptionalString(message.message_id) ?? `${threadId || conversationId}-message-${index}`,
+    role: asOptionalString(message.role) ?? "user",
+    content: asPlainString(message.content),
+    createdAt: asMillis(message.created_at, fallbackTime),
+    runId: asOptionalString(message.run_id) ?? undefined,
+  };
+  // Steering rows keep their identity through hydration: the transcript shows
+  // "Steered mid-run" instead of a bare user bubble.
+  const metadata = isRecord(message.metadata) ? message.metadata : {};
+  if (asOptionalString(metadata.kind) === "steering") {
+    state.steering = "historic";
+    state.steerId = asOptionalString(metadata.steer_id) ?? undefined;
+  }
+  return state;
+};
 
 const findAssistantPatchIndex = (
   messages: Array<Record<string, unknown>>,
@@ -2078,6 +2108,35 @@ export class ApiClient {
         }),
       }
     );
+  }
+
+  /**
+   * Steer an in-flight run (Phase 1 of double texting): the text is applied
+   * to the RUNNING agent at its next model-call boundary instead of waiting
+   * for the turn to finish. A 409 with code "steering_closed" means the run
+   * is terminal or finalizing — callers fall back to Phase 0 queueing.
+   */
+  async steerRun(
+    runId: string,
+    input: { steerId: string; text: string }
+  ): Promise<RunSteerMessageRecord> {
+    return await this.fetchJson<RunSteerMessageRecord>(
+      `/v2/runs/${encodeURIComponent(runId)}/steer`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ steer_id: input.steerId, text: input.text }),
+      }
+    );
+  }
+
+  /** The run's steering messages — used to verify whether a steer POST whose
+   * response was lost actually landed before returning text to the draft. */
+  async listRunSteerMessages(runId: string): Promise<RunSteerMessageRecord[]> {
+    const response = await this.fetchJson<{ steer_messages?: RunSteerMessageRecord[] }>(
+      `/v2/runs/${encodeURIComponent(runId)}/steer`
+    );
+    return response.steer_messages ?? [];
   }
 
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {

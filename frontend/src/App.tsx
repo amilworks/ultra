@@ -71,6 +71,7 @@ import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import {
   ApiClient,
   ApiError,
+  isSteeringClosedError,
   UploadPausedError,
   type StreamTokenEvent,
   type UploadProgressEvent,
@@ -302,6 +303,7 @@ import {
   TextQuote,
   Trash,
   X,
+  Zap,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { toNumber, toRecord } from "./lib/coerce";
@@ -572,6 +574,13 @@ const preloadSecondaryPanelModules = ({
 
 type UiMessageStatus = "stopped" | "failed";
 
+/* Mid-run steering lifecycle (Phase 1 of double texting). pending = accepted
+   by the control plane, waiting for the worker's next model-call boundary;
+   applied = the running agent saw it; missed = the run ended first (the
+   message stays in the transcript, so the NEXT turn reads it); historic =
+   hydrated from a past conversation, lifecycle over. */
+type UiSteeringStatus = "pending" | "applied" | "missed" | "historic";
+
 type UiMessage = {
   id: string;
   role: UiRole;
@@ -580,6 +589,9 @@ type UiMessage = {
   // A turn that the user stopped, or that failed to complete. Drives the calm
   // inline recovery affordance (Retry / Edit) instead of a silent dead-end.
   status?: UiMessageStatus;
+  // Present only on user messages sent as mid-run steering.
+  steering?: UiSteeringStatus;
+  steerId?: string;
   // Raw technical detail for a failed turn, shown in muted monospace.
   errorReason?: string;
   runId?: string;
@@ -1501,6 +1513,15 @@ const toUiMessages = (value: unknown, fallbackTime: number): UiMessage[] => {
             ? row.errorReason
             : undefined,
         runId: row.runId ? String(row.runId) : undefined,
+        steering:
+          row.steering === "pending" ||
+          row.steering === "applied" ||
+          row.steering === "missed" ||
+          row.steering === "historic"
+            ? (row.steering as UiSteeringStatus)
+            : undefined,
+        steerId:
+          typeof row.steerId === "string" && row.steerId.trim() ? row.steerId : undefined,
         durationSeconds: toNumber(row.durationSeconds ?? row.duration_seconds) ?? undefined,
         progressEvents: toProgressEvents(row.progressEvents),
         runEvents: toRunEvents(row.runEvents),
@@ -1536,6 +1557,13 @@ const removeMessageWithPairedResponse = (
   if (target.role === "user") {
     for (let index = targetIndex + 1; index < messages.length; index += 1) {
       const candidate = messages[index];
+      // Steering messages belong to the turn being removed: they sit between
+      // the originating prompt and its assistant, and orphaning them would
+      // strand "Steered mid-run" bubbles with no turn to steer.
+      if (candidate.role === "user" && candidate.steering) {
+        idsToRemove.add(candidate.id);
+        continue;
+      }
       if (candidate.role !== "assistant") {
         break;
       }
@@ -1681,6 +1709,8 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
         status: message.status,
         errorReason: message.errorReason,
         runId: message.runId,
+        steering: message.steering,
+        steerId: message.steerId,
         durationSeconds: message.durationSeconds,
         // Reasoning deltas are live-stream scaffolding (each one supersedes the
         // previous); persisting them ballooned every snapshot POST during a run.
@@ -1982,6 +2012,23 @@ const ConversationMessageRow = memo(
           )}
         >
           <div className="group flex w-full flex-col items-end gap-1">
+            {message.steering ? (
+              /* Steering lifecycle, stated quietly above the bubble. aria-live
+                 lets the pending→applied transition announce itself. */
+              <span
+                className="chat-steering-eyebrow"
+                data-steering={message.steering}
+                aria-live="polite"
+              >
+                {message.steering === "pending"
+                  ? "Steering — will be seen shortly"
+                  : message.steering === "applied"
+                    ? "Seen by the agent"
+                    : message.steering === "missed"
+                      ? "Run ended before this was read — carries into the next turn"
+                      : "Steered mid-run"}
+              </span>
+            ) : null}
             <MessageContent className="max-w-full bg-muted text-primary rounded-3xl px-5 py-2.5">
               {message.content}
             </MessageContent>
@@ -7843,6 +7890,87 @@ export function App() {
     }
   }, [activeConversationStopId, activeStreamingRunId, apiClient, requestStopConversation]);
 
+  /* Fold a steer.* run event into the conversation's steering message.
+     Returns true when the event was a steering event (callers skip the
+     assistant-message fold). A steer from another tab materializes here from
+     the event payload. Defined ABOVE every stream consumer that closes over
+     it — effect dependency arrays evaluate at the call site (the App.tsx TDZ
+     trap). */
+  const applySteerRunEvent = useCallback(
+    (conversationId: string, runEvent: RunEvent): boolean => {
+      // normalizeV2RunEvent folds event_kind into event_type.
+      const kind = String(runEvent.event_type || "");
+      if (!kind.startsWith("steer.")) {
+        return false;
+      }
+      const payload = (runEvent.payload ?? {}) as {
+        steer_id?: unknown;
+        message_id?: unknown;
+        text?: unknown;
+      };
+      const steerId = typeof payload.steer_id === "string" ? payload.steer_id : "";
+      if (!steerId) {
+        return true;
+      }
+      const nextStatus: UiSteeringStatus =
+        kind === "steer.applied" ? "applied" : kind === "steer.missed" ? "missed" : "pending";
+      updateConversation(conversationId, (current) => {
+        const index = current.messages.findIndex((item) => item.steerId === steerId);
+        if (index >= 0) {
+          const existing = current.messages[index];
+          // Lifecycle only moves forward; a late steer.received replay must
+          // not demote an applied message.
+          if (
+            existing.steering === nextStatus ||
+            (existing.steering && existing.steering !== "pending")
+          ) {
+            return current;
+          }
+          const messages = [...current.messages];
+          messages[index] = { ...existing, steering: nextStatus };
+          return { ...current, messages };
+        }
+        const text = typeof payload.text === "string" ? payload.text : "";
+        if (!text) {
+          return current;
+        }
+        const message: UiMessage = {
+          id:
+            typeof payload.message_id === "string" && payload.message_id
+              ? payload.message_id
+              : `steer-${steerId}`,
+          role: "user",
+          content: text,
+          createdAt: Date.now(),
+          steering: nextStatus,
+          steerId,
+        };
+        const messages = [...current.messages];
+        let insertAt = current.streamingMessageId
+          ? messages.findIndex((item) => item.id === current.streamingMessageId)
+          : -1;
+        if (insertAt < 0) {
+          // No live stream (e.g. steer.missed after terminal): keep the
+          // assistant last so Phase 0's settled detection stays true.
+          for (let index = messages.length - 1; index >= 0; index -= 1) {
+            if (messages[index].role === "assistant") {
+              insertAt = index;
+              break;
+            }
+          }
+        }
+        if (insertAt >= 0) {
+          messages.splice(insertAt, 0, message);
+        } else {
+          messages.push(message);
+        }
+        return { ...current, messages };
+      });
+      return true;
+    },
+    [updateConversation]
+  );
+
   useEffect(() => {
     const conversationId = activeConversation?.id ?? null;
     const messageId = activeStreamingMessageId;
@@ -7887,7 +8015,18 @@ export function App() {
         // ...but only accumulate the durable structural events into runEvents — ephemeral deltas
         // must never enter the array (the same invariant the live SSE reducer enforces; otherwise
         // the poll re-introduces the per-token bloat the live path was fixed to avoid).
-        const fresh = response.events.filter((event) => !isEphemeralDeltaEvent(event));
+        // Steer lifecycle events route to their steering message (this poll is
+        // the ONLY consumer when no stream is registered — without this, the
+        // eyebrow would stick at "pending" forever on the poll-fallback path).
+        const fresh: RunEvent[] = [];
+        for (const event of response.events) {
+          if (applySteerRunEvent(conversationId, event)) {
+            continue;
+          }
+          if (!isEphemeralDeltaEvent(event)) {
+            fresh.push(event);
+          }
+        }
         if (fresh.length === 0) {
           return;
         }
@@ -7935,6 +8074,7 @@ export function App() {
 	    activeStreamingMessageId,
 	    activeStreamingRunId,
 	    apiClient,
+	    applySteerRunEvent,
 	    updateConversation,
 	  ]);
 
@@ -10171,6 +10311,7 @@ export function App() {
     return targets;
   }, [authStatus, conversations, conversationsHydrated, localActiveRunIds]);
 
+
   useEffect(() => {
     if (runRecoveryTargets.length === 0) {
       return;
@@ -10241,6 +10382,9 @@ export function App() {
                 afterSequence: target.afterSequence,
                 signal: controller.signal,
                 onRunEvent: (runEvent) => {
+                  if (applySteerRunEvent(target.conversationId, runEvent)) {
+                    return;
+                  }
                   updateConversation(target.conversationId, (conversation) => ({
                     ...conversation,
                     messages: conversation.messages.map((message) =>
@@ -10397,6 +10541,7 @@ export function App() {
   }, [
     apiClient,
     applyGeneratedConversationTitle,
+    applySteerRunEvent,
     hydrateRunDetails,
     runRecoveryTargets,
     updateConversation,
@@ -11063,17 +11208,32 @@ export function App() {
       if (assistantIndex < 0) {
         return;
       }
+      // The originating prompt is the last NON-steering user message: a
+      // mid-run steer sits between the real prompt and the assistant, and
+      // taking it as the turn prompt silently re-asks the steering fragment
+      // instead of the question (review-critical). The turn's steer texts
+      // fold into the re-ask so nothing the user said is dropped.
       let originatingUserMessage: UiMessage | null = null;
+      const turnSteerTexts: string[] = [];
       for (let index = assistantIndex; index >= 0; index -= 1) {
-        if (conversation.messages[index].role === "user") {
-          originatingUserMessage = conversation.messages[index];
-          break;
+        const candidate = conversation.messages[index];
+        if (candidate.role !== "user") {
+          continue;
         }
+        if (candidate.steering) {
+          turnSteerTexts.unshift(candidate.content);
+          continue;
+        }
+        originatingUserMessage = candidate;
+        break;
       }
       if (!originatingUserMessage) {
         return;
       }
-      const prompt = originatingUserMessage.content;
+      const prompt = [originatingUserMessage.content, ...turnSteerTexts]
+        .map((part) => part.trim())
+        .filter(Boolean)
+        .join("\n\n");
       const originatingUserMessageId = originatingUserMessage.id;
       const conversationId = conversation.id;
       stopRequestedConversationIdsRef.current.delete(conversationId);
@@ -11606,6 +11766,9 @@ export function App() {
           }));
         },
         onRunEvent: (runEvent) => {
+          if (applySteerRunEvent(conversationId, runEvent)) {
+            return;
+          }
           if (!assistantMessageId) {
             return;
           }
@@ -11962,6 +12125,130 @@ export function App() {
     );
     focusComposerTextarea();
   }, [activeConversation, focusComposerTextarea, setActivePromptValue, updateConversation]);
+
+  /* Steer the RUNNING turn (Phase 1 of double texting): the control plane
+     stores the message durably and the worker folds it into the agent loop at
+     its next model-call boundary — no restart, no waiting out the run. The
+     steering message renders optimistically BEFORE the streaming assistant
+     row (Phase 0's settled detection requires the assistant to stay last).
+     A 409 steering_closed (run terminal or finalizing) falls back to the
+     Phase 0 queue; any other failure returns the text to the draft — a
+     steered thought is never destroyed. */
+  const steerFollowup = useCallback((): void => {
+    const conversation = activeConversation;
+    const text = activePrompt.trim();
+    if (!conversation || !text || slashMenuOpen || composerResourcePickerOpen) {
+      return;
+    }
+    const streamingRunId = conversation.streamingMessageId
+      ? conversation.messages.find((item) => item.id === conversation.streamingMessageId)?.runId
+      : undefined;
+    const runId = streamingRunId ?? activeRunIdByConversationRef.current.get(conversation.id);
+    if (!runId) {
+      // The run id has not streamed back yet — queueing is the honest option.
+      queueFollowup();
+      return;
+    }
+    const steerId = `steer_${makeId()}`;
+    const conversationId = conversation.id;
+    setActivePromptValue("");
+    updateConversation(conversationId, (current) => {
+      const message: UiMessage = {
+        id: `steer-local-${steerId}`,
+        role: "user",
+        content: text,
+        createdAt: Date.now(),
+        steering: "pending",
+        steerId,
+      };
+      const messages = [...current.messages];
+      const insertAt = current.streamingMessageId
+        ? messages.findIndex((item) => item.id === current.streamingMessageId)
+        : -1;
+      if (insertAt >= 0) {
+        messages.splice(insertAt, 0, message);
+      } else {
+        messages.push(message);
+      }
+      return { ...current, updatedAt: Date.now(), messages };
+    });
+    void apiClient
+      .steerRun(runId, { steerId, text })
+      .then((record) => {
+        // Adopt the durable transcript row id so live steer.* events and the
+        // next hydration converge on one message.
+        updateConversation(conversationId, (current) => ({
+          ...current,
+          messages: current.messages.map((item) =>
+            item.steerId === steerId
+              ? {
+                  ...item,
+                  id: record.message_id || item.id,
+                  steering: record.status === "applied" ? "applied" : item.steering,
+                }
+              : item
+          ),
+        }));
+      })
+      .catch(async (error: unknown) => {
+        if (!isSteeringClosedError(error)) {
+          // A lost RESPONSE is not a lost steer: the POST may have committed
+          // before the network failed. Restoring the draft would tempt a
+          // re-send and duplicate the transcript — verify first.
+          try {
+            const records = await apiClient.listRunSteerMessages(runId);
+            const landed = records.find((record) => record.steer_id === steerId);
+            if (landed) {
+              updateConversation(conversationId, (current) => ({
+                ...current,
+                messages: current.messages.map((item) =>
+                  item.steerId === steerId
+                    ? {
+                        ...item,
+                        id: landed.message_id || item.id,
+                        steering: landed.status === "applied" ? "applied" : item.steering,
+                      }
+                    : item
+                ),
+              }));
+              return;
+            }
+          } catch {
+            // Verification unreachable too — fall through to the restore.
+          }
+        }
+        updateConversation(conversationId, (current) => {
+          const messages = current.messages.filter((item) => item.steerId !== steerId);
+          if (isSteeringClosedError(error)) {
+            // Finalizing/terminal: Phase 0 owns it now — same growing-message
+            // rule as queueFollowup.
+            return {
+              ...current,
+              updatedAt: Date.now(),
+              messages,
+              queuedFollowup: current.queuedFollowup
+                ? `${current.queuedFollowup}\n\n${text}`
+                : text,
+            };
+          }
+          return { ...current, updatedAt: Date.now(), messages };
+        });
+        if (!isSteeringClosedError(error)) {
+          setActivePromptValue((previous) =>
+            previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${text}` : text
+          );
+        }
+      });
+  }, [
+    activeConversation,
+    activePrompt,
+    apiClient,
+    composerResourcePickerOpen,
+    queueFollowup,
+    setActivePromptValue,
+    slashMenuOpen,
+    updateConversation,
+  ]);
 
   /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn
      when the active conversation settles — but ONLY on clean completion. After
@@ -12882,8 +13169,17 @@ export function App() {
 
           <div
             className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
+            /* Every width, not just phones. Reading back through a long answer
+               is when the toolbar is pure distraction, and that is as true on a
+               1440px screen as on a 390px one.
+               Driven by scrolled-AWAY rather than actively-scrolling on purpose:
+               an is-scrolling trigger would re-expand the composer the instant
+               you stop to actually read a paragraph, which is exactly when you
+               want it out of the way. The signal already carries hysteresis
+               (collapse past 160px from the bottom, expand again within 48px),
+               so it does not flutter on small scrolls. */
             data-composer-compact={
-              isPhoneView && composerScrolledAway && !activeSending ? "true" : undefined
+              composerScrolledAway && !activeSending ? "true" : undefined
             }
             data-composer-slim={
               activeConversationHydrated &&
@@ -12995,7 +13291,18 @@ export function App() {
                     ) : null}
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
-                      placeholder={activeConversationHydrated ? "Ask Ultra" : "Loading chat…"}
+                      /* The collapsed state hides the attach, model and send
+                         controls, so the hint changes to say what still works.
+                         "Ask Ultra" names the product next to a toolbar; with
+                         the toolbar gone, an instruction is more use than a
+                         label. Swaps once on collapse, not per scroll event. */
+                      placeholder={
+                        !activeConversationHydrated
+                          ? "Loading chat…"
+                          : composerScrolledAway && !activeSending
+                            ? "Just start typing"
+                            : "Ask Ultra"
+                      }
                       /* Explicit name so the field is not relying on its
                          placeholder for one: the placeholder is deliberately
                          ghost-weight (~2.1:1) and a control's accessible name
@@ -13111,6 +13418,21 @@ export function App() {
                             // rAF inside runs after React paints.
                             focusComposerTextarea();
                           }
+                          return;
+                        }
+                        // ⌘Enter during a run STEERS: the text reaches the
+                        // running agent at its next model-call boundary
+                        // instead of waiting out the turn (Phase 1).
+                        if (
+                          event.key === "Enter" &&
+                          !event.shiftKey &&
+                          (event.metaKey || event.ctrlKey) &&
+                          !event.altKey &&
+                          !event.nativeEvent.isComposing &&
+                          activeSending
+                        ) {
+                          event.preventDefault();
+                          steerFollowup();
                           return;
                         }
                         // Enter during a run queues the draft as a follow-up
@@ -13485,27 +13807,49 @@ export function App() {
                         </DropdownMenu>
                         {activeSending ? (
                           <>
-                            {/* Queue sits LEFT of Stop; Stop never moves (the
-                                send-position jump was a bug once already). */}
+                            {/* Steer, then Queue, then Stop; Stop never moves
+                                (the send-position jump was a bug once
+                                already). Steer reaches the RUNNING agent at
+                                its next step; Queue waits the run out. */}
                             {activePrompt.trim() && !slashMenuOpen && !composerResourcePickerOpen ? (
-                              <PromptInputAction
-                                tooltip="Queue for after this run"
-                                side="top"
-                                sideOffset={8}
-                                delayDuration={350}
-                                className="app-composer-tooltip"
-                              >
-                                <Button
-                                  size="icon"
-                                  type="button"
-                                  variant="ghost"
-                                  onClick={queueFollowup}
-                                  aria-label="Queue follow-up"
-                                  className="app-composer-queue-button size-11 rounded-full sm:size-10"
+                              <>
+                                <PromptInputAction
+                                  tooltip="Steer this run now — ⌘↵"
+                                  side="top"
+                                  sideOffset={8}
+                                  delayDuration={350}
+                                  className="app-composer-tooltip"
                                 >
-                                  <ArrowUp size={18} />
-                                </Button>
-                              </PromptInputAction>
+                                  <Button
+                                    size="icon"
+                                    type="button"
+                                    variant="ghost"
+                                    onClick={steerFollowup}
+                                    aria-label="Steer this run"
+                                    className="app-composer-steer-button size-11 rounded-full sm:size-10"
+                                  >
+                                    <Zap size={18} />
+                                  </Button>
+                                </PromptInputAction>
+                                <PromptInputAction
+                                  tooltip="Queue for after this run"
+                                  side="top"
+                                  sideOffset={8}
+                                  delayDuration={350}
+                                  className="app-composer-tooltip"
+                                >
+                                  <Button
+                                    size="icon"
+                                    type="button"
+                                    variant="ghost"
+                                    onClick={queueFollowup}
+                                    aria-label="Queue follow-up"
+                                    className="app-composer-queue-button size-11 rounded-full sm:size-10"
+                                  >
+                                    <ArrowUp size={18} />
+                                  </Button>
+                                </PromptInputAction>
+                              </>
                             ) : null}
                             <Button
                               size="icon"

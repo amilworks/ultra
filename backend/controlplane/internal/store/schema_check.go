@@ -26,6 +26,8 @@ var requiredPostgresControlTables = []string{
 	"control_run_events",
 	"control_run_event_sequences",
 	"control_run_leases",
+	"control_run_steer_messages",
+	"control_run_steer_barriers",
 	"control_worker_heartbeats",
 	"control_artifacts",
 	"control_resources",

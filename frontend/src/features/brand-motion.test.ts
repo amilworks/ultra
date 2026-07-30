@@ -47,10 +47,14 @@ describe("brand motion gesture", () => {
     // Discrete flips and continuous indicators legitimately opt out; a growing
     // list here means the gesture is being negotiated away one component at a
     // time, which is exactly the drift this suite exists to catch.
-    //   linear x3 — `visibility 0s linear <delay>`, an instant state flip that
-    //               must not interpolate (see the composer/rail slim rules).
+    //   linear x4 — `visibility 0s linear <delay>`, an instant state flip that
+    //               must not interpolate (see the composer/rail slim rules, and
+    //               the read-mode collapse that hides the idle attach, model
+    //               echo and send cluster — same idiom, same reason: a
+    //               0-opacity control is still tabbable, so visibility has to
+    //               flip rather than fade).
     //   ease-out  — one 120ms progress-bar width nudge, too brief to read.
-    expect(named.sort()).toEqual(["ease-out", "linear", "linear", "linear"]);
+    expect(named.sort()).toEqual(["ease-out", "linear", "linear", "linear", "linear"]);
   });
 
   it("only ever animates `visibility` with linear, never a real property", () => {

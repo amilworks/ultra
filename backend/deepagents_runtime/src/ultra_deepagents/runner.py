@@ -73,6 +73,13 @@ from ultra_deepagents.progress_guard import (
 )
 from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
 from ultra_deepagents.schemas import RunJobEnvelope
+from ultra_deepagents.steering import (
+    STEER_CONTENT_PREFIX,
+    build_steering_inbox,
+    steer_agent_content,
+    steer_ids_in_messages,
+    steer_message_id,
+)
 from ultra_deepagents.title_generation import (
     resolve_conversation_title_task,
     start_conversation_title_task,
@@ -607,6 +614,18 @@ async def run_job(
                 cache_root=Path(settings.memory_root).expanduser() / "papers",
             )
         evaluation_surface: dict[str, str] = {}
+        # Mid-run steering: cleanroom evaluation profiles run with a sealed
+        # surface, so they never grow a steering channel.
+        steering_inbox = (
+            build_steering_inbox(settings, run_id=context.run_id)
+            if evaluation_policy is None
+            else None
+        )
+        if steering_inbox is not None:
+            # A fresh attempt accepts steers again: a JetStream redelivery
+            # (no control-plane requeue) would otherwise inherit the crashed
+            # attempt's closed finalization barrier for the whole retry.
+            await steering_inbox.reopen_barrier()
         agent = _build_agent_with_optional_checkpointer(
             agent_factory,
             settings,
@@ -615,6 +634,7 @@ async def run_job(
             context=context,
             checkpointer=checkpointer,
             surface_attestation_sink=evaluation_surface.update,
+            steering_inbox=steering_inbox,
         )
         if evaluation_policy is not None and not evaluation_surface:
             if agent_factory is build_research_agent:
@@ -691,6 +711,12 @@ async def run_job(
         completion_continuations_used = 0
         model_stream_recoveries_used = 0
         progress_stall_recoveries_used = 0
+        steer_barrier_rounds_used = 0
+        # Answers produced BEFORE a barrier continuation. The continuation's
+        # model reply is typically just the steer delta; the published answer
+        # must keep the full pre-steer response (review-critical: the barrier
+        # otherwise REPLACED a complete report with "I've added the labels").
+        steer_barrier_answer_parts: list[str] = []
         previous_missing_kinds: set[str] | None = None
         previous_artifact_signature: frozenset[tuple[str, str]] | None = None
         run_usage = _usage_from_prior_payload(prior_usage)
@@ -877,6 +903,23 @@ async def run_job(
                 not missing_kinds
                 or completion_continuations_used >= settings.completion_max_continuations
             ):
+                # Finalization steer barrier: atomically stop accepting steers
+                # and apply any that arrived too late for the in-loop
+                # middleware. An accepted steer either reaches the model here
+                # or was already injected — it can never silently miss the run.
+                if await _steer_barrier_continuation(
+                    steering_inbox,
+                    messages=messages,
+                    attempt_result=attempt_result,
+                    artifact_events=artifact_events,
+                    context=context,
+                    sequencer=sequencer,
+                    publish_event=publish_event,
+                    rounds_used=steer_barrier_rounds_used,
+                    prior_answer_parts=steer_barrier_answer_parts,
+                ):
+                    steer_barrier_rounds_used += 1
+                    continue
                 break
 
             # No-progress guard: if this continuation could not change the set of
@@ -891,6 +934,19 @@ async def run_job(
                 and set(missing_kinds) == previous_missing_kinds
                 and artifact_signature == previous_artifact_signature
             ):
+                if await _steer_barrier_continuation(
+                    steering_inbox,
+                    messages=messages,
+                    attempt_result=attempt_result,
+                    artifact_events=artifact_events,
+                    context=context,
+                    sequencer=sequencer,
+                    publish_event=publish_event,
+                    rounds_used=steer_barrier_rounds_used,
+                    prior_answer_parts=steer_barrier_answer_parts,
+                ):
+                    steer_barrier_rounds_used += 1
+                    continue
                 break
             previous_missing_kinds = set(missing_kinds)
             previous_artifact_signature = artifact_signature
@@ -935,6 +991,9 @@ async def run_job(
             post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
             artifact_events=artifact_events,
         )
+        response_text = _stitch_steer_barrier_answers(
+            steer_barrier_answer_parts, response_text
+        )
         for artifact_event in artifact_events:
             await publish_event(sequencer.stamp(artifact_event))
     except asyncio.CancelledError:
@@ -976,6 +1035,118 @@ def _cancel_title_task(task: asyncio.Task | None) -> None:
         task.cancel()
 
 
+_STEER_BARRIER_MAX_ROUNDS = 3
+
+
+def _stitch_steer_barrier_answers(parts: list[str], final_text: str) -> str:
+    """Publish the FULL answer after barrier continuations.
+
+    The continuation's model reply is typically an incremental addendum to
+    the steer; the durable response must keep every pre-steer answer part it
+    does not already contain (a model that re-emitted the whole thing wins).
+    """
+    if not parts:
+        return final_text
+    stitched: list[str] = []
+    for part in parts:
+        text = part.strip()
+        if text and text not in final_text:
+            stitched.append(text)
+    stitched.append(final_text)
+    return "\n\n".join(piece for piece in stitched if piece)
+
+
+async def _steer_barrier_continuation(
+    steering_inbox: Any | None,
+    *,
+    messages: list[dict[str, Any]],
+    attempt_result: AgentAttemptResult,
+    artifact_events: list[dict[str, Any]],
+    context: AgentRunContext,
+    sequencer: RunEventSequencer,
+    publish_event: PublishEvent,
+    rounds_used: int,
+    prior_answer_parts: list[str] | None = None,
+) -> bool:
+    """Close the steer barrier; feed still-unseen steers into one more pass.
+
+    True means steers were appended to ``messages`` and the caller should
+    ``continue`` the attempt loop so the model responds to them before the
+    terminal event. The appended dicts carry the steer's message_id as the
+    message id, so ``add_messages`` collapses them with any copy the in-loop
+    middleware already injected. Bounded by ``_STEER_BARRIER_MAX_ROUNDS`` —
+    an ack that can never land must not keep a run alive forever (leftovers
+    surface loudly via the control plane's terminal steer.missed sweep).
+    """
+    if steering_inbox is None:
+        return False
+    if rounds_used >= _STEER_BARRIER_MAX_ROUNDS:
+        logger.error(
+            "Steer barrier rounds exhausted; finishing with steers still pending.",
+            extra={"run_id": context.run_id},
+        )
+        return False
+    pending = await steering_inbox.close_barrier()
+    if not pending:
+        return False
+    present = steer_ids_in_messages(messages)
+    fresh = [
+        steer
+        for steer in pending
+        if steer_message_id(steer) and steer_message_id(steer) not in present
+    ]
+    if not fresh:
+        # Already in the conversation (middleware injected them; only the ack
+        # was lost). Re-ack rather than re-run: the model has seen them.
+        for steer in pending:
+            await steering_inbox.ack(str(steer.get("steer_id") or ""))
+        return False
+    notice_lines = [steer.get("content", "") for steer in fresh]
+    notice = "Applying steering update(s) received at completion: " + " | ".join(
+        line.strip()[:120] for line in notice_lines if str(line).strip()
+    )
+    await publish_event(
+        sequencer.stamp(
+            RunEvent(
+                run_id=context.run_id,
+                thread_id=context.thread_id,
+                event_kind="trace.message.delta",
+                event_type="trace",
+                node_name="steering_barrier",
+                agent_role="steering_barrier",
+                level="info",
+                message=notice,
+                payload={
+                    "text": notice,
+                    "steer_ids": [str(steer.get("steer_id") or "") for steer in fresh],
+                    "barrier_round": rounds_used + 1,
+                },
+            ).to_dict()
+        )
+    )
+    current_response_text = _choose_response_text(
+        final_response_text=attempt_result.final_response_text,
+        streamed_response_text=attempt_result.streamed_response_text,
+        post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
+        artifact_events=artifact_events,
+    )
+    if current_response_text.strip():
+        messages.append({"role": "assistant", "content": current_response_text})
+        if prior_answer_parts is not None:
+            # The published answer must keep this — the continuation's reply
+            # is usually just the steer delta.
+            prior_answer_parts.append(current_response_text)
+    for steer in fresh:
+        messages.append(
+            {
+                "role": "user",
+                "content": steer_agent_content(str(steer.get("content") or "")),
+                "id": steer_message_id(steer),
+            }
+        )
+    return True
+
+
 def _build_agent_with_optional_checkpointer(
     agent_factory: Callable[..., Any],
     settings: RuntimeSettings,
@@ -985,6 +1156,7 @@ def _build_agent_with_optional_checkpointer(
     context: AgentRunContext,
     checkpointer: Any | None,
     surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
+    steering_inbox: Any | None = None,
 ) -> Any:
     """Build the agent, passing the checkpointer only when the factory accepts
     it so custom/test factories without that parameter still work."""
@@ -1007,6 +1179,8 @@ def _build_agent_with_optional_checkpointer(
         "surface_attestation_sink" in parameters or accepts_var_kwargs
     ):
         kwargs["surface_attestation_sink"] = surface_attestation_sink
+    if steering_inbox is not None and ("steering_inbox" in parameters or accepts_var_kwargs):
+        kwargs["steering_inbox"] = steering_inbox
     return agent_factory(settings, **kwargs)
 
 
@@ -1161,7 +1335,10 @@ async def _stream_agent_attempt(
             await publish_event(sequencer.stamp(tool_event))
             execute_progress_streamer.bind_tool_event(tool_event)
             saw_tool_event = True
-            post_tool_response_parts = []
+            # A bookkeeping call (marking todos done after writing the report)
+            # must not wipe answer text the model already streamed.
+            if _tool_event_name(tool_event) not in _BOOKKEEPING_TOOL_NAMES:
+                post_tool_response_parts = []
             if progress_detector is not None:
                 observation = progress_detector.observe(tool_event)
                 if observation is not None:
@@ -1688,6 +1865,20 @@ def _artifact_kind(path: Path, mime_type: str) -> str:
     return "artifact"
 
 
+# Tools whose calls are pure bookkeeping and never invalidate answer text the
+# model has already written. A trailing call to one of these (e.g. marking the
+# todo list complete after writing the report) must not reset the post-tool
+# stream buffer nor split the final answer in the state-based extraction —
+# both resets were how a full report got truncated to its short coda (the
+# truncated-response incident; re-fixed here after the original fix was
+# stranded on an unmerged lineage).
+_BOOKKEEPING_TOOL_NAMES = frozenset({"write_todos"})
+
+
+def _whitespace_collapsed(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _choose_response_text(
     *,
     final_response_text: str,
@@ -1695,9 +1886,23 @@ def _choose_response_text(
     post_tool_streamed_response_text: str,
     artifact_events: list[dict[str, Any]],
 ) -> str:
-    if final_response_text.strip():
+    final = final_response_text.strip()
+    post_tool = post_tool_streamed_response_text.strip()
+    if final:
+        # Safety net for turn shapes the trailing-segment collector doesn't
+        # recognize: when the final-state text is just a short tail of what
+        # streamed after the last substantive tool call, the fuller streamed
+        # text is the real answer (a trailing bookkeeping-style call split the
+        # turn). Never fall back to streamed_response_text here — it spans the
+        # whole run and would persist mid-run narration as the answer.
+        if (
+            post_tool
+            and len(final) * 2 <= len(post_tool)
+            and _whitespace_collapsed(post_tool).endswith(_whitespace_collapsed(final))
+        ):
+            return post_tool_streamed_response_text
         return final_response_text
-    if post_tool_streamed_response_text.strip():
+    if post_tool:
         return post_tool_streamed_response_text
     artifact_fallback = _fallback_response_from_artifacts(artifact_events)
     if artifact_fallback.strip():
@@ -2195,17 +2400,35 @@ def _response_references_artifacts(
     return False
 
 
+def _is_steering_seed_message(message: dict[str, Any]) -> bool:
+    metadata = message.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("kind") == "steering"
+
+
 def _run_request_text(job: RunJobEnvelope) -> str:
     if evaluation_profile_policy(job.evaluation_profile) is not None:
         return job.goal
     parts = [job.goal]
+    # The request = the last NON-steering user message. A requeue-seeded
+    # steer ("also label the axes") must not become the whole request and
+    # erase the original demand classification — steers only ADD, appended
+    # after the request below.
     for message in reversed(job.messages or []):
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or message.get("type") or "").lower()
-        if role in {"user", "human"}:
+        if role in {"user", "human"} and not _is_steering_seed_message(message):
             parts.append(_chunk_text(message.get("content")))
             break
+    for message in job.messages or []:
+        if not isinstance(message, dict) or not _is_steering_seed_message(message):
+            continue
+        # Only THIS run's steers add demands. Prior turns' steering rows are
+        # ordinary history — folding them in resurrected long-satisfied
+        # artifact demands on every requeue (review finding).
+        if str(message.get("run_id") or "").strip() != job.run_id:
+            continue
+        parts.append(_chunk_text(message.get("content")))
     return "\n".join(part for part in parts if part)
 
 
@@ -2213,7 +2436,21 @@ def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
     policy = evaluation_profile_policy(job.evaluation_profile)
     if policy is not None:
         return list(goal_only_messages(policy.name, job.goal))
-    return list(job.messages or [{"role": "user", "content": job.goal}])
+    messages = list(job.messages or [{"role": "user", "content": job.goal}])
+    # Requeue-seeded steering rows carry their thread message_id as the graph
+    # message id, unifying the add_messages id-dedup invariant with the
+    # steering middleware's injections (see steering.py).
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, dict) and _is_steering_seed_message(message):
+            row_id = str(message.get("message_id") or "").strip()
+            if row_id and not message.get("id"):
+                message = {**message, "id": row_id}
+            content = str(message.get("content") or "")
+            if content and not content.startswith(STEER_CONTENT_PREFIX):
+                message = {**message, "content": steer_agent_content(content)}
+        normalized.append(message)
+    return normalized
 
 
 def _requested_artifact_kinds(text: str) -> list[str]:
@@ -2438,6 +2675,13 @@ def _is_coordinator_stream(event: dict[str, Any]) -> bool:
     if agent_name and agent_name not in {"ultra-research-agent", "main-agent", "coordinator"}:
         return False
     return not namespace
+
+
+def _tool_event_name(tool_event: dict[str, Any]) -> str:
+    payload = tool_event.get("payload")
+    if isinstance(payload, dict):
+        return str(payload.get("tool_name") or "")
+    return ""
 
 
 def _tool_event_from_stream_event(
@@ -3323,6 +3567,16 @@ def _stream_text_delta(event: dict[str, Any]) -> str:
 
 
 def _response_text_from_final_state(state: dict[str, Any] | None) -> str:
+    """Text of the turn's closing assistant segment(s), not just the last one.
+
+    A finished turn can be shaped ``[report AIMessage(tool_calls=[write_todos]),
+    ToolMessage(write_todos), coda AIMessage]``: the model writes its report,
+    marks its todos complete, then signs off. Taking only the last AIMessage
+    persists the coda and silently drops the report (the truncated-response
+    incident). Walk back from the end collecting every trailing assistant
+    segment, treating bookkeeping-only tool results as transparent, and stop at
+    the first substantive boundary so mid-turn narration stays out.
+    """
     if not isinstance(state, dict):
         return ""
     messages = state.get("messages")
@@ -3330,13 +3584,21 @@ def _response_text_from_final_state(state: dict[str, Any] | None) -> str:
         return ""
     last_user_index = _last_user_message_index(messages)
     candidate_messages = messages[last_user_index + 1 :] if last_user_index >= 0 else messages
+    segments: list[str] = []
     for message in reversed(candidate_messages):
-        if not _is_assistant_message(message):
+        if _is_assistant_message(message):
+            text = _message_content_text(message)
+            if text.strip():
+                segments.append(text)
             continue
-        text = _message_content_text(message)
-        if text.strip():
-            return text
-    return ""
+        if (
+            _is_tool_message(message)
+            and _tool_message_name(message) in _BOOKKEEPING_TOOL_NAMES
+        ):
+            continue
+        if segments:
+            break
+    return "\n\n".join(reversed(segments))
 
 
 def _last_user_message_index(messages: list[Any] | tuple[Any, ...]) -> int:
@@ -3364,6 +3626,22 @@ def _is_assistant_message(message: Any) -> bool:
     if role in {"assistant", "ai"}:
         return True
     return message.__class__.__name__ == "AIMessage"
+
+
+def _is_tool_message(message: Any) -> bool:
+    if isinstance(message, dict):
+        role = str(message.get("role") or message.get("type") or "").lower()
+        return role == "tool"
+    role = str(getattr(message, "role", "") or getattr(message, "type", "") or "").lower()
+    if role == "tool":
+        return True
+    return message.__class__.__name__ == "ToolMessage"
+
+
+def _tool_message_name(message: Any) -> str:
+    if isinstance(message, dict):
+        return str(message.get("name") or "")
+    return str(getattr(message, "name", "") or "")
 
 
 def _message_content_text(message: Any) -> str:

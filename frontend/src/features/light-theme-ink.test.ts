@@ -22,10 +22,12 @@ const darkBlock = (() => {
 })();
 
 describe("light theme ink", () => {
-  it("moves body ink off black and secondary text to the sage tone", () => {
-    // 10.59:1 on --bg-page, down from #171717's 16.4:1 — still far past AA at
-    // every size, and the whole theme reads airier for it.
-    expect(lightRoot).toMatch(/--text-main:\s*#3b383c;/);
+  it("keeps body ink near-black and secondary text on the sage tone", () => {
+    // 16.12:1 on --bg-page. Deliberately near-black: this is the reading surface
+    // for scientific answers, and the earlier #3b383c (10.59:1) gave up more
+    // legibility than the airiness was worth. Airiness is bought elsewhere — a
+    // quieter sidebar and a real reading measure — not out of the text itself.
+    expect(lightRoot).toMatch(/--text-main:\s*#191919;/);
     // 3.77:1 — clears AA for large text, deliberately just under it for small.
     expect(lightRoot).toMatch(/--text-muted:\s*#787f78;/);
   });
@@ -56,21 +58,56 @@ describe("light theme ink", () => {
     expect(darkBlock).toMatch(/--sidebar-accent-foreground:\s*var\(--sidebar-ink-hover\);/);
   });
 
-  it("darkens sidebar rows on hover with real declarations, not just a token", () => {
-    // The rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
-    // beats Tailwind v4's LAYERED hover:text-sidebar-accent-foreground utility
-    // no matter its specificity — so the token alone never fires.
+  it("splits the sidebar: structural nav at full ink, Recents quiet", () => {
+    // Only the Recents list is quieted. It is long, repetitive and the actual
+    // source of sidebar noise; the handful of fixed nav rows are the app's spine
+    // and reading them as noise made the whole sidebar mushy.
+    expect(lightRoot).toMatch(/--sidebar-nav-foreground:\s*var\(--text-main\);/);
+    // 6.41:1 vs body ink's 16.12:1, and past AA's 4.5:1 for the 14px/500 labels.
+    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#575a57;/);
+    expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Structural nav draws the nav token, not the quiet one.
     expect(stylesSource).toMatch(
-      /\.app-new-chat-button:hover,\s*\.app-resource-browser-button:hover,\s*\.app-bisque-browser-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
+      /\.app-new-chat-button,\s*\.app-resource-browser-button,\s*\.app-bisque-browser-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
     );
+    expect(stylesSource).toMatch(
+      /\.app-bisque-link-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-sidebar-brand-button\[data-slot="button"\]\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    // Recents keeps the quiet token.
+    expect(stylesSource).toMatch(
+      /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-foreground\);/s
+    );
+  });
+
+  it("puts the hover affordance where it can actually be seen", () => {
+    // Recents rows darken: from 6.41:1 to --sidebar-ink-hover's 18.15:1 is a
+    // legible 2.83:1 step. This must be a real declaration, not just the
+    // --sidebar-accent-foreground token: the rows pin `color:
+    // var(--sidebar-foreground)` in unlayered CSS, which beats Tailwind v4's
+    // LAYERED hover:text-sidebar-accent-foreground utility at any specificity.
     expect(stylesSource).toMatch(
       /\.app-history-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
     );
     expect(stylesSource).toMatch(
       /\.app-history-button\[data-active="true"\]\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
     );
-    // The sidebar rows must be ink at REST, or hover has nowhere to go.
-    expect(lightRoot).toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Structural nav must NOT darken on hover: already at full ink, so the step
+    // to #0a0a0a is 1.13:1 — invisible, and misleading to keep as if it worked.
+    // Its background shift carries the affordance instead.
+    const navHover = stylesSource.match(
+      /\.app-new-chat-button:hover,\s*\.app-resource-browser-button:hover,\s*\.app-bisque-browser-button:hover\s*\{[^}]*\}/s
+    )?.[0];
+    // Lookbehind so `border-color: transparent` does not count as a text colour.
+    const TEXT_COLOR = /(?<![-\w])color\s*:/;
+    expect(navHover).toBeTruthy();
+    expect(navHover).toMatch(/background:/);
+    expect(navHover).not.toMatch(TEXT_COLOR);
+    const linkHover = stylesSource.match(/\.app-bisque-link-button:hover\s*\{[^}]*\}/s)?.[0];
+    expect(linkHover).toMatch(/background:/);
+    expect(linkHover).not.toMatch(TEXT_COLOR);
   });
 
   it("drops the ss02 stylistic set for stock Inter", () => {
@@ -83,10 +120,13 @@ describe("light theme ink", () => {
 
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
-    // 49rem of column ran prose to a measured mean of 86.5 characters a line
-    // (8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks.
-    // 37.5rem lands ~70.6.
-    expect(lightRoot).toMatch(/--reading-measure:\s*37\.5rem;/);
+    // Measured on ONE fixed set of 5 answer paragraphs so the values compare:
+    // 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9,
+    // unconstrained = 92.9. 44rem sits KNOWINGLY above the 45–75 guideline at
+    // ~84 — the column is a modest share of a wide screen and reads cramped when
+    // held to the middle of the band. The cap still does real work: the measure
+    // that made readers re-scan was the unconstrained 92.9, not 75.
+    expect(lightRoot).toMatch(/--reading-measure:\s*44rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.
@@ -117,6 +157,32 @@ describe("response reading typography", () => {
     expect(Number(strong)).toBeLessThanOrEqual(Number(heading));
     // UI chrome keeps 700 — different job, sparse use.
     expect(lightRoot).toMatch(/--font-weight-strong:\s*700;/);
+  });
+
+  it("gives wide equations their own scrollport instead of amputating them", () => {
+    // KaTeX sets `white-space: nowrap` on display math, and html/body are both
+    // `overflow-x: clip` so the page never scrolls sideways. `clip` creates NO
+    // scrollport, so the two together silently truncate a wide formula: measured
+    // on a 390px phone, a radar-equation display ran to 728px with 338px
+    // unreachable — no scrollbar, no gesture that could reveal it.
+    const rule = stylesSource.match(
+      /\.pk-markdown \.katex-display,[\s\S]*?\{[^}]*\}/
+    )?.[0];
+    expect(rule).toBeTruthy();
+    expect(rule).toMatch(/overflow-x:\s*auto;/);
+    // Must NOT be `hidden`/`clip` — those re-create the amputation.
+    expect(rule).not.toMatch(/overflow-x:\s*(hidden|clip|visible);/);
+    // A horizontal scrollport reports fractional vertical overflow from KaTeX's
+    // negative struts, which would show a useless vertical scrollbar on tall math.
+    expect(rule).toMatch(/overflow-y:\s*hidden;/);
+    // The page itself must still never scroll sideways.
+    expect(stylesSource).toMatch(/overflow-x:\s*clip;/);
+    // Equations are NOT in the reading-measure list — a formula needs the full
+    // column, and narrowing it only makes the scroll longer.
+    const measureRule = stylesSource.match(
+      /\n\.pk-markdown > p,[\s\S]*?\{[^}]*max-width:\s*var\(--reading-measure\);[^}]*\}/
+    )?.[0];
+    expect(measureRule).not.toMatch(/katex/);
   });
 
   it("stops auto-hyphenating prose once it has a measure", () => {

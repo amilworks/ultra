@@ -17,8 +17,18 @@
      width prose ran a measured mean of 86.5 characters per line (sampled across
      8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
      comfortably. Past ~75 the return sweep starts finding the wrong next line and
-     the reader re-reads. This lands ~72 — the roomy end of comfortable, so the
-     column still feels generous rather than cramped.
+     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
+     numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
+     44rem = 83.9, unconstrained (49rem) = 92.9.
+     44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
+     column is a modest share of a wide screen and reads cramped when held to the
+     middle of the band. Note 42.5rem and 44rem measured identically here — the
+     extra 24px moved no wrap points in this sample — so 44rem is not buying more
+     characters than 42.5 so much as more slack before the next wrap. The cap
+     still does real work: unconstrained is 92.9, and that was the measure that
+     made readers re-scan.
+     Do not read the 45–75 band as violated silently — it is exceeded knowingly,
+     and the number to re-measure against is 92.9, not 75.
      In rem, NOT ch, even though ch looks like the natural unit for a measure:
      `ch` resolves against each ELEMENT's font-size, so one shared token handed
      the h2 an 867px measure and the h3 763px while body prose got 654px — three
@@ -26,7 +36,7 @@
      column, not of the type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
      full 49rem column. */
-  --reading-measure: 37.5rem;
+  --reading-measure: 44rem;
   --font-weight-body: 400;
   --font-weight-reading-body: 400;
   --font-weight-strong: 700;
@@ -76,12 +86,12 @@
   --bg-panel: rgba(255, 255, 255, 0.9);
   --bg-panel-strong: #ffffff;
   --bg-main: #f8f8f7;
-  /* Ink, not black. #171717 measured 16.4:1 on --bg-page — technically superb
-     and visually heavy: at that weight body text stamps itself onto the page
-     instead of sitting on it. #3b383c is 10.59:1, still far past AA for every
-     size, with a faint warm-violet cast that keeps long reading sessions
-     softer. The whole light theme reads airier for it. */
-  --text-main: #3b383c;
+  /* Body ink. 16.12:1 on --bg-page — deliberately near-black: this is the
+     reading surface for scientific answers, and the earlier lift to #3b383c
+     (10.59:1) traded more legibility than the airiness was worth. Airiness is
+     bought elsewhere now — a quieter sidebar and a real reading measure — so
+     the text itself does not have to give any up. */
+  --text-main: #191919;
   /* Secondary text people actually READ (timestamps, counts, meta lines, the
      sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
      clears AA for large text and sits just under it for small — a deliberate
@@ -187,11 +197,32 @@
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
   --sidebar: oklch(0.985 0 0);
-  /* Navigation is not content. At rest the rows sit at ink so they stop
-     competing with the transcript for attention; pointing at one — or being on
-     that page — is what makes it go crisp. The darkening IS the affordance,
-     which is why hover has somewhere to go now that rest is no longer black. */
-  --sidebar-foreground: var(--text-main);
+  /* Navigation is not content, and it no longer follows --text-main. Body ink is
+     near-black (16.12:1) because answers are for reading; a sidebar at that same
+     weight competes with them for attention, and every row shouting at full
+     strength is what makes a chrome-heavy app feel busy. This sits at 6.6:1 —
+     unmistakably quieter than the transcript, still comfortably past AA's 4.5:1
+     for the 14px/500 row labels, which are essential navigation and must not be
+     decorative.
+     It also gives hover somewhere to go: rest 6.6:1 -> --sidebar-ink-hover
+     18.15:1 is a large, obvious step, so the darkening reads as the affordance.
+     Pinned to --text-main it would have been a 1.13:1 no-op.
+     Faintly sage rather than pure grey so it shares a family with --text-muted
+     (#787f78), which the section eyebrows already use.
+     This is the QUIET half of the sidebar: the Recents list, which is long,
+     repetitive and the actual source of sidebar noise. The fixed structural nav
+     opts back up to full ink via --sidebar-nav-foreground below. */
+  --sidebar-foreground: #575a57;
+  /* Structural navigation — brand, New chat, Resources/Training/Admin/Lens, the
+     BisQue links — at body ink. There are only ever a handful of these, they do
+     not scroll, and they are the app's spine: making them recede treats
+     wayfinding as noise. Quieting the 20-plus Recents rows is what buys the
+     calm; flattening the six nav items with them just made the sidebar mushy.
+     NOTE: these rows deliberately keep a background-only hover. At full ink the
+     colour darkening to --sidebar-ink-hover would be a 1.13:1 no-op, so the
+     background carries the affordance here; the quiet Recents rows still darken,
+     because from 6.41:1 that step is worth 2.83:1 and reads clearly. */
+  --sidebar-nav-foreground: var(--text-main);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
@@ -1768,7 +1799,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.875rem;
   line-height: 1.35;
   font-weight: var(--font-weight-action);
-  color: var(--sidebar-foreground);
+  color: var(--sidebar-nav-foreground);
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
@@ -1777,17 +1808,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--sidebar-accent) 74%, transparent);
 }
 
-/* Colour has to be a real declaration here, not just the --sidebar-accent-foreground
-   token: the rows pin `color: var(--sidebar-foreground)` in unlayered CSS, which
-   beats Tailwind v4's layered `hover:text-sidebar-accent-foreground` utility no
-   matter its specificity. The shared row rule already transitions `color`, so
-   the darkening animates for free. */
+/* Background-only hover, deliberately. These rows sit at full ink
+   (--sidebar-nav-foreground), so darkening the text to --sidebar-ink-hover would
+   be a 1.13:1 change — invisible, and misleading to leave in as though it did
+   something. The background shift is the affordance here. The Recents rows are
+   the ones that darken, because from 6.41:1 that step is a legible 2.83:1. */
 .app-new-chat-button:hover,
 .app-resource-browser-button:hover,
 .app-bisque-browser-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 86%, var(--sidebar-foreground) 4%);
   border-color: transparent;
-  color: var(--sidebar-ink-hover);
 }
 
 .app-new-chat-button[data-variant="secondary"],
@@ -1822,6 +1852,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border-radius: var(--sidebar-radius-row);
   min-height: 2.3rem;
   padding-inline: var(--sidebar-item-padding-x);
+  /* Structural nav, so full ink rather than the inherited quiet
+     --sidebar-foreground. Stated explicitly because this rule never set a colour
+     and simply inherited the sidebar root's. */
+  color: var(--sidebar-nav-foreground);
   font-family: var(--font-sans);
   font-size: var(--font-size-nav);
   line-height: 1.35;
@@ -1829,9 +1863,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
+/* Background-only, same reasoning as the nav rows above: already at full ink. */
 .app-bisque-link-button:hover {
   background: var(--sidebar-item-hover-bg);
-  color: var(--sidebar-ink-hover);
 }
 
 .app-history-group {
@@ -1872,7 +1906,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 0.25rem 0.6rem 0.25rem 0.25rem;
   border-radius: var(--sidebar-radius-action);
   background: transparent;
-  color: var(--sidebar-foreground);
+  color: var(--sidebar-nav-foreground);
   box-shadow: none;
   font-family: var(--font-sans);
   line-height: 1.35;
@@ -2039,6 +2073,69 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-shell[data-composer-menu-open="true"] .app-composer-card {
   overflow: visible;
+}
+
+/* Desktop half of the read-mode collapse. Reading back through a long answer is
+   when the toolbar is pure distraction, so the composer drops to a hairline and
+   a hint — no attach, no model chip, no send — and comes back the moment you
+   focus it, reach the bottom, or a run starts.
+   The phone block below already did this by collapsing .app-composer-actions.
+   Desktop cannot reuse that: in the slim state .app-composer-actions is ALREADY
+   max-height 0, and the controls you actually see are three separately
+   positioned elements — the idle attach, the idle model echo, and the
+   absolutely-positioned send cluster. Those are what have to go.
+   Horizontal padding is deliberately NOT relaxed even though the + and send are
+   gone: keeping --composer-slim-pad-* means the placeholder collapses straight
+   down instead of also sliding sideways, and a hint that moves in two axes while
+   you scroll is the distraction this is meant to remove. */
+@media (min-width: 641px) {
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-card-body {
+    min-height: 1.8rem;
+    /* The expanded row's 0.6rem block padding is 19.2px of the 49px it was still
+       measuring — zeroing it is what actually gets the strip to ~30px. The
+       textarea's own padding still centres the line inside the box. */
+    padding-block: 0;
+  }
+  /* Half the resting strip: the card goes 77px -> ~30px. The hint takes the
+     run-meta line's type (12px / 400 / 20px — the "487K tokens · 1m 6s" footer)
+     rather than the composer's 15px reading size, because while collapsed it is
+     marginalia about a control, not the control's own voice. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-textarea {
+    min-height: 1.8rem;
+    max-height: 1.8rem;
+    font-size: 0.75rem;
+    line-height: 20px;
+    /* Centres the 20px line box in the 1.8rem strip; stated in px against a rem
+       box on purpose, so the hint stays centred if the reading size moves. */
+    padding-top: calc((1.8rem - 20px) / 2);
+    padding-bottom: calc((1.8rem - 20px) / 2);
+  }
+  /* Takes the run-meta line's COLOUR as well as its type. The ghost-weight
+     --composer-placeholder is tuned for 15px; at 12px its 1.57:1 stops being a
+     quiet hint and becomes an unreadable one. --text-muted is 3.77:1 — still
+     clearly secondary, but legible at this size. Scoped to the desktop strip on
+     purpose: the phone collapse keeps 16px text, where the ghost weight still
+     reads and the established placeholder treatment should stand. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-textarea::placeholder {
+    color: var(--text-muted);
+  }
+  /* visibility, not just opacity: these are real controls, and a 0-opacity
+     button is still tabbable and still announced. Exactly one set of composer
+     controls should ever be in the a11y tree. */
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-idle-attach,
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-idle-mode,
+  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+    .app-composer-actions-end {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 160ms var(--motion-ease), visibility 0s linear 160ms;
+  }
 }
 
 /* Phone-only: collapse the composer to a slim line while the user reads back
@@ -10697,6 +10794,34 @@ details {
   user-select: none;
 }
 
+/* A wide equation has to scroll INSIDE its own block. KaTeX sets
+   `white-space: nowrap` on display math, so a formula wider than the column
+   spills out of it; html and body are both `overflow-x: clip` to stop the page
+   itself scrolling sideways, and `clip` — unlike `auto` — creates no scrollport.
+   The two together silently AMPUTATE the formula: measured on a 390px phone, a
+   radar-equation display ran to 728px and 338px of it was unreachable, with no
+   scrollbar and no gesture that could reveal it.
+   `overflow-x: auto` here gives the equation its own scrollport, so the overflow
+   becomes a swipe instead of a truncation, and the page still never scrolls.
+   Applied at every width: the same formula overflows a 680px desktop measure
+   too, just less often.
+   overflow-y stays hidden because a horizontal scrollport would otherwise report
+   a fractional vertical overflow from KaTeX's negative struts and show a useless
+   vertical scrollbar on tall math. Height is content-driven, so nothing clips. */
+.pk-markdown .katex-display,
+.pk-message-content-plain .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Room for the scrollbar so it never sits on top of the glyphs, and a hair of
+     side padding so a centred formula is not flush against the scroll edges. */
+  padding-block-end: 0.35rem;
+  padding-inline: 0.125rem;
+  /* Touch momentum on iOS, and keep the swipe from turning into a page-back
+     gesture at the ends of the scroll. */
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
 /* Queued follow-up ("send when this run finishes"): a user-bubble-shaped card
    at reduced presence — real ink, but visibly not yet part of the record. The
    eyebrow states the contract; the × un-queues back to the composer. */
@@ -10753,6 +10878,28 @@ details {
 @media (prefers-reduced-motion: reduce) {
   .chat-queued-followup-bubble {
     animation: none;
+  }
+}
+
+/* Mid-run steering (Phase 1): the lifecycle eyebrow above a steered user
+   bubble. Same voice as the queued-followup eyebrow — a label may never be
+   louder than its content — with color reserved for the one state that needs
+   attention (missed). */
+.chat-steering-eyebrow {
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  padding-inline: 6px;
+  color: color-mix(in oklab, var(--text-muted) 72%, var(--text-main) 28%);
+  transition: color 200ms var(--motion-ease);
+}
+
+.chat-steering-eyebrow[data-steering="missed"] {
+  color: color-mix(in oklab, var(--warning, #a16207) 70%, var(--text-main) 30%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-steering-eyebrow {
+    transition: none;
   }
 }
 

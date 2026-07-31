@@ -1,17 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { ChevronRight, Database, Download, FileCode2, FileText } from "lucide-react";
 import {
-  AlertCircle,
-  ChevronDown,
-  ChevronRight,
-  Database,
-  Download,
-  FileCode2,
-  FileText,
-  Loader2,
-} from "lucide-react";
-import { Markdown } from "@/components/prompt-kit/markdown";
-import {
-  rewriteArtifactMarkdownImageUrls,
+  runReportPathKey,
   type RunDocumentKind,
 } from "@/features/chat/run-artifact-hydration";
 import { formatBytes } from "@/lib/format";
@@ -26,19 +15,14 @@ export type ChatRunDocument = {
   sizeBytes?: number;
 };
 
-// Minimal shape of the run's image artifacts, used only to resolve the report's
-// own `![](outputs/figN.png)` references to their served URLs so figures render
-// inside the report rather than as broken sandbox paths.
-type ChatRunDocumentImage = {
-  path: string;
-  url?: string;
-  downloadUrl?: string;
-};
-
 export type ChatRunDocumentsProps = {
   documents: ChatRunDocument[];
-  imageArtifacts?: ChatRunDocumentImage[];
-  loadDocumentText: (downloadUrl: string) => Promise<string>;
+  /* The card is the report's identity in the transcript — one object, opened
+     in the canvas rather than expanded inline. Version counts and the open
+     path key are conversation-level facts, so they arrive from above. */
+  openReportPathKey?: string | null;
+  reportVersionCounts?: Record<string, number>;
+  onOpenReport?: (document: ChatRunDocument) => void;
 };
 
 const KIND_META: Record<RunDocumentKind, { label: string; Icon: typeof FileText }> = {
@@ -48,124 +32,84 @@ const KIND_META: Record<RunDocumentKind, { label: string; Icon: typeof FileText 
   document: { label: "Document", Icon: FileText },
 };
 
-const metaLabel = (document: ChatRunDocument): string => {
+const fileMetaLabel = (document: ChatRunDocument): string => {
   const { label } = KIND_META[document.kind] ?? KIND_META.document;
   const size =
     document.sizeBytes && document.sizeBytes > 0 ? ` · ${formatBytes(document.sizeBytes)}` : "";
   return `${label}${size}`;
 };
 
-type ReportStatus = "loading" | "ready" | "error";
+const reportMetaLabel = (
+  document: ChatRunDocument,
+  version: number,
+  open: boolean
+): string => {
+  const parts = ["Report"];
+  if (version > 1) {
+    parts.push(`v${version}`);
+  }
+  if (document.sizeBytes && document.sizeBytes > 0) {
+    parts.push(formatBytes(document.sizeBytes));
+  }
+  if (open) {
+    parts.push("open in canvas");
+  }
+  return parts.join(" · ");
+};
 
-function ReportReader({
+function ReportDocumentCard({
   document,
-  imageArtifacts,
-  loadDocumentText,
+  version,
+  open,
+  onOpen,
 }: {
   document: ChatRunDocument;
-  imageArtifacts: ChatRunDocumentImage[];
-  loadDocumentText: ChatRunDocumentsProps["loadDocumentText"];
+  version: number;
+  open: boolean;
+  onOpen?: (document: ChatRunDocument) => void;
 }) {
-  // Reports answer the "let me read it in chat" ask, so they open by default;
-  // the toggle lets a long report be collapsed without losing the download.
-  const [expanded, setExpanded] = useState(true);
-  const [status, setStatus] = useState<ReportStatus>("loading");
-  const [rawContent, setRawContent] = useState("");
-  const [error, setError] = useState("");
-
-  // Fetch once on mount (reports are small and open by default). Status is kept
-  // OUT of the dependency array on purpose: depending on it would re-run the
-  // effect the instant we set "loading", whose cleanup would cancel the in-flight
-  // request and strand the reader on the loading state.
-  useEffect(() => {
-    let cancelled = false;
-    loadDocumentText(document.downloadUrl)
-      .then((text) => {
-        if (cancelled) {
-          return;
-        }
-        setRawContent(text);
-        setStatus("ready");
-      })
-      .catch((cause: unknown) => {
-        if (cancelled) {
-          return;
-        }
-        setError(cause instanceof Error ? cause.message : "Unable to load the report");
-        setStatus("error");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [document.downloadUrl, loadDocumentText]);
-
-  // Resolve the report's own `outputs/figN.png` references to served URLs at
-  // render time so figures appear inline; decoupled from the fetch effect so a
-  // changing image list never re-triggers a network read.
-  const content = useMemo(
-    () => rewriteArtifactMarkdownImageUrls(rawContent, imageArtifacts),
-    [rawContent, imageArtifacts]
-  );
-
+  // Without an open handler (canvas unavailable) the card degrades to the one
+  // thing that always works: downloading the artifact.
+  if (!onOpen) {
+    return (
+      <a href={document.downloadUrl} download className="chat-report-card" data-fallback="true">
+        <span className="chat-report-card-tile">
+          <FileText className="size-4" aria-hidden="true" />
+        </span>
+        <span className="chat-report-card-body">
+          <span className="chat-report-card-title">{document.title}</span>
+          <span className="chat-report-card-meta">{reportMetaLabel(document, version, false)}</span>
+        </span>
+        <Download className="size-4 shrink-0 chat-report-card-chevron" aria-hidden="true" />
+      </a>
+    );
+  }
   return (
-    <section className="chat-document-report" aria-label={`Report: ${document.title}`}>
-      <header className="chat-document-report-header">
-        <button
-          type="button"
-          className="chat-document-report-toggle"
-          onClick={() => setExpanded((value) => !value)}
-          aria-expanded={expanded}
-        >
-          {expanded ? (
-            <ChevronDown className="size-4 shrink-0" aria-hidden="true" />
-          ) : (
-            <ChevronRight className="size-4 shrink-0" aria-hidden="true" />
-          )}
-          <FileText className="size-4 shrink-0" aria-hidden="true" />
-          <span className="chat-document-report-title">{document.title}</span>
-        </button>
-        <span className="chat-document-report-meta">{metaLabel(document)}</span>
-        <a
-          href={document.downloadUrl}
-          download
-          className="chat-document-report-download"
-          aria-label={`Download ${document.title}`}
-        >
-          <Download className="size-4" aria-hidden="true" />
-          <span>Download</span>
-        </a>
-      </header>
-      {expanded ? (
-        <div className="chat-document-report-body">
-          {status === "loading" ? (
-            <div className="chat-document-report-status">
-              <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-              <span>Loading report…</span>
-            </div>
-          ) : status === "error" ? (
-            <div className="chat-document-report-status chat-document-report-error">
-              <AlertCircle className="size-4" aria-hidden="true" />
-              <span>
-                {error} —{" "}
-                <a href={document.downloadUrl} download className="chat-document-report-inline-link">
-                  download instead
-                </a>
-                .
-              </span>
-            </div>
-          ) : (
-            <Markdown className="chat-document-report-markdown">{content}</Markdown>
-          )}
-        </div>
-      ) : null}
-    </section>
+    <button
+      type="button"
+      className="chat-report-card"
+      data-open={open ? "true" : undefined}
+      aria-expanded={open}
+      aria-controls="report-canvas"
+      onClick={() => onOpen(document)}
+    >
+      <span className="chat-report-card-tile">
+        <FileText className="size-4" aria-hidden="true" />
+      </span>
+      <span className="chat-report-card-body">
+        <span className="chat-report-card-title">{document.title}</span>
+        <span className="chat-report-card-meta">{reportMetaLabel(document, version, open)}</span>
+      </span>
+      <ChevronRight className="size-4 shrink-0 chat-report-card-chevron" aria-hidden="true" />
+    </button>
   );
 }
 
 export function ChatRunDocuments({
   documents,
-  imageArtifacts = [],
-  loadDocumentText,
+  openReportPathKey = null,
+  reportVersionCounts,
+  onOpenReport,
 }: ChatRunDocumentsProps) {
   if (!Array.isArray(documents) || documents.length === 0) {
     return null;
@@ -175,14 +119,18 @@ export function ChatRunDocuments({
 
   return (
     <div className="chat-document-list">
-      {reports.map((document) => (
-        <ReportReader
-          key={document.path}
-          document={document}
-          imageArtifacts={imageArtifacts}
-          loadDocumentText={loadDocumentText}
-        />
-      ))}
+      {reports.map((document) => {
+        const pathKey = runReportPathKey(document.path);
+        return (
+          <ReportDocumentCard
+            key={document.path}
+            document={document}
+            version={Math.max(1, reportVersionCounts?.[pathKey] ?? 1)}
+            open={Boolean(pathKey) && openReportPathKey === pathKey}
+            onOpen={onOpenReport}
+          />
+        );
+      })}
       {files.length > 0 ? (
         <div className="chat-document-files">
           {files.map((document) => {
@@ -197,7 +145,7 @@ export function ChatRunDocuments({
                 <Icon className={cn("size-4 shrink-0 chat-document-chip-icon")} aria-hidden="true" />
                 <span className="chat-document-chip-text">
                   <span className="chat-document-chip-title">{document.title}</span>
-                  <span className="chat-document-chip-meta">{metaLabel(document)}</span>
+                  <span className="chat-document-chip-meta">{fileMetaLabel(document)}</span>
                 </span>
                 <Download className="size-4 shrink-0 chat-document-chip-download" aria-hidden="true" />
               </a>

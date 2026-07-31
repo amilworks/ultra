@@ -5,7 +5,10 @@ import {
   isHydratableRunArtifactDocument,
   isHydratableRunArtifactVisual,
   isReportRunDocument,
+  resolveRunOutputArtifactUrl,
   rewriteArtifactMarkdownImageUrls,
+  runReportDocumentFormat,
+  runReportPathKey,
   shouldHydrateRunArtifacts,
 } from "./run-artifact-hydration";
 
@@ -172,6 +175,55 @@ describe("classifyRunDocumentKind", () => {
     expect(isReportRunDocument("outputs/toeplitz_report.md")).toBe(true);
     expect(isReportRunDocument("outputs/script.py")).toBe(false);
   });
+
+  it("classifies HTML artifacts as reports, not plain documents", () => {
+    /* text/html previously fell through to the generic text/* "document"
+       branch, which left an HTML report without a reading surface. The
+       report check must win before that fallback. */
+    expect(classifyRunDocumentKind("outputs/benchmark.html")).toBe("report");
+    expect(classifyRunDocumentKind("outputs/index.htm")).toBe("report");
+    expect(classifyRunDocumentKind("outputs/report", "text/html")).toBe("report");
+    expect(isReportRunDocument("outputs/benchmark.html")).toBe(true);
+  });
+});
+
+describe("runReportDocumentFormat", () => {
+  it("separates the two report renderers by extension and MIME", () => {
+    expect(runReportDocumentFormat("outputs/report.md")).toBe("markdown");
+    expect(runReportDocumentFormat("outputs/report.html")).toBe("html");
+    expect(runReportDocumentFormat("outputs/report", "text/html")).toBe("html");
+    expect(runReportDocumentFormat("outputs/report", "text/markdown")).toBe("markdown");
+    expect(runReportDocumentFormat("outputs/script.py")).toBeNull();
+  });
+});
+
+describe("runReportPathKey", () => {
+  it("gives re-registrations of the same logical output one identity", () => {
+    expect(runReportPathKey("outputs/report.html")).toBe(
+      runReportPathKey("/srv/runs/run_b/outputs/report.html")
+    );
+    expect(runReportPathKey("outputs/Report.HTML")).toBe(
+      runReportPathKey("outputs/report.html")
+    );
+    expect(runReportPathKey("outputs/report.html")).not.toBe(
+      runReportPathKey("outputs/appendix.html")
+    );
+  });
+});
+
+describe("resolveRunOutputArtifactUrl", () => {
+  it("resolves report-relative references to served artifact urls", () => {
+    const artifacts = [
+      { path: "outputs/fig1.png", url: "/v2/artifacts/fig-1/download" },
+    ];
+    expect(resolveRunOutputArtifactUrl("outputs/fig1.png", artifacts)).toBe(
+      "/v2/artifacts/fig-1/download"
+    );
+    expect(resolveRunOutputArtifactUrl("fig1.png", artifacts)).toBe(
+      "/v2/artifacts/fig-1/download"
+    );
+    expect(resolveRunOutputArtifactUrl("outputs/missing.png", artifacts)).toBeNull();
+  });
 });
 
 describe("isHydratableRunArtifactDocument", () => {
@@ -197,6 +249,15 @@ describe("isHydratableRunArtifactDocument", () => {
         mime_type: "image/png",
       })
     ).toBe(false);
+  });
+
+  it("surfaces HTML reports from a run's outputs", () => {
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "outputs/benchmark.html",
+        mime_type: "text/html",
+      })
+    ).toBe(true);
   });
 
   it("ignores uploads and staged inputs that are not run outputs", () => {

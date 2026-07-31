@@ -6856,6 +6856,355 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
 }
 
+/* ============================= REPORT CANVAS =============================
+   The reading surface for run-generated reports. Two pieces:
+   1) .chat-report-card — the report's identity in the transcript. One object
+      across versions; state lives in geometry (border weight, chevron turn),
+      never in color, and "updated" is a meta-line change, not a badge.
+   2) .report-canvas — the panel. On a wide stage it is a real grid column
+      (main[data-report-canvas] below); on a narrow stage it floats over the
+      transcript; on the phone regime it is a full-screen sheet.
+   Chrome is all-neutral by the calm law: color enters only inside the report,
+   carried by its own data. Every surface here is a theme token, so dark
+   arrives with zero additional rules. */
+
+.chat-report-card {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  width: 100%;
+  padding: 0.8rem 1rem;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 160ms var(--motion-ease), background 160ms var(--motion-ease);
+}
+.chat-report-card:hover {
+  border-color: color-mix(in oklab, var(--text-main) 16%, transparent);
+  transition-duration: 60ms;
+}
+.chat-report-card[data-open="true"] {
+  border-color: color-mix(in oklab, var(--text-main) 26%, transparent);
+}
+
+.chat-report-card-tile {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  flex: none;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-main);
+  color: var(--text-main);
+}
+
+.chat-report-card-body {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.1rem;
+}
+
+.chat-report-card-title {
+  font-size: 0.9rem;
+  font-weight: var(--font-weight-panel-heading);
+  line-height: 1.35;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chat-report-card-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chat-report-card-chevron {
+  color: var(--text-muted);
+  transition: transform 220ms var(--motion-ease);
+}
+.chat-report-card[data-open="true"] .chat-report-card-chevron {
+  transform: rotate(90deg);
+}
+
+/* --- the split column: main flips from flex column to a named-area grid.
+   The transcript keeps minmax(0,1fr); the canvas column rides the attribute
+   so open/close is one 220ms gesture on the house curve. */
+.app-main-shell[data-report-canvas] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 0px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "bar bar"
+    "stage canvas"
+    "composer canvas";
+  transition: grid-template-columns 220ms var(--motion-ease);
+}
+.app-main-shell[data-report-canvas="open"] {
+  grid-template-columns: minmax(0, 1fr) min(40.5rem, 46vw);
+}
+.app-main-shell[data-report-canvas] .app-mobile-shell-bar {
+  grid-area: bar;
+}
+.app-main-shell[data-report-canvas] .chat-stage-scroller {
+  grid-area: stage;
+}
+.app-main-shell[data-report-canvas] .app-composer-shell {
+  grid-area: composer;
+}
+.app-main-shell[data-report-canvas] .report-canvas[data-mode="split"] {
+  grid-area: canvas;
+}
+
+.report-canvas {
+  min-width: 0;
+  min-height: 0;
+}
+.report-canvas[data-mode="split"] {
+  padding: 0.75rem 0.75rem 0.75rem 0;
+}
+/* The inner frame holds a FIXED width while the grid column animates, so the
+   report never reflows mid-gesture — the column reveals it like a curtain. */
+.report-canvas[data-mode="split"] .report-canvas-frame {
+  width: min(39.75rem, calc(46vw - 0.75rem));
+  margin-left: auto;
+}
+.report-canvas[data-mode="overlay"] {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  width: min(40.5rem, calc(100vw - 1.5rem));
+  z-index: 40;
+}
+.report-canvas[data-mode="sheet"] {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--bg-page);
+  padding: 0;
+}
+
+.report-canvas-frame {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-panel-strong);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: report-canvas-in 220ms var(--motion-ease);
+}
+.report-canvas[data-mode="sheet"] .report-canvas-frame {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  animation: none;
+}
+.report-canvas[data-closing="true"] .report-canvas-frame {
+  opacity: 0;
+  transition: opacity 160ms var(--motion-ease);
+}
+
+@keyframes report-canvas-in {
+  from {
+    opacity: 0;
+    transform: translateX(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.report-canvas-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 3.25rem;
+  padding: 0.5rem 0.6rem 0.5rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+.report-canvas[data-mode="sheet"] .report-canvas-head {
+  padding-left: 0.5rem;
+  padding-top: calc(0.5rem + env(safe-area-inset-top, 0px));
+}
+
+.report-canvas-heading {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 0.06rem;
+}
+
+.report-canvas-title {
+  font-size: 0.86rem;
+  font-weight: var(--font-weight-panel-heading);
+  color: var(--text-main);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.report-canvas-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.report-canvas-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.report-canvas-button {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+.report-canvas-button:hover {
+  background: var(--bg-main);
+  color: var(--text-main);
+  transition-duration: 60ms;
+}
+
+.report-canvas-back {
+  margin-right: 0.15rem;
+}
+
+.report-canvas-separator {
+  width: 1px;
+  height: 1.1rem;
+  background: var(--line);
+  margin: 0 0.25rem;
+}
+
+.report-canvas-version-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.18rem 0.5rem;
+  margin-right: 0.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: var(--font-weight-action);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: border-color 160ms var(--motion-ease);
+}
+.report-canvas-version-chip:hover {
+  border-color: color-mix(in oklab, var(--text-main) 16%, transparent);
+  transition-duration: 60ms;
+}
+
+.report-canvas-version-menu {
+  min-width: 11rem;
+}
+
+.report-canvas-version-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.9rem;
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.report-canvas-version-run {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.report-canvas-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* HTML reports fill the body; the sandboxed frame is the document. */
+.report-canvas-html-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--bg-panel-strong);
+}
+
+/* Markdown reports read like the transcript: same measure, same rhythm. */
+.report-canvas-article {
+  max-width: var(--reading-measure);
+  margin: 0 auto;
+  padding: 2.2rem 2.4rem 4rem;
+  font-size: var(--font-size-reading);
+  line-height: var(--line-height-reading);
+}
+.report-canvas[data-mode="sheet"] .report-canvas-article {
+  padding: 1.4rem 1.25rem 3rem;
+}
+
+.report-canvas-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 1.1rem 1.25rem;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+.report-canvas-status-error {
+  color: var(--danger);
+}
+.report-canvas-inline-link {
+  color: inherit;
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-main-shell[data-report-canvas] {
+    transition: none;
+  }
+  .report-canvas-frame {
+    animation: none;
+  }
+  .chat-report-card-chevron {
+    transition: none;
+  }
+}
+
 @keyframes rise-in {
   from {
     transform: translateY(6px);

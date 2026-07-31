@@ -149,8 +149,13 @@ import {
   isHydratableRunArtifactVisual,
   rewriteArtifactMarkdownImageUrls,
   type RunDocumentKind,
+  runReportPathKey,
   shouldHydrateRunArtifacts,
 } from "./features/chat/run-artifact-hydration";
+import type {
+  ReportCanvasMode,
+  ReportCanvasVersion,
+} from "./components/canvas/ReportCanvas";
 import {
   isLegacyRunLookup404Content,
   latestRunEventSequence,
@@ -450,6 +455,7 @@ const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
 const loadToolResultCardsModule = () => import("./components/chat/ToolResultCards");
 const loadChatRunDocumentsModule = () => import("./components/chat/ChatRunDocuments");
+const loadReportCanvasModule = () => import("./components/canvas/ReportCanvas");
 const loadComposerWorkflowsModule = () => import("./components/chat/composer-workflows");
 const loadVirtuosoModule = () => import("react-virtuoso");
 
@@ -535,6 +541,7 @@ const LazyToolResultCardSection = lazyNamed(
   "ToolResultCardSection"
 );
 const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
+const LazyReportCanvas = lazyNamed(loadReportCanvasModule, "ReportCanvas");
 
 let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
 let adminPanelPreloadPromise: Promise<unknown> | null = null;
@@ -1907,6 +1914,10 @@ type ConversationTranscriptActions = {
      also removes the reply it produced. */
   onRequestDeleteUserMessage: (messageId: string) => void;
   onRetryAssistant: (assistantMessageId: string, options: { edit: boolean }) => void;
+  /* Toggles the report canvas for a report document's path key. Lives in
+     actions (stable identity) so opening a canvas does not rebuild the
+     transcript's callback plumbing. */
+  onOpenReportDocument: (document: RunDocumentArtifact) => void;
 };
 
 type ConversationMessageRowProps = {
@@ -1919,6 +1930,11 @@ type ConversationMessageRowProps = {
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
   actions: ConversationTranscriptActions;
+  /* Which report (by conversation-level path key) is open in the canvas, and
+     how many registrations each report path has across the conversation. Both
+     are conversation-level facts a single message cannot know. */
+  openReportPathKey: string | null;
+  reportVersionCounts: Record<string, number>;
 };
 
 const ConversationMessageRow = memo(
@@ -1932,6 +1948,8 @@ const ConversationMessageRow = memo(
     bisqueLinksByFileId,
     apiClient,
     actions,
+    openReportPathKey,
+    reportVersionCounts,
   }: ConversationMessageRowProps) {
     const isAssistant = message.role === "assistant";
     const isCopied = copiedMessageId === message.id;
@@ -2251,8 +2269,9 @@ const ConversationMessageRow = memo(
             <Suspense fallback={null}>
               <LazyChatRunDocuments
                 documents={runDocuments}
-                imageArtifacts={runArtifacts}
-                loadDocumentText={fetchRunDocumentText}
+                openReportPathKey={openReportPathKey}
+                reportVersionCounts={reportVersionCounts}
+                onOpenReport={actions.onOpenReportDocument}
               />
             </Suspense>
           ) : null}
@@ -2309,7 +2328,14 @@ const ConversationMessageRow = memo(
     previousProps.conversationRunArtifacts === nextProps.conversationRunArtifacts &&
     previousProps.uploadedFiles === nextProps.uploadedFiles &&
     previousProps.bisqueLinksByFileId === nextProps.bisqueLinksByFileId &&
-    previousProps.apiClient === nextProps.apiClient
+    previousProps.apiClient === nextProps.apiClient &&
+    /* Same rule as the transcript comparator above: rendered-from props must
+       be listed, or the report card's open/version chrome freezes at first
+       paint (both narrow comparators shipped stale in live verification —
+       fiber inspection showed the memo boundary holding the new key while
+       the row inside rendered the old null). */
+    previousProps.openReportPathKey === nextProps.openReportPathKey &&
+    previousProps.reportVersionCounts === nextProps.reportVersionCounts
 );
 
 // Rotating, composer-forward invitations shown on the empty/new-chat screen. Kept
@@ -2356,6 +2382,8 @@ type ConversationTranscriptProps = {
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   apiClient: ApiClient;
   actions: ConversationTranscriptActions;
+  openReportPathKey: string | null;
+  reportVersionCounts: Record<string, number>;
   /* ⌘F navigation: which message to bring into view. The nonce forces a
      re-scroll when the user re-navigates to the same match after scrolling
      away — identity alone would look unchanged. */
@@ -2378,6 +2406,8 @@ const ConversationTranscript = memo(
     bisqueLinksByFileId,
     apiClient,
     actions,
+    openReportPathKey,
+    reportVersionCounts,
     findTarget,
   }: ConversationTranscriptProps) {
     const conversationRunArtifacts = useMemo(
@@ -2459,6 +2489,8 @@ const ConversationTranscript = memo(
             bisqueLinksByFileId={bisqueLinksByFileId}
             apiClient={apiClient}
             actions={actions}
+            openReportPathKey={openReportPathKey}
+            reportVersionCounts={reportVersionCounts}
           />
         </ErrorBoundary>
       ),
@@ -2468,6 +2500,8 @@ const ConversationTranscript = memo(
         bisqueLinksByFileId,
         conversationRunArtifacts,
         copiedMessageId,
+        openReportPathKey,
+        reportVersionCounts,
         streamingMessageId,
         uploadedFiles,
       ]
@@ -2619,7 +2653,16 @@ const ConversationTranscript = memo(
     previousProps.copiedMessageId === nextProps.copiedMessageId &&
     previousProps.uploadedFiles === nextProps.uploadedFiles &&
     previousProps.bisqueLinksByFileId === nextProps.bisqueLinksByFileId &&
-    previousProps.apiClient === nextProps.apiClient
+    previousProps.apiClient === nextProps.apiClient &&
+    /* The report canvas' open state must reach the cards: this comparator is
+       deliberately narrow (actions identity churn is tolerated as stale), so
+       any prop the rows RENDER from has to be listed here explicitly — the
+       card's open/version chrome went permanently stale without these. The
+       re-render also refreshes the rows' actions closure, which is what lets
+       a second click on an open card read the CURRENT canvas target and
+       toggle it closed. */
+    previousProps.openReportPathKey === nextProps.openReportPathKey &&
+    previousProps.reportVersionCounts === nextProps.reportVersionCounts
 );
 
 const toChatWire = (messages: UiMessage[]): ChatMessage[] =>
@@ -5127,6 +5170,45 @@ export function App() {
   // composer to reclaim reading space (expands on focus / at-bottom / sending).
   const [composerScrolledAway, setComposerScrolledAway] = useState(false);
 
+  /* Report canvas — the reading surface for run-generated reports. Below
+     1200px the stage cannot afford a true split, so the canvas floats over
+     the transcript; on the phone regime it is a full-screen sheet. */
+  const reportCanvasStageNarrow = useBreakpoint(1200);
+  const reportCanvasMode: ReportCanvasMode = isPhoneView
+    ? "sheet"
+    : reportCanvasStageNarrow
+      ? "overlay"
+      : "split";
+  /* Controlled so opening the canvas can collapse the sidebar to its icon
+     rail (paying the width back to the transcript) and closing can restore
+     it. The SidebarTrigger keeps working — it drives this same state through
+     the provider's onOpenChange. */
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [reportCanvasTarget, setReportCanvasTarget] = useState<{
+    conversationId: string;
+    pathKey: string;
+  } | null>(null);
+  const [reportCanvasClosing, setReportCanvasClosing] = useState(false);
+  const reportCanvasCloseTimerRef = useRef<number | null>(null);
+  /* Auto-open fires once per report path per conversation — a later version
+     of the same report never re-opens the canvas over the reader. */
+  const reportCanvasAutoOpenedKeysRef = useRef<Set<string>>(new Set());
+  /* What the sidebar was before the canvas collapsed it. STATE, not a ref:
+     the conversation-switch reset reads it during render (the sanctioned
+     reset-from-props pattern), and refs must not be read there. The mirror
+     ref below serves event handlers that need the CURRENT sidebar state
+     without re-memoizing the whole action chain on every sidebar toggle. */
+  const [sidebarOpenBeforeCanvas, setSidebarOpenBeforeCanvas] = useState<boolean | null>(
+    null
+  );
+  const sidebarOpenRef = useRef(true);
+  useEffect(() => {
+    sidebarOpenRef.current = sidebarOpen;
+  }, [sidebarOpen]);
+  const reportCanvasAutoOpenRef = useRef<
+    ((conversationId: string, pathKeys: string[]) => void) | null
+  >(null);
+
   const [conversations, setConversations] = useState<ConversationState[]>([]);
   const [conversationListOffset, setConversationListOffset] = useState(0);
   const [conversationListHasMore, setConversationListHasMore] = useState(false);
@@ -7621,6 +7703,208 @@ export function App() {
   };
 
   const activeMessages = activeConversation?.messages ?? EMPTY_UI_MESSAGES;
+
+  /* One version chain per report path across the conversation: re-registering
+     outputs/report.html on a later run appends a version behind the same card
+     instead of minting a second identity. Order follows the transcript, so
+     the last entry is always the latest registration. */
+  const reportCanvasVersionsByKey = useMemo(() => {
+    const byKey = new Map<string, ReportCanvasVersion[]>();
+    for (const message of activeMessages) {
+      if (message.role !== "assistant") {
+        continue;
+      }
+      for (const document of message.runDocuments ?? EMPTY_RUN_DOCUMENTS) {
+        if (document.kind !== "report") {
+          continue;
+        }
+        const pathKey = runReportPathKey(document.path);
+        if (!pathKey) {
+          continue;
+        }
+        const versions = byKey.get(pathKey) ?? [];
+        versions.push({
+          messageId: message.id,
+          runId: message.runId ?? null,
+          document,
+          imageArtifacts: message.runArtifacts ?? EMPTY_RUN_IMAGE_ARTIFACTS,
+        });
+        byKey.set(pathKey, versions);
+      }
+    }
+    return byKey;
+  }, [activeMessages]);
+  const reportVersionCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    reportCanvasVersionsByKey.forEach((versions, pathKey) => {
+      counts[pathKey] = versions.length;
+    });
+    return counts;
+  }, [reportCanvasVersionsByKey]);
+  const activeReportCanvasVersions = useMemo(() => {
+    if (
+      !reportCanvasTarget ||
+      reportCanvasTarget.conversationId !== (activeConversation?.id ?? null)
+    ) {
+      return null;
+    }
+    const versions = reportCanvasVersionsByKey.get(reportCanvasTarget.pathKey);
+    return versions && versions.length > 0 ? versions : null;
+  }, [reportCanvasTarget, activeConversation?.id, reportCanvasVersionsByKey]);
+  const reportCanvasVisible = Boolean(activeReportCanvasVersions);
+  const openReportPathKey =
+    reportCanvasVisible && !reportCanvasClosing && reportCanvasTarget
+      ? reportCanvasTarget.pathKey
+      : null;
+
+  const clearReportCanvasCloseTimer = useCallback(() => {
+    if (reportCanvasCloseTimerRef.current !== null) {
+      window.clearTimeout(reportCanvasCloseTimerRef.current);
+      reportCanvasCloseTimerRef.current = null;
+    }
+  }, []);
+  const restoreSidebarAfterReportCanvas = useCallback(() => {
+    setSidebarOpenBeforeCanvas(null);
+    if (sidebarOpenBeforeCanvas === true) {
+      /* Restore only if the rail is still collapsed — if the reader re-opened
+         the sidebar themselves while reading, that choice stands. */
+      setSidebarOpen((current) => (current === false ? true : current));
+    }
+  }, [sidebarOpenBeforeCanvas]);
+  const openReportCanvas = useCallback(
+    (conversationId: string, pathKey: string) => {
+      clearReportCanvasCloseTimer();
+      setReportCanvasClosing(false);
+      setReportCanvasTarget({ conversationId, pathKey });
+      if (reportCanvasMode === "split") {
+        /* Latch what the sidebar was before the collapse, once per canvas
+           session — reopening a different report while already split keeps
+           the ORIGINAL pre-canvas state. */
+        setSidebarOpenBeforeCanvas((latch) =>
+          latch === null ? sidebarOpenRef.current : latch
+        );
+        setSidebarOpen(false);
+      }
+    },
+    [clearReportCanvasCloseTimer, reportCanvasMode]
+  );
+  const closeReportCanvas = useCallback(() => {
+    restoreSidebarAfterReportCanvas();
+    const finalize = () => {
+      setReportCanvasTarget(null);
+      setReportCanvasClosing(false);
+    };
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    if (reportCanvasMode !== "split" || reduceMotion) {
+      clearReportCanvasCloseTimer();
+      finalize();
+      return;
+    }
+    /* Split mode animates shut: the closing attribute drives the grid column
+       back to zero, and the target clears after the 220ms gesture lands. */
+    setReportCanvasClosing(true);
+    clearReportCanvasCloseTimer();
+    reportCanvasCloseTimerRef.current = window.setTimeout(() => {
+      reportCanvasCloseTimerRef.current = null;
+      finalize();
+    }, 260);
+  }, [clearReportCanvasCloseTimer, reportCanvasMode, restoreSidebarAfterReportCanvas]);
+  const toggleReportDocument = useCallback(
+    (document: RunDocumentArtifact) => {
+      const conversationId = activeConversation?.id;
+      if (!conversationId) {
+        return;
+      }
+      const pathKey = runReportPathKey(document.path);
+      if (!pathKey) {
+        return;
+      }
+      if (
+        reportCanvasTarget &&
+        !reportCanvasClosing &&
+        reportCanvasTarget.conversationId === conversationId &&
+        reportCanvasTarget.pathKey === pathKey
+      ) {
+        closeReportCanvas();
+        return;
+      }
+      openReportCanvas(conversationId, pathKey);
+    },
+    [
+      activeConversation?.id,
+      closeReportCanvas,
+      openReportCanvas,
+      reportCanvasClosing,
+      reportCanvasTarget,
+    ]
+  );
+
+  /* Auto-open through a ref so the artifact-hydration callback (a stable
+     useCallback with narrow deps) never has to depend on canvas state. */
+  useEffect(() => {
+    reportCanvasAutoOpenRef.current = (conversationId, pathKeys) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+      /* Desktop split only: never steal a phone screen or a narrow stage,
+         and never replace a canvas the reader already has open. */
+      if (!window.matchMedia("(min-width: 1200px)").matches) {
+        return;
+      }
+      if (conversationId !== (activeConversation?.id ?? null)) {
+        return;
+      }
+      if (reportCanvasTarget) {
+        return;
+      }
+      const fresh = pathKeys.find(
+        (pathKey) =>
+          pathKey &&
+          !reportCanvasAutoOpenedKeysRef.current.has(`${conversationId}::${pathKey}`)
+      );
+      if (!fresh) {
+        return;
+      }
+      reportCanvasAutoOpenedKeysRef.current.add(`${conversationId}::${fresh}`);
+      openReportCanvas(conversationId, fresh);
+    };
+  });
+
+  /* Esc closes the canvas — unless something closer to the keyboard (dialog,
+     menu, the composer's resource picker) already claimed the keypress. */
+  useEffect(() => {
+    if (!reportCanvasVisible) {
+      return undefined;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) {
+        return;
+      }
+      closeReportCanvas();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [reportCanvasVisible, closeReportCanvas]);
+
+  /* Switching conversations closes the canvas without animation; a target
+     whose report vanished (message deleted) clears the same way. Adjusted
+     DURING RENDER — React's sanctioned reset-state-from-props pattern — so no
+     effect fires setState synchronously. Idempotent under a StrictMode
+     double-render: the second pass sees the target already null. A close
+     timer that outlives this reset finalizes into a no-op. */
+  if (
+    reportCanvasTarget &&
+    (reportCanvasTarget.conversationId !== (activeConversation?.id ?? null) ||
+      !reportCanvasVersionsByKey.has(reportCanvasTarget.pathKey))
+  ) {
+    setReportCanvasTarget(null);
+    if (reportCanvasClosing) {
+      setReportCanvasClosing(false);
+    }
+    restoreSidebarAfterReportCanvas();
+  }
   const activeConversationHydrated = activeConversation?.hydrated ?? true;
   const activePrompt =
     activeConversation &&
@@ -10038,7 +10322,8 @@ export function App() {
   const hydrateRunArtifacts = useCallback(async (
     conversationId: string,
     assistantMessageId: string,
-    runId: string
+    runId: string,
+    options?: { autoOpenReport?: boolean }
   ): Promise<void> => {
     try {
       const artifactResponse = await listRunArtifacts(apiClient, runId, 2000);
@@ -10075,7 +10360,29 @@ export function App() {
 
       const selected = prioritizeHydratedImageArtifacts(durableArtifacts);
 
+      /* Report paths this hydration introduces to the conversation — i.e.
+         paths no OTHER message already carries. Only these may auto-open the
+         canvas: a re-registration of an existing report (v2, v3…) updates its
+         card quietly and never opens anything over the reader. Written from
+         inside the updater (idempotent under a double-invoke) because that is
+         where the pre-update conversation state is visible. */
+      let freshReportPathKeys: string[] = [];
       updateConversation(conversationId, (conversation) => {
+        const knownReportKeys = new Set<string>();
+        conversation.messages.forEach((item) => {
+          if (item.id === assistantMessageId) {
+            return;
+          }
+          (item.runDocuments ?? []).forEach((document) => {
+            if (document.kind === "report") {
+              knownReportKeys.add(runReportPathKey(document.path));
+            }
+          });
+        });
+        freshReportPathKeys = documentArtifacts
+          .filter((document) => document.kind === "report")
+          .map((document) => runReportPathKey(document.path))
+          .filter((pathKey) => pathKey && !knownReportKeys.has(pathKey));
         const uploadedPreviewLookup = buildUploadedArtifactPreviewLookup(
           conversation.uploadedFiles
         );
@@ -10117,6 +10424,9 @@ export function App() {
           ),
         };
       });
+      if (options?.autoOpenReport && freshReportPathKeys.length > 0) {
+        reportCanvasAutoOpenRef.current?.(conversationId, freshReportPathKeys);
+      }
     } catch (error) {
       console.warn("Artifact hydration failed", { runId, error });
       // non-blocking: keep chat response usable without artifact previews
@@ -10167,7 +10477,11 @@ export function App() {
     assistantMessageId: string,
     runId: string
   ): void => {
-    void hydrateRunArtifacts(conversationId, assistantMessageId, runId);
+    void hydrateRunArtifacts(conversationId, assistantMessageId, runId, {
+      /* Live completion (not load-time backfill): the turn's first NEW report
+         may open the canvas, once, on the desktop split only. */
+      autoOpenReport: true,
+    });
     void hydrateRunEvents(conversationId, assistantMessageId, runId);
   }, [hydrateRunArtifacts, hydrateRunEvents]);
 
@@ -11301,6 +11615,7 @@ export function App() {
       onEditUserMessage: handleEditUserMessage,
       onRequestDeleteUserMessage: requestDeleteUserMessage,
       onRetryAssistant: retryAssistantResponse,
+      onOpenReportDocument: toggleReportDocument,
     }),
     [
       copyBisqueResourceUri,
@@ -11313,6 +11628,7 @@ export function App() {
       retryAssistantResponse,
       setActivePromptValue,
       stopActiveConversation,
+      toggleReportDocument,
     ]
   );
 
@@ -12425,6 +12741,8 @@ export function App() {
     <SidebarProvider
       className="app-shell h-dvh overflow-hidden"
       style={{ "--sidebar-width": "260px" } as CSSProperties}
+      open={sidebarOpen}
+      onOpenChange={setSidebarOpen}
     >
       <Sidebar collapsible="icon" className="app-sidebar">
         <CollapsedSidebarRail
@@ -12817,7 +13135,21 @@ export function App() {
       ) : null}
 
       <SidebarInset>
-        <main className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden">
+        <main
+          className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden"
+          /* Split-mode report canvas: the attribute flips the shell from a
+             column into a named-area grid (bar / stage+canvas / composer),
+             so the canvas gets a real column without re-nesting the chat
+             tree. "open" carries the 648px column; "closing" returns it to
+             zero and the node unmounts after the gesture lands. */
+          data-report-canvas={
+            activePanel === "chat" && reportCanvasVisible && reportCanvasMode === "split"
+              ? reportCanvasClosing
+                ? "closing"
+                : "open"
+              : undefined
+          }
+        >
           <div className="app-mobile-shell-bar md:hidden">
             <SidebarTrigger
               className="app-mobile-sidebar-trigger"
@@ -13084,7 +13416,7 @@ export function App() {
             </Suspense>
           ) : (
             <>
-            <div className="relative min-h-0 flex-1 overflow-hidden">
+            <div className="chat-stage-scroller relative min-h-0 flex-1 overflow-hidden">
               {/* Anchored to this NON-scrolling wrapper, deliberately: the
                   ChatContainerRoot below is the scroll container, and an
                   absolute child there rides the scrolled coordinate space. */}
@@ -13127,6 +13459,8 @@ export function App() {
                   bisqueLinksByFileId={activeBisqueLinksByFileId}
                   apiClient={apiClient}
                   actions={transcriptActions}
+                  openReportPathKey={openReportPathKey}
+                  reportVersionCounts={reportVersionCounts}
                   findTarget={transcriptFindTarget}
                 />
                 {/* Queued follow-up: scrolls with the transcript, below the
@@ -13903,6 +14237,17 @@ export function App() {
               </FileUpload>
             </div>
           </div>
+          {reportCanvasVisible && activeReportCanvasVersions ? (
+            <Suspense fallback={null}>
+              <LazyReportCanvas
+                versions={activeReportCanvasVersions}
+                mode={reportCanvasMode}
+                closing={reportCanvasClosing}
+                onClose={closeReportCanvas}
+                loadDocumentText={fetchRunDocumentText}
+              />
+            </Suspense>
+          ) : null}
             </>
           )}
         </main>

@@ -177,7 +177,11 @@ const normalizeArtifactReferencePath = (value: string): string => {
   return path.replace(/^\/+/, "");
 };
 
-const artifactUrlForMarkdownPath = (
+// Resolve a path the report references (markdown image, HTML <img src>) to the
+// served URL of the matching run artifact. Exported for the report canvas's
+// HTML pipeline, which rewrites <img> references the same way the markdown
+// rewriter below does.
+export const resolveRunOutputArtifactUrl = (
   rawPath: string,
   artifacts: HydrationRunArtifact[]
 ): string | null => {
@@ -212,11 +216,18 @@ export const rewriteArtifactMarkdownImageUrls = (
   return markdown.replace(
     /(!\[[^\]]*]\(\s*)([^)\s]+)((?:\s+["'][^"']*["'])?\s*\))/g,
     (match, prefix: string, rawUrl: string, suffix: string) => {
-      const resolvedUrl = artifactUrlForMarkdownPath(rawUrl, artifacts);
+      const resolvedUrl = resolveRunOutputArtifactUrl(rawUrl, artifacts);
       return resolvedUrl ? `${prefix}${resolvedUrl}${suffix}` : match;
     }
   );
 };
+
+// Stable identity for a report within a conversation. Re-registrations of the
+// same logical output (turn 3 regenerates outputs/report.html) land under new
+// runs but keep this key, which is what groups them into one version chain
+// behind one card instead of a trail of duplicate cards.
+export const runReportPathKey = (path: string): string =>
+  normalizeArtifactReferencePath(path).toLowerCase();
 
 export const shouldHydrateRunArtifacts = (
   message: HydrationMessage,
@@ -283,7 +294,14 @@ export const shouldHydrateRunArtifacts = (
 // markdown report, supporting code, and data tables a run produces.
 export type RunDocumentKind = "report" | "code" | "data" | "document";
 
+// Reports come in two source formats with two different rendering paths: the
+// markdown pipeline renders natively (prompt-kit Markdown + KaTeX), while HTML
+// renders inside a sandboxed iframe. Both are the same "report" kind to every
+// other consumer (cards, hydration gates, download chips).
+export type RunReportFormat = "markdown" | "html";
+
 const REPORT_DOCUMENT_EXTENSIONS = [".md", ".markdown", ".mdx"];
+const HTML_REPORT_EXTENSIONS = [".html", ".htm"];
 const CODE_DOCUMENT_EXTENSIONS = [
   ".py",
   ".ipynb",
@@ -345,12 +363,33 @@ const isRunOutputArtifactPath = (path: string): boolean => {
   return normalized.startsWith("outputs/") || normalized.includes("/outputs/");
 };
 
+// Which report renderer a document takes: HTML wins over the generic
+// text/* fallbacks and must be checked before them — text/html would
+// otherwise classify as a plain "document" and lose its reading surface.
+export const runReportDocumentFormat = (
+  path: string,
+  mimeType?: string | null
+): RunReportFormat | null => {
+  const mime = String(mimeType ?? "").trim().toLowerCase();
+  if (
+    pathHasExtension(path, HTML_REPORT_EXTENSIONS) ||
+    mime === "text/html" ||
+    mime === "application/xhtml+xml"
+  ) {
+    return "html";
+  }
+  if (pathHasExtension(path, REPORT_DOCUMENT_EXTENSIONS) || mime === "text/markdown") {
+    return "markdown";
+  }
+  return null;
+};
+
 export const classifyRunDocumentKind = (
   path: string,
   mimeType?: string | null
 ): RunDocumentKind | null => {
   const mime = String(mimeType ?? "").trim().toLowerCase();
-  if (pathHasExtension(path, REPORT_DOCUMENT_EXTENSIONS) || mime === "text/markdown") {
+  if (runReportDocumentFormat(path, mimeType) !== null) {
     return "report";
   }
   if (pathHasExtension(path, CODE_DOCUMENT_EXTENSIONS) || mime.startsWith("text/x-")) {

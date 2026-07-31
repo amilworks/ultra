@@ -101,6 +101,17 @@
      territory instead; see the note there. */
   --text-muted: #787f78;
   --line: rgba(23, 23, 23, 0.08);
+  /* The hover/active step up from --line — exactly double the rest weight, so
+     the darkening reads as the affordance without approaching text ink.
+     This token was consumed by three hover rules (artifact cards, document
+     chips, the report download button) for months while never being DEFINED:
+     border-color is non-inherited, so the invalid var() resolved to
+     currentcolor and those hovers silently painted FULL TEXT INK — the
+     loudest border in the product, by accident. Defined in both theme blocks
+     now (the ultra-light-theme-ink lesson: an undefined var() fails silently,
+     and any token consumed by theme-agnostic rules must exist in every
+     theme). light-theme-ink.test.ts pins both definitions. */
+  --line-strong: rgba(23, 23, 23, 0.16);
   --brand: #171717;
   --brand-strong: #0a0a0a;
   /* Future launch-only, non-text signal; intentionally has no var() consumers. */
@@ -11903,6 +11914,11 @@ details {
   --text-main: #f5f5f5;
   --text-muted: #a1a1aa;
   --line: rgba(255, 255, 255, 0.14);
+  /* Hover/active hairline step (see the light-block note). Not a straight
+     doubling here: light-on-dark strokes read brighter than dark-on-light at
+     equal offset (the composer-placeholder lesson below), so 0.14 → 0.24
+     lands the same perceived step as light's 0.08 → 0.16. */
+  --line-strong: rgba(255, 255, 255, 0.24);
   --brand: #f5f5f5;
   --brand-strong: #ffffff;
   --account-avatar-fill: #f5f5f5;

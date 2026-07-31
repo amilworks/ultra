@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { ChatRunDocuments, type ChatRunDocument } from "./ChatRunDocuments";
+import { runReportPathKey } from "@/features/chat/run-artifact-hydration";
 
 const reportDoc: ChatRunDocument = {
   path: "outputs/toeplitz_report.md",
@@ -10,6 +11,15 @@ const reportDoc: ChatRunDocument = {
   kind: "report",
   mimeType: "text/markdown",
   sizeBytes: 16606,
+};
+
+const htmlReportDoc: ChatRunDocument = {
+  path: "outputs/benchmark.html",
+  title: "benchmark.html",
+  downloadUrl: "/v2/artifacts/report-2/download",
+  kind: "report",
+  mimeType: "text/html",
+  sizeBytes: 530432,
 };
 
 const codeDoc: ChatRunDocument = {
@@ -23,71 +33,64 @@ const codeDoc: ChatRunDocument = {
 
 describe("ChatRunDocuments", () => {
   it("renders nothing when there are no documents", () => {
-    const { container } = render(
-      <ChatRunDocuments documents={[]} loadDocumentText={vi.fn()} />
-    );
+    const { container } = render(<ChatRunDocuments documents={[]} />);
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("reads the markdown report inline and exposes a download link", async () => {
-    const loadDocumentText = vi
-      .fn()
-      .mockResolvedValue("# Toeplitz\n\nThe FFT embedding trick reduces cost.");
+  it("renders a report as a card that opens the canvas, not an inline reader", () => {
+    const onOpenReport = vi.fn();
+    render(<ChatRunDocuments documents={[reportDoc]} onOpenReport={onOpenReport} />);
 
-    render(<ChatRunDocuments documents={[reportDoc]} loadDocumentText={loadDocumentText} />);
+    const card = screen.getByRole("button", { name: /Toeplitz report/ });
+    expect(card).toHaveAttribute("aria-expanded", "false");
+    expect(card).toHaveAttribute("aria-controls", "report-canvas");
+    /* The card never fetches or expands content into the transcript. */
+    expect(screen.queryByText(/Loading report/)).not.toBeInTheDocument();
 
-    expect(loadDocumentText).toHaveBeenCalledWith("/v2/artifacts/report-1/download");
-    await waitFor(() =>
-      expect(screen.getByText(/FFT embedding trick reduces cost/)).toBeInTheDocument()
-    );
-
-    const downloadLink = screen.getByLabelText("Download Toeplitz report");
-    expect(downloadLink).toHaveAttribute("href", "/v2/artifacts/report-1/download");
-    expect(downloadLink).toHaveAttribute("download");
+    fireEvent.click(card);
+    expect(onOpenReport).toHaveBeenCalledWith(reportDoc);
   });
 
-  it("rewrites the report's own figure references to served artifact URLs", async () => {
-    const loadDocumentText = vi
-      .fn()
-      .mockResolvedValue("![Figure 1](outputs/fig1.png)");
-
-    const { container } = render(
+  it("marks the card open and says so in the meta line", () => {
+    render(
       <ChatRunDocuments
-        documents={[reportDoc]}
-        imageArtifacts={[
-          {
-            path: "outputs/fig1.png",
-            url: "/v2/artifacts/fig-1/download",
-            downloadUrl: "/v2/artifacts/fig-1/download",
-          },
-        ]}
-        loadDocumentText={loadDocumentText}
+        documents={[htmlReportDoc]}
+        onOpenReport={vi.fn()}
+        openReportPathKey={runReportPathKey(htmlReportDoc.path)}
       />
     );
 
-    await waitFor(() => {
-      const image = container.querySelector("img");
-      expect(image).not.toBeNull();
-      expect(image?.getAttribute("src")).toBe("/v2/artifacts/fig-1/download");
-    });
+    const card = screen.getByRole("button", { name: /benchmark/ });
+    expect(card).toHaveAttribute("data-open", "true");
+    expect(card).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/open in canvas/)).toBeInTheDocument();
   });
 
-  it("renders non-report outputs as download chips without fetching them", () => {
-    const loadDocumentText = vi.fn();
-    render(<ChatRunDocuments documents={[codeDoc]} loadDocumentText={loadDocumentText} />);
+  it("shows the conversation-level version on the card", () => {
+    render(
+      <ChatRunDocuments
+        documents={[reportDoc]}
+        onOpenReport={vi.fn()}
+        reportVersionCounts={{ [runReportPathKey(reportDoc.path)]: 3 }}
+      />
+    );
+    expect(screen.getByText(/Report · v3/)).toBeInTheDocument();
+  });
+
+  it("degrades to a download link when no canvas handler is wired", () => {
+    render(<ChatRunDocuments documents={[reportDoc]} />);
+    const fallback = screen.getByText("Toeplitz report").closest("a");
+    expect(fallback).toHaveAttribute("href", "/v2/artifacts/report-1/download");
+    expect(fallback).toHaveAttribute("download");
+  });
+
+  it("renders non-report outputs as download chips, untouched by the canvas", () => {
+    const onOpenReport = vi.fn();
+    render(<ChatRunDocuments documents={[codeDoc]} onOpenReport={onOpenReport} />);
 
     const chip = screen.getByText("toeplitz_plots.py").closest("a");
     expect(chip).toHaveAttribute("href", "/v2/artifacts/code-1/download");
     expect(chip).toHaveAttribute("download");
-    expect(loadDocumentText).not.toHaveBeenCalled();
-  });
-
-  it("falls back to a download prompt when the report fails to load", async () => {
-    const loadDocumentText = vi.fn().mockRejectedValue(new Error("network down"));
-    render(<ChatRunDocuments documents={[reportDoc]} loadDocumentText={loadDocumentText} />);
-
-    await waitFor(() =>
-      expect(screen.getByText(/download instead/)).toBeInTheDocument()
-    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });

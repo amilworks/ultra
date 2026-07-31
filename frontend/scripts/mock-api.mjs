@@ -1177,6 +1177,121 @@ const readSessionMode = (request) =>
     .find((value) => value.startsWith(`${guestCookieName}=`))
     ?.slice(guestCookieName.length + 1) || null;
 
+// ---------------------------------------------------------------------------
+// Report-canvas seed: one completed conversation whose run registered a report
+// (html + md), a figure, and a data table — enough for the real app to exercise
+// the transcript card → canvas path end to end (hydration, srcdoc sandbox,
+// data-URI figure inlining, download chips).
+// OFF by default: mobile-smoke waits for the blank-chat welcome hero and must
+// keep an empty Recents. Opt in with MOCK_SEED_REPORT_CANVAS=1 (the
+// `mock-api-canvas` launch entry does).
+// ---------------------------------------------------------------------------
+const seedReportCanvas = process.env.MOCK_SEED_REPORT_CANVAS === "1";
+const reportCanvasThreadId = "thread_report_canvas";
+const reportCanvasRunId = "run_report_canvas";
+// 8x8 solid #1e65bd PNG — enough to prove the host-side data-URI inlining.
+// (Generated, not hand-typed: an earlier hand-typed constant decoded to a
+// corrupt zlib stream and rendered as a broken image.)
+const reportCanvasFigPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAEklEQVR4nGOQS937Hx9mGBkKAMTvj8HX0yDvAAAAAElFTkSuQmCC",
+  "base64"
+);
+const reportCanvasReportHtml = `<!doctype html>
+<html>
+<head>
+  <title>Flight C benchmark — interactive</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; color: #191919; }
+    .tile { border: 1px solid rgba(23,23,23,.12); border-radius: 10px; padding: 12px 16px; display: inline-block; margin-right: 10px; }
+    .v { font-size: 22px; font-weight: 650; }
+    .k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: #787f78; }
+  </style>
+</head>
+<body>
+  <h1>Flight C benchmark</h1>
+  <p>Model-generated HTML rendered by the report canvas' sandboxed frame.</p>
+  <div class="tile"><div class="k">mAP@0.5</div><div class="v">0.86</div></div>
+  <div class="tile"><div class="k">Recall</div><div class="v" id="live">…</div></div>
+  <p><img src="outputs/fig1.png" alt="figure inlined by the host" width="96"></p>
+  <p><img src="https://external.example/blocked.png" alt="external image the CSP must block" width="96"></p>
+  <script>document.getElementById("live").textContent = "0.83";</script>
+</body>
+</html>
+`;
+const reportCanvasReportMd = `# Prairie-dog colony detection: checkpoint B evaluation
+
+Checkpoint B (epoch 41, hard-negative resampling) was evaluated against the flight C holdout — 1,214 aerial tiles across four colonies.
+
+![Figure 1](outputs/fig1.png)
+
+| Colony | Tiles | Precision | Recall |
+| --- | ---: | ---: | ---: |
+| North Rim | 342 | 0.93 | 0.86 |
+| Wash Fan | 297 | 0.91 | 0.84 |
+`;
+const reportCanvasCountsCsv =
+  "colony,tiles,burrows_detected,precision,recall\nNorth Rim,342,1286,0.93,0.86\nWash Fan,297,954,0.91,0.84\n";
+const reportCanvasArtifacts = [
+  {
+    artifact_id: "art_rc_report_html",
+    path: "outputs/report.html",
+    mime_type: "text/html",
+    size_bytes: Buffer.byteLength(reportCanvasReportHtml),
+    created_at: "2026-07-31T18:01:30.000Z",
+    body: () => Buffer.from(reportCanvasReportHtml),
+  },
+  {
+    artifact_id: "art_rc_report_md",
+    path: "outputs/report.md",
+    mime_type: "text/markdown",
+    size_bytes: Buffer.byteLength(reportCanvasReportMd),
+    created_at: "2026-07-31T18:01:20.000Z",
+    body: () => Buffer.from(reportCanvasReportMd),
+  },
+  {
+    artifact_id: "art_rc_fig1",
+    path: "outputs/fig1.png",
+    mime_type: "image/png",
+    size_bytes: reportCanvasFigPng.length,
+    created_at: "2026-07-31T18:01:10.000Z",
+    body: () => reportCanvasFigPng,
+  },
+  {
+    artifact_id: "art_rc_counts",
+    path: "outputs/colony_counts.csv",
+    mime_type: "text/csv",
+    size_bytes: Buffer.byteLength(reportCanvasCountsCsv),
+    created_at: "2026-07-31T18:01:00.000Z",
+    body: () => Buffer.from(reportCanvasCountsCsv),
+  },
+];
+const reportCanvasThread = () => ({
+  thread_id: reportCanvasThreadId,
+  title: "RareSpot eval — flight C",
+  summary: "Checkpoint B evaluation with report",
+  created_at: "2026-07-31T17:55:00.000Z",
+  updated_at: "2026-07-31T18:02:00.000Z",
+  latest_run_id: reportCanvasRunId,
+  metadata: { conversation_id: reportCanvasThreadId },
+});
+const reportCanvasMessages = [
+  {
+    message_id: "msg_rc_user",
+    role: "user",
+    content:
+      "Evaluate the new RareSpot checkpoint on flight C and write up the results — is it ready to replace checkpoint A?",
+    created_at: "2026-07-31T17:55:05.000Z",
+  },
+  {
+    message_id: "msg_rc_assistant",
+    role: "assistant",
+    run_id: reportCanvasRunId,
+    content:
+      "Checkpoint B clears A on every metric that matters for the survey: mAP@0.5 rises 0.79 → 0.86 and recall improves six points at the shipping threshold. The full evaluation is in the report, alongside the per-colony counts table.",
+    created_at: "2026-07-31T18:01:40.000Z",
+  },
+];
+
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url || "/", `http://${request.headers.host || "127.0.0.1"}`);
 
@@ -1282,13 +1397,111 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && url.pathname === "/v2/threads") {
+    const threads = seedReportCanvas ? [reportCanvasThread()] : [];
     sendJson(response, 200, {
-      threads: [],
-      count: 0,
-      total_count: 0,
+      threads,
+      count: threads.length,
+      total_count: threads.length,
       offset: Number(url.searchParams.get("offset") || "0"),
       limit: Number(url.searchParams.get("limit") || "50"),
     });
+    return;
+  }
+
+  if (
+    seedReportCanvas &&
+    request.method === "GET" &&
+    url.pathname === `/v2/threads/${reportCanvasThreadId}`
+  ) {
+    sendJson(response, 200, reportCanvasThread());
+    return;
+  }
+
+  if (
+    seedReportCanvas &&
+    request.method === "GET" &&
+    url.pathname === `/v2/threads/${reportCanvasThreadId}/messages`
+  ) {
+    sendJson(response, 200, {
+      thread_id: reportCanvasThreadId,
+      messages: reportCanvasMessages,
+      count: reportCanvasMessages.length,
+    });
+    return;
+  }
+
+  if (
+    seedReportCanvas &&
+    request.method === "GET" &&
+    url.pathname === `/v2/runs/${reportCanvasRunId}/events`
+  ) {
+    sendJson(response, 200, { run_id: reportCanvasRunId, events: [], count: 0 });
+    return;
+  }
+
+  if (
+    seedReportCanvas &&
+    request.method === "GET" &&
+    url.pathname === `/v2/runs/${reportCanvasRunId}/artifacts`
+  ) {
+    sendJson(response, 200, {
+      run_id: reportCanvasRunId,
+      count: reportCanvasArtifacts.length,
+      artifacts: reportCanvasArtifacts.map((artifact) => ({
+        artifact_id: artifact.artifact_id,
+        path: artifact.path,
+        mime_type: artifact.mime_type,
+        size_bytes: artifact.size_bytes,
+        created_at: artifact.created_at,
+      })),
+    });
+    return;
+  }
+
+  // The client prefers the immutable by-id URL once the artifact list has been
+  // seen (artifactDownloadUrl remembers ids), so both routes must exist.
+  const reportCanvasArtifactByIdMatch = url.pathname.match(/^\/v2\/artifacts\/([^/]+)\/download$/);
+  if (seedReportCanvas && request.method === "GET" && reportCanvasArtifactByIdMatch) {
+    const artifactId = decodeURIComponent(reportCanvasArtifactByIdMatch[1] || "");
+    const artifact = reportCanvasArtifacts.find((candidate) => candidate.artifact_id === artifactId);
+    if (artifact) {
+      response.writeHead(200, {
+        "Content-Type": artifact.mime_type,
+        "Content-Disposition": `attachment; filename="${artifact.path.split("/").pop()}"`,
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "no-store",
+      });
+      response.end(artifact.body());
+      return;
+    }
+  }
+
+  if (
+    seedReportCanvas &&
+    request.method === "GET" &&
+    url.pathname === `/v2/runs/${reportCanvasRunId}/artifacts/download`
+  ) {
+    const requestedPath = String(url.searchParams.get("path") || "").trim();
+    const artifact = reportCanvasArtifacts.find(
+      (candidate) =>
+        candidate.path === requestedPath ||
+        candidate.path.endsWith(`/${requestedPath}`) ||
+        requestedPath.endsWith(`/${candidate.path}`)
+    );
+    if (!artifact) {
+      sendJson(response, 404, { error: "artifact path was not found for run" });
+      return;
+    }
+    response.writeHead(200, {
+      "Content-Type": artifact.mime_type,
+      // Mirrors the control plane: artifacts download as attachments; HTML is
+      // never served inline (the canvas reads bytes via fetch, so disposition
+      // is irrelevant to it).
+      "Content-Disposition": `attachment; filename="${artifact.path.split("/").pop()}"`,
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-store",
+    });
+    response.end(artifact.body());
     return;
   }
 

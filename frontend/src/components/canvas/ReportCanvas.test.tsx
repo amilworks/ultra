@@ -70,6 +70,28 @@ describe("prepareHtmlReportDocument", () => {
     expect(fetchImageDataUrl).not.toHaveBeenCalled();
     expect(prepared.srcdoc).toContain("data:image/png;base64,AAAA");
   });
+
+  it("injects the fragment-navigation shim after the report's own content", async () => {
+    /* Fragment links can't navigate in a sandboxed srcdoc frame — the click
+       either dies silently or replaces the report with an error page (a
+       delivered report's TOC blanked the canvas exactly this way). The shim
+       turns them into same-document scrolling. */
+    const prepared = await prepareHtmlReportDocument(
+      `<html><body><a href="#sec">TOC</a><h2 id="sec">Section</h2></body></html>`,
+      [],
+      vi.fn()
+    );
+    expect(prepared.srcdoc).toContain("a[href^=");
+    expect(prepared.srcdoc).toContain("scrollIntoView");
+    /* preventDefault unconditionally: a missing target must no-op, never
+       attempt the navigation that blanks the frame. */
+    expect(prepared.srcdoc).toContain("event.preventDefault()");
+    expect(prepared.srcdoc.indexOf("scrollIntoView")).toBeGreaterThan(
+      prepared.srcdoc.indexOf('id="sec"')
+    );
+    /* Reduced motion is honored inside the frame too. */
+    expect(prepared.srcdoc).toContain("prefers-reduced-motion");
+  });
 });
 
 describe("ReportCanvas", () => {

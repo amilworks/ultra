@@ -68,6 +68,39 @@ const REPORT_FRAME_CSP =
   "default-src 'none'; img-src data: blob:; media-src data: blob:; " +
   "style-src 'unsafe-inline'; font-src data:; script-src 'unsafe-inline'";
 
+// Fragment links (#section — every report's table of contents) cannot
+// navigate inside a sandboxed srcdoc frame: the browser treats the click as
+// a document navigation to about:srcdoc, which cannot be re-fetched, so the
+// frame either swallows the click or replaces the report with an error page
+// (traced live on a delivered report whose TOC chips blanked the canvas).
+// The author meant same-document scrolling, so this injected shim does
+// exactly that: capture-phase, preventDefault always (a missing target must
+// no-op, never blank the page), honoring reduced motion.
+const FRAGMENT_NAV_SHIM =
+  "(function () {" +
+  '  var reduce = false;' +
+  '  try { reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) {}' +
+  '  document.addEventListener("click", function (event) {' +
+  "    if (event.defaultPrevented || event.button !== 0) return;" +
+  "    var origin = event.target;" +
+  "    var anchor = origin && origin.closest ? origin.closest('a[href^=\"#\"]') : null;" +
+  "    if (!anchor) return;" +
+  "    event.preventDefault();" +
+  '    var raw = anchor.getAttribute("href").slice(1);' +
+  "    if (!raw) return;" +
+  "    var id = raw;" +
+  "    try { id = decodeURIComponent(raw); } catch (e) {}" +
+  "    var target = document.getElementById(id);" +
+  "    if (!target) {" +
+  "      var named = document.getElementsByName(id);" +
+  "      target = named && named.length ? named[0] : null;" +
+  "    }" +
+  "    if (target && target.scrollIntoView) {" +
+  '      target.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });' +
+  "    }" +
+  "  }, true);" +
+  "})();";
+
 // Reports beyond this size are not pulled into memory and re-serialized into
 // a srcdoc (data-URI figure inlining can inflate them further); the canvas
 // offers the download instead. Generous on purpose — a self-contained
@@ -144,6 +177,13 @@ export const prepareHtmlReportDocument = async (
   csp.setAttribute("http-equiv", "Content-Security-Policy");
   csp.setAttribute("content", REPORT_FRAME_CSP);
   parsed.head.insertBefore(csp, parsed.head.firstChild);
+
+  // Last child of <body>, capture-phase listener: wins over page handlers and
+  // covers content scripts append later. CSP allows it (script-src
+  // 'unsafe-inline'); the sandbox allows it (allow-scripts).
+  const navShim = parsed.createElement("script");
+  navShim.textContent = FRAGMENT_NAV_SHIM;
+  parsed.body.appendChild(navShim);
 
   return {
     srcdoc: `<!doctype html>${parsed.documentElement.outerHTML}`,

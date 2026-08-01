@@ -32,6 +32,19 @@ describe("light theme ink", () => {
     expect(lightRoot).toMatch(/--text-muted:\s*#787f78;/);
   });
 
+  it("defines the strong hairline in BOTH theme blocks", () => {
+    // --line-strong was consumed by three hover rules for months while never
+    // being defined: border-color is non-inherited, so the invalid var()
+    // resolved to currentcolor and those hovers silently painted full text
+    // ink. The undefined-var() failure mode is invisible — no error, no
+    // console warning — so the definitions are pinned here in both blocks
+    // (any token consumed by theme-agnostic rules must exist in every theme).
+    expect(lightRoot).toMatch(/--line-strong:\s*rgba\(23, 23, 23, 0\.16\);/);
+    expect(darkBlock).toMatch(/--line-strong:\s*rgba\(255, 255, 255, 0\.24\);/);
+    // And it must stay consumed — a defined-but-dead token is the opposite drift.
+    expect(stylesSource).toMatch(/border-color:\s*var\(--line-strong\)/);
+  });
+
   it("points the shadcn foreground tokens at the house ink tokens", () => {
     // Two palettes for one job is how a theme drifts: the app draws most text
     // through --text-main/--text-muted while Tailwind and shadcn primitives draw

@@ -1231,10 +1231,14 @@ Checkpoint B (epoch 41, hard-negative resampling) was evaluated against the flig
 `;
 const reportCanvasCountsCsv =
   "colony,tiles,burrows_detected,precision,recall\nNorth Rim,342,1286,0.93,0.86\nWash Fan,297,954,0.91,0.84\n";
+// Path shapes mirror the REAL control plane (verified live 2026-08-01):
+// registered paths are relative to the outputs root with NO outputs/ prefix
+// ("report.html", "figs/fig1.png"). report.md keeps the prefixed variant on
+// purpose — both shapes must stay accepted by the hydration gate.
 const reportCanvasArtifacts = [
   {
     artifact_id: "art_rc_report_html",
-    path: "outputs/report.html",
+    path: "report.html",
     mime_type: "text/html",
     size_bytes: Buffer.byteLength(reportCanvasReportHtml),
     created_at: "2026-07-31T18:01:30.000Z",
@@ -1250,7 +1254,7 @@ const reportCanvasArtifacts = [
   },
   {
     artifact_id: "art_rc_fig1",
-    path: "outputs/fig1.png",
+    path: "fig1.png",
     mime_type: "image/png",
     size_bytes: reportCanvasFigPng.length,
     created_at: "2026-07-31T18:01:10.000Z",
@@ -1258,7 +1262,7 @@ const reportCanvasArtifacts = [
   },
   {
     artifact_id: "art_rc_counts",
-    path: "outputs/colony_counts.csv",
+    path: "colony_counts.csv",
     mime_type: "text/csv",
     size_bytes: Buffer.byteLength(reportCanvasCountsCsv),
     created_at: "2026-07-31T18:01:00.000Z",

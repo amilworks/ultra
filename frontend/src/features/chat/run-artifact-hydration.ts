@@ -349,8 +349,29 @@ const pathHasExtension = (path: string, extensions: string[]): boolean => {
 };
 
 // Only intentional, agent-produced OUTPUTS are surfaced — never the user's own
-// uploads, staged inputs, or intermediate tile artifacts. The outputs collector
-// registers produced files under `outputs/`.
+// uploads, staged inputs, or intermediate tile artifacts.
+//
+// CONTRACT (verified against the live control_artifacts table, 2026-08-01):
+// registered paths are RELATIVE to the run's outputs root — "report.html",
+// "toeplitz_figs/fig1.png" — with NO "outputs/" prefix. A prefix appears only
+// when the agent happens to nest a directory literally named outputs/. The
+// old gate here REQUIRED the prefix, which silently dark-holed every
+// prefixless report ever registered (traced live on a real run: backend
+// registered kind=report/text/html perfectly; this predicate rejected it).
+// The table is written exclusively by the outputs collector — zero uploads/,
+// staged_artifacts/, tool_outputs/ or diagnostics/ rows exist in it — so the
+// gate ACCEPTS by default and denies the roots that would mark non-output
+// content if registration ever widened.
+const NON_OUTPUT_PATH_ROOTS = new Set([
+  "uploads",
+  "staged_artifacts",
+  "staged_inputs",
+  "tool_outputs",
+  "diagnostics",
+  "workspace",
+  ".deepagents",
+]);
+
 const isRunOutputArtifactPath = (path: string): boolean => {
   const normalized = String(path || "")
     .trim()
@@ -360,7 +381,8 @@ const isRunOutputArtifactPath = (path: string): boolean => {
   if (!normalized) {
     return false;
   }
-  return normalized.startsWith("outputs/") || normalized.includes("/outputs/");
+  const rootSegment = normalized.split("/", 1)[0] ?? "";
+  return !NON_OUTPUT_PATH_ROOTS.has(rootSegment);
 };
 
 // Which report renderer a document takes: HTML wins over the generic

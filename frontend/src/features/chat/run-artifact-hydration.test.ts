@@ -260,6 +260,47 @@ describe("isHydratableRunArtifactDocument", () => {
     ).toBe(true);
   });
 
+  it("accepts the REAL registration shape: paths relative to the outputs root", () => {
+    /* Traced live (2026-08-01): the control plane registers artifact paths
+       WITHOUT an outputs/ prefix — "toeplitz_matrix_report.html",
+       "toeplitz_figs/make_figures.py". The old prefix-requiring gate
+       dark-holed every such report while the backend registered it
+       perfectly. The prefixed shape (agent nests a literal outputs/ dir)
+       stays accepted too. */
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "toeplitz_matrix_report.html",
+        mime_type: "text/html",
+      })
+    ).toBe(true);
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "toeplitz_figs/make_figures.py",
+        mime_type: "text/x-python",
+      })
+    ).toBe(true);
+    expect(
+      isHydratableRunArtifactDocument({
+        path: "rarespot_run/report.md",
+        mime_type: "text/markdown",
+      })
+    ).toBe(true);
+  });
+
+  it("still denies non-output roots even without the prefix convention", () => {
+    for (const path of [
+      "uploads/source_notes.md",
+      "staged_artifacts/run_prev/data.csv",
+      "tool_outputs/tile_004.csv",
+      "diagnostics/report_preview/report.console.json",
+      ".deepagents/state.json",
+    ]) {
+      expect(isHydratableRunArtifactDocument({ path, mime_type: "text/plain" })).toBe(
+        false
+      );
+    }
+  });
+
   it("ignores uploads and staged inputs that are not run outputs", () => {
     expect(
       isHydratableRunArtifactDocument({

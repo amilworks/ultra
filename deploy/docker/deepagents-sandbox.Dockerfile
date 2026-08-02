@@ -216,6 +216,29 @@ RUN python -m pip install --no-cache-dir \
 
 # numba/llvmlite mis-detects the CPU's feature set on some virtualized hosts (notably the arm64
 # Docker VM on Apple Silicon), emitting an illegal instruction (SIGILL) on the FIRST @njit
+# Headless Chromium for the report-preview skill: the agent renders its own
+# outputs/report.html to a screenshot + console log (skills/report-preview)
+# before delivery, catching broken figure refs and script errors the reader
+# would otherwise hit. Browsers download at BUILD time (runtime stays
+# network-isolated; the renderer drives file:// only and aborts every
+# outbound request). Verified end-to-end in this image lineage before this
+# line landed: pip playwright + install --with-deps chromium, then
+# render_report.py returns 0/2/3 semantics with a correct findings log.
+RUN python -m pip install --no-cache-dir playwright \
+    && playwright install --with-deps chromium
+
+# Report-authoring extras (both offline-safe for the reader's sandboxed
+# canvas, which blocks all network):
+# - latex2mathml: LaTeX -> native MathML. Chromium (reader AND the headless
+#   preview) renders MathML core natively, so equations need zero vendored
+#   JS/CSS/fonts — this replaces the hand-rolled HTML/CSS math the first real
+#   report resorted to.
+# - plotly: interactive figures inlined into self-contained reports via
+#   include_plotlyjs="inline" (~3.5MB of inline JS; the canvas CSP allows
+#   inline scripts). Static figure exports stay on matplotlib — deliberately
+#   NO kaleido, which would bundle a second private Chromium.
+RUN python -m pip install --no-cache-dir latex2mathml plotly
+
 # compile — which hard-crashes every numba-JIT path: umap / scanpy neighbors (bio),
 # xarray-spatial terrain (ecology), esda conditional permutations. Forcing
 # generic baseline-ISA codegen makes the JIT correct on every host; the modest loss of

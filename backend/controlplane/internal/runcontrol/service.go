@@ -575,14 +575,19 @@ func (s *Service) CancelRun(ctx context.Context, req CancelRunRequest) (domain.R
 	}
 
 	cancelEventInput := domain.AppendRunEventInput{
-		EventID:   canceledRunEventID(existing.RunID),
-		RunID:     existing.RunID,
-		ThreadID:  existing.ThreadID,
-		EventKind: "run.canceled",
-		EventType: "run",
-		Level:     "info",
-		Message:   "Run canceled.",
-		Payload:   domain.JSONMap{"reason": req.Reason},
+		EventID: canceledRunEventID(existing.RunID),
+		RunID:   existing.RunID,
+		// Cancel targets a LIVE run whose worker is already past sequencer
+		// seeding: claiming a source_sequence here either collides with an
+		// existing worker stamp (the append 409s and the cancel FAILS) or
+		// steals the worker's next stamp (ingest silently drops that event).
+		NoSourceSequence: true,
+		ThreadID:         existing.ThreadID,
+		EventKind:        "run.canceled",
+		EventType:        "run",
+		Level:            "info",
+		Message:          "Run canceled.",
+		Payload:          domain.JSONMap{"reason": req.Reason},
 	}
 	event, found, err := s.store.GetRunEvent(ctx, cancelEventInput.EventID)
 	if err != nil {
@@ -590,6 +595,12 @@ func (s *Service) CancelRun(ctx context.Context, req CancelRunRequest) (domain.R
 	}
 	if !found {
 		event, err = s.store.AppendRunEvent(ctx, cancelEventInput)
+		if errors.Is(err, store.ErrConflict) {
+			// Concurrent cancel: the deterministic event id already landed.
+			if stored, foundNow, getErr := s.store.GetRunEvent(ctx, cancelEventInput.EventID); getErr == nil && foundNow {
+				event, err = stored, nil
+			}
+		}
 		if err != nil {
 			return domain.RunRecord{}, err
 		}
@@ -880,13 +891,18 @@ func (s *Service) RequeueRun(ctx context.Context, req RequeueRunRequest) (domain
 		payload["evicted_lease_expires_at"] = evictedLease.LeaseExpiresAt.Format(time.RFC3339Nano)
 	}
 	event, err := s.store.AppendRunEvent(ctx, domain.AppendRunEventInput{
-		RunID:     run.RunID,
-		ThreadID:  run.ThreadID,
-		EventKind: "run.requeued",
-		EventType: "run",
-		Level:     "info",
-		Message:   "Run requeued.",
-		Payload:   payload,
+		RunID: run.RunID,
+		// Requeue also appends to a LIVE run: with a sparse worker
+		// source_sequence history the defaulted claim can collide with an
+		// existing stamp, failing recovery itself with a store conflict
+		// (and a straggler event from the dead attempt could be dropped).
+		NoSourceSequence: true,
+		ThreadID:         run.ThreadID,
+		EventKind:        "run.requeued",
+		EventType:        "run",
+		Level:            "info",
+		Message:          "Run requeued.",
+		Payload:          payload,
 	})
 	if err != nil {
 		return run, err

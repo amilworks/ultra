@@ -252,9 +252,10 @@ def test_docker_sandbox_omits_resource_limits_when_unset(tmp_path: Path):
     assert command[-3:] == ["bash", "-lc", "python train.py"]
 
 
-def test_docker_sandbox_ignores_tool_timeout_when_admin_timeout_is_disabled(
+def test_docker_sandbox_honors_tool_timeout_when_admin_timeout_is_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """A per-call hint bounds the call even with no admin ceiling (floored)."""
     captured: dict[str, object] = {}
 
     def fake_run(
@@ -275,14 +276,46 @@ def test_docker_sandbox_ignores_tool_timeout_when_admin_timeout_is_disabled(
 
     result = backend.execute("python train.py", timeout=7)
 
-    assert captured["timeout"] is None
+    # 7 is below the safety floor, so the floor applies — not None, and not 7.
+    assert captured["timeout"] == docker._MIN_REQUESTED_TIMEOUT_SECONDS
     assert result.exit_code == 0
     assert result.output == "ok"
 
 
-def test_docker_sandbox_admin_timeout_overrides_tool_timeout(
+def test_docker_sandbox_tool_timeout_shrinks_admin_ceiling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    """The traced regression (run_10bb3712): a call that declared timeout=120
+    ran until the multi-hour admin ceiling because the hint was ignored. The
+    hint must SHRINK the bound; extension stays impossible (next test)."""
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        timeout: int | None,
+        source_command: str,
+        progress_callback,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=21600),
+    )
+
+    result = backend.execute("python verify.py", timeout=120)
+
+    assert captured["timeout"] == 120
+    assert result.exit_code == 0
+
+
+def test_docker_sandbox_admin_timeout_still_caps_large_tool_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Extension remains impossible: the ceiling is the security boundary."""
     captured: dict[str, object] = {}
 
     def fake_run(
@@ -301,10 +334,28 @@ def test_docker_sandbox_admin_timeout_overrides_tool_timeout(
         config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=1800),
     )
 
-    result = backend.execute("python train.py", timeout=7)
+    result = backend.execute("python train.py", timeout=999999)
 
     assert captured["timeout"] == 1800
     assert result.exit_code == 0
+
+
+def test_resolve_execute_timeout_contract():
+    resolve = docker.resolve_execute_timeout
+    floor = docker._MIN_REQUESTED_TIMEOUT_SECONDS
+    # shrink-only: a sane hint below the ceiling wins
+    assert resolve(120, 21600) == 120
+    # extension impossible
+    assert resolve(999999, 1800) == 1800
+    # tiny/typo'd hints raise to the floor rather than zeroing the call
+    assert resolve(1, 21600) == floor
+    # absent/zero/garbage hints fall back to the ceiling alone
+    assert resolve(None, 1800) == 1800
+    assert resolve(0, 1800) == 1800
+    assert resolve("soon", 1800) == 1800
+    # no ceiling: hint still bounds (floored); no hint means unbounded
+    assert resolve(7, 0) == floor
+    assert resolve(None, 0) == 0
 
 
 def test_sandbox_concurrency_cap_returns_busy_when_saturated(
@@ -550,9 +601,14 @@ def test_cleanup_expired_code_workspaces_disabled_when_retention_not_positive(tm
 
 
 def test_armed_admin_default_bounds_a_hung_execute(monkeypatch, tmp_path: Path):
-    """The execute() hang fix: the admin ceiling now DEFAULTS non-zero, so a sandbox call
-    that never returns is bounded (exit 124, recoverable) instead of awaiting forever — while
-    the model's per-call timeout stays IGNORED (admin precedence is a security boundary)."""
+    """The execute() hang fix, generation two. Generation one armed the admin
+    ceiling so a call that never returns is bounded (exit 124) instead of
+    awaiting forever, and IGNORED the model's per-call timeout entirely.
+    Ignoring it downward then turned a model-authored infinite loop into a
+    ceiling-length 100%-CPU hold (run_10bb3712: declared timeout=120, ran for
+    16+ minutes until killed by hand). The hint is now SHRINK-ONLY: it bounds
+    the call when below the ceiling (floored), and can never extend past the
+    ceiling — admin precedence over extension is still the security boundary."""
     from ultra_deepagents.config import RuntimeSettings
 
     # the default admin ceiling is armed (was 0 = unbounded -> a latent infinite hang)
@@ -570,10 +626,12 @@ def test_armed_admin_default_bounds_a_hung_execute(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(docker, "_run_command_with_progress", _fake_run)
 
-    # the model passes timeout=7, but the admin ceiling (1800) governs AND bounds the hang
+    # the model passes timeout=7: floored to the minimum and HONORED (shrinks 1800)
     resp = backend.execute("python train.py", timeout=7)
-    assert seen["timeout"] == 1800   # admin precedence preserved (model's 7 ignored)
+    assert seen["timeout"] == docker._MIN_REQUESTED_TIMEOUT_SECONDS
     assert resp.exit_code == 124     # the hung call is surfaced as a recoverable error
+    assert "the timeout this call requested" in resp.output
+    assert "check for an unterminated loop" in resp.output
 
 
 def test_docker_sandbox_command_stamps_reaper_labels(tmp_path: Path):

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -252,5 +253,73 @@ func TestPostgresAppendRunEventPersistsSourceSequence(t *testing.T) {
 	}
 	if !found || bySource.EventID != workerEvent.EventID {
 		t.Fatalf("source sequence lookup found=%v event=%+v, want %s", found, bySource, workerEvent.EventID)
+	}
+}
+
+// A control-plane event appended mid-run must sit OUTSIDE the worker's
+// source_sequence namespace. With a sparse worker history (stamps ran ahead of
+// the row count), a defaulted claim of "next sequence_number" collides with an
+// existing worker stamp and the append itself fails with ErrConflict — the
+// CancelRun-returns-409 bug. NoSourceSequence stores NULL, which the partial
+// unique index ignores, so the append always lands and no worker slot is
+// stolen.
+func TestPostgresAppendRunEventNoSourceSequenceAvoidsWorkerSlotCollision(t *testing.T) {
+	s := appendEventTestStore(t)
+	run := appendEventTestRun(t, s)
+	ctx := context.Background()
+
+	// Worker event whose stamp ran ahead of the store row count: row 1 carries
+	// source_sequence 2 (stamp 1 was consumed but its event never persisted).
+	if _, outcome, err := s.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-" + run.RunID + "-worker-000002",
+		RunID:          run.RunID,
+		ThreadID:       run.ThreadID,
+		EventKind:      "message.delta",
+		SourceSequence: 2,
+		Message:        "worker stamp 2",
+	}); err != nil || outcome != RunEventAppendOutcomeAppended {
+		t.Fatalf("worker append outcome = %v err = %v, want appended", outcome, err)
+	}
+
+	// Mechanism pin: a defaulted control-plane append allocates
+	// sequence_number 2 and claims source_sequence 2 — the collision.
+	if _, err := s.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-" + run.RunID + "-cancel-defaulted",
+		RunID:     run.RunID,
+		ThreadID:  run.ThreadID,
+		EventKind: "run.canceled",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("defaulted control append err = %v, want ErrConflict (worker slot collision)", err)
+	}
+
+	// The fix: NoSourceSequence lands regardless of worker-stamp history.
+	canceled, err := s.AppendRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:          "evt-" + run.RunID + "-canceled",
+		RunID:            run.RunID,
+		ThreadID:         run.ThreadID,
+		EventKind:        "run.canceled",
+		NoSourceSequence: true,
+	})
+	if err != nil {
+		t.Fatalf("NoSourceSequence append: %v", err)
+	}
+	if canceled.SourceSequence != 0 {
+		t.Fatalf("control event source_sequence = %d, want 0 (NULL)", canceled.SourceSequence)
+	}
+
+	// The worker's next stamp is still free: nothing was stolen.
+	next, outcome, err := s.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+		EventID:        "evt-" + run.RunID + "-worker-000003",
+		RunID:          run.RunID,
+		ThreadID:       run.ThreadID,
+		EventKind:      "message.delta",
+		SourceSequence: 3,
+		Message:        "worker stamp 3",
+	})
+	if err != nil || outcome != RunEventAppendOutcomeAppended {
+		t.Fatalf("worker stamp 3 outcome = %v err = %v, want appended (slot not stolen)", outcome, err)
+	}
+	if next.SourceSequence != 3 {
+		t.Fatalf("worker stamp = %d, want 3", next.SourceSequence)
 	}
 }

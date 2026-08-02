@@ -1,21 +1,25 @@
 ---
 name: computational-experiment-rigor
-description: Rigor protocol for the analysis itself — uncertainty quantification, convergence checks, classification thresholds, literature grounding, and reproducibility records. Use when designing or running a simulation, numerical experiment, or parameter study, when computing estimates (exponents, rates, fits, spectra, regime classifications), or before making any quantitative claim — i.e. while producing the numbers, not while writing them up.
+description: Domain-specific rigor protocol for computational nonlinear-dynamical-system regime studies — Lyapunov estimation, convergence, IC and basin checks, independent discriminators, literature grounding, and reproducibility. Use only when a request explicitly studies dynamical regimes in systems such as logistic, Lorenz, Duffing, or pendulum models; generic quantitative, simulation, statistics, spectrum, metric, and classification work routes elsewhere.
 ---
 
 # Computational Experiment Rigor
 
 ## When to use
-Read this skill before finalizing any run that estimates numbers from simulation
-or data (exponents, rates, fits, spectra, regime classifications, benchmark
-metrics). Apply it proportionally: a quick demo plot needs only items 1 and 6;
-a regime classification or quantitative claim needs all of them.
+Read this skill only when the request explicitly asks for a computational study
+of nonlinear or dynamical-system regimes, with a strong anchor such as a
+Lyapunov exponent, bifurcation, Poincare section, phase portrait, basin of
+attraction, return map, or a named canonical system. Generic simulations,
+estimates, classifications, statistics, spectra, scaling exponents, and
+scientific-image analyses do not use this protocol. Apply it proportionally: a
+quick canonical-system demo needs only items 1 and 6; a regime classification
+needs all of them.
 
 ## Protocol
 
 ### 1. Recognize canonical systems and ground in known results
 If the system under study is a standard one (e.g. driven pendulum, Lorenz,
-logistic map, Ising, double pendulum, Duffing, Hodgkin–Huxley), say so by name,
+logistic map, double pendulum, Duffing), say so by name,
 state the commonly reported behavior for the studied parameter values from
 literature you are confident about, and compare your results against it.
 - When your result disagrees with the commonly reported one, do not silently
@@ -79,12 +83,13 @@ standards explicitly in the task description (seeds, durations, threshold
 rule), and reconcile by comparing its numbers to yours with the spread, not
 just "consistent".
 
-## Results contract (Intelligence: Pro)
-On Pro-intelligence runs the harness enforces a results contract on the final
-answer (mean ± spread on every decision-relevant estimate, the decision rule
-stated and applied per row, a classification table, projection-aliasing noted,
-basin/IC-dependence for borderline cases, and a Limitations paragraph) and sends
-the run back for revision when any is missing. The authoritative wording is
-injected into the system prompt on those runs; follow it verbatim and meet it on
-the first pass to avoid a revision round-trip. The items above (UQ, the 3×-spread
-rule, triangulation, limitations) already satisfy it.
+## Dynamical-systems results contract (Intelligence: Pro)
+On Pro-intelligence runs whose request is positively identified as a
+computational dynamical-regime study, the harness enforces a results contract on
+the final answer (mean ± spread on every decision-relevant estimate, the
+decision rule stated and applied per row, a classification table,
+projection-aliasing noted, basin/IC-dependence for borderline cases, and a
+Limitations paragraph) and sends the run back for revision when any is missing.
+The authoritative wording is injected only on those dynamics runs; follow it
+verbatim and meet it on the first pass to avoid a revision round-trip. The items
+above (UQ, the 3×-spread rule, triangulation, limitations) already satisfy it.

@@ -4896,3 +4896,43 @@ func TestServiceRecoverReclaimsLeaselessZombieRun(t *testing.T) {
 		t.Fatalf("requeued = %+v, want the zombie reclaimed after grace", result.RequeuedRuns)
 	}
 }
+
+// Cancel and requeue append control-plane events to a LIVE run whose worker is
+// already past sequencer seeding. They must never claim a worker
+// source_sequence slot: a defaulted claim either collides with an existing
+// worker stamp (the append itself 409s, so the cancel/requeue FAILS) or steals
+// the worker's next stamp (ingest silently drops that worker event).
+func TestCancelAndRequeueEventsClaimNoWorkerSourceSequence(t *testing.T) {
+	t.Parallel()
+	ctx, mem, service, run := newSteeringFixture(t)
+
+	if _, err := service.RequeueRun(ctx, RequeueRunRequest{RunID: run.RunID, Reason: "expired lease"}); err != nil {
+		t.Fatalf("RequeueRun: %v", err)
+	}
+	if _, err := service.CancelRun(ctx, CancelRunRequest{RunID: run.RunID, Reason: "user stop"}); err != nil {
+		t.Fatalf("CancelRun: %v", err)
+	}
+
+	events, err := mem.ListRunEvents(ctx, run.RunID, 100)
+	if err != nil {
+		t.Fatalf("ListRunEvents: %v", err)
+	}
+	sawCanceled, sawRequeued := false, false
+	for _, event := range events {
+		switch event.EventKind {
+		case "run.canceled":
+			sawCanceled = true
+			if event.SourceSequence != 0 {
+				t.Fatalf("run.canceled claimed source_sequence %d — worker slot theft", event.SourceSequence)
+			}
+		case "run.requeued":
+			sawRequeued = true
+			if event.SourceSequence != 0 {
+				t.Fatalf("run.requeued claimed source_sequence %d — worker slot theft", event.SourceSequence)
+			}
+		}
+	}
+	if !sawCanceled || !sawRequeued {
+		t.Fatalf("events missing run.canceled (%v) or run.requeued (%v)", sawCanceled, sawRequeued)
+	}
+}

@@ -1484,21 +1484,21 @@ type AppendRunEventInput struct {
 	// the new sequence_number, silently CLAIMING the worker's next slot under
 	// the (run_id, source_sequence) unique index — and ingest then DROPS the
 	// worker event that arrives carrying that stamp.
-	SourceSequence   int64 `json:"sequence,omitempty"`
-	NoSourceSequence bool  `json:"-"`
-	RunID          string    `json:"run_id"`
-	ThreadID       string    `json:"thread_id,omitempty"`
-	EventKind      string    `json:"event_kind"`
-	EventType      string    `json:"event_type,omitempty"`
-	NodeName       string    `json:"node_name,omitempty"`
-	TaskID         string    `json:"task_id,omitempty"`
-	CheckpointID   string    `json:"checkpoint_id,omitempty"`
-	ScopeID        string    `json:"scope_id,omitempty"`
-	AgentRole      string    `json:"agent_role,omitempty"`
-	Level          string    `json:"level,omitempty"`
-	TS             time.Time `json:"ts,omitempty"`
-	Message        string    `json:"message,omitempty"`
-	Payload        JSONMap   `json:"payload"`
+	SourceSequence   int64     `json:"sequence,omitempty"`
+	NoSourceSequence bool      `json:"-"`
+	RunID            string    `json:"run_id"`
+	ThreadID         string    `json:"thread_id,omitempty"`
+	EventKind        string    `json:"event_kind"`
+	EventType        string    `json:"event_type,omitempty"`
+	NodeName         string    `json:"node_name,omitempty"`
+	TaskID           string    `json:"task_id,omitempty"`
+	CheckpointID     string    `json:"checkpoint_id,omitempty"`
+	ScopeID          string    `json:"scope_id,omitempty"`
+	AgentRole        string    `json:"agent_role,omitempty"`
+	Level            string    `json:"level,omitempty"`
+	TS               time.Time `json:"ts,omitempty"`
+	Message          string    `json:"message,omitempty"`
+	Payload          JSONMap   `json:"payload"`
 }
 
 type CreateArtifactInput struct {

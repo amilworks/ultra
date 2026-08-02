@@ -230,3 +230,96 @@ def test_run_job_persists_report_across_trailing_write_todos(tmp_path: Path):
     assert CODA in response_text
     tool_events = [e for e in published if e.get("event_type") == "tool_call"]
     assert [e["payload"]["tool_name"] for e in tool_events] == ["write_todos", "write_todos"]
+
+
+ANALYSIS = (
+    "## Scientific analysis\n\n"
+    "The Lyapunov spectrum indicates chaotic dynamics across the full "
+    "parameter sweep, with detailed per-regime interpretation."
+)
+GUARD_CODA = "Added the requested figure."
+
+
+class FakeAnalysisThenFigureDeltaAgent:
+    """Attempt 1 answers with a full analysis but forgets the requested figure;
+    the completion-guard continuation (attempt 2) saves it and replies with
+    only the delta. Models the cross-attempt truncation incident."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": ANALYSIS},
+                        ]
+                    },
+                },
+            }
+            return
+        workspace = Path(context.workspace_root)
+        (workspace / "lyapunov.png").write_bytes(b"\x89PNG\r\n\x1a\nspectrum")
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][-1]["content"]},
+                        {"role": "assistant", "content": GUARD_CODA},
+                    ]
+                },
+            },
+        }
+
+
+def test_run_job_keeps_earlier_attempt_answer_across_completion_guard(tmp_path: Path):
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "workspaces"),
+        artifact_root=str(tmp_path / "artifacts"),
+        completion_max_continuations=1,
+    )
+    goal = "Analyze the system dynamics and save a plot of the Lyapunov spectrum."
+    job = RunJobEnvelope(
+        run_id="run-1",
+        thread_id="thread-1",
+        user_id="researcher-1",
+        goal=goal,
+        messages=[{"role": "user", "content": goal}],
+    )
+    fake_agent = FakeAnalysisThenFigureDeltaAgent()
+    published = []
+
+    async def publish(event):
+        published.append(event)
+
+    result = asyncio.run(
+        run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+    )
+
+    assert fake_agent.calls == 2
+    completed = published[-1]
+    assert completed["event_kind"] == "run.completed"
+    response_text = completed["payload"]["response_text"]
+    # The UI must receive attempt 1's analysis AND attempt 2's delta, in order.
+    assert ANALYSIS in response_text
+    assert GUARD_CODA in response_text
+    assert response_text.index(ANALYSIS) < response_text.index(GUARD_CODA)
+    assert result == response_text

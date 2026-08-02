@@ -375,14 +375,17 @@ class DockerSandboxBackend(BaseSandbox):
         if violation is not None:
             return ExecuteResponse(output=violation, exit_code=126)
 
-        # The model's per-call timeout is intentionally IGNORED — only the operator's admin
-        # ceiling (config.timeout_seconds) governs the sandbox, so the model can neither
-        # extend nor shrink its own runtime cap (a security boundary). The hang fix is that
-        # this admin ceiling now DEFAULTS non-zero (config.py / env), so a hung or zombie
-        # call (a codeexec container that died mid-run) is bounded — subprocess.run kills the
-        # docker process on expiry (exit 124, recoverable) — instead of awaiting forever.
-        _ = timeout
-        timeout_seconds = self.config.timeout_seconds
+        # Per-call timeout is a SHRINK-ONLY hint (see resolve_execute_timeout):
+        # the operator ceiling stays absolute — extension remains impossible,
+        # which is the security boundary the old ignore-both-directions
+        # comment protected. Honoring the downward direction is the fix for a
+        # traced failure mode: a model-authored infinite loop inside a call
+        # that DECLARED timeout=120 held a sandbox at 100% CPU until killed by
+        # hand, because only the multi-hour admin ceiling applied
+        # (run_10bb3712, 2026-08-01). On expiry subprocess.run kills the
+        # docker process (exit 124, recoverable by the model).
+        timeout_seconds = resolve_execute_timeout(timeout, self.config.timeout_seconds)
+        timeout_hint_applied = timeout_seconds != max(0, int(self.config.timeout_seconds))
 
         # Aggregate, process-wide admission control: when an operator sets a cap
         # (ULTRA_DEEPAGENTS_SANDBOX_MAX_CONCURRENCY > 0) bound how many sandbox
@@ -415,8 +418,18 @@ class DockerSandboxBackend(BaseSandbox):
                 return ExecuteResponse(output="Docker executable not found.", exit_code=127)
             except subprocess.TimeoutExpired as exc:
                 output = _combine_output(exc.stdout, exc.stderr)
+                source_note = (
+                    " (the timeout this call requested)" if timeout_hint_applied else ""
+                )
+                guidance = (
+                    "The process was killed. If the work legitimately needs longer, "
+                    "raise or omit the timeout parameter; if this duration should "
+                    "have been enough, check for an unterminated loop or a process "
+                    "waiting on input before retrying."
+                )
                 truncated_output, truncated = _truncate_output(
-                    f"Command timed out after {timeout_seconds} seconds.\n{output}",
+                    f"Command timed out after {timeout_seconds} seconds{source_note}. "
+                    f"{guidance}\n{output}",
                     self.config.output_limit_bytes,
                 )
                 return ExecuteResponse(
@@ -680,6 +693,33 @@ def _progress_line_text(line: str) -> str:
     return text[: max(0, limit - 24)] + "... [line truncated]"
 
 
+# Floor for a model-requested execute timeout: below this, a mistyped hint
+# (0/1/2s) would kill legitimate work during cold-container startup
+# (interpreter launch + imports) before it begins.
+_MIN_REQUESTED_TIMEOUT_SECONDS = 10
+
+
+def resolve_execute_timeout(requested: object, ceiling: int) -> int:
+    """Effective wall-clock bound for one execute call, in seconds (0 = none).
+
+    The model's per-call timeout is a SHRINK-ONLY hint: the operator ceiling
+    is absolute (a hint can never extend it), but a positive hint below the
+    ceiling is honored, floored at _MIN_REQUESTED_TIMEOUT_SECONDS. Absent or
+    unparseable hints fall back to the ceiling alone.
+    """
+    try:
+        hint = int(requested) if requested is not None else 0
+    except (TypeError, ValueError):
+        hint = 0
+    ceiling_seconds = max(0, int(ceiling))
+    if hint <= 0:
+        return ceiling_seconds
+    bounded = max(hint, _MIN_REQUESTED_TIMEOUT_SECONDS)
+    if ceiling_seconds > 0:
+        return min(ceiling_seconds, bounded)
+    return bounded
+
+
 def validate_sandbox_command(command: str) -> str | None:
     normalized = " ".join(str(command or "").split())
     if not normalized:
@@ -774,9 +814,10 @@ def _root_search_message() -> str:
 
 def _shell_timeout_message() -> str:
     return (
-        "Do not wrap sandbox commands with shell timeout. Long-running analysis is "
-        "allowed; run the command directly and let the platform's operator-configured "
-        "sandbox policy handle any hard limit."
+        "Do not wrap sandbox commands with shell timeout. Pass the execute tool's "
+        "`timeout` parameter instead — it bounds this one call and can only shorten "
+        "the operator's wall-clock cap, never extend it. Long-running analysis "
+        "without a timeout remains allowed."
     )
 
 

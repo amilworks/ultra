@@ -3358,7 +3358,10 @@ def test_run_job_continues_when_explicit_plot_request_only_saves_code(tmp_path: 
     result, events, fake_agent = asyncio.run(scenario())
 
     assert fake_agent.calls == 2
+    # Terminal assembly stitches the pre-continuation answer in front of the
+    # continuation's delta reply — the guard must not erase attempt 1's answer.
     assert result == (
+        "Saved the script plot_x2.py.\n\n"
         "Executed the plotting script and saved the code (plot_x2.py) and figure (plot_x2.png)."
     )
     assert "figure" in fake_agent.continuation_prompt
@@ -3420,7 +3423,11 @@ def test_run_job_continues_when_training_request_omits_model_weights(tmp_path: P
     result, events, fake_agent = asyncio.run(scenario())
 
     assert fake_agent.calls == 2
-    assert result == "Saved the trained model weights, code, and figures."
+    # Attempt 1's answer survives the completion-guard continuation.
+    assert result == (
+        "Saved the training script and training curves.\n\n"
+        "Saved the trained model weights, code, and figures."
+    )
     assert "model" in fake_agent.continuation_prompt
     trace_events = [event for event in events if event["event_kind"] == "trace.message.delta"]
     assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [["model"]]
@@ -5875,8 +5882,19 @@ def _study_job(workflow_hint: dict | None = None) -> RunJobEnvelope:
         run_id="run-rigor",
         thread_id="thread-rigor",
         user_id="researcher-1",
-        goal="Run a simulation, analyze metrics, and plot results.",
-        messages=[{"role": "user", "content": "Run a simulation and analyze metrics."}],
+        goal=(
+            "Simulate the Duffing oscillator and classify dynamical regimes from "
+            "Lyapunov exponents and Poincare sections."
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Simulate the Duffing oscillator and classify dynamical regimes from "
+                    "Lyapunov exponents and Poincare sections."
+                ),
+            }
+        ],
         workflow_hint=dict(workflow_hint or {}),
     )
 
@@ -6062,11 +6080,230 @@ def test_missing_rigor_contract_kinds_gates_on_intelligence_and_goal(tmp_path: P
     code_debug_context = _context_for_job(code_debug_job, tmp_path)
     assert _missing_rigor_contract_kinds(code_debug_context, code_debug_job, bare_answer) == []
 
+    diagram_review_job = RunJobEnvelope(
+        run_id="run-dynamics-diagram-review",
+        thread_id="thread-dynamics-diagram-review",
+        user_id="researcher-1",
+        goal="Analyze the attached bifurcation diagram for the Lorenz system.",
+        messages=[
+            {
+                "role": "user",
+                "content": "Analyze the attached bifurcation diagram for the Lorenz system.",
+            }
+        ],
+        workflow_hint={"id": "pro_mode"},
+    )
+    diagram_review_context = _context_for_job(diagram_review_job, tmp_path)
+    assert (
+        _missing_rigor_contract_kinds(
+            diagram_review_context,
+            diagram_review_job,
+            bare_answer,
+        )
+        == []
+    )
+
+    incidental_nph_goal = (
+        "Quantitatively assess this CT, estimate the Evans index, and classify NPH; "
+        "the radiology report mentions a bifurcation in the disease course."
+    )
+    dynamics_request = (
+        "Simulate the Duffing oscillator and classify dynamical regimes from "
+        "Lyapunov exponents and Poincare sections."
+    )
+    nph_job = RunJobEnvelope(
+        run_id="run-nph",
+        thread_id="thread-nph",
+        user_id="researcher-1",
+        goal=incidental_nph_goal,
+        messages=[
+            {"role": "user", "content": dynamics_request},
+            {
+                "role": "user",
+                "content": dynamics_request,
+                "metadata": {"kind": "steering"},
+                "run_id": "run-nph",
+            },
+        ],
+        workflow_hint={"id": "pro_mode"},
+    )
+    nph_context = _context_for_job(nph_job, tmp_path)
+    assert _missing_rigor_contract_kinds(nph_context, nph_job, bare_answer) == []
+
+    dynamics_job = RunJobEnvelope(
+        run_id="run-dynamics-base-goal",
+        thread_id="thread-dynamics-base-goal",
+        user_id="researcher-1",
+        goal=dynamics_request,
+        messages=[
+            {"role": "user", "content": incidental_nph_goal},
+            {
+                "role": "user",
+                "content": "Do not run a dynamics study.",
+                "metadata": {"kind": "steering"},
+                "run_id": "run-dynamics-base-goal",
+            },
+        ],
+        workflow_hint={"id": "pro_mode"},
+    )
+    dynamics_context = _context_for_job(dynamics_job, tmp_path)
+    assert _missing_rigor_contract_kinds(dynamics_context, dynamics_job, bare_answer) == [
+        "rigor:uncertainty",
+        "rigor:sampling",
+        "rigor:step_size",
+        "rigor:decision_rule",
+        "rigor:discriminator",
+        "rigor:limitations",
+    ]
+
     pro_job = _study_job({"id": "pro_mode"})
     pro_context = _context_for_job(pro_job, tmp_path)
     assert _missing_rigor_contract_kinds(pro_context, pro_job, _attempt("")) == []
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        (
+            "Simulate the Lorenz system, then inspect HRV metrics and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then process RNA-seq data and classify stable "
+            "regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then interpret the attached paper and classify "
+            "its chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then evaluate the CT and classify stable regimes "
+            "of NPH."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect an attached bifurcation diagram "
+            "and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect an HRV Poincare map and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect ECG Lyapunov exponents and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect a bifurcation diagram from the "
+            "attached paper and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Poincare maps from an HRV recording "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Lyapunov exponents from an ECG "
+            "recording and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze Lyapunov exponents from the attached "
+            "article and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for this ECG signal "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect the Duffing oscillator from the "
+            "attached paper and classify chaotic regimes."
+        ),
+    ],
+)
+def test_missing_rigor_contract_kinds_rejects_coordinated_foreign_segments(
+    tmp_path: Path,
+    goal: str,
+):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = RunJobEnvelope(
+        run_id="run-coordinated-foreign-segment",
+        thread_id="thread-coordinated-foreign-segment",
+        user_id="researcher-1",
+        goal=goal,
+        messages=[{"role": "user", "content": goal}],
+        workflow_hint={"id": "pro_mode"},
+    )
+    context = _context_for_job(job, tmp_path)
+
+    assert _missing_rigor_contract_kinds(context, job, _attempt("Only one result.")) == []
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        (
+            "Simulate the Lorenz system, then analyze the Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents and Poincare "
+            "sections, then classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze its Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents from its trajectories "
+            "and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for the Lorenz "
+            "attractor and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents over parameter "
+            "values and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then measure Lyapunov exponents across the parameter "
+            "range and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents at r=3.9 and "
+            "classify chaotic regimes."
+        ),
+    ],
+)
+def test_missing_rigor_contract_kinds_accepts_coordinated_dynamics_evidence(
+    tmp_path: Path,
+    goal: str,
+):
+    from ultra_deepagents.runner import _missing_rigor_contract_kinds
+
+    job = RunJobEnvelope(
+        run_id="run-coordinated-dynamics-evidence",
+        thread_id="thread-coordinated-dynamics-evidence",
+        user_id="researcher-1",
+        goal=goal,
+        messages=[{"role": "user", "content": goal}],
+        workflow_hint={"id": "pro_mode"},
+    )
+    context = _context_for_job(job, tmp_path)
+
+    assert _missing_rigor_contract_kinds(
+        context, job, _attempt("Only one result.")
+    ) == [
+        "rigor:uncertainty",
+        "rigor:sampling",
+        "rigor:step_size",
+        "rigor:decision_rule",
+        "rigor:discriminator",
+        "rigor:limitations",
+    ]
 
 
 def test_requested_artifacts_ignore_code_blocks_and_negated_plot_requests():
@@ -6182,8 +6419,19 @@ def test_run_job_enforces_rigor_contract_with_one_continuation(tmp_path: Path):
             run_id="run-rigor-e2e",
             thread_id="thread-rigor-e2e",
             user_id="researcher-1",
-            goal="Run a simulation and analyze metrics.",
-            messages=[{"role": "user", "content": "Run a simulation and analyze metrics."}],
+            goal=(
+                "Simulate the Duffing oscillator and classify dynamical regimes from "
+                "Lyapunov exponents and Poincare sections."
+            ),
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Simulate the Duffing oscillator and classify dynamical regimes from "
+                        "Lyapunov exponents and Poincare sections."
+                    ),
+                }
+            ],
             workflow_hint={"id": "pro_mode"},
         )
         agent = FakeStudyThenContractAgent()
@@ -6207,6 +6455,298 @@ def test_run_job_enforces_rigor_contract_with_one_continuation(tmp_path: Path):
     completed = next(event for event in events if event["event_kind"] == "run.completed")
     assert "±" in completed["payload"]["response_text"]
     assert "Limitations" in completed["payload"]["response_text"]
+
+
+def test_run_job_does_not_force_dynamics_rigor_for_nph_prompt(tmp_path: Path):
+    response = (
+        "The measured Evans index is 0.34 on the selected axial slice. "
+        "That measurement can support ventriculomegaly, but it does not by itself "
+        "establish normal-pressure hydrocephalus; clinical correlation is required."
+    )
+
+    class FakeNPHAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": response},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        prompt = (
+            "Quantitatively assess this CT, estimate the Evans index, and classify NPH; "
+            "the radiology report mentions a bifurcation in the disease course."
+        )
+        job = RunJobEnvelope(
+            run_id="run-nph-e2e",
+            thread_id="thread-nph-e2e",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeNPHAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, agent, published
+
+    result, agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 1
+    assert not [event for event in events if event.get("node_name") == "completion_guard"]
+    assert result == response
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert completed["payload"]["response_text"] == response
+
+
+def test_run_job_does_not_force_dynamics_rigor_for_lorenz_literature_review(
+    tmp_path: Path,
+):
+    response = (
+        "The reviewed sources use the Lorenz system as a canonical example of deterministic "
+        "chaos and discuss sensitivity to initial conditions. This is a literature summary, "
+        "not a new numerical regime classification."
+    )
+
+    class FakeLiteratureReviewAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": response},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        prompt = "Run a literature review of the Lorenz chaos study."
+        job = RunJobEnvelope(
+            run_id="run-lorenz-literature-review",
+            thread_id="thread-lorenz-literature-review",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeLiteratureReviewAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, agent, published
+
+    result, agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 1
+    assert not [event for event in events if event.get("node_name") == "completion_guard"]
+    assert result == response
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert completed["payload"]["response_text"] == response
+
+
+def test_run_job_does_not_force_dynamics_rigor_for_hrv_with_lorenz_citation(
+    tmp_path: Path,
+):
+    response = (
+        "The HRV feature summary shows an oscillatory component in the measured signal. "
+        "The cited Lorenz example is contextual and does not turn this into a new "
+        "dynamical-system regime experiment."
+    )
+
+    class FakeHRVAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": response},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        prompt = (
+            "Compute HRV metrics and classify oscillatory regimes while citing the "
+            "Lorenz system chaos study."
+        )
+        job = RunJobEnvelope(
+            run_id="run-hrv-lorenz-citation",
+            thread_id="thread-hrv-lorenz-citation",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeHRVAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, agent, published
+
+    result, agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 1
+    assert not [event for event in events if event.get("node_name") == "completion_guard"]
+    assert result == response
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert completed["payload"]["response_text"] == response
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        (
+            "Simulate the Lorenz system for illustration, and compute HRV metrics and "
+            "classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect HRV metrics and classify "
+            "oscillatory regimes."
+        ),
+    ],
+)
+def test_run_job_does_not_force_dynamics_rigor_across_same_sentence_task_switch(
+    tmp_path: Path,
+    prompt: str,
+):
+    response = (
+        "The Lorenz simulation is illustrative only. The HRV calculation reports the "
+        "requested signal metrics without treating them as a Lorenz-regime experiment."
+    )
+
+    class FakeCrossObjectAgent:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def astream_events(self, payload, *, context=None, version=None):
+            assert version == "v3"
+            self.calls += 1
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][0]["content"]},
+                            {"role": "assistant", "content": response},
+                        ]
+                    },
+                },
+            }
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-cross-object-task-switch",
+            thread_id="thread-cross-object-task-switch",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+            workflow_hint={"id": "pro_mode"},
+        )
+        agent = FakeCrossObjectAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, agent, published
+
+    result, agent, events = asyncio.run(scenario())
+
+    assert agent.calls == 1
+    assert not [event for event in events if event.get("node_name") == "completion_guard"]
+    assert result == response
+    completed = next(event for event in events if event["event_kind"] == "run.completed")
+    assert completed["payload"]["response_text"] == response
 
 
 def test_run_job_does_not_force_rigor_or_artifacts_for_negated_code_debug_prompt(tmp_path: Path):

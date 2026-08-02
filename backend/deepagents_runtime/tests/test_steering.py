@@ -306,21 +306,21 @@ class TestBarrierContinuation:
     def test_prior_answer_is_kept_for_stitching(self) -> None:
         # The continuation's reply is usually just the steer delta; the
         # published answer must keep the pre-steer response.
-        from ultra_deepagents.runner import _stitch_steer_barrier_answers
+        from ultra_deepagents.runner import _stitch_continuation_answers
 
         inbox = FakeInbox([], barrier=[steer("steer_a", "msg_a", "Add a title.")])
         messages = [{"role": "user", "content": "original"}]
         parts: list[str] = []
         assert self.run_barrier(inbox, messages, prior_answer_parts=parts) is True
         assert parts == ["The answer."]
-        stitched = _stitch_steer_barrier_answers(parts, "Done — added the title.")
+        stitched = _stitch_continuation_answers(parts, "Done — added the title.")
         assert stitched == "The answer.\n\nDone — added the title."
         # A model that re-emitted the full answer wins without duplication.
         assert (
-            _stitch_steer_barrier_answers(parts, "The answer. And the title.")
+            _stitch_continuation_answers(parts, "The answer. And the title.")
             == "The answer. And the title."
         )
-        assert _stitch_steer_barrier_answers([], "unchanged") == "unchanged"
+        assert _stitch_continuation_answers([], "unchanged") == "unchanged"
 
 
 class TestInboxGating:

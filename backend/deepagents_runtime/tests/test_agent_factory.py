@@ -859,7 +859,9 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     assert "stage selected uploads" in code_runner["system_prompt"].lower()
     assert "stage prior artifacts" in code_runner["system_prompt"].lower()
     assert "preserve the user's requested compute scope" in code_runner["system_prompt"].lower()
-    assert "longer durations, finer step sizes, more seeds" in code_runner["system_prompt"].lower()
+    assert (
+        "dataset, sampling, repetitions, validation scope" in code_runner["system_prompt"].lower()
+    )
     assert "pilot timing pass" in code_runner["system_prompt"]
     assert "/outputs" in code_runner["system_prompt"]
     assert "after each condition or batch" in code_runner["system_prompt"]
@@ -1127,8 +1129,11 @@ def test_system_prompt_discourages_analysis_wall_clock_timeout_wrappers():
     prompt = " ".join(build_system_prompt(settings).lower().split())
 
     assert "do not wrap sandbox commands with shell timeout" in prompt
-    assert "execute timeout" in prompt
-    assert "long-running analysis is allowed" in prompt
+    # The per-call `timeout` parameter is now the sanctioned tool: shrink-only
+    # against the operator cap (the run_10bb3712 infinite-loop lesson).
+    assert "`timeout` parameter" in prompt
+    assert "can only shorten the operator's wall-clock cap" in prompt
+    assert "long-running analysis without a timeout remains allowed" in prompt
 
 
 def test_system_prompt_requires_long_compute_pilot_checkpoint_and_budget_gate():
@@ -1707,8 +1712,6 @@ def test_stage_uploaded_files_for_analysis_text_returns_sandbox_paths_only(tmp_p
     assert (workspace / "staged_uploads" / "file-1" / "prairie.jpg").read_bytes() == b"image-bytes"
 
 
-
-
 def test_stage_uploaded_files_accepts_json_encoded_file_ids(tmp_path: Path):
     upload_root = tmp_path / "uploads"
     source = upload_root / "file-1__prairie.jpg"
@@ -1923,68 +1926,599 @@ def test_looks_scoped_delegation_goal_shared_gate():
     assert looks_scoped_delegation_goal("Say hello.") is False
 
 
-def test_quantitative_rigor_goal_is_narrower_than_scoped_delegation():
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Compute Lyapunov exponents for the logistic map and classify its parameter regimes.",
+        "Simulate the logistic map, then classify its chaotic regimes.",
+        "Compute Lyapunov exponents for the Lorenz system, then classify its regimes.",
+        "Simulate the logistic map but classify only its chaotic regimes.",
+        ("Do not plot then simulate the logistic map and classify its chaotic regimes."),
+        (
+            "Explain the method then compute Lyapunov exponents for the Lorenz system "
+            "and classify its regimes."
+        ),
+        "Run a Lorenz chaos study and determine whether the attractor is chaotic.",
+        "Run a double-pendulum regime analysis and classify its stability.",
+        ("Conduct a nonlinear-system stability analysis and classify its stable regimes."),
+        ("Run a Lorenz system computational analysis and classify its chaotic regimes."),
+        ("Conduct a Duffing oscillator numerical experiment and classify its regimes."),
+        "Perform a parameter sweep of the logistic map and classify its regimes.",
+        "Generate a Lorenz bifurcation map and classify its regimes.",
+        "Map Duffing bifurcations and Poincare sections across its dynamical regimes.",
+        (
+            "Without plotting, compute Lyapunov exponents for the logistic map and "
+            "classify its regimes."
+        ),
+        (
+            "Explain the method, then compute Lyapunov exponents for the Lorenz system "
+            "and classify its chaotic regimes."
+        ),
+        (
+            "Compute the Duffing response, classify its regimes, then explain the result "
+            "conceptually."
+        ),
+        "Run a chaos study on the Rössler system and classify its regimes.",
+        "Run a chaos study on the Lorenz system and classify its regimes.",
+        "Perform a parameter sweep over the logistic map and classify its regimes.",
+        "Run a stability analysis of a nonlinear system model.",
+        "Simulate the Hénon map and distinguish chaotic parameter regimes.",
+        "Run a regime analysis of the double-pendulum and classify stability.",
+        (
+            "Simulate a gene-regulatory dynamical-system model and classify its stable and "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the logistic map at r=3.9, compute its Lyapunov exponent, and "
+            "classify its regimes."
+        ),
+        (
+            "Do not plot, but simulate the logistic map across parameter values and "
+            "classify its chaotic regimes."
+        ),
+        (
+            "Can you simulate the logistic map across parameter values and classify its "
+            "chaotic regimes?"
+        ),
+        (
+            "Can you please simulate the logistic map across parameter values and "
+            "classify its chaotic regimes?"
+        ),
+        (
+            "Could you compute Lyapunov exponents for the Lorenz system and classify its "
+            "chaotic regimes?"
+        ),
+        "Would you run a chaos study on the Rössler system and classify its regimes?",
+        "I want you to simulate the Duffing oscillator and classify its regimes.",
+        ("I need you to compute Lyapunov exponents for the logistic map and classify its regimes."),
+        (
+            "I would like you to simulate a gene-regulatory dynamical-system model and "
+            "classify its stable and oscillatory regimes."
+        ),
+        (
+            "Do not plot but simulate the logistic map across parameter values and "
+            "classify its chaotic regimes."
+        ),
+        (
+            "Do not simulate the Lorenz system but compute Lyapunov exponents for the "
+            "logistic map and classify its regimes."
+        ),
+        (
+            "Avoid simulating the Lorenz system but compute Lyapunov exponents for the "
+            "logistic map and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze the Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents and Poincare "
+            "sections, then classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze its Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents from its trajectories "
+            "and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for the Lorenz "
+            "attractor and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents over parameter "
+            "values and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then measure Lyapunov exponents across the parameter "
+            "range and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents at r=3.9 and "
+            "classify chaotic regimes."
+        ),
+        (
+            "Do not plot; instead simulate the logistic map across parameter values and "
+            "classify its chaotic regimes."
+        ),
+        (
+            "Avoid plotting and instead compute Lyapunov exponents for the logistic map "
+            "and classify its regimes."
+        ),
+        (
+            "Without plotting compute Lyapunov exponents for the logistic map and "
+            "classify its regimes."
+        ),
+    ],
+)
+def test_dynamical_system_rigor_goal_accepts_explicit_regime_studies(goal: str):
     from ultra_deepagents.agent import (
+        looks_dynamical_system_rigor_goal,
         looks_quantitative_rigor_goal,
-        looks_scoped_delegation_goal,
     )
 
-    non_quantitative = "Analyze this Python code and debug the workflow."
-    schema_inspection = "Analyze this dataset schema and summarize its columns."
-    negated_live_debug = """Pro mode debug request. Analyze this Python function for correctness.
-Do not run a numerical experiment and do not create plots or CSVs.
+    assert looks_dynamical_system_rigor_goal(goal) is True
+    assert looks_quantitative_rigor_goal(goal) is True
 
-```python
-def normalize_rows(rows):
-    totals = [sum(row) for row in rows]
-    return [[x / totals[i] for x in row] for i, row in enumerate(rows)]
-```
 
-Please answer with findings and a corrected implementation."""
-    quantitative = "Run a simulation and classify chaotic regimes from Lyapunov metrics."
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Quantitatively assess this CT, estimate the Evans index, and classify NPH.",
+        "Segment the tumor and report Dice, IoU, sensitivity, and specificity metrics.",
+        "Use the scan and clinical history to infer the most likely diagnosis.",
+        "Analyze RNA-seq counts and classify the cells by lineage.",
+        "Estimate species abundance and compare the ecology groups statistically.",
+        "Fit a regression and validate it with a Monte Carlo analysis.",
+        "Estimate the microscopy power spectrum and scaling exponent.",
+        "Run a simulation and analyze its metrics.",
+        "Explain what a Lyapunov exponent means.",
+        "Explain what a Lyapunov exponent measures in 3 sentences.",
+        "Analyze a bifurcation diagram conceptually without running calculations.",
+        "Describe how to calculate a Lyapunov exponent.",
+        "Explain the logistic map conceptually.",
+        "Define a Poincare return map.",
+        "Estimate the Evans index for NPH without computing a Lyapunov exponent.",
+        "Review a bifurcation analysis.",
+        "Read the attached bifurcation analysis and summarize it.",
+        "Calculate an Evans index; the report mentions a bifurcation in disease course.",
+        "Classify this paper about the Lorenz system by topic.",
+        "Estimate the reading time of this article about the logistic map.",
+        "Compare published Lyapunov estimates for the Lorenz attractor.",
+        "Plot the logistic map time series.",
+        "Plot a phase portrait for a damped harmonic oscillator.",
+        "Calculate a fixed-window Lyapunov exponent for this ECG signal.",
+        "Calculate Poincaré SD1 and SD2 metrics for this HRV recording.",
+        "Compute the Lorenz curve and Gini coefficient for household incomes.",
+        "Compute a Lyapunov exponent for the Lorenz system.",
+        "Simulate the Lorenz system.",
+        "Do not simulate the Lorenz system or classify its chaotic regimes.",
+        "Analyze this paper about bifurcations in the Lorenz system.",
+        (
+            "Investigate whether this article correctly classifies chaotic regimes in the "
+            "Lorenz system."
+        ),
+        "Study the literature on chaotic regimes of the Lorenz system.",
+        "Analyze the attached bifurcation diagram for the Lorenz system.",
+        "Analyze the Lorenz system chaos conceptually without running calculations.",
+        "Analyze bifurcations in the Lorenz system.",
+        "Can you review this paper about bifurcations in the Lorenz system?",
+        "Can you please review this paper about bifurcations in the Lorenz system?",
+        "Can you analyze this paper about chaotic regimes in the Lorenz system?",
+        "Run a literature review of the Lorenz chaos study.",
+        "Conduct a critique of the bifurcation analysis for the Lorenz system.",
+        "Could you run a summary of the Lorenz chaos study?",
+        "Conduct an audit of the Lorenz chaos study.",
+        "Run an evaluation of the Lorenz chaos study.",
+        "Perform a comparison of the Lorenz chaos study.",
+        "Conduct an interpretation of the Lorenz chaos study.",
+        "Run a discussion of the Lorenz chaos study.",
+        "Run an assessment of the Lorenz chaos study.",
+        "Run a Lorenz chaos study review.",
+        "Conduct a Duffing bifurcation analysis critique.",
+        "Perform a double-pendulum regime analysis summary.",
+        "Run a Lorenz chaos study report.",
+        (
+            "Run a review of the Lorenz system computational analysis and classify its "
+            "chaotic regimes."
+        ),
+        (
+            "Conduct a critique of the Duffing oscillator numerical experiment and "
+            "classify its regimes."
+        ),
+        ("Perform a summary of the Duffing oscillator parameter sweep and classify its regimes."),
+        "Generate a report about the Lorenz system and classify its chaotic regimes.",
+        (
+            "Compute HRV metrics and classify oscillatory regimes while citing the "
+            "Lorenz system chaos study."
+        ),
+        (
+            "Compute RNA-seq scores and identify stable regimes before discussing the "
+            "Lorenz system chaotic dynamics."
+        ),
+        (
+            "Compute ecological metrics and identify stable regimes before discussing "
+            "the Lorenz system chaotic dynamics."
+        ),
+        (
+            "Compute microscopy time-series features and classify oscillatory regimes "
+            "while comparing them with the Lorenz system chaos study."
+        ),
+        (
+            "Run a computational analysis of the attached paper about Lorenz chaos and "
+            "classify its regimes."
+        ),
+        (
+            "Conduct a numerical experiment of the attached report about Duffing "
+            "bifurcations and classify its regimes."
+        ),
+        (
+            "Perform a parameter sweep of the attached article about the logistic map "
+            "and classify its regimes."
+        ),
+        "Run a bifurcation analysis of the attached report for the Lorenz system.",
+        (
+            "Simulate the Lorenz system for illustration, and compute HRV metrics and "
+            "classify oscillatory regimes."
+        ),
+        ("Simulate the Lorenz system, then analyze RNA-seq data and classify stable regimes."),
+        (
+            "Simulate the Lorenz system, and estimate the Evans index to classify stable "
+            "regimes of NPH."
+        ),
+        "Run a Lorenz chaos study: review the attached literature.",
+        "Conduct a Duffing bifurcation analysis, a literature review only.",
+        ("Simulate the Lorenz system, then inspect HRV metrics and classify oscillatory regimes."),
+        ("Simulate the Lorenz system, then process RNA-seq data and classify stable regimes."),
+        (
+            "Simulate the Lorenz system, then interpret the attached paper and classify "
+            "its chaotic regimes."
+        ),
+        ("Simulate the Lorenz system, then evaluate the CT and classify stable regimes of NPH."),
+        (
+            "Simulate the Lorenz system, then inspect an attached bifurcation diagram "
+            "and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect an HRV Poincare map and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect ECG Lyapunov exponents and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect a bifurcation diagram from the "
+            "attached paper and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Poincare maps from an HRV recording "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Lyapunov exponents from an ECG "
+            "recording and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze Lyapunov exponents from the attached "
+            "article and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for this ECG signal "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect the Duffing oscillator from the "
+            "attached paper and classify chaotic regimes."
+        ),
+        ("Compute a CT metric and classify NPH then cite the Lorenz system's chaotic regimes."),
+        ("Compute a CT metric and classify NPH while citing the Lorenz system's chaotic regimes."),
+    ],
+)
+def test_dynamical_system_rigor_goal_rejects_non_dynamics_science(goal: str):
+    from ultra_deepagents.agent import (
+        looks_dynamical_system_rigor_goal,
+        looks_quantitative_rigor_goal,
+    )
 
-    assert looks_scoped_delegation_goal(non_quantitative) is True
-    assert looks_quantitative_rigor_goal(non_quantitative) is False
-    assert looks_scoped_delegation_goal(schema_inspection) is True
-    assert looks_quantitative_rigor_goal(schema_inspection) is False
-    assert looks_scoped_delegation_goal(negated_live_debug) is True
-    assert looks_quantitative_rigor_goal(negated_live_debug) is False
-    assert looks_scoped_delegation_goal(quantitative) is True
-    assert looks_quantitative_rigor_goal(quantitative) is True
+    assert looks_dynamical_system_rigor_goal(goal) is False
+    assert looks_quantitative_rigor_goal(goal) is False
 
 
 def test_runtime_prompt_suffix_appends_contract_only_for_pro_intelligence():
     from ultra_deepagents.agent import build_runtime_prompt_suffix
 
     base = _code_execution_context().to_payload()
+    dynamics_goal = (
+        "Compute Lyapunov exponents for the logistic map and classify its dynamical regimes."
+    )
 
-    pro = AgentRunContext(**{**base, "workflow_hint": {"id": "pro_mode"}})
+    pro = AgentRunContext(**{**base, "goal": dynamics_goal, "workflow_hint": {"id": "pro_mode"}})
     suffix = build_runtime_prompt_suffix(pro, elapsed_seconds=95)
-    assert "Results contract" in suffix
+    assert "Dynamical-systems results contract" in suffix
     assert "Active run context:" in suffix
     assert "1m35s" in suffix
     assert "wall-clock" in suffix
 
-    high = AgentRunContext(**base)
+    high = AgentRunContext(**{**base, "goal": dynamics_goal})
     high_suffix = build_runtime_prompt_suffix(high, elapsed_seconds=5)
-    assert "Results contract" not in high_suffix
+    assert "Dynamical-systems results contract" not in high_suffix
     assert "Active run context:" in high_suffix
 
     chat = AgentRunContext(**{**base, "goal": "Say hello.", "workflow_hint": {"id": "pro_mode"}})
-    assert "Results contract" not in build_runtime_prompt_suffix(chat, elapsed_seconds=5)
+    assert "Dynamical-systems results contract" not in build_runtime_prompt_suffix(
+        chat, elapsed_seconds=5
+    )
 
-    code_debug = AgentRunContext(
+    nph = AgentRunContext(
         **{
             **base,
-            "goal": "Analyze this Python code and debug the workflow.",
+            "goal": (
+                "Quantitatively assess this CT, estimate the Evans index, and classify NPH; "
+                "the radiology report mentions a bifurcation in the disease course."
+            ),
             "workflow_hint": {"id": "pro_mode"},
         }
     )
-    code_suffix = build_runtime_prompt_suffix(code_debug, elapsed_seconds=5)
-    assert "Results contract" not in code_suffix
-    assert "Active run context:" in code_suffix
+    nph_suffix = build_runtime_prompt_suffix(nph, elapsed_seconds=5)
+    assert "Dynamical-systems results contract" not in nph_suffix
+    assert "3×" not in nph_suffix
+    assert "initial conditions" not in nph_suffix
+    assert "Active run context:" in nph_suffix
 
     assert build_runtime_prompt_suffix(None) == ""
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Analyze this paper about bifurcations in the Lorenz system.",
+        "Study the literature on chaotic regimes of the Lorenz system.",
+        "Analyze the attached bifurcation diagram for the Lorenz system.",
+        "Can you review this paper about chaotic regimes in the Lorenz system?",
+        "Run a literature review of the Lorenz chaos study.",
+        "Conduct a critique of the bifurcation analysis for the Lorenz system.",
+        "Could you run a summary of the Lorenz chaos study?",
+        "Conduct an audit of the Lorenz chaos study.",
+        "Run an evaluation of the Lorenz chaos study.",
+        "Perform a comparison of the Lorenz chaos study.",
+        "Conduct an interpretation of the Lorenz chaos study.",
+        "Run a discussion of the Lorenz chaos study.",
+        "Run an assessment of the Lorenz chaos study.",
+        "Run a Lorenz chaos study review.",
+        "Conduct a Duffing bifurcation analysis critique.",
+        "Perform a double-pendulum regime analysis summary.",
+        "Run a Lorenz chaos study report.",
+        (
+            "Run a review of the Lorenz system computational analysis and classify its "
+            "chaotic regimes."
+        ),
+        (
+            "Conduct a critique of the Duffing oscillator numerical experiment and "
+            "classify its regimes."
+        ),
+        ("Perform a summary of the Duffing oscillator parameter sweep and classify its regimes."),
+        "Generate a report about the Lorenz system and classify its chaotic regimes.",
+        (
+            "Compute HRV metrics and classify oscillatory regimes while citing the "
+            "Lorenz system chaos study."
+        ),
+        (
+            "Compute RNA-seq scores and identify stable regimes before discussing the "
+            "Lorenz system chaotic dynamics."
+        ),
+        (
+            "Compute ecological metrics and identify stable regimes before discussing "
+            "the Lorenz system chaotic dynamics."
+        ),
+        (
+            "Compute microscopy time-series features and classify oscillatory regimes "
+            "while comparing them with the Lorenz system chaos study."
+        ),
+        (
+            "Run a computational analysis of the attached paper about Lorenz chaos and "
+            "classify its regimes."
+        ),
+        (
+            "Conduct a numerical experiment of the attached report about Duffing "
+            "bifurcations and classify its regimes."
+        ),
+        (
+            "Perform a parameter sweep of the attached article about the logistic map "
+            "and classify its regimes."
+        ),
+        "Run a bifurcation analysis of the attached report for the Lorenz system.",
+        (
+            "Simulate the Lorenz system for illustration, and compute HRV metrics and "
+            "classify oscillatory regimes."
+        ),
+        ("Simulate the Lorenz system, then analyze RNA-seq data and classify stable regimes."),
+        (
+            "Simulate the Lorenz system, and estimate the Evans index to classify stable "
+            "regimes of NPH."
+        ),
+        "Run a Lorenz chaos study: review the attached literature.",
+        "Conduct a Duffing bifurcation analysis, a literature review only.",
+        ("Simulate the Lorenz system, then inspect HRV metrics and classify oscillatory regimes."),
+        ("Simulate the Lorenz system, then process RNA-seq data and classify stable regimes."),
+        (
+            "Simulate the Lorenz system, then interpret the attached paper and classify "
+            "its chaotic regimes."
+        ),
+        ("Simulate the Lorenz system, then evaluate the CT and classify stable regimes of NPH."),
+        (
+            "Simulate the Lorenz system, then inspect an attached bifurcation diagram "
+            "and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect an HRV Poincare map and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect ECG Lyapunov exponents and classify "
+            "oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect a bifurcation diagram from the "
+            "attached paper and classify its regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Poincare maps from an HRV recording "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect Lyapunov exponents from an ECG "
+            "recording and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze Lyapunov exponents from the attached "
+            "article and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for this ECG signal "
+            "and classify oscillatory regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then inspect the Duffing oscillator from the "
+            "attached paper and classify chaotic regimes."
+        ),
+    ],
+)
+def test_runtime_prompt_suffix_does_not_contract_source_interpretation(goal: str):
+    from ultra_deepagents.agent import build_runtime_prompt_suffix
+
+    base = _code_execution_context().to_payload()
+    context = AgentRunContext(**{**base, "goal": goal, "workflow_hint": {"id": "pro_mode"}})
+
+    suffix = build_runtime_prompt_suffix(context, elapsed_seconds=5)
+
+    assert "Dynamical-systems results contract" not in suffix
+    assert "3×" not in suffix
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        (
+            "Do not simulate the Lorenz system but compute Lyapunov exponents for the "
+            "logistic map and classify its regimes."
+        ),
+        (
+            "Avoid simulating the Lorenz system but compute Lyapunov exponents for the "
+            "logistic map and classify its regimes."
+        ),
+    ],
+)
+def test_runtime_prompt_suffix_contracts_affirmative_work_after_negated_contrast(
+    goal: str,
+):
+    from ultra_deepagents.agent import build_runtime_prompt_suffix
+
+    base = _code_execution_context().to_payload()
+    context = AgentRunContext(**{**base, "goal": goal, "workflow_hint": {"id": "pro_mode"}})
+
+    suffix = build_runtime_prompt_suffix(context, elapsed_seconds=5)
+
+    assert "Dynamical-systems results contract" in suffix
+    assert "3×" in suffix
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        (
+            "Simulate the Lorenz system, then analyze the Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents and Poincare "
+            "sections, then classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then analyze its Lyapunov spectrum and classify "
+            "chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then compute Lyapunov exponents from its trajectories "
+            "and classify chaotic regimes."
+        ),
+        (
+            "Simulate the Lorenz system, then measure Lyapunov exponents for the Lorenz "
+            "attractor and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents over parameter "
+            "values and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then measure Lyapunov exponents across the parameter "
+            "range and classify chaotic regimes."
+        ),
+        (
+            "Simulate the logistic map, then compute Lyapunov exponents at r=3.9 and "
+            "classify chaotic regimes."
+        ),
+    ],
+)
+def test_runtime_prompt_suffix_contracts_coordinated_dynamics_evidence(goal: str):
+    from ultra_deepagents.agent import build_runtime_prompt_suffix
+
+    base = _code_execution_context().to_payload()
+    context = AgentRunContext(**{**base, "goal": goal, "workflow_hint": {"id": "pro_mode"}})
+
+    suffix = build_runtime_prompt_suffix(context, elapsed_seconds=5)
+
+    assert "Dynamical-systems results contract" in suffix
+    assert "3×" in suffix
+
+
+def test_generic_computational_delegates_do_not_impose_dynamics_confidence_rules():
+    from ultra_deepagents.agent import (
+        QWEN_CODE_RUNNER,
+        SCOPED_DELEGATION_RESPONSE_FORMAT,
+        SCOPED_DELEGATION_SUBAGENTS,
+    )
+
+    code_runner = next(
+        spec for spec in SCOPED_DELEGATION_SUBAGENTS if spec["name"] == "code-runner"
+    )
+    texts = [
+        SCOPED_DELEGATION_RESPONSE_FORMAT["properties"]["confidence"]["description"],
+        code_runner["system_prompt"],
+        QWEN_CODE_RUNNER["system_prompt"],
+    ]
+    for text in texts:
+        assert "3x" not in text.lower()
+        assert "3×" not in text
+    assert all("task-appropriate" in text.lower() for text in texts)
+
+
+def test_shipped_rigor_skill_routing_and_reporting_are_domain_safe():
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    root = resolve_skills_root(settings)
+    assert root is not None
+
+    dynamics = (root / "computational-experiment-rigor" / "SKILL.md").read_text(encoding="utf-8")
+    reporting = (root / "scientific-reporting" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert all(token in dynamics.lower() for token in ("nonlinear", "dynamical", "regime"))
+    assert "before making any quantitative claim" not in dynamics.lower()
+    assert "task-appropriate" in reporting.lower()
+    assert "3×" not in reporting
+    assert "initial conditions" not in reporting.lower()
 
 
 def _settings_factory() -> RuntimeSettings:

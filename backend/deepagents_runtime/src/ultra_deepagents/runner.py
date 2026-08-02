@@ -20,7 +20,7 @@ from ultra_deepagents.agent import (
     attempt_ledger_path,
     build_research_agent,
     is_rigor_intelligence,
-    looks_quantitative_rigor_goal,
+    looks_dynamical_system_rigor_goal,
     request_classification_text,
     resolve_user_memory_root,
 )
@@ -712,11 +712,13 @@ async def run_job(
         model_stream_recoveries_used = 0
         progress_stall_recoveries_used = 0
         steer_barrier_rounds_used = 0
-        # Answers produced BEFORE a barrier continuation. The continuation's
-        # model reply is typically just the steer delta; the published answer
-        # must keep the full pre-steer response (review-critical: the barrier
-        # otherwise REPLACED a complete report with "I've added the labels").
-        steer_barrier_answer_parts: list[str] = []
+        # Answers produced BEFORE a continuation attempt (steer barrier or
+        # completion guard). The continuation's model reply is typically just
+        # the delta ("I've added the labels" / "Added the requested figure");
+        # the published answer must keep the full earlier response
+        # (review-critical: terminal assembly otherwise REPLACED a complete
+        # report with the delta of the last attempt).
+        continuation_answer_parts: list[str] = []
         previous_missing_kinds: set[str] | None = None
         previous_artifact_signature: frozenset[tuple[str, str]] | None = None
         run_usage = _usage_from_prior_payload(prior_usage)
@@ -916,7 +918,7 @@ async def run_job(
                     sequencer=sequencer,
                     publish_event=publish_event,
                     rounds_used=steer_barrier_rounds_used,
-                    prior_answer_parts=steer_barrier_answer_parts,
+                    prior_answer_parts=continuation_answer_parts,
                 ):
                     steer_barrier_rounds_used += 1
                     continue
@@ -943,7 +945,7 @@ async def run_job(
                     sequencer=sequencer,
                     publish_event=publish_event,
                     rounds_used=steer_barrier_rounds_used,
-                    prior_answer_parts=steer_barrier_answer_parts,
+                    prior_answer_parts=continuation_answer_parts,
                 ):
                     steer_barrier_rounds_used += 1
                     continue
@@ -982,6 +984,18 @@ async def run_job(
             )
             if current_response_text.strip():
                 messages.append({"role": "assistant", "content": current_response_text})
+                # The continuation attempt usually answers with just the delta
+                # for the missing deliverable; terminal assembly must keep this
+                # attempt's full answer, not only the last attempt's. Only a
+                # substantive answer qualifies — when the attempt produced no
+                # final/post-tool text, current_response_text is the artifact
+                # fallback or raw streamed narration, and the guard is asking
+                # for the real response precisely because this one is missing.
+                if (
+                    attempt_result.final_response_text.strip()
+                    or attempt_result.post_tool_streamed_response_text.strip()
+                ):
+                    continuation_answer_parts.append(current_response_text)
             messages.append({"role": "user", "content": continuation_prompt})
             completion_continuations_used += 1
 
@@ -991,8 +1005,8 @@ async def run_job(
             post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
             artifact_events=artifact_events,
         )
-        response_text = _stitch_steer_barrier_answers(
-            steer_barrier_answer_parts, response_text
+        response_text = _stitch_continuation_answers(
+            continuation_answer_parts, response_text
         )
         for artifact_event in artifact_events:
             await publish_event(sequencer.stamp(artifact_event))
@@ -1038,12 +1052,13 @@ def _cancel_title_task(task: asyncio.Task | None) -> None:
 _STEER_BARRIER_MAX_ROUNDS = 3
 
 
-def _stitch_steer_barrier_answers(parts: list[str], final_text: str) -> str:
-    """Publish the FULL answer after barrier continuations.
+def _stitch_continuation_answers(parts: list[str], final_text: str) -> str:
+    """Publish the FULL answer after continuation attempts.
 
-    The continuation's model reply is typically an incremental addendum to
-    the steer; the durable response must keep every pre-steer answer part it
-    does not already contain (a model that re-emitted the whole thing wins).
+    A continuation — steer barrier or completion guard — typically replies
+    with an incremental addendum; the durable response must keep every
+    earlier answer part it does not already contain (a model that re-emitted
+    the whole thing wins).
     """
     if not parts:
         return final_text
@@ -2073,13 +2088,15 @@ def _missing_rigor_contract_kinds(
     """Results-contract evidence missing from a rigor-tier final answer.
 
     Active only for Intelligence Pro runs (``workflow_hint.id == "pro_mode"``)
-    on quantitative/scientific study goals. Checks are intentionally lightweight:
-    they decide whether to spend one completion continuation, not whether the
-    science is right.
+    whose canonical base goal requests a computational dynamical-regime study.
+    Prompt injection and this guard both classify ``context.goal`` so messages
+    or steering cannot retrofit the hard contract mid-run. Checks are
+    intentionally lightweight: they decide whether to spend one completion
+    continuation, not whether the science is right.
     """
     if not is_rigor_intelligence(context):
         return []
-    if not looks_quantitative_rigor_goal(_run_request_text(job)):
+    if not looks_dynamical_system_rigor_goal(context.goal):
         return []
     response_text = "\n".join(
         part

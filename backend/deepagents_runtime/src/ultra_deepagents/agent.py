@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -62,6 +63,250 @@ _NEGATED_REQUEST_CLAUSE_RE = re.compile(
     r"\b(?:do\s+not|don't|dont|without|avoid(?:ing)?)\b[^.?!;\n]*"
     r"|\bno\s+(?:plots?|figures?|charts?|graphs?|visuali[sz]ations?|csvs?|"
     r"numerical\s+experiments?|simulations?|experiments?|metrics?|statistics?)\b[^.?!;\n]*",
+    re.IGNORECASE,
+)
+_DYNAMICAL_RIGOR_CLAUSE_SPLIT_RE = re.compile(r"[?!;\n]+|\.(?!\d)")
+_DYNAMICAL_RIGOR_TASK_TRANSITION_RE = re.compile(
+    r"\b(?:and\s+instead|instead|rather)\b",
+    re.IGNORECASE,
+)
+_DYNAMICAL_RIGOR_LEADING_PLOT_CONSTRAINT_RE = re.compile(
+    r"^\s*(?:do\s+not|don't|dont|avoid(?:ing)?|without)\s+plot(?:ting)?\b"
+    r"\s*,?\s*(?:(?:but|then)\s+)?",
+    re.IGNORECASE,
+)
+_DYNAMICAL_RIGOR_NEGATED_ACTION_RE = re.compile(
+    r"\b(?:do\s+not|don't|dont|avoid(?:ing)?|without)\s+"
+    r"(?:(?:run|running|perform|performing|conduct|conducting)\s+)?"
+    r"(?:comput\w*|calculat\w*|estimat\w*|simulat\w*|integrat\w*|sweep\w*|"
+    r"classif\w*|distinguish\w*|determin\w*|generat\w*|construct\w*|plot\w*|"
+    r"map\w*|analy[sz]\w*|study\w*)"
+    r"(?:(?!\b(?:but|yet|and\s+instead|instead|rather)\b)[^,])*"
+    r"(?:,|(?=\b(?:but|yet|and\s+instead|instead|rather)\b)|$)",
+    re.IGNORECASE,
+)
+_DYNAMICAL_ACTION_BOUNDARY = r"(?:^|,\s*(?:(?:then|but|yet)\s+)?|\b(?:then|but|yet)\s+)"
+_DYNAMICAL_REQUEST_WRAPPER = (
+    r"(?:please\s+)?(?:"
+    r"(?:can|could|would)\s+you\s+(?:please\s+)?"
+    r"|i\s+(?:want|need)\s+you\s+to\s+"
+    r"|i\s+would\s+like\s+you\s+to\s+"
+    r")?"
+)
+_DYNAMICAL_DIRECT_MODEL_MODIFIER = (
+    r"(?:"
+    r"(?:lorenz|rossler)(?:\s+(?:systems?|models?|equations?|attractors?|dynamics))?"
+    r"|duffing(?:\s+(?:oscillators?|equations?|systems?|models?|responses?|dynamics))?"
+    r"|henon(?:\s+maps?)?"
+    r"|logistic\s+maps?"
+    r"|(?:driven|double)\s+pendulums?"
+    r"|(?:nonlinear|dynamical)\s+(?:systems?|models?|equations?|oscillators?)"
+    r")"
+)
+_DYNAMICAL_GENERIC_MODEL_OBJECT = (
+    r"(?:(?!(?:about|of|on|for|while|before|after|with|using|from|in|into|"
+    r"within|between|through)\b)[a-z0-9]+\s+){0,3}"
+    r"(?:nonlinear|dynamical)\s+(?:systems?|models?|equations?|oscillators?)"
+    r"(?:\s+models?)?"
+)
+_DYNAMICAL_EXPLICIT_MODEL_OBJECT = (
+    r"(?:"
+    r"(?:lorenz|rossler)\s+(?:systems?|models?|equations?|attractors?|dynamics)"
+    r"|duffing\s+(?:oscillators?|equations?|systems?|models?|responses?|dynamics)"
+    r"|henon\s+maps?"
+    r"|logistic\s+maps?"
+    r"|(?:driven|double)\s+pendulums?"
+    r"|" + _DYNAMICAL_GENERIC_MODEL_OBJECT + r")"
+)
+_DYNAMICAL_BOUND_MODEL_PREFIX = (
+    r"(?:" + _DYNAMICAL_DIRECT_MODEL_MODIFIER + r"|" + _DYNAMICAL_GENERIC_MODEL_OBJECT + r")"
+)
+_DYNAMICAL_DIRECT_EVIDENCE_OBJECT = (
+    r"(?:lyapunov\s+(?:exponents?|spectrum)|bifurcations?"
+    r"(?:\s+(?:maps?|diagrams?))?|poincare\s+(?:sections?|maps?)|phase\s+portraits?|"
+    r"basins?\s+of\s+attraction|stroboscopic\s+(?:maps?|sections?)|return\s+maps?|"
+    r"regime\s+maps?|stability\s+maps?)"
+)
+_DYNAMICAL_DIRECT_COMPUTE_HEAD = (
+    r"(?:simulations?|integrations?|parameter\s+sweeps?|"
+    r"(?:numerical|computational)\s+(?:bifurcation\s+)?"
+    r"(?:analys(?:is|es)|experiments?|stud(?:y|ies)))"
+)
+_DYNAMICAL_DIRECT_STUDY_HEAD = (
+    r"(?:chaos|regime|bifurcation|stability|dynamical)\s+"
+    r"(?:study|analysis|experiment|mapping)"
+)
+_DYNAMICAL_MODEL_COMPLEMENT = (
+    r"(?:of|on|for|over|across|with|using|from|in|at)\s+"
+    r"(?:(?:a|an|the)\s+)?" + _DYNAMICAL_EXPLICIT_MODEL_OBJECT
+)
+_DYNAMICAL_DIRECT_OBJECT_TAIL = (
+    r"(?=$|[,):]|\s+(?:and|on|of|for|across|over|with|using|from|under|at|by|to|"
+    r"in|into|within|between|through|then|but)\b)"
+)
+_DYNAMICAL_COORDINATED_SEGMENT_END = r"(?=$|\s+(?:and|then|but|yet)\b)"
+_DYNAMICAL_BOUND_COMPUTED_OBJECT = (
+    r"(?:(?:its|their)\s+(?:simulated\s+)?|the\s+simulated\s+)"
+    r"(?:trajector(?:y|ies)|orbits?|time\s+series|state\s+series|solutions?|responses?)"
+)
+_DYNAMICAL_PARAMETER_DOMAIN_OBJECT = (
+    r"(?:(?:a|an|the)\s+)?parameters?\s+(?:values?|ranges?|grids?|spaces?)"
+)
+_DYNAMICAL_NAMED_PARAMETER_ASSIGNMENT = (
+    r"[a-z][a-z0-9_]{0,15}\s*=\s*[+]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?"
+)
+_DYNAMICAL_DIRECT_SEGMENT_OBJECT_TAIL = (
+    r"(?:"
+    + _DYNAMICAL_COORDINATED_SEGMENT_END
+    + r"|\s+(?:of|on|for|over|across|with|using|from|in|at|under|by)\s+"
+    r"(?:"
+    r"(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_EXPLICIT_MODEL_OBJECT
+    + r"|"
+    + _DYNAMICAL_BOUND_COMPUTED_OBJECT
+    + r")"
+    + _DYNAMICAL_COORDINATED_SEGMENT_END
+    + r"|\s+(?:over|across)\s+"
+    + _DYNAMICAL_PARAMETER_DOMAIN_OBJECT
+    + _DYNAMICAL_COORDINATED_SEGMENT_END
+    + r"|\s+at\s+"
+    + _DYNAMICAL_NAMED_PARAMETER_ASSIGNMENT
+    + _DYNAMICAL_COORDINATED_SEGMENT_END
+    + r")"
+)
+_DYNAMICAL_DIRECT_SEGMENT_OBJECT_RE = re.compile(
+    r"^(?:"
+    r"(?:"
+    + _DYNAMICAL_DIRECT_EVIDENCE_OBJECT
+    + r"|"
+    + _DYNAMICAL_EXPLICIT_MODEL_OBJECT
+    + r")|"
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"[a-z]+\b\s+"
+    r"(?:(?:a|an|the|this|that|these|those|my|our|your|its|their)\s+)?"
+    r"(?:" + _DYNAMICAL_DIRECT_EVIDENCE_OBJECT + r"|" + _DYNAMICAL_EXPLICIT_MODEL_OBJECT + r")"
+    r")" + _DYNAMICAL_DIRECT_SEGMENT_OBJECT_TAIL,
+    re.IGNORECASE,
+)
+_DYNAMICAL_STUDY_TASK_TAIL = (
+    r"(?=$|(?:[,):]\s*|\s+)(?:(?:and|then|but|yet)\s+)?(?:classif\w*|"
+    r"distinguish\w*|identif\w*|determin\w*|on|of|for|across|over|with|using|"
+    r"from|under|at|by|to|in|into|within|between|through)\b)"
+)
+_DYNAMICAL_SYSTEM_MODEL_ANCHOR_RE = re.compile(
+    r"\b(?:"
+    r"(?:nonlinear|dynamical)\s+(?:systems?|models?|equations?|oscillators?)"
+    r"|logistic\s+maps?"
+    r"|lorenz\s+(?:systems?|models?|equations?|attractors?|dynamics|bifurcations?|"
+    r"chaos(?:\s+study)?)"
+    r"|duffing\s+(?:oscillators?|equations?|systems?|models?|responses?|dynamics|"
+    r"bifurcations?)"
+    r"|rossler\s+(?:systems?|models?|equations?|attractors?|dynamics|chaos(?:\s+study)?)"
+    r"|henon\s+maps?"
+    r"|(?:driven|double)\s+pendulums?"
+    r")\b",
+    re.IGNORECASE,
+)
+_DYNAMICAL_REGIME_EVIDENCE_RE = re.compile(
+    r"\b(?:"
+    r"lyapunov\s+(?:exponents?|spectrum)|bifurcations?|poincare\s+(?:sections?|maps?)"
+    r"|phase\s+portraits?|basins?\s+of\s+attraction|stroboscopic\s+"
+    r"(?:maps?|sections?|sampling|plots?)|return\s+maps?|chaos|chaotic|regimes?"
+    r"|stability|periodic|quasiperiodic|oscillatory"
+    r")\b",
+    re.IGNORECASE,
+)
+_DYNAMICAL_ACTIVE_COMPUTE_RE = re.compile(
+    _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:comput\w*|calculat\w*|estimat\w*|simulat\w*|integrat\w*|sweep\w*)\b\s+"
+    r"(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_EXPLICIT_MODEL_OBJECT
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:comput\w*|calculat\w*|estimat\w*|simulat\w*|integrat\w*|sweep\w*)\b\s+"
+    r"(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_DIRECT_EVIDENCE_OBJECT
+    + r"\s+"
+    + _DYNAMICAL_MODEL_COMPLEMENT
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:generat\w*|construct\w*|plot\w*|map)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_BOUND_MODEL_PREFIX
+    + r"\s+"
+    + _DYNAMICAL_DIRECT_EVIDENCE_OBJECT
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:generat\w*|construct\w*|plot\w*|map)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_DIRECT_EVIDENCE_OBJECT
+    + r"\s+"
+    + _DYNAMICAL_MODEL_COMPLEMENT
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:run|perform|conduct)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_BOUND_MODEL_PREFIX
+    + r"\s+"
+    + _DYNAMICAL_DIRECT_COMPUTE_HEAD
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:run|perform|conduct)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_DIRECT_COMPUTE_HEAD
+    + r"\s+"
+    + _DYNAMICAL_MODEL_COMPLEMENT
+    + _DYNAMICAL_DIRECT_OBJECT_TAIL,
+    re.IGNORECASE,
+)
+_DYNAMICAL_ACTIVE_REGIME_DECISION_RE = re.compile(
+    r"\b(?:classif\w*|distinguish\w*|identif\w*)\s+"
+    r"(?:only\s+)?(?:(?:the|its|these|those)\s+)?"
+    r"(?:(?:stable|unstable|oscillatory|periodic|quasiperiodic|chaotic|dynamical|"
+    r"parameter)\s+(?:and\s+)?)*(?:regimes?|stability|bifurcations?)\b"
+    r"|\bdetermin\w*\s+(?:whether|if)\s+"
+    r"(?:(?!\b(?:then|while|before|after|whereas)\b)[^,;]){0,96}"
+    r"\b(?:chaotic|periodic|quasiperiodic|stable|unstable|oscillatory)\b"
+    r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"map\b(?:(?!\b(?:then|while|before|after|whereas)\b)[^,;]){0,64}"
+    r"\b(?:regimes?|bifurcations?|poincare|phase\s+portraits?|basins?|stability)\b",
+    re.IGNORECASE,
+)
+_DYNAMICAL_ACTIVE_BOUNDED_STUDY_RE = re.compile(
+    _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:run|perform|conduct)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_BOUND_MODEL_PREFIX
+    + r"\s+"
+    + _DYNAMICAL_DIRECT_STUDY_HEAD
+    + _DYNAMICAL_STUDY_TASK_TAIL
+    + r"|"
+    + _DYNAMICAL_ACTION_BOUNDARY
+    + _DYNAMICAL_REQUEST_WRAPPER
+    + r"(?:run|perform|conduct)\b\s+(?:(?:a|an|the)\s+)?"
+    + _DYNAMICAL_DIRECT_STUDY_HEAD
+    + r"\s+"
+    + _DYNAMICAL_MODEL_COMPLEMENT
+    + _DYNAMICAL_STUDY_TASK_TAIL,
+    re.IGNORECASE,
+)
+_DYNAMICAL_TASK_ASSOCIATION_BARRIER_RE = re.compile(
+    r"\b(?:while|before|after|whereas|cit(?:e|es|ed|ing)|discuss(?:es|ed|ing)?|"
+    r"compar(?:e|es|ed|ing)|reviews?|summar(?:y|ies|ize[ds]?|izing)|reports?|"
+    r"critiques?|literature)\b",
+    re.IGNORECASE,
+)
+_DYNAMICAL_COORDINATED_SEGMENT_RE = re.compile(
+    r"(?:[,:]\s*(?:(?:and|then|but|yet)\s+)?|\b(?:and|then|but|yet)\s+)",
     re.IGNORECASE,
 )
 MEMORY_PATHS = [
@@ -286,10 +531,14 @@ unrelated analysis.
 """
 
 SANDBOX_RUNTIME_GUIDANCE = """
-For sandbox execution, do not wrap sandbox commands with shell timeout, gtimeout, or
-execute timeout arguments. Long-running analysis is allowed. Prefer scientifically
-meaningful convergence checks, smaller smoke-test data, checkpoints, and resumable
-artifacts over arbitrary wall-clock caps.
+For sandbox execution, do not wrap sandbox commands with shell timeout or gtimeout
+wrappers. When a command has a known small budget — a quick check, a verification
+script, a pilot timing pass — pass the execute tool's `timeout` parameter (seconds):
+it bounds that one call, can only shorten the operator's wall-clock cap (never extend
+it), and a timed-out call returns exit code 124 you can react to instead of holding
+the sandbox. Long-running analysis without a timeout remains allowed. Prefer
+scientifically meaningful convergence checks, smaller smoke-test data, checkpoints,
+and resumable artifacts over arbitrary wall-clock caps.
 """
 
 LONG_COMPUTE_RUNTIME_GUIDANCE = """
@@ -504,8 +753,9 @@ established in a previous session.
 """
 
 
-RESULTS_CONTRACT_GUIDANCE = """
-Results contract (Pro intelligence — mandatory for the final chat answer, not only the report):
+DYNAMICAL_SYSTEMS_RESULTS_CONTRACT_GUIDANCE = """
+Dynamical-systems results contract (Pro intelligence — mandatory for the final chat answer,
+not only the report):
 - Report every decision-relevant estimate as mean ± spread from at least 3 seeds or initial
   conditions and at least 2 observation durations, including clearly-resolved cases, and
   carry the spread column into any CSV/table artifact.
@@ -567,9 +817,10 @@ SCOPED_DELEGATION_RESPONSE_FORMAT = {
             "type": "string",
             "enum": SCOPED_DELEGATION_CONFIDENCE_LEVELS,
             "description": (
-                "Earned confidence level. Use high only when the decision rule passes "
-                "(estimate magnitude exceeds 3x its spread, or equivalent); use "
-                "unresolved when the evidence cannot distinguish the hypotheses."
+                "Earned confidence level. Use high only when task-appropriate validation "
+                "supports the key finding and relevant uncertainty and limitations have "
+                "been accounted for; use unresolved when the evidence cannot distinguish "
+                "the hypotheses."
             ),
         },
         "confidence_basis": {
@@ -650,18 +901,18 @@ SCOPED_DELEGATION_SUBAGENTS = [
             "guessing paths. For pure data-inspection subtasks you may stage and summarize "
             "files (schema, shape, metadata, quality concerns) without running heavy code. "
             "Keep intermediate files under /workspace and durable outputs under "
-            "/outputs when available. Preserve the user's requested compute scope: do not add "
-            "longer durations, finer step sizes, more seeds, or broader convergence sweeps unless "
-            "the subtask explicitly asks for them or a short smoke check reveals a material "
-            "uncertainty. " + LONG_COMPUTE_RUNTIME_GUIDANCE.strip() + " Return a concise "
+            "/outputs when available. Preserve the user's requested compute scope: do not expand "
+            "the dataset, sampling, repetitions, validation scope, model size, or compute budget "
+            "unless the subtask explicitly asks for it or a short task-appropriate check reveals "
+            "material uncertainty. " + LONG_COMPUTE_RUNTIME_GUIDANCE.strip() + " Return a concise "
             "final report with commands/scripts run, key numerical results, generated "
             "artifact paths, failures, and confidence. IMPORTANT: return only the distilled "
             "result — do NOT paste raw stdout, full tracebacks, or large tables into your "
             "fields; write large data to /workspace and reference it by path, and keep the "
-            "summary under ~200 words. Set confidence=high only when "
-            "your evidence passes a stated decision rule (for example estimate "
-            "magnitude above 3x its spread); otherwise use medium, low, or unresolved, "
-            "and explain the basis in confidence_basis. Do not perform broad literature "
+            "summary under ~200 words. Set confidence=high only when task-appropriate "
+            "validation supports the key result and relevant uncertainty and limitations "
+            "have been accounted for; otherwise use medium, low, or unresolved, and explain "
+            "the basis in confidence_basis. Do not perform broad literature "
             "review, BisQue account operations, RareSpot inference, or user-facing final "
             "synthesis; the coordinator reconciles your result."
         ),
@@ -690,13 +941,15 @@ QWEN_CODE_RUNNER = {
         "stage selected uploads and prior artifacts before code reads them; avoid "
         "guessing paths. Keep intermediate files under /workspace and durable outputs "
         "under /outputs when available. Preserve the user's requested compute scope: "
-        "do not add longer durations, finer step sizes, more seeds, or broader "
-        "convergence sweeps unless the subtask explicitly asks for them or a short "
-        "smoke check reveals material uncertainty. "
+        "do not expand the dataset, sampling, repetitions, validation scope, model size, "
+        "or compute budget unless the subtask explicitly asks for it or a short "
+        "task-appropriate check reveals material uncertainty. "
         + LONG_COMPUTE_RUNTIME_GUIDANCE.strip()
         + " Return a concise final report with "
         "commands/scripts run, key numerical results, visual/artifact findings, "
-        "generated artifact paths, failures, and confidence. Do not perform broad "
+        "generated artifact paths, failures, and confidence. Use high confidence only "
+        "when task-appropriate validation supports the key result and relevant uncertainty "
+        "and limitations have been accounted for. Do not perform broad "
         "literature review, BisQue account operations, RareSpot inference, or "
         "user-facing final synthesis; the coordinator reconciles your result."
     ),
@@ -1075,53 +1328,101 @@ def looks_scoped_delegation_goal(goal: str) -> bool:
     )
 
 
-def looks_quantitative_rigor_goal(goal: str) -> bool:
-    """True when a goal needs the Pro quantitative/scientific results contract.
-
-    This is intentionally narrower than scoped delegation. Code review, debug,
-    and workflow-analysis prompts can benefit from subagents, but should not be
-    forced into irrelevant ``±`` / 3×-spread language.
-    """
-    goal = str(goal or "")
-    if looks_report_only_rarespot_goal(goal):
-        return False
-    lowered = " ".join(goal.lower().split())
-    if any(
-        token in lowered
-        for token in (
-            "rarespot",
-            "prairie dog",
-            "prairie dogs",
-            "burrow",
-            "burrows",
-        )
-    ):
-        return False
-    request_text = request_classification_text(goal)
-    lowered = " ".join(request_text.lower().split())
-    return any(
-        token in lowered
-        for token in (
-            "benchmark",
-            "bifurcation",
-            "classif",
-            "convergence",
-            "estimate",
-            "experiment",
-            "exponent",
-            "fit",
-            "lyapunov",
-            "metric",
-            "monte carlo",
-            "numerical",
-            "parameter sweep",
-            "quantitative",
-            "regime",
-            "simulation",
-            "statistic",
-            "spectrum",
-        )
+def _dynamical_rigor_clauses(goal: str) -> tuple[str, ...]:
+    """Normalize affirmative task clauses without changing shared request guards."""
+    text = _FENCED_CODE_BLOCK_RE.sub(" ", str(goal or ""))
+    text = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(character)
     )
+    text = re.sub(r"[\u2010-\u2015\u2212-]+", " ", text).lower()
+    clauses: list[str] = []
+    for raw_clause in _DYNAMICAL_RIGOR_CLAUSE_SPLIT_RE.split(text):
+        for task_clause in _DYNAMICAL_RIGOR_TASK_TRANSITION_RE.split(raw_clause):
+            clause = _DYNAMICAL_RIGOR_LEADING_PLOT_CONSTRAINT_RE.sub("", task_clause)
+            clause = _DYNAMICAL_RIGOR_NEGATED_ACTION_RE.sub(" ", clause)
+            clause = " ".join(clause.strip(" ,").split())
+            if clause:
+                clauses.append(clause)
+    return tuple(clauses)
+
+
+def _next_non_dynamical_action_start(clause: str, start: int) -> int | None:
+    """Return the next coordinated segment not bound to the dynamics task."""
+    transitions = list(_DYNAMICAL_COORDINATED_SEGMENT_RE.finditer(clause, start))
+    decisions = list(_DYNAMICAL_ACTIVE_REGIME_DECISION_RE.finditer(clause, start))
+    for index, transition in enumerate(transitions):
+        if any(
+            decision.start() == transition.end()
+            or decision.start() < transition.start() < decision.end()
+            for decision in decisions
+        ):
+            continue
+        segment_end = (
+            transitions[index + 1].start() if index + 1 < len(transitions) else len(clause)
+        )
+        segment = clause[transition.end() : segment_end].strip(" ,:")
+        if not segment:
+            return transition.start()
+        if _DYNAMICAL_ACTIVE_REGIME_DECISION_RE.match(segment):
+            continue
+        if _DYNAMICAL_DIRECT_SEGMENT_OBJECT_RE.match(segment):
+            continue
+        if _DYNAMICAL_ACTIVE_COMPUTE_RE.search(
+            segment
+        ) or _DYNAMICAL_ACTIVE_BOUNDED_STUDY_RE.search(segment):
+            continue
+        return transition.start()
+    return None
+
+
+def _has_bound_dynamical_compute_task(clause: str) -> bool:
+    """Require one active computation to bind its model, evidence, and decision."""
+    for active_match in _DYNAMICAL_ACTIVE_COMPUTE_RE.finditer(clause):
+        barrier = _DYNAMICAL_TASK_ASSOCIATION_BARRIER_RE.search(clause, active_match.end())
+        decision_limit = barrier.start() if barrier is not None else len(clause)
+        task_switch = _next_non_dynamical_action_start(clause, active_match.end())
+        if task_switch is not None:
+            decision_limit = min(decision_limit, task_switch)
+        for decision_match in _DYNAMICAL_ACTIVE_REGIME_DECISION_RE.finditer(
+            clause, active_match.start(), decision_limit
+        ):
+            if decision_match.end() < active_match.end():
+                continue
+            task_span = clause[active_match.start() : decision_match.end()]
+            if _DYNAMICAL_REGIME_EVIDENCE_RE.search(task_span):
+                return True
+    return False
+
+
+def looks_dynamical_system_rigor_goal(goal: str) -> bool:
+    """True only for affirmative computational dynamical-regime studies.
+
+    Each qualifying clause must identify a genuine system/model, name
+    dynamics-specific evidence, and actively request either a regime study or
+    both evidence generation and a regime decision. Generic verbs, reviews,
+    plots, measurements, and overloaded scientific terms fail closed.
+    """
+    for clause in _dynamical_rigor_clauses(goal):
+        if not _DYNAMICAL_SYSTEM_MODEL_ANCHOR_RE.search(clause):
+            continue
+        if not _DYNAMICAL_REGIME_EVIDENCE_RE.search(clause):
+            continue
+        if _DYNAMICAL_ACTIVE_BOUNDED_STUDY_RE.search(clause):
+            return True
+        if _has_bound_dynamical_compute_task(clause):
+            return True
+    return False
+
+
+def looks_quantitative_rigor_goal(goal: str) -> bool:
+    """Compatibility wrapper for the legacy runner import.
+
+    Despite the historical name, this now gates only the dynamical-systems
+    Pro contract. New callers should use ``looks_dynamical_system_rigor_goal``.
+    """
+    return looks_dynamical_system_rigor_goal(goal)
 
 
 def request_classification_text(text: str) -> str:
@@ -1406,8 +1707,8 @@ def build_runtime_prompt_suffix(
             "When reporting runtimes, report this wall-clock time and any inner "
             "compute time as separate labeled numbers."
         )
-    if is_rigor_intelligence(context) and looks_quantitative_rigor_goal(context.goal):
-        sections.append(RESULTS_CONTRACT_GUIDANCE.strip())
+    if is_rigor_intelligence(context) and looks_dynamical_system_rigor_goal(context.goal):
+        sections.append(DYNAMICAL_SYSTEMS_RESULTS_CONTRACT_GUIDANCE.strip())
     return "\n\n".join(sections)
 
 

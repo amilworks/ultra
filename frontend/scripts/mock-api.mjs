@@ -464,6 +464,11 @@ const hdf5LensDatasetSummary = (datasetPath) => {
   const elementCount = shape.reduce((total, size) => total * Math.max(1, size), shape.length ? 1 : 0);
   const isVolume = shape.length >= 3 && shape[0] >= 64;
   const vectorComponents = shape.length === 4 ? shape[3] : 1;
+  /* rgb/vector/label volumes take the atlas render path (bounded PNG grid),
+     which the mock can serve without a binary scalar-volume endpoint; the
+     plain scalar volume stays slice-only to exercise the slice-only caption. */
+  const atlasEligible =
+    isVolume && ["rgb_volume", "vector_volume", "label_volume"].includes(node.preview_kind ?? "");
   const base = {
     file_id: hdf5LensFileId,
     dataset_path: datasetPath,
@@ -479,21 +484,40 @@ const hdf5LensDatasetSummary = (datasetPath) => {
     element_count: elementCount,
     estimated_bytes: elementCount * 4,
     dimension_summary: isVolume ? { z: shape[0], y: shape[1], x: shape[2] } : null,
-    render_policy: node.preview_kind === "label_volume" ? "categorical" : "scalar",
-    delivery_mode: "direct",
+    render_policy:
+      node.preview_kind === "label_volume"
+        ? "categorical"
+        : atlasEligible
+          ? "display"
+          : "scalar",
+    delivery_mode: atlasEligible ? "atlas" : "direct",
     diagnostic_surface: isVolume ? "mpr" : "none",
     first_paint_mode: "image",
     measurement_policy: "spacing-aware",
     texture_policy: node.preview_kind === "label_volume" ? "nearest" : "linear",
     display_capabilities: isVolume ? ["slice_navigation"] : [],
     viewer_capabilities: [],
-    volume_eligible: false,
-    volume_reason: isVolume
-      ? "Preview is bounded to orthogonal slices for this mock fixture."
-      : null,
+    volume_eligible: atlasEligible,
+    volume_reason: atlasEligible
+      ? null
+      : isVolume
+        ? "Preview is bounded to orthogonal slices for this mock fixture."
+        : null,
     axis_sizes: isVolume ? { T: 1, C: vectorComponents, Z: shape[0], Y: shape[1], X: shape[2] } : null,
     physical_spacing: isVolume ? { x: 1, y: 1, z: 1 } : null,
-    atlas_scheme: null,
+    atlas_scheme: atlasEligible
+      ? {
+          slice_count: 64,
+          columns: 8,
+          rows: 8,
+          slice_width: 64,
+          slice_height: 64,
+          atlas_width: 512,
+          atlas_height: 512,
+          downsample: 8,
+          format: "png",
+        }
+      : null,
     attributes: { ObjectType: "DataArray<T>", TupleDimensions: shape.join(" x ") },
     geometry: isVolume
       ? {
@@ -528,7 +552,30 @@ const hdf5LensDatasetSummary = (datasetPath) => {
   if (node.preview_kind === "table") {
     return { ...base, capabilities: ["table"], delivery_mode: "direct", diagnostic_surface: "none" };
   }
-  return { ...base, capabilities: isVolume ? ["slice", "histogram"] : ["table"] };
+  const featureFilter =
+    node.preview_kind === "label_volume"
+      ? {
+          supported: true,
+          source_dataset_path: datasetPath,
+          max_ids: 64,
+          background_id: 0,
+          provenance: "co_registered_raw_integer_feature_ids",
+          registration_key: `${datasetPath}|${shape.join("x")}|1x1x1`,
+          target_role: "feature_ids",
+          native_shape: [shape[0], shape[1], shape[2]],
+          preview_shape: [64, 64, 64],
+          preview_stride: { z: 8, y: 8, x: 8 },
+        }
+      : null;
+  return {
+    ...base,
+    feature_filter: featureFilter,
+    capabilities: isVolume
+      ? atlasEligible
+        ? ["slice", "volume", "histogram"]
+        : ["slice", "histogram"]
+      : ["table"],
+  };
 };
 const mockHdf5ViewerInfo = (resource) => ({
   ...mockUploadViewerInfo(resource),

@@ -1,18 +1,9 @@
-import { type ReactNode, useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiClient } from "@/lib/api";
-import { writeClipboardText } from "@/lib/clipboard";
 import type { Hdf5DatasetSummary, UploadViewerInfo } from "@/types";
 
 import {
@@ -62,45 +53,11 @@ export function Hdf5Inspector({
   loading,
   error,
 }: Hdf5InspectorProps) {
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    if (!copied) {
-      return;
-    }
-    const timeout = window.setTimeout(() => setCopied(false), 1600);
-    return () => window.clearTimeout(timeout);
-  }, [copied]);
-
   return (
     <Card
       className="viewer-hdf-dashboard-card viewer-hdf-inspector-card gap-0 py-0 shadow-none"
       data-hdf5-inspector="true"
     >
-      <CardHeader className="viewer-hdf-dashboard-header viewer-hdf-dashboard-header-split">
-        <div>
-          <CardTitle>Dataset details</CardTitle>
-          <CardDescription>
-            {summary
-              ? "Keep the selected dataset context, sampling limits, and metadata readable while you explore."
-              : "Choose a dataset to inspect structure, geometry, and sampling context."}
-          </CardDescription>
-        </div>
-        {activeDatasetPath ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void writeClipboardText(activeDatasetPath).then(() => setCopied(true));
-            }}
-          >
-            {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
-            {copied ? "Copied" : "Copy path"}
-          </Button>
-        ) : null}
-      </CardHeader>
-
       <CardContent className="viewer-hdf-dashboard-content viewer-hdf-inspector-content">
         {!activeDatasetPath ? (
           <div className="viewer-empty viewer-hdf-empty-state">
@@ -115,13 +72,6 @@ export function Hdf5Inspector({
           </div>
         ) : summary ? (
           <>
-            {summary.volume_reason ? (
-              <div className="viewer-hdf-provenance-note">
-                <strong>{summary.volume_eligible ? "Native 3D policy" : "Slice-only reason"}</strong>
-                <span>{summary.volume_reason}</span>
-              </div>
-            ) : null}
-
             <Tabs key={summary.dataset_path} defaultValue="preview" className="viewer-hdf-detail-tabs">
               <TabsList className="viewer-hdf-detail-tabs-list">
                 <TabsTrigger value="preview">Preview</TabsTrigger>
@@ -202,14 +152,10 @@ export function Hdf5Inspector({
               <TabsContent value="sampling" className="viewer-hdf-detail-tab">
                 <ScrollArea className="viewer-hdf-scroll-area viewer-hdf-detail-scroll">
                   <div className="viewer-hdf-detail-stack">
-                    <div className="viewer-hdf-provenance-note" data-hdf5-sample-provenance="true">
-                      <strong>Bounded preview sample</strong>
-                      <span>
-                        These values and statistics are preview-sized so scientists can browse quickly before running a full analysis.
-                      </span>
-                    </div>
-
                     <DetailSection title="Sampling summary" dataId="sampling">
+                      <p className="viewer-hdf-detail-caption" data-hdf5-sample-provenance="true">
+                        Preview-sized sample — browse quickly here, run a full analysis for exact numbers.
+                      </p>
                       {summary.sample_statistics ? (
                         <dl className="viewer-metadata-list">
                           <div className="viewer-metadata-row">

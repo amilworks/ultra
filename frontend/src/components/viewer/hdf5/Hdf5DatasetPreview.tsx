@@ -113,19 +113,6 @@ const axisSize = (summary: Hdf5DatasetSummary, axis: "z" | "y" | "x"): number =>
   return Math.max(1, Number.isFinite(size) ? size : 1);
 };
 
-const buildPreviewNotice = (summary: Hdf5DatasetSummary, componentLabel: string | null): string | null => {
-  if (summary.preview_kind === "vector_volume") {
-    return `Component-aware scientific slice for ${componentLabel ?? "the selected component"}. This is not an RGB rendering.`;
-  }
-  if (summary.preview_kind === "rgb_volume") {
-    return "Display-oriented RGB slice preview. The viewer keeps color interpretation explicit for this dataset.";
-  }
-  if (summary.preview_kind === "label_volume") {
-    return "Categorical slice preview with a deterministic label palette. Colors identify regions, not intensity magnitude.";
-  }
-  return null;
-};
-
 const canRenderNativeVolume = (summary: Hdf5DatasetSummary): boolean =>
   Boolean(
     summary.volume_eligible &&
@@ -516,17 +503,19 @@ function Hdf5VolumePreview({
 
   const renderPreviewToolbarActions = () => (
     <div className="viewer-hdf-preview-toolbar-actions">
-      {renderPreviewTabsList()}
+      {renderComponentField()}
       {renderFeatureFilter()}
     </div>
   );
 
+  const hasToolbarContent =
+    previewTabCount > 1 || summary.preview_kind === "vector_volume" || Boolean(summary.feature_filter);
+
   const renderCompactToolbar = () =>
-    compactLayout &&
-    (previewTabCount > 1 || summary.preview_kind === "vector_volume" || summary.feature_filter) ? (
+    compactLayout && hasToolbarContent ? (
       <div className="viewer-hdf-preview-compact-toolbar">
+        {renderPreviewTabsList()}
         {renderPreviewToolbarActions()}
-        {renderComponentField()}
       </div>
     ) : null;
 
@@ -537,32 +526,17 @@ function Hdf5VolumePreview({
         onValueChange={(value) => setSelectedTab(value as "volume" | "visual" | "distribution")}
         className={`viewer-hdf-preview-tabs${compactLayout ? " viewer-hdf-preview-tabs-compact" : ""}`}
       >
-        {compactLayout ? renderCompactToolbar() : (
-          <div className="viewer-hdf-preview-toolbar">
-            <div className="viewer-hdf-preview-toolbar-copy">
-              <span>
-                {canRenderVolume
-                  ? "Use Volume for 3D preview inspection, Slice for orthogonal spot checks, and Distribution when you want bounded numeric context."
-                  : "Use Slice to inspect the selected dataset, then switch to Distribution when you want bounded numeric context."}
-              </span>
-            </div>
-            {renderComponentField()}
-            {renderPreviewToolbarActions()}
-          </div>
-        )}
+        {compactLayout
+          ? renderCompactToolbar()
+          : hasToolbarContent ? (
+              <div className="viewer-hdf-preview-toolbar">
+                {renderPreviewTabsList()}
+                {renderPreviewToolbarActions()}
+              </div>
+            ) : null}
 
         {canRenderVolume && hdf5VolumeSource ? (
           <TabsContent value="volume" className="viewer-hdf-preview-tab">
-            <div className="viewer-hdf-preview-note">
-              <strong>
-                {summary.preview_kind === "label_volume" ? "Categorical volume" : "Scalar volume"}
-              </strong>
-              <span>
-                {summary.render_policy === "scalar"
-                  ? "The 3D scalar preview preserves intensity ordering from the HDF5 dataset and scales the volume from stored geometry metadata."
-                  : "The 3D categorical/display preview uses bounded atlas data and scales the preview volume from stored geometry metadata."}
-              </span>
-            </div>
             {isCategoricalVolume ? (
               <div
                 className="viewer-hdf-categorical-controls"
@@ -662,23 +636,9 @@ function Hdf5VolumePreview({
               </div>
 
               {!canRenderVolume && summary.volume_reason ? (
-                <div className="viewer-hdf-preview-note">
-                  <strong>Slice-only</strong>
-                  <span>{summary.volume_reason}</span>
-                </div>
-              ) : null}
-
-              {buildPreviewNotice(summary, componentLabels[activeComponent] ?? null) ? (
-                <div className="viewer-hdf-preview-note">
-                  <strong>
-                    {summary.preview_kind === "vector_volume"
-                      ? "Component-aware"
-                      : summary.preview_kind === "rgb_volume"
-                        ? "RGB"
-                        : "Slice"}
-                  </strong>
-                  <span>{buildPreviewNotice(summary, componentLabels[activeComponent] ?? null)}</span>
-                </div>
+                <p className="viewer-hdf-detail-caption" data-hdf5-slice-only="true">
+                  {summary.volume_reason}
+                </p>
               ) : null}
 
               <Card className="viewer-hdf-slider-panel">

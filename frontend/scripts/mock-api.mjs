@@ -290,6 +290,279 @@ const mockViewerRasterPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAFnklEQVR42u3VoQ0AAAgEsd9/WCQWdsDSpBOcuVQPAA9FAgADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAADUAHAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADADAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADADAAFQAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAAA5AAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAwABUADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADADAAFQAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAMAAADAAAAwAAAMAwAAAMAAADAAAAwDAAAAwAAAMAAADAMAAADAAAAwAAAMAwAAAMAAAbhYktq01xYecMAAAAABJRU5ErkJggg==",
   "base64"
 );
+// ---------------------------------------------------------------------------
+// HDF5 Lens seed: one DREAM3D-shaped .h5 resource with a 45-dataset tree and
+// per-dataset summaries — enough for the real app to open Lens end to end
+// (hero, workspace tabs, dataset browser, inspector tabs, slice preview).
+// Built for layout work: the dataset density and long names mirror the real
+// synthetic-microstructure file that exposed the mobile regressions.
+// OFF by default (mobile-smoke needs the stock resource list); opt in with
+// MOCK_SEED_HDF5=1 (the `mock-api-hdf5` launch entry does).
+// ---------------------------------------------------------------------------
+const seedHdf5Lens = process.env.MOCK_SEED_HDF5 === "1";
+const hdf5LensFileId = "file_hdf5_dream3d";
+const hdf5LensDefaultDataset = "/DataContainers/SyntheticVolumeDataContainer/CellData/IPFColor";
+if (seedHdf5Lens) {
+  resourceFixtures.push({
+    file_id: hdf5LensFileId,
+    original_name: "neal-NOPARAM_20220623T081303_123054.h5",
+    content_type: "application/x-hdf5",
+    size_bytes: 6_900_000_000,
+    sha256: "sha-hdf5-dream3d",
+    source_type: "upload",
+    resource_kind: "file",
+    project_id: "project_nph",
+    created_at: nowIso,
+    has_thumbnail: false,
+    tags: ["DREAM3D"],
+    metadata: {},
+    share_summary: { share_status: "private", active_grant_count: 0, shared_by_me: false, shared_with_me: false },
+  });
+}
+const hdf5LensDs = (parentPath, name, shape, dtype, previewKind) => ({
+  path: `${parentPath}/${name}`,
+  name,
+  node_type: "dataset",
+  child_count: 0,
+  attributes_count: 2,
+  shape,
+  dtype,
+  preview_kind: previewKind,
+  children: [],
+});
+const hdf5LensGrp = (parentPath, name, children) => ({
+  path: `${parentPath}/${name}`,
+  name,
+  node_type: "group",
+  child_count: children.length,
+  attributes_count: 1,
+  shape: null,
+  dtype: null,
+  preview_kind: null,
+  children,
+});
+const hdf5LensFeatureColumns = [
+  ["Active", [2387, 1], "bool"],
+  ["AspectRatios", [2387, 2], "float32"],
+  ["AvgQuats", [2387, 4], "float32"],
+  ["AxisEulerAngles", [2387, 3], "float32"],
+  ["AxisLengths", [2387, 3], "float32"],
+  ["Centroids", [2387, 3], "float32"],
+  ["EquivalentDiameters", [2387, 1], "float32"],
+  ["FeaturePhases", [2387, 1], "int32"],
+  ["MisorientationList", [2387, 1], "float32"],
+  ["Neighborhoods", [2387, 1], "int32"],
+  ["NumElements", [2387, 1], "int32"],
+  ["NumNeighbors", [2387, 1], "int32"],
+  ["Omega3s", [2387, 1], "float32"],
+  ["Shapes", [2387, 1], "float32"],
+  ["Sphericity", [2387, 1], "float32"],
+  ["SurfaceAreaVolumeRatio", [2387, 1], "float32"],
+  ["SurfaceFeatures", [2387, 1], "bool"],
+  ["Volumes", [2387, 1], "float32"],
+  ["Size Distribution", [2387, 1], "float32"],
+];
+const hdf5LensStatsPhase = (parentPath, name) =>
+  hdf5LensGrp(parentPath, name, [
+    hdf5LensDs(`${parentPath}/${name}`, "AxisODF-Weights", [1, 5], "float32", "table"),
+    hdf5LensDs(`${parentPath}/${name}`, "FeatureSize Distribution", [2, 1], "float32", "table"),
+    hdf5LensDs(`${parentPath}/${name}`, "FeatureSize Vs B Over A Distributions", [4, 2], "float32", "table"),
+    hdf5LensDs(`${parentPath}/${name}`, "MDF-Weights", [1, 4], "float32", "table"),
+    hdf5LensDs(`${parentPath}/${name}`, "ODF-Weights", [1, 5], "float32", "table"),
+  ]);
+const hdf5LensCellDataPath = "/DataContainers/SyntheticVolumeDataContainer/CellData";
+const hdf5LensTree = [
+  hdf5LensGrp("", "DataContainers", [
+    hdf5LensGrp("/DataContainers", "SyntheticVolumeDataContainer", [
+      hdf5LensGrp("/DataContainers/SyntheticVolumeDataContainer", "CellData", [
+        hdf5LensDs(hdf5LensCellDataPath, "BoundaryCells", [512, 512, 512], "int8", "scalar_volume"),
+        hdf5LensDs(hdf5LensCellDataPath, "EulerAngles", [512, 512, 512, 3], "float32", "vector_volume"),
+        hdf5LensDs(hdf5LensCellDataPath, "FeatureIds", [512, 512, 512], "uint32", "label_volume"),
+        hdf5LensDs(hdf5LensCellDataPath, "GoodVoxels", [512, 512, 512], "bool", "label_volume"),
+        hdf5LensDs(hdf5LensCellDataPath, "IPFColor", [512, 512, 512, 3], "uint8", "rgb_volume"),
+        hdf5LensDs(hdf5LensCellDataPath, "Phases", [512, 512, 512], "int32", "label_volume"),
+      ]),
+      hdf5LensGrp(
+        "/DataContainers/SyntheticVolumeDataContainer",
+        "CellFeatureData",
+        hdf5LensFeatureColumns.map(([name, shape, dtype]) =>
+          hdf5LensDs(
+            "/DataContainers/SyntheticVolumeDataContainer/CellFeatureData",
+            name,
+            shape,
+            dtype,
+            "table"
+          )
+        )
+      ),
+      hdf5LensGrp("/DataContainers/SyntheticVolumeDataContainer", "CellEnsembleData", [
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/CellEnsembleData", "CrystalStructures", [2, 1], "uint32", "scalar_volume"),
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/CellEnsembleData", "PhaseName", [2], "string", "table"),
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/CellEnsembleData", "PhaseTypes", [2, 1], "uint32", "scalar_volume"),
+      ]),
+      hdf5LensGrp("/DataContainers/SyntheticVolumeDataContainer", "_SIMPL_GEOMETRY", [
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/_SIMPL_GEOMETRY", "DIMENSIONS", [3], "int64", "table"),
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/_SIMPL_GEOMETRY", "ORIGIN", [3], "float32", "table"),
+        hdf5LensDs("/DataContainers/SyntheticVolumeDataContainer/_SIMPL_GEOMETRY", "SPACING", [3], "float32", "table"),
+      ]),
+    ]),
+    hdf5LensGrp("/DataContainers", "StatsGeneratorDataContainer", [
+      hdf5LensGrp("/DataContainers/StatsGeneratorDataContainer", "CellEnsembleData", [
+        hdf5LensDs("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData", "CrystalStructures", [2, 1], "uint32", "scalar_volume"),
+        hdf5LensDs("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData", "PhaseName", [2], "string", "table"),
+        hdf5LensDs("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData", "PhaseTypes", [2, 1], "uint32", "scalar_volume"),
+        hdf5LensGrp("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData", "Statistics", [
+          hdf5LensStatsPhase("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics", "Phase_1"),
+          hdf5LensStatsPhase("/DataContainers/StatsGeneratorDataContainer/CellEnsembleData/Statistics", "Phase_2"),
+        ]),
+      ]),
+    ]),
+  ]),
+  hdf5LensGrp("", "Pipeline", [
+    hdf5LensDs("/Pipeline", "Pipeline", [1], "string", "table"),
+  ]),
+];
+const hdf5LensCountDatasets = (nodes) =>
+  nodes.reduce(
+    (total, node) =>
+      node.node_type === "dataset" ? total + 1 : total + hdf5LensCountDatasets(node.children ?? []),
+    0
+  );
+const hdf5LensCountGroups = (nodes) =>
+  nodes.reduce(
+    (total, node) =>
+      node.node_type === "group" ? total + 1 + hdf5LensCountGroups(node.children ?? []) : total,
+    0
+  );
+const hdf5LensFindNode = (nodes, path) => {
+  for (const node of nodes) {
+    if (node.path === path) {
+      return node;
+    }
+    const found = hdf5LensFindNode(node.children ?? [], path);
+    if (found) {
+      return found;
+    }
+  }
+  return null;
+};
+const hdf5LensPlane = (axis, width, height) => ({
+  axis,
+  label: axis === "z" ? "XY plane" : axis === "y" ? "XZ plane" : "YZ plane",
+  axes: axis === "z" ? ["Y", "X"] : axis === "y" ? ["Z", "X"] : ["Z", "Y"],
+  pixel_size: { width, height },
+  spacing: { row: 1, col: 1 },
+  world_size: { width, height },
+  aspect_ratio: width / height,
+});
+const hdf5LensDatasetSummary = (datasetPath) => {
+  const node = hdf5LensFindNode(hdf5LensTree, datasetPath);
+  if (!node || node.node_type !== "dataset") {
+    return null;
+  }
+  const shape = node.shape ?? [];
+  const elementCount = shape.reduce((total, size) => total * Math.max(1, size), shape.length ? 1 : 0);
+  const isVolume = shape.length >= 3 && shape[0] >= 64;
+  const vectorComponents = shape.length === 4 ? shape[3] : 1;
+  const base = {
+    file_id: hdf5LensFileId,
+    dataset_path: datasetPath,
+    dataset_name: node.name,
+    materials_domain_tags: ["microstructure"],
+    preview_kind: node.preview_kind,
+    semantic_role: node.name === "FeatureIds" ? "feature_ids" : null,
+    feature_filter: null,
+    units_hint: null,
+    dtype: node.dtype ?? "float32",
+    shape,
+    rank: shape.length,
+    element_count: elementCount,
+    estimated_bytes: elementCount * 4,
+    dimension_summary: isVolume ? { z: shape[0], y: shape[1], x: shape[2] } : null,
+    render_policy: node.preview_kind === "label_volume" ? "categorical" : "scalar",
+    delivery_mode: "direct",
+    diagnostic_surface: isVolume ? "mpr" : "none",
+    first_paint_mode: "image",
+    measurement_policy: "spacing-aware",
+    texture_policy: node.preview_kind === "label_volume" ? "nearest" : "linear",
+    display_capabilities: isVolume ? ["slice_navigation"] : [],
+    viewer_capabilities: [],
+    volume_eligible: false,
+    volume_reason: isVolume
+      ? "Preview is bounded to orthogonal slices for this mock fixture."
+      : null,
+    axis_sizes: isVolume ? { T: 1, C: vectorComponents, Z: shape[0], Y: shape[1], X: shape[2] } : null,
+    physical_spacing: isVolume ? { x: 1, y: 1, z: 1 } : null,
+    atlas_scheme: null,
+    attributes: { ObjectType: "DataArray<T>", TupleDimensions: shape.join(" x ") },
+    geometry: isVolume
+      ? {
+          path: "/DataContainers/SyntheticVolumeDataContainer/_SIMPL_GEOMETRY",
+          dimensions: [shape[2], shape[1], shape[0]],
+          spacing: [1, 1, 1],
+          origin: [0, 0, 0],
+          complete: true,
+        }
+      : null,
+    structured_fields: [],
+    component_count: vectorComponents,
+    component_labels: vectorComponents === 3 ? ["R", "G", "B"] : [],
+    slice_axes: isVolume ? ["z", "y", "x"] : [],
+    preview_planes: isVolume
+      ? {
+          z: hdf5LensPlane("z", shape[2], shape[1]),
+          y: hdf5LensPlane("y", shape[2], shape[0]),
+          x: hdf5LensPlane("x", shape[1], shape[0]),
+        }
+      : {},
+    sample_shape: isVolume ? [4, 4, 4] : shape,
+    sample_values: isVolume ? [0, 12, 64, 255] : [1, 1],
+    sample_statistics: {
+      sample_count: Math.min(elementCount, 4096),
+      min: 0,
+      max: node.dtype === "uint8" ? 255 : 12,
+      mean: node.dtype === "uint8" ? 127.5 : 4.5,
+      unique_values: node.preview_kind === "label_volume" ? 2387 : null,
+    },
+  };
+  if (node.preview_kind === "table") {
+    return { ...base, capabilities: ["table"], delivery_mode: "direct", diagnostic_surface: "none" };
+  }
+  return { ...base, capabilities: isVolume ? ["slice", "histogram"] : ["table"] };
+};
+const mockHdf5ViewerInfo = (resource) => ({
+  ...mockUploadViewerInfo(resource),
+  kind: "hdf5",
+  modality: "hdf5",
+  dims_order: "ZYX",
+  axis_sizes: { T: 1, C: 1, Z: 512, Y: 512, X: 512 },
+  hdf5: {
+    enabled: true,
+    supported: true,
+    status: "ready",
+    error: null,
+    root_keys: ["DataContainers", "Pipeline"],
+    root_attributes: { "DREAM3D Version": "6.5.171", FileVersion: "7.0" },
+    summary: {
+      group_count: hdf5LensCountGroups(hdf5LensTree),
+      dataset_count: hdf5LensCountDatasets(hdf5LensTree),
+      dataset_kinds: { display: 2, label_volume: 3, scalar_volume: 5, table: 35 },
+      truncated: false,
+      geometry: {
+        path: "/DataContainers/SyntheticVolumeDataContainer/_SIMPL_GEOMETRY",
+        dimensions: [512, 512, 512],
+        spacing: [1, 1, 1],
+        origin: [0, 0, 0],
+        complete: true,
+      },
+    },
+    tree: hdf5LensTree,
+    limitations: [],
+    selected_dataset_path: hdf5LensDefaultDataset,
+    default_dataset_path: hdf5LensDefaultDataset,
+    materials: null,
+  },
+});
 const createdResourceCollections = [];
 const resourceCollectionStatusOverrides = new Map();
 const resourceCollectionNameOverrides = new Map();
@@ -1875,7 +2148,77 @@ const server = http.createServer(async (request, response) => {
       sendJson(response, 200, mockCiftiViewerInfo(resource, ciftiKind));
       return;
     }
+    if (resource.file_id === hdf5LensFileId) {
+      sendJson(response, 200, mockHdf5ViewerInfo(resource));
+      return;
+    }
     sendJson(response, 200, mockUploadViewerInfo(resource));
+    return;
+  }
+
+  const hdf5DatasetMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/hdf5\/dataset$/);
+  if (request.method === "GET" && hdf5DatasetMatch) {
+    const datasetPath = String(url.searchParams.get("dataset_path") || "");
+    const summary =
+      decodeURIComponent(hdf5DatasetMatch[1] || "") === hdf5LensFileId
+        ? hdf5LensDatasetSummary(datasetPath)
+        : null;
+    if (!summary) {
+      sendJson(response, 404, { error: "dataset not found" });
+      return;
+    }
+    sendJson(response, 200, summary);
+    return;
+  }
+
+  const hdf5SliceMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/hdf5\/preview\/(slice|atlas)$/);
+  if (request.method === "GET" && hdf5SliceMatch) {
+    response.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "no-store" });
+    response.end(mockViewerRasterPng);
+    return;
+  }
+
+  const hdf5HistogramMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/hdf5\/preview\/histogram$/);
+  if (request.method === "GET" && hdf5HistogramMatch) {
+    const datasetPath = String(url.searchParams.get("dataset_path") || "");
+    sendJson(response, 200, {
+      file_id: hdf5LensFileId,
+      dataset_path: datasetPath,
+      preview_kind: "display",
+      component_index: null,
+      component_label: null,
+      sample_count: 4096,
+      discrete: false,
+      min: 0,
+      max: 255,
+      bins: [0, 32, 64, 96, 128, 160, 192, 224].map((start, index) => ({
+        label: `${start}–${start + 31}`,
+        start,
+        end: start + 31,
+        count: [3, 8, 18, 42, 64, 42, 18, 8][index],
+      })),
+    });
+    return;
+  }
+
+  const hdf5TableMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/hdf5\/preview\/table$/);
+  if (request.method === "GET" && hdf5TableMatch) {
+    const datasetPath = String(url.searchParams.get("dataset_path") || "");
+    sendJson(response, 200, {
+      file_id: hdf5LensFileId,
+      dataset_path: datasetPath,
+      preview_kind: "table",
+      offset: 0,
+      limit: 8,
+      total_rows: 8,
+      total_columns: 2,
+      columns: [
+        { key: "row", label: "Row", dtype: "int64", numeric: true },
+        { key: "value", label: "Value", dtype: "float32", numeric: true },
+      ],
+      rows: Array.from({ length: 8 }, (_, index) => ({ row: index, value: index * 0.5 })),
+      charts: [],
+    });
     return;
   }
 

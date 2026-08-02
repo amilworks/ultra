@@ -1439,6 +1439,13 @@
     grid-template-areas:
       "inspector"
       "navigator";
+    /* max-content, not auto: the shell keeps this grid at height:100% as the
+       scrollport, and AUTO rows stop growing once a definite container is
+       full — the stacked cards get fit-distributed to the viewport (the
+       inspector was handed 248px for ~500px of content and overflow:hidden
+       ate the tabs). max-content rows take their natural height and the
+       surplus scrolls, which is the whole point of the scrollport. */
+    grid-auto-rows: max-content;
     height: auto;
     overflow: visible;
   }
@@ -1541,6 +1548,45 @@
     grid-template-columns: 1fr;
     gap: 8px;
   }
+
+  /* Stacked regime: the inspector flows with the page, so the desktop
+     fill-the-column plumbing must not force heights here. */
+  .viewer-hdf-detail-tabs {
+    height: auto;
+  }
+
+  /* These lists wrap at stacked widths, and the primitive's box is a fixed
+     h-10 — wrapped rows paint straight over whatever renders below unless
+     the box grows with them. Desktop (>1120px) keeps the stock box. */
+  .viewer-hdf-workspace-tabs-list,
+  .viewer-hdf-detail-tabs-list,
+  .viewer-hdf-preview-tabs-list {
+    height: auto;
+    min-height: 2.5rem;
+  }
+
+  /* The navigator card is capped at min(420px, 46dvh) in this regime. Its
+     content grid declares two rows but holds ONE child (the command box),
+     which therefore lands in the unbounded auto row — the bounded 1fr track
+     sits empty below it. Collapse to a single bounded track so the cap can
+     actually reach the dataset list. */
+  .viewer-hdf-navigator-content {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  /* Desktop floors these scrollports at 260px so short columns stay usable,
+     and the primitive caps the list at 320px. Inside the capped card the
+     floor + toolbar + header exceed the cap on phones — the overflow clipped
+     the search input in half. The bounded track governs instead. */
+  .viewer-hdf-tree-scroll,
+  .viewer-hdf-detail-scroll,
+  .viewer-hdf-search-results {
+    min-height: 120px;
+  }
+
+  .viewer-hdf-search-results {
+    max-height: none;
+  }
 }
 
 @media (min-width: 1121px) {
@@ -1575,6 +1621,17 @@
   .viewer-hdf-current-inline {
     display: grid;
     gap: 2px;
+  }
+
+  /* At phone width the split header's action button crowds the wrapped
+     description; stack them instead. */
+  .viewer-hdf-dashboard-header-split {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .viewer-hdf-dashboard-header-split > button {
+    align-self: flex-start;
   }
 
   .viewer-hdf-current-inline strong,
@@ -1658,6 +1715,16 @@
   .viewer-hdf-shell [data-slot="select-trigger"],
   .viewer-hdf-slider {
     min-height: 44px;
+  }
+
+  /* Raising triggers to 44px overflows the primitive's fixed h-10 list box
+     at ANY width on touch devices — the same rule that grows the triggers
+     must let their box grow too. */
+  .viewer-hdf-workspace-tabs-list,
+  .viewer-hdf-detail-tabs-list,
+  .viewer-hdf-preview-tabs-list {
+    height: auto;
+    min-height: 2.5rem;
   }
 }
 

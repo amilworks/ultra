@@ -17,6 +17,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import type { Hdf5ViewerTreeNode } from "@/types";
 
@@ -151,6 +152,15 @@ const flattenDatasets = (
 export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5NavigatorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activePath, setActivePath] = useState<string | null>(null);
+  /* Mirrors the CSS stacked regime (max-width: 1120px). There the whole
+     dashboard is one scrollport, and cmdk's own selection engine calls
+     scrollIntoView on the selected row (on mount and on every filter
+     keystroke) — which walks ancestor scrollports and yanks the page down
+     to the dataset list. Holding cmdk's value empty in this regime starves
+     that scroller (it targets [aria-selected="true"], which never exists);
+     keyboard flow is unaffected because this component handles the arrow
+     and enter keys itself. Desktop keeps stock cmdk selection and hover. */
+  const stackedLayout = useBreakpoint(1121);
   const itemRefs = useRef(new Map<string, HTMLDivElement | null>());
   const datasetEntries = useMemo(() => flattenDatasets(tree), [tree]);
   const datasetCount = useMemo(() => countDatasets(tree), [tree]);
@@ -188,7 +198,24 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
       return;
     }
     const activeElement = itemRefs.current.get(resolvedActivePath);
-    activeElement?.scrollIntoView({ block: "nearest" });
+    if (!activeElement) {
+      return;
+    }
+    /* Scroll the dataset list only — scrollIntoView walks EVERY scrollable
+       ancestor, and in the stacked (mobile) layout that includes the whole
+       dashboard scrollport, so opening the viewer yanked the page down past
+       the inspector to wherever the active dataset row happened to sit. */
+    const listElement = activeElement.closest('[data-hdf5-dataset-list="true"]');
+    if (!(listElement instanceof HTMLElement)) {
+      return;
+    }
+    const itemRect = activeElement.getBoundingClientRect();
+    const listRect = listElement.getBoundingClientRect();
+    if (itemRect.top < listRect.top) {
+      listElement.scrollTop += itemRect.top - listRect.top;
+    } else if (itemRect.bottom > listRect.bottom) {
+      listElement.scrollTop += itemRect.bottom - listRect.bottom;
+    }
   }, [resolvedActivePath]);
 
   const moveActivePath = (direction: 1 | -1, queryValue: string) => {
@@ -225,7 +252,12 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
       </CardHeader>
 
       <CardContent className="viewer-hdf-dashboard-content viewer-hdf-navigator-content">
-        <Command className="viewer-hdf-command" shouldFilter={false} loop>
+        <Command
+          className="viewer-hdf-command"
+          shouldFilter={false}
+          loop
+          {...(stackedLayout ? { value: "", defaultValue: "" } : {})}
+        >
           <div className="viewer-hdf-command-toolbar" data-hdf5-search="true">
             <CommandInput
               value={searchQuery}

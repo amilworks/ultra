@@ -1,3 +1,22 @@
+# --- three.js bundle builder (build-time network only; nothing from this
+# stage runs in the sandbox). Produces ONE classic-script IIFE exposing the
+# global `THREE` — including OrbitControls, which nearly every scientific
+# scene needs — so reports can inline bespoke 3D under the reading canvas's
+# CSP (inline scripts allowed, external fetches blocked) with zero imports,
+# no import maps, and no CSP loosening. Versions pinned; MIT license ships
+# beside the bundle. node:22-alpine digest resolved 2026-08-02.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS threejs-bundle
+WORKDIR /build
+RUN npm install --no-audit --no-fund three@0.172.0 esbuild@0.24.2 \
+    && printf '%s\n' \
+        "export * from 'three';" \
+        "export { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';" \
+        > entry.js \
+    && npx esbuild entry.js --bundle --minify --format=iife --global-name=THREE \
+        --legal-comments=none --outfile=three.iife.min.js \
+    && cp node_modules/three/LICENSE THREE_LICENSE \
+    && node -e "const s=require('fs').statSync('three.iife.min.js').size; if (s < 400000 || s > 1400000) { throw new Error('three bundle size out of expected range: ' + s); } console.log('three.iife.min.js', s, 'bytes')"
+
 # Multi-architecture python:3.11-slim index resolved 2026-07-11
 # (3.11.15-slim-trixie). Revisions require an explicit reviewed digest update.
 FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
@@ -238,6 +257,13 @@ RUN python -m pip install --no-cache-dir playwright \
 #   inline scripts). Static figure exports stay on matplotlib — deliberately
 #   NO kaleido, which would bundle a second private Chromium.
 RUN python -m pip install --no-cache-dir latex2mathml plotly
+
+# Bespoke 3D for reports: the vendored three.js IIFE (global THREE, incl.
+# THREE.OrbitControls) built in the stage above. Reports inline the FILE
+# CONTENTS in a classic <script> — never a CDN tag, which is a silently dead
+# tag under the reading canvas's CSP. ~0.7MB minified; MIT license alongside.
+COPY --from=threejs-bundle /build/three.iife.min.js /opt/report-assets/three.iife.min.js
+COPY --from=threejs-bundle /build/THREE_LICENSE /opt/report-assets/THREE_LICENSE
 
 # compile — which hard-crashes every numba-JIT path: umap / scanpy neighbors (bio),
 # xarray-spatial terrain (ecology), esda conditional permutations. Forcing

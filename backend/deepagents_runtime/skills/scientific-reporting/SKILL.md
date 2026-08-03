@@ -67,14 +67,30 @@ genuinely empty, and then say so explicitly:
   the keyboard works. **Verify interactive logic the way you verify Python**:
   extract the pure functions and cross-check them in the sandbox against a
   reference implementation (`scipy`, `numpy`) before shipping the page.
-- **No JS frameworks or 3D libraries by name**: three.js, d3, React, and every
-  other library are NOT installed and can never load — the sandbox has no
-  network while you write and the reading surface blocks external scripts
-  while the user reads, so a CDN `<script src>` is a silently dead tag. For 3D
-  the sanctioned route is plotly's WebGL traces (`scatter3d`, `surface`,
-  `volume`) inlined as above; if a concept seems to need a bespoke 3D scene,
-  prefer the 2D projection that teaches the same thing — it almost always
-  exists and reads better.
+- **No CDN libraries, ever**: d3, React, and any `<script src>` pointing off
+  the page are silently dead tags — the sandbox has no network while you
+  write and the reading surface blocks external scripts while the user
+  reads. The ONLY libraries available are the ones vendored below; everything
+  else is vanilla.
+- **Bespoke 3D scenes**: a full three.js build is vendored at
+  `/opt/report-assets/three.iife.min.js` (MIT; license alongside). Inline the
+  FILE CONTENTS in a classic `<script>` tag ahead of your scene code — never
+  reference it by path or URL. It exposes the global `THREE`, including
+  `THREE.OrbitControls` (construct with `new THREE.OrbitControls(camera,
+  renderer.domElement)`). Discipline:
+  - It costs ~0.7MB inline — use it when a navigable 3D scene genuinely
+    earns it. Chart-shaped 3D (scatter, surface, volume) stays on plotly
+    above; a 2D projection that teaches the same idea is often still the
+    better page.
+  - Guard for WebGL: create the renderer in a `try/catch` plus a
+    `canvas.getContext("webgl2") || canvas.getContext("webgl")` check, and
+    on failure swap in a static figure or prose fallback — never a blank
+    box. Headless preview environments may lack GPU acceleration; the page
+    must degrade, not die.
+  - Animate with `requestAnimationFrame`; when
+    `matchMedia("(prefers-reduced-motion: reduce)")` matches, start with
+    auto-rotate off and let OrbitControls' user-driven motion be the only
+    motion.
 - **Table of contents**: plain fragment links (`<a href="#results">`) with
   matching section `id`s are fully supported — the reading canvas turns them
   into in-document scrolling. Give sections `scroll-margin-top` (the template

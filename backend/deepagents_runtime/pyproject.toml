@@ -99,3 +99,6 @@ packages = ["src/ultra_deepagents"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "tier2_chaos: fault-injection tests needing a docker daemon (real NATS JetStream)",
+]

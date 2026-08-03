@@ -113,6 +113,18 @@ class RunLock:
             self._handle.close()
 
 
+# Server-side max-wait on each pull request the serve loop issues.
+_JOB_FETCH_MAX_WAIT_SECONDS = 2.0
+# A shutdown NAK must schedule redelivery BEYOND the dying worker's last
+# outstanding pull request (issued at most _JOB_FETCH_MAX_WAIT_SECONDS before
+# the loop stopped). An immediate NAK loses that race: JetStream redelivers the
+# message straight into the shutting-down worker's own pull buffer, the buffered
+# delivery dies with the connection, and the run stays checked out to the dead
+# delivery until AckWait expires (5 minutes at production settings) — measured
+# in tests/longhorizon/test_tier2_chaos_nats.py.
+_SHUTDOWN_NAK_DELAY_SECONDS = _JOB_FETCH_MAX_WAIT_SECONDS + 1.0
+
+
 def build_job_consumer_config(settings: RuntimeSettings) -> ConsumerConfig:
     return ConsumerConfig(
         durable_name=settings.nats_worker_durable,
@@ -864,7 +876,7 @@ class NATSDeepAgentsWorker:
                 messages = await fetch_job_messages(
                     subscription,
                     batch=available_slots,
-                    timeout=2.0,
+                    timeout=_JOB_FETCH_MAX_WAIT_SECONDS,
                 )
                 if not messages:
                     if active_message_tasks:
@@ -1064,8 +1076,13 @@ class NATSDeepAgentsWorker:
                         sequence=run_sequencer.next_sequence(),
                     )
                 except EventPublishError:
+                    # Transient NAK = delayed NAK, always (an immediate nak
+                    # burns MaxDeliver in seconds during a NATS blip).
                     logger.exception("Deep Agents skip event publish failed; redelivering job.")
-                    await _nak_message(message)
+                    await _nak_message(
+                        message,
+                        delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                    )
                     return
                 await _ack_message(message)
                 return
@@ -1267,7 +1284,13 @@ class NATSDeepAgentsWorker:
                         return
                     if self._shutting_down and job.run_id not in self._canceled_run_reasons:
                         should_ack = False
-                        await _nak_message(message)
+                        # Delayed past the serve loop's outstanding pull request
+                        # so the redelivery reaches a LIVE worker, not this
+                        # dying one's buffer (see _SHUTDOWN_NAK_DELAY_SECONDS).
+                        await _nak_message(
+                            message,
+                            delay_seconds=_SHUTDOWN_NAK_DELAY_SECONDS,
+                        )
                         return
                     if control_terminal_status in CONTROL_PLANE_STATUSES_WITH_AUTHORITATIVE_TERMINAL_EVENT:
                         await self._publish_skipped_event(

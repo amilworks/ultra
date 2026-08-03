@@ -53,3 +53,33 @@ text, an `execute` command, a sleep, or a raised crash), pick a sandbox
 invariant helpers. Derive policy progress from `world.sandbox.calls` (the
 side-effect ledger), never from visible context — compaction rewrites context,
 and resume replays it.
+
+# Tier 2 — chaos on real JetStream
+
+`longhorizon_nats.py` + `test_tier2_chaos_nats.py` move the trust boundary out
+one ring: jobs flow through a REAL dockerized NATS JetStream into the REAL
+`NATSDeepAgentsWorker` consume loop (durable pull consumer, ack/NAK/extension,
+duplicate guards, worker terminal events), with the Tier-1 scripted model and
+sandbox at the edges and a thin `ChaosControlPlane` answering the worker's own
+injection seams. Needs a docker daemon; marked `tier2_chaos` and self-skipping.
+
+| Scenario | Claim under test |
+|---|---|
+| happy path | job → consumer → run → partitioned events → ack, gapless, no redeliveries |
+| worker death | shutdown NAK → JetStream redelivery → fresh worker resumes from durable checkpoint, 12 stages exactly once |
+| duplicate delivery | active-run duplicate parried (delayed NAK); post-completion redelivery `run.worker_skipped` via control-plane status, never re-executed |
+
+First blood: the worker-death scenario found a real production bug — the
+shutdown path's immediate NAK raced the dying worker's own outstanding pull
+request, so JetStream redelivered into the doomed buffer and the run stayed
+checked out to a ghost until AckWait expired (5 minutes at production
+settings), with a 30s DrainTimeoutError on every such shutdown. Fixed by
+delaying the shutdown NAK past the pull max-wait
+(`_SHUTDOWN_NAK_DELAY_SECONDS`); teardown is now instant and the redelivery
+reaches a live worker.
+
+Gotchas encoded in the harness: control-plane status vocabulary is
+`succeeded` (not `completed`); the skip terminal event is
+`run.worker_skipped`; `num_redelivered` is a gauge of UNACKED redeliveries
+(reads 0 after ack), so redelivery evidence comes from `run.resumed` /
+`run.worker_skipped` events instead.

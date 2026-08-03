@@ -73,6 +73,26 @@ genuinely empty, and then say so explicitly:
 - Reference each figure from the report text near the claim it supports —
   no orphan figures, no figures dumped at the end.
 
+## Interactive HTML pages — render proof, offline assets, bounded verifiers
+- **Render proof is required, not optional.** The completion guard withholds
+  completion while an `.html` deliverable lacks passing headless-render
+  evidence. Verify the FINAL built file (not a draft): load it in headless
+  Chromium (`PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright`) with
+  network disabled, require zero console errors and zero page errors, and
+  exercise at least one interaction, asserting its effect (a readout changes,
+  canvas pixels change). Only on a pass, write the evidence JSON — at minimum
+  `{"console_errors": [], "page_errors": []}` — to
+  `/workspace/diagnostics/report_preview/<page>.console.json`. Never write
+  the evidence file for a failing page; fix the page instead.
+- **Pages must work offline.** No CDN or external URLs of any kind — the
+  sandbox has no network and neither may the deliverable. For 3D, inline the
+  vendored build at `/opt/report-assets/three.iife.min.js`. Static + numeric
+  checks cannot see load-time failures; only the render proves the page.
+- **Verifiers must be bounded.** Pass the execute tool's `timeout` parameter
+  on every verification or subprocess call. Do not hand-roll character-scanning
+  parsers or state machines (a non-advancing state hangs the run for hours);
+  use `html.parser`, `json`, `ast`, or the preinstalled libraries.
+
 ## Artifact hygiene
 - `/outputs/` (durable) holds only artifacts a researcher should keep: final
   code, final figures, data tables, the report. Each durable artifact must be

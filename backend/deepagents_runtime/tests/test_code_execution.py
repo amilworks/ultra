@@ -752,3 +752,102 @@ def test_parse_rfc3339_handles_nanoseconds_and_sentinels():
     # never-started sentinel and blank → None (caller skips, not "infinitely old")
     assert cleanup._parse_rfc3339("0001-01-01T00:00:00Z") is None
     assert cleanup._parse_rfc3339("") is None
+
+
+def test_execute_translates_leading_shell_timeout_into_tool_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The torus incident: a hung run wrapped its suspect verifier in
+    `timeout 60`, was rejected, retried UNBOUNDED, and re-entered a one-hour
+    idle hang. The simple prefix form must translate into the tool bound
+    instead of being refused."""
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        timeout: int | None,
+        source_command: str,
+        progress_callback,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = timeout
+        captured["command"] = command
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=3600),
+    )
+
+    result = backend.execute("timeout 60 python verify.py")
+
+    assert result.exit_code == 0
+    assert captured["timeout"] == 60
+    # The wrapper itself must not reach the container command line.
+    assert not any("timeout 60" in part for part in captured["command"])
+    assert "translated into the execute tool's timeout parameter" in result.output
+    assert result.output.endswith("ok")
+
+
+def test_execute_translation_merges_with_explicit_hint_taking_the_minimum(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured: dict[str, object] = {}
+
+    def fake_run(
+        command: list[str],
+        *,
+        timeout: int | None,
+        source_command: str,
+        progress_callback,
+    ) -> subprocess.CompletedProcess[str]:
+        captured["timeout"] = timeout
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(docker, "_run_command_with_progress", fake_run)
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test", timeout_seconds=3600),
+    )
+
+    backend.execute("gtimeout 5m python long.py", timeout=90)
+
+    assert captured["timeout"] == 90  # min(300, 90)
+
+
+def test_execute_still_rejects_mid_pipeline_shell_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Only the whole-command prefix translates; a wrapper buried in a pipeline
+    keeps the conservative rejection (never silently reinterpreted)."""
+    monkeypatch.setattr(
+        docker,
+        "_run_command_with_progress",
+        lambda *args, **kwargs: pytest.fail("must not launch"),
+    )
+    backend = DockerSandboxBackend(
+        workspace_dir=tmp_path / "workspace",
+        config=DockerSandboxConfig(image="ultra-agent-sandbox:test"),
+    )
+
+    result = backend.execute("cd /workspace && timeout 60 python verify.py")
+
+    assert result.exit_code == 126
+    assert "Do not wrap sandbox commands with shell timeout" in result.output
+
+
+def test_translate_shell_timeout_prefix_forms():
+    from ultra_deepagents.code_execution.docker import translate_shell_timeout_prefix
+
+    assert translate_shell_timeout_prefix("timeout 60 python v.py") == ("python v.py", 60)
+    assert translate_shell_timeout_prefix("gtimeout 1m python v.py") == ("python v.py", 60)
+    assert translate_shell_timeout_prefix("timeout 1.5h make all") == ("make all", 5400)
+    # timeout 0 disables the bound in GNU timeout: strip wrapper, no hint.
+    assert translate_shell_timeout_prefix("timeout 0 python v.py") == ("python v.py", 0)
+    # Compound inner command is preserved verbatim.
+    assert translate_shell_timeout_prefix('timeout 60 sh -c "a; b"') == ('sh -c "a; b"', 60)
+    # Not the prefix form: leave for the validator.
+    assert translate_shell_timeout_prefix("cd /w && timeout 5 x") is None
+    assert translate_shell_timeout_prefix("timeout 60 timeout 5 x") is None
+    assert translate_shell_timeout_prefix("python v.py") is None

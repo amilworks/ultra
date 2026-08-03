@@ -189,6 +189,15 @@ class RuntimeSettings:
     sandbox_reaper_grace_seconds: int = 600
     sandbox_reaper_max_per_sweep: int = 200
     completion_max_continuations: int = 8
+    # Render-proof completion gate: when a run produces an .html deliverable, the
+    # completion guard withholds completion until headless render evidence exists
+    # (a diagnostics/report_preview/*.console.json or *browser_verify*.json with
+    # empty console_errors/page_errors, at least as fresh as the page). Two live
+    # incidents shipped "verified" interactive pages that threw on load / needed
+    # internet — both invisible to static checks, both caught instantly by one
+    # headless render. The existing no-progress breaker still bounds runs that
+    # genuinely cannot render. 0/false disables.
+    render_proof_required: bool = True
     async_subagents: tuple[dict[str, Any], ...] = ()
     nats_url: str = "nats://127.0.0.1:4222"
     nats_stream: str = "ULTRA_RUNS"
@@ -403,6 +412,10 @@ class RuntimeSettings:
             completion_max_continuations=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_COMPLETION_MAX_CONTINUATIONS", "8")),
+            ),
+            render_proof_required=_env_bool(
+                "ULTRA_DEEPAGENTS_REQUIRE_RENDER_PROOF",
+                True,
             ),
             async_subagents=_async_subagents_from_env(),
             nats_url=os.getenv(

@@ -151,6 +151,31 @@ const flattenDatasets = (
 export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5NavigatorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [activePath, setActivePath] = useState<string | null>(null);
+  /* JS twin of the CSS stacked regime: the shell is the @container the
+     regime blocks query, so this must observe the SHELL's width (never the
+     viewport — an expanded app sidebar can stack the viewer inside a wide
+     window). In the stacked regime the whole dashboard is one scrollport,
+     and cmdk's own selection engine calls scrollIntoView on the selected
+     row (on mount and on every filter keystroke) — which walks ancestor
+     scrollports and yanks the page down to the dataset list. Holding
+     cmdk's value empty there starves that scroller (it targets
+     [aria-selected="true"], which never exists); keyboard flow is
+     unaffected because this component handles the arrow and enter keys
+     itself. The two-pane regime keeps stock cmdk selection and hover. */
+  const [stackedLayout, setStackedLayout] = useState(false);
+  const shellProbeRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const shell = shellProbeRef.current?.closest(".viewer-hdf-shell");
+    if (!(shell instanceof HTMLElement) || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const update = () => setStackedLayout(shell.clientWidth < 720);
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, []);
   const itemRefs = useRef(new Map<string, HTMLDivElement | null>());
   const datasetEntries = useMemo(() => flattenDatasets(tree), [tree]);
   const datasetCount = useMemo(() => countDatasets(tree), [tree]);
@@ -188,7 +213,24 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
       return;
     }
     const activeElement = itemRefs.current.get(resolvedActivePath);
-    activeElement?.scrollIntoView({ block: "nearest" });
+    if (!activeElement) {
+      return;
+    }
+    /* Scroll the dataset list only — scrollIntoView walks EVERY scrollable
+       ancestor, and in the stacked (mobile) layout that includes the whole
+       dashboard scrollport, so opening the viewer yanked the page down past
+       the inspector to wherever the active dataset row happened to sit. */
+    const listElement = activeElement.closest('[data-hdf5-dataset-list="true"]');
+    if (!(listElement instanceof HTMLElement)) {
+      return;
+    }
+    const itemRect = activeElement.getBoundingClientRect();
+    const listRect = listElement.getBoundingClientRect();
+    if (itemRect.top < listRect.top) {
+      listElement.scrollTop += itemRect.top - listRect.top;
+    } else if (itemRect.bottom > listRect.bottom) {
+      listElement.scrollTop += itemRect.bottom - listRect.bottom;
+    }
   }, [resolvedActivePath]);
 
   const moveActivePath = (direction: 1 | -1, queryValue: string) => {
@@ -225,8 +267,13 @@ export function Hdf5Navigator({ tree, selectedPath, onSelect, truncated }: Hdf5N
       </CardHeader>
 
       <CardContent className="viewer-hdf-dashboard-content viewer-hdf-navigator-content">
-        <Command className="viewer-hdf-command" shouldFilter={false} loop>
-          <div className="viewer-hdf-command-toolbar" data-hdf5-search="true">
+        <Command
+          className="viewer-hdf-command"
+          shouldFilter={false}
+          loop
+          {...(stackedLayout ? { value: "", defaultValue: "" } : {})}
+        >
+          <div className="viewer-hdf-command-toolbar" data-hdf5-search="true" ref={shellProbeRef}>
             <CommandInput
               value={searchQuery}
               onValueChange={(nextValue) => {

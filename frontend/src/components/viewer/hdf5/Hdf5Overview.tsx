@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Maximize2, Minimize2 } from "lucide-react";
+import { Check, Copy, Maximize2, Minimize2 } from "lucide-react";
 import { HoverCard as HoverCardPrimitive } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
 import { HoverCard, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { ApiClient } from "@/lib/api";
+import { writeClipboardText } from "@/lib/clipboard";
 import type { Hdf5DatasetSummary, Hdf5MaterialsDashboardResponse, UploadViewerInfo } from "@/types";
 
 import { Hdf5Inspector } from "./Hdf5Inspector";
@@ -143,6 +144,15 @@ export function Hdf5ViewerShell({
   const [nativeFullscreen, setNativeFullscreen] = useState(false);
   const [cssFullscreen, setCssFullscreen] = useState(false);
   const isFullscreen = nativeFullscreen || cssFullscreen;
+  const [pathCopied, setPathCopied] = useState(false);
+
+  useEffect(() => {
+    if (!pathCopied) {
+      return;
+    }
+    const timeout = window.setTimeout(() => setPathCopied(false), 1600);
+    return () => window.clearTimeout(timeout);
+  }, [pathCopied]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -469,6 +479,18 @@ export function Hdf5ViewerShell({
                   <p className="viewer-hdf-current-inline" data-hdf5-active-dataset="true">
                     <span>Current dataset</span>
                     <strong>{activeDatasetName}</strong>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className="viewer-hdf-copy-path"
+                      aria-label={pathCopied ? "Dataset path copied" : "Copy dataset path"}
+                      onClick={() => {
+                        void writeClipboardText(activeDatasetPath).then(() => setPathCopied(true));
+                      }}
+                    >
+                      {pathCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                    </Button>
                   </p>
                 ) : null}
               </div>

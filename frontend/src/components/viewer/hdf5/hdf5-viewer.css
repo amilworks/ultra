@@ -49,6 +49,10 @@
 }
 
 .viewer-hdf-shell {
+  /* The layout regime is decided by the shell's own width, not the viewport:
+     an expanded app sidebar can eat ~240px, so a "desktop" window can still
+     host a narrow viewer. Every regime block below queries this container. */
+  container: hdf5shell / size;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
@@ -124,11 +128,33 @@
   min-width: 0;
   max-width: 100%;
   margin: 0;
-  font-size: 1.06rem;
-  line-height: 1.2;
+  font-size: 1.125rem;
+  /* Tailwind's preflight sets heading weight to `inherit`, so this title was
+     silently rendering at body 400 — the one page title in the app below
+     titling weight. 600 matches CardTitle and the house heading voice. */
+  font-weight: 600;
+  line-height: 1.25;
   color: var(--text-main);
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* Quiet inline affordance beside the dataset name; ink appears on hover. */
+.viewer-hdf-copy-path {
+  color: var(--text-muted);
+}
+
+.viewer-hdf-copy-path:hover {
+  color: var(--text-main);
+}
+
+/* One voice for inline explanatory captions (sampling bounds, slice-only
+   reasons): a muted line, not a boxed card competing with the data. */
+.viewer-hdf-detail-caption {
+  margin: 0;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--text-muted);
 }
 
 .viewer-hdf-current-inline {
@@ -277,7 +303,7 @@
 
 .viewer-hdf-dashboard {
   display: grid;
-  grid-template-columns: clamp(280px, 21vw, 312px) minmax(0, 1fr);
+  grid-template-columns: clamp(280px, 25cqw, 312px) minmax(0, 1fr);
   grid-template-areas: "navigator inspector";
   gap: 0;
   height: 100%;
@@ -302,6 +328,10 @@
 
 .viewer-hdf-inspector-card {
   grid-area: inspector;
+  /* Header-less card: without this the lone CardContent lands in the shared
+     card template's AUTO row (sized to min-content) while the bounded 1fr
+     row sits empty — the same single-child trap as the navigator content. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .viewer-hdf-navigator-content {
@@ -430,6 +460,12 @@
   width: fit-content;
   flex-wrap: wrap;
   gap: 4px;
+  /* These lists may wrap in any narrow container (and coarse pointers raise
+     triggers to 44px), but the primitive's box is a fixed h-10 — wrapped or
+     tall rows paint over the content below unless the box grows. A single
+     stock-height row still renders at exactly 40px. */
+  height: auto;
+  min-height: 2.5rem;
 }
 
 .viewer-hdf-workspace-tabs {
@@ -447,6 +483,8 @@
   width: fit-content;
   flex-wrap: wrap;
   gap: 4px;
+  height: auto;
+  min-height: 2.5rem;
 }
 
 .viewer-hdf-workspace-tab {
@@ -659,21 +697,13 @@
   gap: 12px;
 }
 
-.viewer-hdf-preview-toolbar-copy {
-  max-width: 56ch;
-  font-size: 0.8rem;
-  line-height: 1.5;
-  color: var(--text-muted);
-}
-
 .viewer-hdf-preview-toolbar-actions {
   display: flex;
-  flex: 1 1 auto;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
   gap: 8px;
   min-width: 0;
+  margin-left: auto;
 }
 
 .viewer-hdf-preview-controls {
@@ -1412,16 +1442,19 @@
   min-height: 220px;
 }
 
-@media (min-width: 1121px) {
+@container hdf5shell (min-width: 920px) {
   .viewer-hdf-slice-layout {
     grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
-    align-items: start;
+    grid-template-rows: minmax(0, 1fr);
+    /* stretch, not start: the canvas column fills the preview height (the
+       sidebar keeps align-content: start internally). */
+    align-items: stretch;
   }
 }
 
-@media (max-width: 1380px) {
+@container hdf5shell (max-width: 1380px) {
   .viewer-hdf-dashboard {
-    grid-template-columns: clamp(280px, 24vw, 300px) minmax(0, 1fr);
+    grid-template-columns: clamp(260px, 30cqw, 300px) minmax(0, 1fr);
   }
 
   .viewer-hdf-material-chart-grid {
@@ -1433,12 +1466,19 @@
   }
 }
 
-@media (max-width: 1120px) {
+@container hdf5shell (max-width: 719px) {
   .viewer-hdf-dashboard {
     grid-template-columns: 1fr;
     grid-template-areas:
       "inspector"
       "navigator";
+    /* max-content, not auto: the shell keeps this grid at height:100% as the
+       scrollport, and AUTO rows stop growing once a definite container is
+       full — the stacked cards get fit-distributed to the viewport (the
+       inspector was handed 248px for ~500px of content and overflow:hidden
+       ate the tabs). max-content rows take their natural height and the
+       surplus scrolls, which is the whole point of the scrollport. */
+    grid-auto-rows: max-content;
     height: auto;
     overflow: visible;
   }
@@ -1541,16 +1581,100 @@
     grid-template-columns: 1fr;
     gap: 8px;
   }
-}
 
-@media (min-width: 1121px) {
-  .viewer-hdf-navigator-card > .viewer-hdf-dashboard-header,
-  .viewer-hdf-inspector-card > .viewer-hdf-dashboard-header {
-    min-height: 72px;
+  /* Stacked regime: the inspector flows with the page, so the desktop
+     fill-the-column plumbing must not force heights here. */
+  .viewer-hdf-detail-tabs {
+    height: auto;
+  }
+
+  /* The navigator card is capped at min(420px, 46dvh) in this regime. Its
+     content grid declares two rows but holds ONE child (the command box),
+     which therefore lands in the unbounded auto row — the bounded 1fr track
+     sits empty below it. Collapse to a single bounded track so the cap can
+     actually reach the dataset list. */
+  .viewer-hdf-navigator-content {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  /* Desktop floors these scrollports at 260px so short columns stay usable,
+     and the primitive caps the list at 320px. Inside the capped card the
+     floor + toolbar + header exceed the cap on phones — the overflow clipped
+     the search input in half. The bounded track governs instead. */
+  .viewer-hdf-tree-scroll,
+  .viewer-hdf-detail-scroll,
+  .viewer-hdf-search-results {
+    min-height: 120px;
+  }
+
+  .viewer-hdf-search-results {
+    max-height: none;
   }
 }
 
-@media (max-width: 620px) {
+/* Two-pane desktop: the preview fills the inspector column instead of
+   stopping at a fixed clamp — the freed space (the removed explainer copy)
+   goes to the visualization. Chain of definite heights from the detail tab
+   down to the canvas; the canvas is flexible with a sane floor, and content
+   that still cannot fit scrolls inside the detail tab, never the page. */
+@container hdf5shell (min-width: 720px) {
+  .viewer-hdf-detail-tab-preview {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .viewer-hdf-preview-body {
+    height: 100%;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .viewer-hdf-preview-tabs {
+    height: 100%;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .viewer-hdf-preview-tabs > .viewer-hdf-preview-tab {
+    min-height: 0;
+  }
+
+  /* Gate on the active state: a bare display override would defeat the
+     [hidden] attribute on inactive Radix tab panes. */
+  .viewer-hdf-preview-tab[data-state="active"] {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .viewer-hdf-preview-tab[data-state="active"] > .viewer-hdf-slice-shell,
+  .viewer-hdf-preview-tab[data-state="active"] > .viewer-hdf-slice-layout {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .viewer-hdf-slice-shell {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .viewer-hdf-slice-layout {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  [data-hdf5-slice-preview="true"] {
+    min-height: 0;
+    align-content: stretch;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .viewer-hdf-slice-canvas,
+  [data-hdf5-slice-preview="true"] .viewer-hdf-slice-canvas {
+    height: 100%;
+    min-height: 320px;
+    max-height: none;
+  }
+}
+
+@container hdf5shell (max-width: 620px) {
   .viewer-hdf-shell {
     width: 100%;
     max-width: 100%;
@@ -1575,6 +1699,17 @@
   .viewer-hdf-current-inline {
     display: grid;
     gap: 2px;
+  }
+
+  /* At phone width the split header's action button crowds the wrapped
+     description; stack them instead. */
+  .viewer-hdf-dashboard-header-split {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .viewer-hdf-dashboard-header-split > button {
+    align-self: flex-start;
   }
 
   .viewer-hdf-current-inline strong,
@@ -1661,7 +1796,7 @@
   }
 }
 
-@media (max-height: 860px) {
+@container hdf5shell (max-height: 860px) {
   .viewer-hdf-dashboard-header {
     padding: 10px 14px 8px;
   }
@@ -1676,7 +1811,7 @@
   }
 }
 
-@media (min-width: 1121px) and (max-height: 700px) {
+@container hdf5shell (min-width: 720px) and (max-height: 700px) {
   .viewer-hdf-material-shell[data-hdf5-material-section="maps"] .viewer-hdf-material-body {
     overflow-x: hidden;
     overflow-y: auto;

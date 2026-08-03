@@ -541,6 +541,27 @@ scientifically meaningful convergence checks, smaller smoke-test data, checkpoin
 and resumable artifacts over arbitrary wall-clock caps.
 """
 
+# Deterministic environment manifest for the verification toolchain. Three of four
+# live runs on 2026-08-03 lost time or shipped broken deliverables because they
+# guessed at (or never discovered) these capabilities: one declared "no browser
+# engine" with playwright installed, one shipped a CDN-dependent page with the
+# vendored three.js on disk, and one hand-rolled an unbounded verifier that hung
+# for two hours. Enumerating the toolchain here deletes that discovery variance.
+SANDBOX_VERIFICATION_TOOLCHAIN_GUIDANCE = """
+Verification toolchain (preinstalled, offline): headless Chromium via Playwright — browsers
+live under /root/.cache/ms-playwright (launch with PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright);
+never claim no browser exists without probing that path. For self-contained 3D pages a vendored
+three.js IIFE build is at /opt/report-assets/three.iife.min.js — inline it into the page; never
+reference a CDN (deliverables must work with no internet). Any HTML page you deliver requires
+RENDER PROOF before the run can complete: load the final file headlessly with network disabled,
+require zero console errors and zero page errors, exercise at least one interaction (a control
+must change visible state), and only on a passing check save the evidence JSON (at minimum
+{"console_errors": [], "page_errors": []}) under diagnostics/report_preview/ in the workspace.
+Bound every verification or subprocess with the execute tool's timeout parameter, and never
+hand-roll character-scanning loops for parsing/validation — use stdlib parsers (html.parser,
+json, ast) or battle-tested libraries; a scanner with a non-advancing state hangs the run.
+"""
+
 LONG_COMPUTE_RUNTIME_GUIDANCE = """
 For long scientific/computational runs, do not launch the full grid, sweep, training job, or long integration as the first expensive command. First run a pilot timing pass on a tiny representative subset: one seed, one duration/window, one grid point, one batch, or about 1-5% of the data. Record elapsed seconds and extrapolate the estimated runtime for the full requested scope. Compare that estimate to the user/control-plane runtime budget when present, otherwise to the sandbox wall-clock cap from tool_capability_manifest. If the estimated runtime exceeds budget, shrink or chunk the grid: reduce seeds, durations, resolution, sample count, or batch size; run resumable chunks; and state the reduced scope explicitly. During execution, checkpoint durable progress under /outputs after each condition or batch, and at least every few minutes for long loops: metrics.jsonl/csv, partial tables, completed-batch manifests, model checkpoints, and enough parameters/seeds to resume. Keep scratch/temp files under /workspace, but progress evidence and final deliverables belong in /outputs.
 """
@@ -633,6 +654,8 @@ def build_sandbox_resources_guidance(settings: RuntimeSettings) -> str:
         "checkpoint long runs to files. Write large temp/intermediate files under "
         "/workspace, not /tmp. Call tool_capability_manifest for the exact compute "
         "envelope (cores, memory, shm, GPU, full package list). "
+        + SANDBOX_VERIFICATION_TOOLCHAIN_GUIDANCE.strip()
+        + " "
         + LONG_COMPUTE_RUNTIME_GUIDANCE.strip()
     )
 

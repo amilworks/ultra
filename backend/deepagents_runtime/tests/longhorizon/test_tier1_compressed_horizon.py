@@ -315,3 +315,87 @@ def test_week_scale_soak_completes_bounded_and_gapless(tmp_path) -> None:
         f"soak took {elapsed:.1f}s — the compressed tier must stay CI-fast; "
         f"profile before raising this budget"
     )
+
+
+def test_render_proof_gate_blocks_unproven_html_then_accepts_proof(tmp_path) -> None:
+    """End-to-end through the real completion loop: producing an .html
+    deliverable without render evidence draws a completion-guard continuation
+    demanding render proof; writing a passing, fresh proof satisfies the gate
+    and the run completes. Pins the gate the same way the harness pins the
+    stall/idle guards."""
+    world = LongHorizonWorld(tmp=tmp_path)
+    workspace = tmp_path / "workspaces" / world.run_id
+
+    def behavior(command: str, nth: int) -> ExecuteResponse:
+        if "build page" in command:
+            page = workspace / "demo.html"
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text("<html><body><button id='b'>go</button></body></html>")
+            return ExecuteResponse(output="page written", exit_code=0)
+        if "verify page" in command:
+            proof = workspace / "diagnostics" / "report_preview" / "demo.console.json"
+            proof.parent.mkdir(parents=True, exist_ok=True)
+            proof.write_text('{"console_errors": [], "page_errors": []}')
+            return ExecuteResponse(output="render check passed", exit_code=0)
+        return ExecuteResponse(output=f"ok {nth}", exit_code=0)
+
+    world.sandbox._behavior = behavior
+
+    def policy(request: TurnRequest) -> TurnDecision:
+        if request.saw("render proof"):
+            # The gate's continuation prompt is in context: run the (scripted)
+            # headless check, then restate the answer.
+            if not any("verify page" in call for call in world.sandbox.calls):
+                return TurnDecision(execute_command="verify page")
+            return TurnDecision(
+                text="The demo page demo.html is verified: zero console errors."
+            )
+        if not world.sandbox.calls:
+            return TurnDecision(execute_command="build page")
+        return TurnDecision(text="Built the demo page demo.html with one button.")
+
+    response = world.run_sync(
+        policy,
+        goal="Make a small HTML page with a button and deliver it.",
+        config=CompressedConfig(context_window_tokens=60_000),
+    )
+
+    guard_events = [
+        event
+        for event in world.log.events
+        if event.get("node_name") == "completion_guard"
+        and "render proof" in str((event.get("payload") or {}).get("text") or "").lower()
+    ]
+    assert guard_events, (
+        "the completion guard never demanded render proof for the html deliverable "
+        f"(kinds: {sorted(set(world.log.kinds()))})"
+    )
+    assert (
+        (guard_events[0].get("payload") or {}).get("missing_artifact_kinds") is not None
+    )
+    assert "verify page" in " ".join(world.sandbox.calls)
+    assert "verified" in response
+    assert_terminal_success(world.log)
+    assert_event_stream_integrity(world.log)
+
+
+def test_render_proof_gate_stays_quiet_without_html_artifacts(tmp_path) -> None:
+    """Negative control: ordinary non-HTML runs never see the render demand."""
+    world = LongHorizonWorld(tmp=tmp_path)
+    policy = staged_pipeline_policy(
+        world,
+        rounds=3,
+        final_answer="Diagnostics done: 3 stages nominal.",
+    )
+    world.run_sync(
+        policy,
+        goal="Run the diagnostic sequence and state the outcome plainly.",
+        config=CompressedConfig(context_window_tokens=60_000),
+    )
+    assert not [
+        event
+        for event in world.log.events
+        if event.get("node_name") == "completion_guard"
+        and "render proof" in str((event.get("payload") or {}).get("text") or "").lower()
+    ]
+    assert_terminal_success(world.log)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import os
 import queue
 import re
@@ -371,6 +372,30 @@ class DockerSandboxBackend(BaseSandbox):
         return docker_command
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        # A simple leading `timeout N cmd` is TRANSLATED into the tool's own
+        # timeout parameter instead of rejected. Rejecting it mid-incident once
+        # knocked a hung run off its only self-rescue: the model wrapped its
+        # suspect verifier in `timeout 60`, was refused, retried UNBOUNDED, and
+        # re-entered a one-hour stream-idle hang (torus run, 2026-08-03). The
+        # security property is unchanged — the translated bound goes through
+        # resolve_execute_timeout, so it can only shrink the operator ceiling.
+        # Complex forms (wrapper mid-pipeline / unparseable duration) still hit
+        # the validation message below.
+        translation_note = ""
+        translated = translate_shell_timeout_prefix(command)
+        if translated is not None:
+            command, wrapper_bound = translated
+            if wrapper_bound > 0:
+                try:
+                    hint = int(timeout) if timeout is not None else 0
+                except (TypeError, ValueError):
+                    hint = 0
+                timeout = min(hint, wrapper_bound) if hint > 0 else wrapper_bound
+            translation_note = (
+                "[note] The shell `timeout` wrapper was translated into the execute "
+                f"tool's timeout parameter ({wrapper_bound}s bound applied). Pass the "
+                "timeout parameter directly next time.\n"
+            )
         violation = validate_sandbox_command(command)
         if violation is not None:
             return ExecuteResponse(output=violation, exit_code=126)
@@ -428,6 +453,7 @@ class DockerSandboxBackend(BaseSandbox):
                     "waiting on input before retrying."
                 )
                 truncated_output, truncated = _truncate_output(
+                    f"{translation_note}"
                     f"Command timed out after {timeout_seconds} seconds{source_note}. "
                     f"{guidance}\n{output}",
                     self.config.output_limit_bytes,
@@ -447,7 +473,7 @@ class DockerSandboxBackend(BaseSandbox):
                 )
 
             output, truncated = _truncate_output(
-                _combine_output(completed.stdout, completed.stderr),
+                translation_note + _combine_output(completed.stdout, completed.stderr),
                 self.config.output_limit_bytes,
             )
             return ExecuteResponse(
@@ -743,6 +769,36 @@ def validate_sandbox_command(command: str) -> str | None:
 
 def _uses_shell_timeout_wrapper(command: str) -> bool:
     return bool(re.search(r"(?:^|(?:&&|\|\||;|\|)\s*)g?timeout\b", command))
+
+
+_SHELL_TIMEOUT_PREFIX_RE = re.compile(
+    r"^\s*g?timeout\s+"
+    r"(?:(?:-k|--kill-after(?:=|\s+))\S+\s+|(?:-s|--signal(?:=|\s+))\S+\s+"
+    r"|--preserve-status\s+|--foreground\s+|-v\s+)*"
+    r"(?P<duration>\d+(?:\.\d+)?)(?P<unit>[smhd]?)\s+(?P<inner>\S.*)$",
+    re.DOTALL,
+)
+_SHELL_TIMEOUT_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def translate_shell_timeout_prefix(command: str) -> tuple[str, int] | None:
+    """``(inner_command, bound_seconds)`` for a simple leading ``timeout N cmd``.
+
+    Only the whole-command prefix form is translated (the model's usual
+    self-rescue shape); a wrapper buried mid-pipeline or with an unparseable
+    duration returns ``None`` and keeps the validation rejection. A GNU
+    ``timeout 0`` disables the bound, so it maps to ``bound_seconds=0``
+    (strip the wrapper, add no hint).
+    """
+    match = _SHELL_TIMEOUT_PREFIX_RE.match(str(command or ""))
+    if match is None:
+        return None
+    inner = match.group("inner").strip()
+    if not inner or _uses_shell_timeout_wrapper(inner):
+        # Nested/chained wrappers stay on the rejection path.
+        return None
+    seconds = float(match.group("duration")) * _SHELL_TIMEOUT_UNIT_SECONDS[match.group("unit")]
+    return inner, int(math.ceil(seconds))
 
 
 # Recursive filesystem searches are only ever legitimate under the run's own mounts.

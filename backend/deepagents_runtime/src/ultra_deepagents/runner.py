@@ -893,6 +893,12 @@ async def run_job(
             missing_kinds = [
                 *_missing_requested_artifact_kinds(job, artifact_events),
                 *_missing_requested_response_kinds(job, attempt_result),
+                *_missing_render_proof_kinds(
+                    settings,
+                    artifact_events,
+                    workspace_dir=workspace_dir,
+                    artifact_dir=artifact_dir,
+                ),
                 *_missing_delegation_evidence_kinds(attempt_result),
                 *_missing_rigor_contract_kinds(
                     context,
@@ -1994,6 +2000,104 @@ def _missing_requested_response_kinds(
     return ["response"]
 
 
+_HTML_ARTIFACT_SUFFIXES = frozenset({".html", ".htm"})
+# Bounded scan: render proofs live in known spots, never a full workspace walk.
+_RENDER_PROOF_GLOBS = (
+    "diagnostics/report_preview/*.console.json",
+    "diagnostics/*browser_verify*.json",
+    "*browser_verify*.json",
+    "*render_verify*.json",
+)
+_RENDER_PROOF_MTIME_SLACK_SECONDS = 2.0
+
+
+def _html_artifact_paths(artifact_events: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for event in artifact_events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        raw = str(payload.get("path") or payload.get("relative_path") or "").strip()
+        if raw and Path(raw).suffix.lower() in _HTML_ARTIFACT_SUFFIXES:
+            paths.append(raw)
+    return paths
+
+
+def _newest_html_mtime(html_paths: list[str], roots: tuple[Path, ...]) -> float | None:
+    newest: float | None = None
+    for raw in html_paths:
+        candidates = [Path(raw)] if Path(raw).is_absolute() else []
+        basename = Path(raw).name
+        for root in roots:
+            candidates.append(root / raw)
+            candidates.extend(root.glob(f"**/{basename}"))
+        for candidate in candidates:
+            try:
+                mtime = candidate.stat().st_mtime
+            except OSError:
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    return newest
+
+
+def _render_proof_is_valid(path: Path, *, not_older_than: float | None) -> bool:
+    try:
+        if not_older_than is not None:
+            if path.stat().st_mtime + _RENDER_PROOF_MTIME_SLACK_SECONDS < not_older_than:
+                return False  # proof predates the page's current build
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    console_errors = payload.get("console_errors")
+    page_errors = payload.get("page_errors")
+    return console_errors == [] and page_errors == []
+
+
+def _has_render_proof(
+    workspace_dir: Path,
+    artifact_dir: Path,
+    *,
+    html_paths: list[str],
+) -> bool:
+    roots = (workspace_dir, artifact_dir)
+    newest_html = _newest_html_mtime(html_paths, roots)
+    for root in roots:
+        for pattern in _RENDER_PROOF_GLOBS:
+            try:
+                matches = sorted(root.glob(pattern))
+            except OSError:
+                continue
+            for match in matches:
+                if _render_proof_is_valid(match, not_older_than=newest_html):
+                    return True
+    return False
+
+
+def _missing_render_proof_kinds(
+    settings: RuntimeSettings,
+    artifact_events: list[dict[str, Any]],
+    *,
+    workspace_dir: Path,
+    artifact_dir: Path,
+) -> list[str]:
+    """An .html deliverable without headless render evidence is an incomplete
+    deliverable. Triggered by the ARTIFACT (not goal wording): a produced page
+    is the commitment, whatever the request called it — the two live incidents
+    ("interactive CNN page" that threw on load; "torus in HTML" that needed
+    internet) had goals that respectively did and did not say "interactive"."""
+    if not settings.render_proof_required:
+        return []
+    html_paths = _html_artifact_paths(artifact_events)
+    if not html_paths:
+        return []
+    if _has_render_proof(workspace_dir, artifact_dir, html_paths=html_paths):
+        return []
+    return ["render_proof"]
+
+
 _RIGOR_UNCERTAINTY_RE = re.compile(r"±|\+/-|\\pm\b")
 _RIGOR_SAMPLING_RE = re.compile(
     r"\b(ICs?|initial conditions?|seeds?|n_ics|n_seeds)\b",
@@ -2559,11 +2663,27 @@ def _completion_continuation_prompt(
         "Current durable outputs detected:\n"
         f"{current_outputs_text}"
     )
+    if "render_proof" in delivery_kinds:
+        prompt += "\n" + _RENDER_PROOF_CONTINUATION_PROMPT
     if delegation_kinds:
         prompt += "\n" + _delegation_contract_continuation_prompt(delegation_kinds)
     if rigor_kinds:
         prompt += "\n" + _rigor_contract_continuation_prompt(rigor_kinds)
     return prompt
+
+
+_RENDER_PROOF_CONTINUATION_PROMPT = (
+    "An HTML deliverable exists but no passing render proof was found. Load the FINAL "
+    "page file in the sandbox's headless Chromium "
+    "(PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright) with network disabled, and "
+    "require all of: zero console errors, zero page errors, and at least one exercised "
+    "interaction whose effect you assert (for example a control changes a readout or "
+    "canvas pixels). Only when the check passes, save the evidence JSON — at minimum "
+    '{"console_errors": [], "page_errors": []} — under diagnostics/report_preview/ in '
+    "the workspace (e.g. diagnostics/report_preview/<page>.console.json). If the check "
+    "fails, fix the page first; do not write the evidence file for a failing page. "
+    "Bound the check with the execute tool's timeout parameter."
+)
 
 
 def _delegation_contract_continuation_prompt(delegation_kinds: list[str]) -> str:

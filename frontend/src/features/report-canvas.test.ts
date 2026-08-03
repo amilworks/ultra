@@ -106,3 +106,40 @@ describe("report canvas source contract", () => {
     }
   });
 });
+
+describe("report canvas regimes and resize", () => {
+  it("has exactly two regimes, decided by the stage shell, not the viewport", () => {
+    /* The floating overlay half-covered the transcript and turned the
+       sidebar into a competing overlay — it is gone on purpose. The split
+       decision keys off the MAIN SHELL's measured width (an expanded
+       sidebar narrows the stage inside a wide window), so viewport media
+       hooks here are a regression. */
+    expect(canvasSource).not.toMatch(/"overlay"/);
+    expect(appSource).not.toMatch(/useBreakpoint\(1200\)/);
+    expect(appSource).not.toMatch(/min-width: 1200px/);
+    expect(appSource).toMatch(/REPORT_CANVAS_SPLIT_MIN_STAGE/);
+    expect(appSource).toMatch(/new ResizeObserver/);
+  });
+
+  it("routes the panel width through one variable with the divider in charge", () => {
+    /* --report-canvas-col is the single width authority: the grid column
+       and the inner frame both derive from it, so they can never disagree,
+       and the drag writes it imperatively so the App tree never renders at
+       pointer speed. */
+    expect(canvasStyles).toMatch(
+      /grid-template-columns:\s*minmax\(0, 1fr\) var\(--report-canvas-col/
+    );
+    expect(canvasStyles).toMatch(
+      /width:\s*calc\(var\(--report-canvas-col[^)]*\) - 0\.75rem\)/
+    );
+    expect(canvasStyles).not.toMatch(/46vw/);
+    /* Mid-gesture the grid tracks the pointer, not the 220ms curve. */
+    expect(canvasStyles).toMatch(
+      /\[data-canvas-resizing="true"\]\s*\{[^}]*transition:\s*none;/
+    );
+    expect(canvasSource).toMatch(/setPointerCapture/);
+    expect(canvasSource).toMatch(/data-canvas-resizing/);
+    /* The width survives sessions. */
+    expect(appSource).toMatch(/ultra:report-canvas:width/);
+  });
+});

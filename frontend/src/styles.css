@@ -6872,9 +6872,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    1) .chat-report-card — the report's identity in the transcript. One object
       across versions; state lives in geometry (border weight, chevron turn),
       never in color, and "updated" is a meta-line change, not a badge.
-   2) .report-canvas — the panel. On a wide stage it is a real grid column
-      (main[data-report-canvas] below); on a narrow stage it floats over the
-      transcript; on the phone regime it is a full-screen sheet.
+   2) .report-canvas — the panel. When the stage affords both minimums it is
+      a real, reader-resizable grid column (main[data-report-canvas] below);
+      otherwise it is a full-screen sheet. No floating middle state.
    Chrome is all-neutral by the calm law: color enters only inside the report,
    carried by its own data. Every surface here is a theme token, so dark
    arrives with zero additional rules. */
@@ -6962,7 +6962,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: grid-template-columns 220ms var(--motion-ease);
 }
 .app-main-shell[data-report-canvas="open"] {
-  grid-template-columns: minmax(0, 1fr) min(40.5rem, 46vw);
+  /* The column is the reader's: the divider drags it between the host's
+     bounds, and the variable is the single width authority (the frame below
+     derives from it, so panel and column can never disagree). */
+  grid-template-columns: minmax(0, 1fr) var(--report-canvas-col, 40.5rem);
+}
+/* Mid-gesture the grid must track the pointer, not the 220ms curve. */
+.app-main-shell[data-canvas-resizing="true"] {
+  transition: none;
+  user-select: none;
+}
+.app-main-shell[data-canvas-resizing="true"] .report-canvas-body iframe {
+  /* Belt on top of pointer capture: the frame never swallows the drag. */
+  pointer-events: none;
 }
 .app-main-shell[data-report-canvas] .app-mobile-shell-bar {
   grid-area: bar;
@@ -6982,21 +6994,49 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-height: 0;
 }
 .report-canvas[data-mode="split"] {
+  position: relative;
   padding: 0.75rem 0.75rem 0.75rem 0;
 }
-/* The inner frame holds a FIXED width while the grid column animates, so the
-   report never reflows mid-gesture — the column reveals it like a curtain. */
+/* The inner frame holds the SAME width the column variable carries, so the
+   report never reflows mid-open/close — the column reveals it like a
+   curtain — and dragging the divider moves both in lockstep. */
 .report-canvas[data-mode="split"] .report-canvas-frame {
-  width: min(39.75rem, calc(46vw - 0.75rem));
+  width: calc(var(--report-canvas-col, 40.5rem) - 0.75rem);
   margin-left: auto;
 }
-.report-canvas[data-mode="overlay"] {
+/* The reader's handle on the panel edge: an invisible 12px hit area whose
+   hairline appears on hover/focus. Ink-quiet until touched, per the calm
+   law — the affordance is the cursor, not chrome. */
+.report-canvas-resize {
   position: absolute;
+  left: -0.25rem;
   top: 0.75rem;
-  right: 0.75rem;
   bottom: 0.75rem;
-  width: min(40.5rem, calc(100vw - 1.5rem));
-  z-index: 40;
+  width: 0.75rem;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 5;
+}
+.report-canvas-resize::before {
+  content: "";
+  position: absolute;
+  left: 0.3125rem;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 999px;
+  background: transparent;
+  transition: background 160ms var(--motion-ease);
+}
+.report-canvas-resize:hover::before,
+.report-canvas-resize:active::before {
+  background: var(--line-strong);
+}
+.report-canvas-resize:focus-visible {
+  outline: none;
+}
+.report-canvas-resize:focus-visible::before {
+  background: color-mix(in oklab, var(--accent) 62%, var(--line) 38%);
 }
 .report-canvas[data-mode="sheet"] {
   position: fixed;

@@ -57,6 +57,24 @@ genuinely empty, and then say so explicitly:
   `fig.to_html(full_html=False, include_plotlyjs="inline")` (inline JS is
   allowed; the network is not). Use it only when interaction earns its ~3.5MB;
   static figures stay matplotlib PNGs at 300 dpi.
+- **Hand-written interactivity** (simulations, steppable demos, explorable
+  explanations): vanilla inline JS + CSS is the sanctioned stack, and it is
+  fully sufficient — build with DOM/SVG for structured diagrams and `<canvas>`
+  2D for pixel grids or anything animating more than a few hundred elements.
+  Drive animation with `requestAnimationFrame`, never `setInterval`, and gate
+  autoplaying motion behind `matchMedia("(prefers-reduced-motion: reduce)")`
+  (offer a manual step control either way). Make controls real `<button>`s so
+  the keyboard works. **Verify interactive logic the way you verify Python**:
+  extract the pure functions and cross-check them in the sandbox against a
+  reference implementation (`scipy`, `numpy`) before shipping the page.
+- **No JS frameworks or 3D libraries by name**: three.js, d3, React, and every
+  other library are NOT installed and can never load — the sandbox has no
+  network while you write and the reading surface blocks external scripts
+  while the user reads, so a CDN `<script src>` is a silently dead tag. For 3D
+  the sanctioned route is plotly's WebGL traces (`scatter3d`, `surface`,
+  `volume`) inlined as above; if a concept seems to need a bespoke 3D scene,
+  prefer the 2D projection that teaches the same thing — it almost always
+  exists and reads better.
 - **Table of contents**: plain fragment links (`<a href="#results">`) with
   matching section `id`s are fully supported — the reading canvas turns them
   into in-document scrolling. Give sections `scroll-margin-top` (the template

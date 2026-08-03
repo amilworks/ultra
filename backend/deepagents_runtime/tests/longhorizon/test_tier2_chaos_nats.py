@@ -288,3 +288,274 @@ def test_duplicate_delivery_parried_and_post_completion_redelivery_skipped(
     # reads 0 again once the skip acks.
     ack_pending, _redelivered = asyncio.run(consumer_state(nats_server, settings))
     assert ack_pending == 0, "a delivery was left unacked after skip handling"
+
+
+def _pause_once_policy(
+    world: ChaosWorld,
+    *,
+    rounds: int,
+    pause_before_stage: int,
+    pause_seconds: float,
+    paused: threading.Event,
+    final_answer: str,
+):
+    """Staged policy that, exactly once, signals the test and stalls inside the
+    model node right before dispatching ``pause_before_stage`` — a deterministic
+    window for the test to inject its fault."""
+
+    def policy(request: TurnRequest) -> TurnDecision:
+        next_stage = len(world.sandbox.calls) + 1
+        if next_stage <= rounds:
+            if next_stage == pause_before_stage and not paused.is_set():
+                paused.set()
+                return TurnDecision(
+                    execute_command=f"python stage.py --index {next_stage}",
+                    sleep_seconds=pause_seconds,
+                )
+            return TurnDecision(execute_command=f"python stage.py --index {next_stage}")
+        return TurnDecision(text=final_answer)
+
+    return policy
+
+
+async def _wait_event(flag: threading.Event, *, timeout: float, description: str) -> None:
+    deadline = time.monotonic() + timeout
+    while not flag.is_set():
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out waiting for {description}")
+        await asyncio.sleep(0.05)
+
+
+def _assert_stages_exactly_once_with_bounded_rework(
+    world: ChaosWorld, rounds: int, *, max_rework: int = 1
+) -> None:
+    """The SLO's rework clause: every stage ran, and at most ``max_rework``
+    stage was replayed (the single in-flight step a resume may re-run)."""
+    commands = list(world.sandbox.calls)
+    expected = {f"python stage.py --index {n}" for n in range(1, rounds + 1)}
+    assert set(commands) == expected, (
+        f"stage set mismatch: missing={sorted(expected - set(commands))} "
+        f"unexpected={sorted(set(commands) - expected)}"
+    )
+    rework = len(commands) - len(set(commands))
+    assert rework <= max_rework, (
+        f"{rework} stages re-executed (allowed {max_rework}): "
+        f"{sorted({c for c in commands if commands.count(c) > 1})}"
+    )
+
+
+def test_nats_server_restart_mid_run_recovers_and_completes(tmp_path, nats_server) -> None:
+    """Bounce the NATS server while a run is in flight. Whichever path the
+    worker takes — transparent client reconnect, or EventPublishError -> NAK ->
+    redelivery -> checkpoint resume — the run must complete with every stage
+    executed (at most one replayed) and a single terminal event."""
+    namespace = ChaosNamespace.fresh()
+    settings = chaos_settings(tmp_path, nats_server, namespace, worker_ack_wait_seconds=8.0)
+    world = ChaosWorld(tmp=tmp_path)
+    job = RunJobEnvelope(
+        run_id="run-chaos-natsrestart",
+        thread_id="thread-chaos",
+        user_id="chaos-tester",
+        goal="Run the staged pipeline to completion and state the outcome plainly.",
+    )
+    paused = threading.Event()
+    policy = _pause_once_policy(
+        world,
+        rounds=12,
+        pause_before_stage=5,
+        pause_seconds=4.0,
+        paused=paused,
+        final_answer="Pipeline finished across the broker restart.",
+    )
+
+    async def scenario():
+        collector = EventCollector(nats_server.url, namespace)
+        await collector.start()
+        control_plane = ChaosControlPlane(collector)
+        worker = ChaosWorker(
+            settings,
+            world=world,
+            collector=collector,
+            control_plane=control_plane,
+            policy=policy,
+        )
+        worker_task = await start_worker(worker)
+        try:
+            await publish_job(nats_server, settings, job)
+            await _wait_event(paused, timeout=30, description="the pre-restart pause window")
+            await nats_server.restart()
+            # The restart destroyed the collector's ephemeral ordered consumer;
+            # resync replays the stream additively (event_id-deduped).
+            await collector.resync()
+            await collector.wait_for(
+                lambda c: c.of_kind(job.run_id, "run.completed"),
+                timeout=60,
+                description="run.completed after the NATS server restart",
+            )
+            await asyncio.sleep(0.3)
+            return collector.to_event_log(job.run_id)
+        finally:
+            await stop_worker(worker_task)
+            await collector.stop()
+
+    with _sandbox_patch(world):
+        log = asyncio.run(scenario())
+
+    _assert_stages_exactly_once_with_bounded_rework(world, 12)
+    assert_terminal_success(log)
+    assert_event_stream_integrity(log)
+    ack_pending, _redelivered = asyncio.run(consumer_state(nats_server, settings))
+    assert ack_pending == 0, "job left unacked after the restart recovery"
+
+
+def test_cancel_subject_aborts_run_and_publishes_canceled(tmp_path, nats_server) -> None:
+    namespace = ChaosNamespace.fresh()
+    settings = chaos_settings(tmp_path, nats_server, namespace)
+    world = ChaosWorld(tmp=tmp_path)
+    job = RunJobEnvelope(
+        run_id="run-chaos-cancel",
+        thread_id="thread-chaos",
+        user_id="chaos-tester",
+        goal="Run the staged pipeline to completion and state the outcome plainly.",
+    )
+    paused = threading.Event()
+    policy = _pause_once_policy(
+        world,
+        rounds=12,
+        pause_before_stage=3,
+        pause_seconds=6.0,
+        paused=paused,
+        final_answer="This answer must never be produced.",
+    )
+
+    async def scenario():
+        collector = EventCollector(nats_server.url, namespace)
+        await collector.start()
+        control_plane = ChaosControlPlane(collector)
+        worker = ChaosWorker(
+            settings,
+            world=world,
+            collector=collector,
+            control_plane=control_plane,
+            policy=policy,
+        )
+        worker_task = await start_worker(worker)
+        try:
+            await publish_job(nats_server, settings, job)
+            await _wait_event(paused, timeout=30, description="the pre-cancel pause window")
+            import json as json_module
+
+            import nats as nats_client
+
+            connection = await nats_client.connect(nats_server.url)
+            try:
+                await connection.publish(
+                    settings.nats_cancel_subject,
+                    json_module.dumps(
+                        {"run_id": job.run_id, "reason": "user-requested-halt"}
+                    ).encode("utf-8"),
+                )
+                await connection.flush()
+            finally:
+                await connection.close()
+            await collector.wait_for(
+                lambda c: c.of_kind(job.run_id, "run.canceled"),
+                timeout=30,
+                description="run.canceled after the cancel-subject message",
+            )
+            await asyncio.sleep(0.3)
+            return collector.to_event_log(job.run_id)
+        finally:
+            await stop_worker(worker_task)
+            await collector.stop()
+
+    with _sandbox_patch(world):
+        log = asyncio.run(scenario())
+
+    canceled = log.of_kind("run.canceled")
+    assert len(canceled) == 1
+    assert canceled[0]["payload"]["reason"] == "user-requested-halt"
+    assert not log.of_kind("run.completed"), "canceled run still published a completion"
+    assert not log.of_kind("run.failed")
+    # The cancel landed inside the stage-3 model pause: stages 1-2 ran, nothing
+    # after — cancellation stops compute, not just the answer.
+    assert world.sandbox.calls == [f"python stage.py --index {n}" for n in range(1, 3)]
+    assert_event_stream_integrity(log)
+    ack_pending, _redelivered = asyncio.run(consumer_state(nats_server, settings))
+    assert ack_pending == 0, "canceled run's delivery was not terminally acked"
+
+
+def test_lease_loss_aborts_promptly_and_redelivery_resumes(tmp_path, nats_server) -> None:
+    """The keepalive thread's 409 is the one kill signal a worker trusts: on a
+    scripted renewal conflict the run must abort promptly, NAK for redelivery,
+    and the redelivered run — under a fresh lease tenure — must checkpoint-resume
+    and finish with bounded rework and no spurious terminal events."""
+    namespace = ChaosNamespace.fresh()
+    settings = chaos_settings(
+        tmp_path,
+        nats_server,
+        namespace,
+        worker_ack_wait_seconds=8.0,
+        control_run_lease_ttl_seconds=1.0,  # keepalive ticks every 0.25s
+    )
+    world = ChaosWorld(tmp=tmp_path)
+    job = RunJobEnvelope(
+        run_id="run-chaos-leaseloss",
+        thread_id="thread-chaos",
+        user_id="chaos-tester",
+        goal="Run the staged pipeline to completion and state the outcome plainly.",
+    )
+
+    def policy(request: TurnRequest) -> TurnDecision:
+        next_stage = len(world.sandbox.calls) + 1
+        if next_stage <= 10:
+            # Slow, model-side turns so the conflict lands inside a model node.
+            return TurnDecision(
+                execute_command=f"python stage.py --index {next_stage}",
+                sleep_seconds=0.3,
+            )
+        return TurnDecision(text="Pipeline finished after the lease hand-off came home.")
+
+    async def scenario():
+        collector = EventCollector(nats_server.url, namespace)
+        await collector.start()
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
+        control_plane.conflict_after_renewals = 2  # 409 on the 3rd renewal (~0.75s in)
+        worker = ChaosWorker(
+            settings,
+            world=world,
+            collector=collector,
+            control_plane=control_plane,
+            policy=policy,
+        )
+        worker_task = await start_worker(worker)
+        try:
+            await publish_job(nats_server, settings, job)
+            await collector.wait_for(
+                lambda c: c.of_kind(job.run_id, "run.completed"),
+                timeout=60,
+                description="run.completed after lease loss and redelivery",
+            )
+            await asyncio.sleep(0.3)
+            return collector.to_event_log(job.run_id), control_plane
+        finally:
+            await stop_worker(worker_task)
+            await collector.stop()
+
+    with _sandbox_patch(world):
+        log, control_plane = asyncio.run(scenario())
+
+    assert control_plane.lease_tenures >= 2, (
+        "the redelivered run never acquired a fresh lease tenure"
+    )
+    assert log.of_kind("run.resumed"), (
+        "the post-conflict redelivery restarted from scratch instead of resuming"
+    )
+    _assert_stages_exactly_once_with_bounded_rework(world, 10)
+    assert not log.of_kind("run.canceled"), (
+        "lease loss must requeue silently, not publish a user-facing cancel"
+    )
+    assert_terminal_success(log)
+    assert_event_stream_integrity(log)
+    ack_pending, _redelivered = asyncio.run(consumer_state(nats_server, settings))
+    assert ack_pending == 0

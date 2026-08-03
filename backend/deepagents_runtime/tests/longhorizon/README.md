@@ -68,6 +68,9 @@ injection seams. Needs a docker daemon; marked `tier2_chaos` and self-skipping.
 | happy path | job → consumer → run → partitioned events → ack, gapless, no redeliveries |
 | worker death | shutdown NAK → JetStream redelivery → fresh worker resumes from durable checkpoint, 12 stages exactly once |
 | duplicate delivery | active-run duplicate parried (delayed NAK); post-completion redelivery `run.worker_skipped` via control-plane status, never re-executed |
+| NATS server restart | broker bounced mid-run (`docker restart`, JetStream state persists); worker recovers via reconnect or NAK→redelivery→resume; every stage present, ≤1 replayed |
+| cancel subject | mid-run cancel message → prompt abort, `run.canceled` with the caller's reason, compute stops (no later stages), delivery acked |
+| lease loss | scripted 409 on keepalive renewal (the one kill a worker trusts) → prompt abort, silent NAK (no user-facing terminal), redelivery under a fresh lease tenure resumes and completes |
 
 First blood: the worker-death scenario found a real production bug — the
 shutdown path's immediate NAK raced the dying worker's own outstanding pull

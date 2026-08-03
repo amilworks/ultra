@@ -49,7 +49,11 @@ from longhorizon_harness import (
 from ultra_deepagents.agent import build_research_agent
 from ultra_deepagents.checkpointing import DurableCheckpointer, InMemoryCheckpointStateStore
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.nats_worker import NATSDeepAgentsWorker
+from ultra_deepagents.nats_worker import (
+    ControlPlaneRunLease,
+    NATSDeepAgentsWorker,
+    RunLeaseConflict,
+)
 from ultra_deepagents.runner import run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
@@ -113,6 +117,19 @@ class NatsServerContainer:
             capture_output=True,
             timeout=30,
         )
+
+    async def restart(self) -> None:
+        """Bounce the server process. ``docker restart`` keeps the container
+        filesystem, so JetStream streams/consumers/unacked state survive —
+        the same shape as a NATS node reboot in production."""
+        await asyncio.to_thread(
+            subprocess.run,
+            ["docker", "restart", self.name],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        )
+        await self.wait_ready()
 
     async def wait_ready(self, *, timeout: float = 20.0) -> None:
         deadline = time.monotonic() + timeout
@@ -205,8 +222,10 @@ class EventCollector:
         self._url = url
         self._namespace = namespace
         self._connection: Any = None
+        self._js: Any = None
         self._subscription: Any = None
         self._task: asyncio.Task | None = None
+        self._seen_event_ids: set[str] = set()
         self.events: list[dict[str, Any]] = []
 
     async def start(self) -> None:
@@ -226,25 +245,50 @@ class EventCollector:
         except Exception as exc:
             if "stream name already in use" not in str(exc).lower():
                 raise
-        self._subscription = await js.subscribe(
+        self._js = js
+        await self._open_subscription()
+
+    async def _open_subscription(self) -> None:
+        self._subscription = await self._js.subscribe(
             f"{self._namespace.events_subject}.>",
             stream=self._namespace.stream,
             ordered_consumer=True,
         )
-        self._task = asyncio.create_task(self._pump())
+        self._task = asyncio.create_task(self._pump(self._subscription))
 
-    async def _pump(self) -> None:
+    async def resync(self) -> None:
+        """Re-read the stream from the beginning on a fresh ordered consumer.
+
+        A server restart destroys ephemeral ordered consumers; the replacement
+        replays the full history, and event_id dedupe makes the replay additive
+        (``events`` is never cleared, so the worker's resume-floor query never
+        observes a transiently empty view)."""
+        if self._task is not None:
+            self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        with contextlib.suppress(Exception):
+            await self._subscription.unsubscribe()
+        await self._open_subscription()
+
+    async def _pump(self, subscription: Any) -> None:
         while True:
             try:
-                message = await self._subscription.next_msg(timeout=0.5)
+                message = await subscription.next_msg(timeout=0.5)
             except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 raise
             try:
-                self.events.append(json.loads(message.data.decode("utf-8")))
+                event = json.loads(message.data.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 continue
+            event_id = str(event.get("event_id") or "")
+            if event_id and event_id in self._seen_event_ids:
+                continue
+            if event_id:
+                self._seen_event_ids.add(event_id)
+            self.events.append(event)
 
     async def stop(self) -> None:
         if self._task is not None:
@@ -307,11 +351,22 @@ class ChaosControlPlane:
     """Stand-in for the Go control plane, answering through the worker's own
     injection seams. Status is derived from the ingested event stream exactly
     like production: a terminal event makes the run non-runnable, which is what
-    stops a late redelivery from re-executing a completed run."""
+    stops a late redelivery from re-executing a completed run.
 
-    def __init__(self, collector: EventCollector) -> None:
+    Lease chaos: with ``grant_leases=True`` every delivery gets a real
+    ``ControlPlaneRunLease`` (a new tenure per grant) and the keepalive thread's
+    renewals go through ``renew_lease_sync``. Arm ``conflict_after_renewals`` to
+    make the FIRST tenure's Nth renewal raise ``RunLeaseConflict`` — the
+    authoritative "the run was handed elsewhere" signal, and the only kill a
+    worker trusts."""
+
+    def __init__(self, collector: EventCollector, *, grant_leases: bool = False) -> None:
         self._collector = collector
+        self._grant_leases = grant_leases
         self.status_overrides: dict[str, str] = {}
+        self.lease_tenures = 0
+        self.lease_renewals = 0
+        self.conflict_after_renewals: int | None = None
 
     async def run_status(self, run_id: str, settings: RuntimeSettings) -> str | None:
         del settings
@@ -332,14 +387,28 @@ class ChaosControlPlane:
         }[terminal]
 
     async def run_lease(self, run_id: str, settings: RuntimeSettings):
-        del run_id, settings
-        return None
+        del settings
+        if not self._grant_leases:
+            return None
+        self.lease_tenures += 1
+        return ControlPlaneRunLease(
+            run_id=run_id,
+            worker_id=f"chaos-worker-tenure-{self.lease_tenures}",
+            lease_token=f"lease-{self.lease_tenures}",
+        )
 
     async def release_lease(self, lease: Any, settings: RuntimeSettings) -> None:
         del lease, settings
 
     def renew_lease_sync(self, lease: Any, settings: RuntimeSettings):
+        # Runs on the _LeaseKeepalive thread, mirroring the sync HTTP renewal.
         del settings
+        self.lease_renewals += 1
+        if self.conflict_after_renewals is not None:
+            self.conflict_after_renewals -= 1
+            if self.conflict_after_renewals < 0:
+                self.conflict_after_renewals = None  # one-shot: later tenures renew fine
+                raise RunLeaseConflict("scripted 409: run handed to another worker")
         return lease
 
     async def worker_heartbeat(self, *args: Any, **kwargs: Any) -> None:

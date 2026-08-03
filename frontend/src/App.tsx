@@ -368,6 +368,17 @@ type BisqueResourceCountsState = {
 // LUT palette, fixed time/depth, and selected scrub axis.
 const THUMBNAIL_SCRUB_CONFIG = new Map<string, ThumbnailScrubConfig>();
 
+/* Report canvas split geometry, all in px of the MAIN SHELL's width.
+   Split needs transcript-min + panel-min to coexist; below that the canvas
+   is a sheet. The default matches the pre-resize fixed column (40.5rem). */
+const REPORT_CANVAS_TRANSCRIPT_MIN = 384;
+const REPORT_CANVAS_PANEL_MIN = 320;
+const REPORT_CANVAS_PANEL_MAX = 896;
+const REPORT_CANVAS_PANEL_DEFAULT = 648;
+const REPORT_CANVAS_SPLIT_MIN_STAGE =
+  REPORT_CANVAS_TRANSCRIPT_MIN + REPORT_CANVAS_PANEL_MIN + 16;
+const REPORT_CANVAS_WIDTH_STORAGE_KEY = "ultra:report-canvas:width";
+
 const readAuthErrorFromLocation = (): string | null => {
   if (typeof window === "undefined") {
     return null;
@@ -5170,15 +5181,90 @@ export function App() {
   // composer to reclaim reading space (expands on focus / at-bottom / sending).
   const [composerScrolledAway, setComposerScrolledAway] = useState(false);
 
-  /* Report canvas — the reading surface for run-generated reports. Below
-     1200px the stage cannot afford a true split, so the canvas floats over
-     the transcript; on the phone regime it is a full-screen sheet. */
-  const reportCanvasStageNarrow = useBreakpoint(1200);
-  const reportCanvasMode: ReportCanvasMode = isPhoneView
-    ? "sheet"
-    : reportCanvasStageNarrow
-      ? "overlay"
+  /* Report canvas — the reading surface for run-generated reports. Two
+     regimes, decided by the MAIN SHELL's own width (an expanded sidebar can
+     narrow the stage inside a wide window, so the viewport is the wrong
+     axis): a true split whenever the stage affords the transcript and panel
+     minimums together, a full-screen sheet everywhere else. There is
+     deliberately no floating overlay between them — it half-covered the
+     transcript and turned the sidebar into a competing overlay. */
+  /* A STATE ref, not useRef + []-effect: the shell mounts after the auth
+     gate resolves, and a mount-once effect would observe nothing forever. */
+  const [mainShellElement, setMainShellElement] = useState<HTMLElement | null>(null);
+  const mainShellWidthRef = useRef<number | null>(null);
+  const [mainShellWidth, setMainShellWidth] = useState<number | null>(null);
+  useEffect(() => {
+    if (!mainShellElement || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const update = () => {
+      const width = mainShellElement.clientWidth;
+      mainShellWidthRef.current = width;
+      /* Quantized so a live window-resize re-renders a handful of times,
+         not per pixel. */
+      setMainShellWidth(Math.round(width / 16) * 16);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(mainShellElement);
+    return () => observer.disconnect();
+  }, [mainShellElement]);
+  const reportCanvasMode: ReportCanvasMode =
+    isPhoneView ||
+    (mainShellWidth !== null && mainShellWidth < REPORT_CANVAS_SPLIT_MIN_STAGE)
+      ? "sheet"
       : "split";
+  /* The divider commits here; the width survives sessions. Bounds re-derive
+     from the live stage width so a resize can never starve the transcript. */
+  const [reportCanvasStoredWidth, setReportCanvasStoredWidth] = useState<number | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    try {
+      const raw = window.localStorage.getItem(REPORT_CANVAS_WIDTH_STORAGE_KEY);
+      const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
+  const reportCanvasSplitBounds = useMemo(
+    () => ({
+      min: REPORT_CANVAS_PANEL_MIN,
+      max: Math.max(
+        REPORT_CANVAS_PANEL_MIN,
+        Math.min(
+          REPORT_CANVAS_PANEL_MAX,
+          (mainShellWidth ?? 1280) - REPORT_CANVAS_TRANSCRIPT_MIN
+        )
+      ),
+    }),
+    [mainShellWidth]
+  );
+  const reportCanvasSplitWidth = Math.min(
+    reportCanvasSplitBounds.max,
+    Math.max(
+      reportCanvasSplitBounds.min,
+      reportCanvasStoredWidth ?? REPORT_CANVAS_PANEL_DEFAULT
+    )
+  );
+  const handleReportCanvasWidthCommit = useCallback((width: number) => {
+    const rounded = Math.round(width);
+    setReportCanvasStoredWidth(rounded);
+    try {
+      window.localStorage.setItem(REPORT_CANVAS_WIDTH_STORAGE_KEY, String(rounded));
+    } catch {
+      /* Private-mode storage failures only cost persistence. */
+    }
+  }, []);
+  const handleReportCanvasWidthReset = useCallback(() => {
+    setReportCanvasStoredWidth(null);
+    try {
+      window.localStorage.removeItem(REPORT_CANVAS_WIDTH_STORAGE_KEY);
+    } catch {
+      /* Same: reset still applies for this session. */
+    }
+  }, []);
   /* Controlled so opening the canvas can collapse the sidebar to its icon
      rail (paying the width back to the transcript) and closing can restore
      it. The SidebarTrigger keeps working — it drives this same state through
@@ -7848,9 +7934,11 @@ export function App() {
       if (typeof window === "undefined") {
         return;
       }
-      /* Desktop split only: never steal a phone screen or a narrow stage,
-         and never replace a canvas the reader already has open. */
-      if (!window.matchMedia("(min-width: 1200px)").matches) {
+      /* Split only: never steal a phone screen or a narrow stage, and never
+         replace a canvas the reader already has open. Measured on the stage
+         shell, the same axis the regime uses. */
+      const stageWidth = mainShellWidthRef.current;
+      if (stageWidth === null || stageWidth < REPORT_CANVAS_SPLIT_MIN_STAGE) {
         return;
       }
       if (conversationId !== (activeConversation?.id ?? null)) {
@@ -13136,17 +13224,24 @@ export function App() {
 
       <SidebarInset>
         <main
+          ref={setMainShellElement}
           className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden"
           /* Split-mode report canvas: the attribute flips the shell from a
              column into a named-area grid (bar / stage+canvas / composer),
              so the canvas gets a real column without re-nesting the chat
-             tree. "open" carries the 648px column; "closing" returns it to
-             zero and the node unmounts after the gesture lands. */
+             tree. "open" carries the resizable column (the width variable
+             below); "closing" returns it to zero and the node unmounts
+             after the gesture lands. */
           data-report-canvas={
             activePanel === "chat" && reportCanvasVisible && reportCanvasMode === "split"
               ? reportCanvasClosing
                 ? "closing"
                 : "open"
+              : undefined
+          }
+          style={
+            activePanel === "chat" && reportCanvasVisible && reportCanvasMode === "split"
+              ? ({ "--report-canvas-col": `${reportCanvasSplitWidth}px` } as CSSProperties)
               : undefined
           }
         >
@@ -14245,6 +14340,10 @@ export function App() {
                 closing={reportCanvasClosing}
                 onClose={closeReportCanvas}
                 loadDocumentText={fetchRunDocumentText}
+                splitWidth={reportCanvasSplitWidth}
+                splitWidthBounds={reportCanvasSplitBounds}
+                onSplitWidthCommit={handleReportCanvasWidthCommit}
+                onSplitWidthReset={handleReportCanvasWidthReset}
               />
             </Suspense>
           ) : null}

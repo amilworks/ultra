@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,10 +45,14 @@ export type ReportCanvasVersion = {
   imageArtifacts: Array<{ path: string; url?: string; downloadUrl?: string }>;
 };
 
-// split: a fixed column in the stage grid (desktop).
-// overlay: floats over the transcript when the stage is too narrow to split.
-// sheet: full-screen on the phone regime, entered only from the card.
-export type ReportCanvasMode = "split" | "overlay" | "sheet";
+// split: a user-resizable column in the stage grid — reader sees chat AND
+//        report. Engages whenever the stage affords both minimum widths.
+// sheet: full-screen immersion everywhere else. There is deliberately no
+//        floating middle state: a panel half-covering prose serves neither
+//        reading nor chat, and it turns the sidebar into a competing overlay.
+export type ReportCanvasMode = "split" | "sheet";
+
+export type ReportCanvasSplitBounds = { min: number; max: number };
 
 export type ReportCanvasProps = {
   versions: ReportCanvasVersion[];
@@ -49,7 +60,17 @@ export type ReportCanvasProps = {
   closing?: boolean;
   onClose: () => void;
   loadDocumentText: (downloadUrl: string) => Promise<string>;
+  /* Split-regime resize. Live drag writes the width variable imperatively on
+     the stage grid so the App tree never renders at pointer speed; the host
+     receives one commit per gesture (and per keystroke) to persist. */
+  splitWidth?: number;
+  splitWidthBounds?: ReportCanvasSplitBounds;
+  onSplitWidthCommit?: (width: number) => void;
+  onSplitWidthReset?: () => void;
 };
+
+const DEFAULT_SPLIT_BOUNDS: ReportCanvasSplitBounds = { min: 320, max: 896 };
+const SPLIT_KEYBOARD_STEP = 16;
 
 type CanvasBodyStatus = "loading" | "ready" | "error" | "oversize";
 
@@ -258,10 +279,62 @@ export function ReportCanvas({
   closing = false,
   onClose,
   loadDocumentText,
+  splitWidth,
+  splitWidthBounds,
+  onSplitWidthCommit,
+  onSplitWidthReset,
 }: ReportCanvasProps) {
   // null = follow the latest registration (new versions replace the view);
   // a number = the reader pinned an older registration from the chip.
   const [pinnedVersionIndex, setPinnedVersionIndex] = useState<number | null>(null);
+  const rootRef = useRef<HTMLElement | null>(null);
+  /* Non-null only mid-gesture; the committed width lives with the host. */
+  const [liveSplitWidth, setLiveSplitWidth] = useState<number | null>(null);
+  const splitDragRef = useRef<{ pointerId: number; frameRight: number } | null>(null);
+  const splitBounds = splitWidthBounds ?? DEFAULT_SPLIT_BOUNDS;
+  const resolvedSplitWidth = liveSplitWidth ?? splitWidth;
+
+  const clampSplitWidth = useCallback(
+    (width: number) =>
+      Math.round(Math.min(splitBounds.max, Math.max(splitBounds.min, width))),
+    [splitBounds.max, splitBounds.min]
+  );
+
+  const stageShellElement = useCallback(
+    () => rootRef.current?.closest(".app-main-shell") as HTMLElement | null,
+    []
+  );
+
+  /* Pointer capture keeps the move stream on the handle even while the
+     cursor crosses the report iframe — without it the frame swallows the
+     gesture. The width variable is written straight onto the stage grid so
+     dragging never renders the App tree. */
+  const applyLiveSplitWidth = useCallback(
+    (width: number) => {
+      const clamped = clampSplitWidth(width);
+      stageShellElement()?.style.setProperty("--report-canvas-col", `${clamped}px`);
+      setLiveSplitWidth(clamped);
+      return clamped;
+    },
+    [clampSplitWidth, stageShellElement]
+  );
+
+  const endSplitDrag = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>, commit: boolean) => {
+      const drag = splitDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) {
+        return;
+      }
+      splitDragRef.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      stageShellElement()?.removeAttribute("data-canvas-resizing");
+      if (commit) {
+        onSplitWidthCommit?.(applyLiveSplitWidth(drag.frameRight - event.clientX));
+      }
+      setLiveSplitWidth(null);
+    },
+    [applyLiveSplitWidth, onSplitWidthCommit, stageShellElement]
+  );
   const latestIndex = versions.length - 1;
   const activeIndex =
     pinnedVersionIndex !== null && pinnedVersionIndex >= 0 && pinnedVersionIndex <= latestIndex
@@ -394,6 +467,7 @@ export function ReportCanvas({
   return (
     <aside
       id="report-canvas"
+      ref={rootRef}
       className="report-canvas"
       data-mode={mode}
       data-closing={closing ? "true" : undefined}
@@ -401,6 +475,75 @@ export function ReportCanvas({
       aria-modal={mode === "sheet" ? true : undefined}
       aria-label={`Report: ${displayTitle}`}
     >
+      {mode === "split" ? (
+        <div
+          className="report-canvas-resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize report panel"
+          aria-valuemin={splitBounds.min}
+          aria-valuemax={splitBounds.max}
+          aria-valuenow={resolvedSplitWidth}
+          tabIndex={0}
+          onPointerDown={(event) => {
+            if (event.button !== 0) {
+              return;
+            }
+            const frame = rootRef.current?.querySelector(".report-canvas-frame");
+            if (!(frame instanceof HTMLElement)) {
+              return;
+            }
+            event.preventDefault();
+            /* preventDefault (needed so a drag never selects transcript
+               text) also suppresses pointerdown's default focus — restore
+               it so the keyboard path is one click away. */
+            event.currentTarget.focus();
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+            /* The panel's right edge is anchored to the stage padding, so it
+               is a stable reference for the whole gesture. */
+            splitDragRef.current = {
+              pointerId: event.pointerId,
+              frameRight: frame.getBoundingClientRect().right,
+            };
+            stageShellElement()?.setAttribute("data-canvas-resizing", "true");
+          }}
+          onPointerMove={(event) => {
+            const drag = splitDragRef.current;
+            if (!drag || event.pointerId !== drag.pointerId) {
+              return;
+            }
+            applyLiveSplitWidth(drag.frameRight - event.clientX);
+          }}
+          onPointerUp={(event) => endSplitDrag(event, true)}
+          onPointerCancel={(event) => endSplitDrag(event, false)}
+          onDoubleClick={() => onSplitWidthReset?.()}
+          onKeyDown={(event) => {
+            const current = resolvedSplitWidth;
+            if (current === undefined) {
+              return;
+            }
+            let next: number | null = null;
+            if (event.key === "ArrowLeft") {
+              next = clampSplitWidth(current + SPLIT_KEYBOARD_STEP);
+            } else if (event.key === "ArrowRight") {
+              next = clampSplitWidth(current - SPLIT_KEYBOARD_STEP);
+            } else if (event.key === "Home") {
+              next = splitBounds.min;
+            } else if (event.key === "End") {
+              next = splitBounds.max;
+            }
+            if (next === null || next === current) {
+              if (next !== null) {
+                event.preventDefault();
+              }
+              return;
+            }
+            event.preventDefault();
+            stageShellElement()?.style.setProperty("--report-canvas-col", `${next}px`);
+            onSplitWidthCommit?.(next);
+          }}
+        />
+      ) : null}
       <div className="report-canvas-frame">
         <header className="report-canvas-head">
           {mode === "sheet" ? (

@@ -234,3 +234,49 @@ describe("ReportCanvas", () => {
     expect(screen.queryByLabelText("Close report canvas")).not.toBeInTheDocument();
   });
 });
+
+describe("ReportCanvas split resize", () => {
+  it("exposes a keyboard-operable separator that commits clamped widths", async () => {
+    const onSplitWidthCommit = vi.fn();
+    const onSplitWidthReset = vi.fn();
+    const loadDocumentText = vi.fn().mockResolvedValue("# T\n\nbody");
+
+    render(
+      <ReportCanvas
+        versions={[markdownVersion]}
+        mode="split"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+        splitWidth={648}
+        splitWidthBounds={{ min: 320, max: 700 }}
+        onSplitWidthCommit={onSplitWidthCommit}
+        onSplitWidthReset={onSplitWidthReset}
+      />
+    );
+
+    const separator = screen.getByRole("separator", { name: "Resize report panel" });
+    expect(separator).toHaveAttribute("aria-valuenow", "648");
+    /* The panel hangs on the right, so ArrowLeft grows it; bounds clamp. */
+    fireEvent.keyDown(separator, { key: "ArrowLeft" });
+    expect(onSplitWidthCommit).toHaveBeenCalledWith(664);
+    fireEvent.keyDown(separator, { key: "End" });
+    expect(onSplitWidthCommit).toHaveBeenCalledWith(700);
+    fireEvent.keyDown(separator, { key: "Home" });
+    expect(onSplitWidthCommit).toHaveBeenCalledWith(320);
+    fireEvent.doubleClick(separator);
+    expect(onSplitWidthReset).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the divider out of the sheet regime", () => {
+    const loadDocumentText = vi.fn().mockResolvedValue("# T\n\nbody");
+    render(
+      <ReportCanvas
+        versions={[markdownVersion]}
+        mode="sheet"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+      />
+    );
+    expect(screen.queryByRole("separator")).not.toBeInTheDocument();
+  });
+});

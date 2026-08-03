@@ -5117,6 +5117,10 @@ def test_worker_shutdown_naks_active_job_without_marking_user_canceled(monkeypat
 
     assert message.acked == 0
     assert message.naked == 1
+    # The shutdown NAK must delay redelivery beyond the dying worker's last
+    # outstanding pull request; an immediate NAK redelivers into this worker's
+    # own doomed buffer and wedges the run until AckWait expires.
+    assert message.nak_delays == [nats_worker_module._SHUTDOWN_NAK_DELAY_SECONDS]
     assert [event["event_kind"] for event in events] == []
 
 

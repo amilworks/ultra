@@ -1,4 +1,4 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image roll-workers frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image roll-workers ocr-golden-eval frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 COMPOSE_ENV_FILE := $(if $(wildcard .env.docker),.env.docker,.env.docker.example)
@@ -207,6 +207,9 @@ codeexec-image: ## Build Python sandbox image for execute_python_job (bakes Rare
 
 roll-workers: ## Restart compose deepagents workers so a rebuilt sandbox image takes effect
 	docker compose restart worker || docker restart ultra-worker-1 ultra-worker-2
+
+ocr-golden-eval: ## Score OCR accuracy on synthetic ground-truth fixtures (engine mode; VLM=1 for the Qwen pass)
+	@cd backend/deepagents_runtime && if [ "$${VLM:-0}" = "1" ]; then uv run python scripts/eval_ocr_golden.py --vlm; else uv run python scripts/eval_ocr_golden.py; fi
 
 control-test: ## Run Go control plane tests
 	$(MAKE) -C backend/controlplane test

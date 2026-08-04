@@ -145,6 +145,18 @@ RUN python -m pip install --no-cache-dir \
     && python -c "import numpy, zarr, dask, torch, torchvision, cv2, bioio_ome_zarr; assert numpy.__version__ == '1.26.4', numpy.__version__; print('bio main-env no-regression OK: numpy', numpy.__version__, 'zarr', zarr.__version__, 'dask', dask.__version__)" \
     && python -c "import scanpy, anndata, leidenalg, igraph, liana; from torch_geometric.nn import GCNConv; print('bio main-env imports OK: scanpy', scanpy.__version__, 'liana', liana.__version__)"
 
+# OCR + video toolchain for the ocr-reader subagent. Deliberately a LATE layer:
+# adding it to the base apt block would invalidate the torch/conda cache chain
+# and force a full rebuild for a 60MB addition. Verified at build time so a
+# broken toolchain fails the build, not a run.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install --no-cache-dir pytesseract \
+    && tesseract --version | head -1 \
+    && ffmpeg -version | head -1 \
+    && python -c "import pytesseract; print('ocr toolchain OK:', pytesseract.get_tesseract_version())"
+
 # graph-tool (Bayesian nested stochastic block models + minimum-description-length model
 # selection — the principled test for whether detected community structure is real signal or
 # an artifact of the algorithm) and squidpy (spatial neighbor graphs, neighborhood

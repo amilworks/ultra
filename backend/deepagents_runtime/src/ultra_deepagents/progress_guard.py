@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 EXECUTE_TOOL_NAMES = frozenset({"execute"})
 # Forward-motion tools: a completed mutation or delegation means the next re-run
 # is a new attempt, not churn.
-PROGRESS_TOOL_NAMES = frozenset({"write_file", "edit_file", "task"})
+PROGRESS_TOOL_NAMES = frozenset({"write_file", "edit_file", "task", "map_task"})
 
 _COMMAND_PREVIEW_CHARS = 160
 _ERROR_PREVIEW_CHARS = 200

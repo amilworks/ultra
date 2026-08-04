@@ -34,6 +34,25 @@ from pydantic import BaseModel, Field
 MAP_TASK_MAX_ITEMS = 64
 MAP_TASK_MAX_CONCURRENCY = 8
 MAP_TASK_DEFAULT_CONCURRENCY = 4
+
+# The synthetic always-available map target. Exported so the capability
+# manifest can list it truthfully: a run with zero registered specialist
+# subagents still has BOTH deepagents' built-in general-purpose (via task)
+# and this spec (via map_task) — a manifest that says available_subagents:[]
+# while map_task sits in the tool list sends the model chasing a
+# contradiction (observed live: run_69c0e07d, 2026-08-04).
+GENERAL_PURPOSE_SUBAGENT_SPEC: dict[str, object] = {
+    "name": "general-purpose",
+    "description": (
+        "General-purpose analyst for delegated items; always available to "
+        "task and map_task even when no specialist subagents are registered."
+    ),
+    "system_prompt": (
+        "You are a capable general-purpose analyst subagent. Complete the "
+        "single delegated item you are given and reply with the result, "
+        "nothing else."
+    ),
+}
 _PREVIEW_CHARS = 240
 _RESULT_MARKER = "map_task result"
 
@@ -232,7 +251,7 @@ def build_map_task_tool(
             "per-image reads): it dispatches concurrently under a cap, isolates "
             "per-item failures as error entries, writes full outputs to a "
             "workspace JSONL, and returns only compact previews so the batch "
-            "never floods your context. Items must be self-contained prompts — "
+            "never floods your context. The `general-purpose` subagent type is ALWAYS available as a map target, even when no specialist subagents are registered. Items must be self-contained prompts — "
             "subagents share no state. For a single delegation, or steps that "
             "depend on each other's outputs, keep using task."
         ),

@@ -516,8 +516,10 @@ def test_research_agent_registers_configured_async_subagents_and_manifest(monkey
         "cancel_async_task",
         "list_async_tasks",
     }.issubset(builtin_names)
-    assert "task" not in builtin_names
-    assert manifest["available_subagents"] == []
+    assert "task" in builtin_names  # built-in general-purpose always exists
+    assert [entry["name"] for entry in manifest["available_subagents"]] == [
+        "general-purpose"
+    ]
     assert manifest["available_async_subagents"] == [
         {
             "name": "remote-training-runner",
@@ -915,6 +917,14 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
                 "stage_uploaded_files_for_analysis",
             ],
         },
+        {
+            "name": "general-purpose",
+            "description": (
+                "General-purpose analyst for delegated items; always available "
+                "to task and map_task even when no specialist subagents are "
+                "registered."
+            ),
+        },
     ]
 
 
@@ -985,6 +995,7 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
     assert [item["name"] for item in manifest["available_subagents"]] == [
         "code-runner",
         "qwen-code-runner",
+        "general-purpose",
     ]
 
 

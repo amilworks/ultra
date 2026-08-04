@@ -35,7 +35,7 @@ from ultra_deepagents.code_execution.docker import (
 )
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.map_task import build_map_task_tool
+from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import (
     build_context_tools,
@@ -2350,38 +2350,34 @@ def build_research_agent(
         enriched.setdefault("tools", [])
         mappable_specs.append(enriched)
     mappable_specs.append(
-        {
-            "name": "general-purpose",
-            "description": "General-purpose analyst for mapped items.",
-            "system_prompt": (
-                "You are a capable general-purpose analyst subagent. Complete "
-                "the single delegated item you are given and reply with the "
-                "result, nothing else."
-            ),
-            "model": map_model,
-            "tools": [],
-        }
+        {**GENERAL_PURPOSE_SUBAGENT_SPEC, "model": map_model, "tools": []}
     )
+    # The manifest must list every subagent the task/map_task tools can really
+    # reach: deepagents auto-adds a built-in general-purpose to task, and
+    # map_task always carries the synthetic spec above — a bare run reporting
+    # available_subagents:[] alongside a registered map_task is a lie the
+    # model wastes reasoning on.
+    manifest_subagents = [*subagents, dict(GENERAL_PURPOSE_SUBAGENT_SPEC)]
     resolved_tools.append(
         build_map_task_tool(mappable_specs, workspace_dir=workspace_dir)
     )
     compute_resources = sandbox_compute_resources(settings)
     capability_manifest_tool = build_tool_capability_manifest_tool(
         resolved_tools,
-        available_subagents=subagents,
+        available_subagents=manifest_subagents,
         available_async_subagents=async_subagents,
         compute_resources=compute_resources,
     )
     registered_tools = [*resolved_tools, capability_manifest_tool]
     domain_manifest = build_tool_capability_manifest(
         registered_tools,
-        available_subagents=subagents,
+        available_subagents=manifest_subagents,
         available_async_subagents=async_subagents,
         compute_resources=compute_resources,
     )
     full_manifest = build_tool_capability_manifest(
         registered_tools,
-        available_subagents=subagents,
+        available_subagents=manifest_subagents,
         available_async_subagents=async_subagents,
         compute_resources=compute_resources,
     )

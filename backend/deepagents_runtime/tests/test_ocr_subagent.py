@@ -102,3 +102,28 @@ def test_generic_text_goals_do_not_pay_for_ocr_guidance():
     settings = replace(_vision_settings(), qwen_vlm_enabled=False)
     prompt = build_system_prompt(settings, _context("Summarize the CSV results"))
     assert "ocr-reader" not in prompt
+
+
+def test_bare_run_manifest_never_contradicts_map_task():
+    """Regression for run_69c0e07d (2026-08-04): a run with zero registered
+    specialist subagents shipped a manifest saying available_subagents: []
+    while map_task sat in the tool list — the model wasted reasoning chasing
+    the contradiction. The manifest must always list the general-purpose
+    target that task and map_task can really reach."""
+    from ultra_deepagents.context_tools import build_tool_capability_manifest
+    from ultra_deepagents.map_task import (
+        GENERAL_PURPOSE_SUBAGENT_SPEC,
+        build_map_task_tool,
+    )
+
+    map_tool = build_map_task_tool([dict(GENERAL_PURPOSE_SUBAGENT_SPEC)], workspace_dir=None)
+    manifest = build_tool_capability_manifest(
+        [map_tool],
+        available_subagents=[dict(GENERAL_PURPOSE_SUBAGENT_SPEC)],
+    )
+    assert "map_task" in manifest["registered_tools"]
+    names = [entry["name"] for entry in manifest["available_subagents"]]
+    assert names == ["general-purpose"]
+    assert "task" in {tool["name"] for tool in manifest["deepagents_builtin_tools"]}
+    # And the tool's own description carries the always-available guarantee.
+    assert "ALWAYS available" in map_tool.description

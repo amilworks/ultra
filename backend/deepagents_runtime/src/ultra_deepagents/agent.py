@@ -35,6 +35,7 @@ from ultra_deepagents.code_execution.docker import (
 )
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.map_task import build_map_task_tool
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import (
     build_context_tools,
@@ -2333,6 +2334,37 @@ def build_research_agent(
     async_subagents = build_async_subagents(settings, context=context)
     if async_subagents:
         middleware.append(UltraAsyncSubagentContextMiddleware(async_subagents))
+    # map_task: deterministic batched dispatch over the run's LOCAL subagents
+    # (async subagents are not mappable). Raw specs are enriched here with the
+    # run's resolved model — the same precondition create_deep_agent satisfies
+    # before compiling them for the task tool — plus a synthetic
+    # general-purpose entry so generic analysis batches always have a target.
+    map_model = model or build_chat_model(settings)
+    mappable_specs: list[dict[str, Any]] = []
+    for spec in subagents:
+        if "runnable" in spec:
+            mappable_specs.append(spec)
+            continue
+        enriched = dict(spec)
+        enriched.setdefault("model", map_model)
+        enriched.setdefault("tools", [])
+        mappable_specs.append(enriched)
+    mappable_specs.append(
+        {
+            "name": "general-purpose",
+            "description": "General-purpose analyst for mapped items.",
+            "system_prompt": (
+                "You are a capable general-purpose analyst subagent. Complete "
+                "the single delegated item you are given and reply with the "
+                "result, nothing else."
+            ),
+            "model": map_model,
+            "tools": [],
+        }
+    )
+    resolved_tools.append(
+        build_map_task_tool(mappable_specs, workspace_dir=workspace_dir)
+    )
     compute_resources = sandbox_compute_resources(settings)
     capability_manifest_tool = build_tool_capability_manifest_tool(
         resolved_tools,
@@ -2366,7 +2398,7 @@ def build_research_agent(
     resolved_tools = registered_tools
     all_subagents = [*subagents, *async_subagents]
 
-    resolved_model = model or build_chat_model(settings)
+    resolved_model = map_model
 
     return create_deep_agent(
         name="ultra-research-agent",

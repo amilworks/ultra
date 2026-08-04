@@ -1085,12 +1085,19 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
-  it("does not complete a chat response when the V2 stream ends while the run is still active", async () => {
+  it("reconnects (never completes early) when the V2 stream ends while the run is still active", async () => {
+    // The pre-reconnect contract threw a 503 here and the App rendered a false
+    // failure while the run kept executing — the guaranteed outcome of closing a
+    // laptop on an overnight run. The contract now: a stream that ends without a
+    // terminal event while the run is still active RESUMES from the cursor, and
+    // the response completes only once the run itself is terminal.
     const encoder = new TextEncoder();
+    let streamAttempts = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
       const url = String(input);
       if (url === "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=0") {
+        streamAttempts += 1;
         const body =
           'event: run_event\ndata: {"run_id":"run_live","event_kind":"message.delta","sequence":1,"payload":{"text":"partial"}}\n\n';
         return new Response(encoder.encode(body), {
@@ -1098,12 +1105,24 @@ describe("ApiClient V2 chat bridge", () => {
           headers: { "Content-Type": "text/event-stream" },
         });
       }
+      if (url === "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=1") {
+        streamAttempts += 1;
+        const body =
+          'event: run_event\ndata: {"run_id":"run_live","event_kind":"message.delta","sequence":2,"payload":{"text":" then done"}}\n\n' +
+          'event: run_event\ndata: {"run_id":"run_live","event_kind":"run.completed","sequence":3,"payload":{"response_text":"partial then done"}}\n\n';
+        return new Response(encoder.encode(body), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
       if (url === "https://ultra.example.org/v2/runs/run_live") {
+        // Still running after the first sever; succeeded for the terminal settle.
+        const status = streamAttempts < 2 ? "running" : "succeeded";
         return new Response(
           JSON.stringify({
             run_id: "run_live",
-            status: "running",
-            response_text: "",
+            status,
+            response_text: status === "succeeded" ? "partial then done" : "",
             updated_at: "2026-05-31T00:00:01Z",
           }),
           { status: 200, headers: { "Content-Type": "application/json" } }
@@ -1117,23 +1136,19 @@ describe("ApiClient V2 chat bridge", () => {
     const tokens: string[] = [];
     const donePayloads: unknown[] = [];
 
-    await expect(
-      client.resumeRunStream("run_live", {
-        onToken: (delta) => tokens.push(delta),
-        onDone: (payload) => donePayloads.push(payload),
-      })
-    ).rejects.toMatchObject({
-      status: 503,
-      detail: {
-        run_id: "run_live",
-        status: "running",
-      },
+    const result = await client.resumeRunStream("run_live", {
+      retryBaseDelayMs: 1,
+      onToken: (delta) => tokens.push(delta),
+      onDone: (payload) => donePayloads.push(payload),
     });
 
-    expect(tokens).toEqual(["partial"]);
-    expect(donePayloads).toEqual([]);
+    expect(tokens).toEqual(["partial", " then done"]);
+    expect(result.response_text).toBe("partial then done");
+    expect(donePayloads).toHaveLength(1);
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=0",
+      "https://ultra.example.org/v2/runs/run_live",
+      "https://ultra.example.org/v2/runs/run_live/events?stream=true&after_sequence=1",
       "https://ultra.example.org/v2/runs/run_live",
     ]);
   });

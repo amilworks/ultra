@@ -18,6 +18,10 @@ export type NavState = {
   panel: NavPanel;
   // Lens resource file id(s); only meaningful when panel === "scientific-viewer".
   resourceFileIds: string[];
+  // Open Resources collection (folder); only meaningful when panel === "resources".
+  // In the URL so Back leaves a folder the way it was entered and a refresh
+  // reopens the same folder instead of dropping to the collection root.
+  resourceCollectionId: string | null;
 };
 
 const PANEL_TO_VIEW: Record<NavPanel, string | null> = {
@@ -37,6 +41,7 @@ const VIEW_TO_PANEL: Record<string, NavPanel> = {
 
 const VIEW_PARAM = "view";
 const RESOURCE_PARAM = "resource";
+const COLLECTION_PARAM = "collection";
 
 // Build the relative URL (pathname + search + hash) for a nav state, preserving all
 // other query params present on `current`.
@@ -57,6 +62,12 @@ export const buildNavUrl = (
   } else {
     params.delete(RESOURCE_PARAM);
   }
+  const collectionId = nav.panel === "resources" ? (nav.resourceCollectionId ?? "").trim() : "";
+  if (collectionId) {
+    params.set(COLLECTION_PARAM, collectionId);
+  } else {
+    params.delete(COLLECTION_PARAM);
+  }
   const search = params.toString();
   return `${current.pathname}${search ? `?${search}` : ""}${current.hash}`;
 };
@@ -74,10 +85,19 @@ export const parseNavFromSearch = (search: string): NavState => {
           .map((id) => id.trim())
           .filter((id) => id.length > 0)
       : [];
-  return { panel, resourceFileIds };
+  const collectionRaw = (params.get(COLLECTION_PARAM) ?? "").trim();
+  const resourceCollectionId = panel === "resources" && collectionRaw ? collectionRaw : null;
+  return { panel, resourceFileIds, resourceCollectionId };
 };
 
 // A stable identity for a nav state, for deduping URL writes (the resource list only
 // matters in Lens).
-export const navStateKey = (nav: NavState): string =>
-  nav.panel === "scientific-viewer" ? `scientific-viewer|${[...nav.resourceFileIds].join(",")}` : nav.panel;
+export const navStateKey = (nav: NavState): string => {
+  if (nav.panel === "scientific-viewer") {
+    return `scientific-viewer|${[...nav.resourceFileIds].join(",")}`;
+  }
+  if (nav.panel === "resources") {
+    return `resources|${nav.resourceCollectionId ?? ""}`;
+  }
+  return nav.panel;
+};

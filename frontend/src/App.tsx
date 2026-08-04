@@ -843,6 +843,28 @@ const buildConversationUrl = (conversationId: string): string => {
   return nextUrl.toString();
 };
 
+// Switching threads is a navigation: PUSH a history entry so Back returns to the
+// previous conversation (the convention every mainstream chat product follows).
+// Programmatic normalization (first sync, clearing a draft) still replaces.
+const pushConversationIdInLocation = (conversationId: string): void => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const normalizedConversationId = conversationId.trim();
+  if (!normalizedConversationId) {
+    return;
+  }
+  const nextUrl = new URL(window.location.href);
+  nextUrl.searchParams.set(CONVERSATION_QUERY_PARAM, normalizedConversationId);
+  nextUrl.searchParams.delete("auth_error");
+  const nextRelativeUrl = `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+  const currentRelativeUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (nextRelativeUrl === currentRelativeUrl) {
+    return;
+  }
+  window.history.pushState({}, "", nextRelativeUrl);
+};
+
 const replaceConversationIdInLocation = (conversationId: string | null): void => {
   if (typeof window === "undefined") {
     return;
@@ -5987,9 +6009,20 @@ export function App() {
     const urlConversation = resolvedConversationId
       ? conversations.find((conversation) => conversation.id === resolvedConversationId) ?? null
       : null;
-    replaceConversationIdInLocation(
-      shouldExposeConversationInUrl(urlConversation) ? resolvedConversationId : null
-    );
+    const targetConversationId = shouldExposeConversationInUrl(urlConversation)
+      ? resolvedConversationId
+      : null;
+    const currentUrlConversationId = readConversationIdFromLocation();
+    if (targetConversationId === currentUrlConversationId) {
+      return; // in sync (covers Back/Forward restores — never write a new entry for those)
+    }
+    if (targetConversationId && currentUrlConversationId) {
+      // A real thread-to-thread switch: push so Back returns to the previous one.
+      pushConversationIdInLocation(targetConversationId);
+      return;
+    }
+    // First exposure or clearing a draft: normalize in place.
+    replaceConversationIdInLocation(targetConversationId);
   }, [activeConversationId, authStatus, conversations, conversationsHydrated]);
 
   const flushConversationSnapshots = useCallback(() => {
@@ -9714,11 +9747,10 @@ export function App() {
   );
   const initialNavRef = useRef<NavState>(
     typeof window === "undefined"
-      ? { panel: "chat", resourceFileIds: [] }
+      ? { panel: "chat", resourceFileIds: [], resourceCollectionId: null }
       : parseNavFromSearch(window.location.search)
   );
   const navRestoredRef = useRef(false);
-  const suppressNavSyncRef = useRef(false);
   const lastNavKeyRef = useRef<string | null>(null);
 
   // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
@@ -9761,6 +9793,9 @@ export function App() {
     if (initial.panel === "scientific-viewer" && initial.resourceFileIds.length > 0) {
       void restoreViewerContextForFileIds(initial.resourceFileIds);
     }
+    if (initial.panel === "resources" && initial.resourceCollectionId) {
+      setActiveResourceCollectionId(initial.resourceCollectionId);
+    }
   }, [authStatus, restoreViewerContextForFileIds]);
 
   // State -> URL: push a history entry on each navigation (so Back reverses it), replace
@@ -9769,17 +9804,17 @@ export function App() {
     if (typeof window === "undefined" || !navRestoredRef.current || authStatus !== "authenticated") {
       return;
     }
-    const nav: NavState = { panel: activePanel, resourceFileIds: viewerResourceFileIds };
+    const nav: NavState = {
+      panel: activePanel,
+      resourceFileIds: viewerResourceFileIds,
+      resourceCollectionId: activePanel === "resources" ? activeResourceCollectionId : null,
+    };
     const key = navStateKey(nav);
     if (key === lastNavKeyRef.current) {
       return;
     }
     const isFirstSync = lastNavKeyRef.current === null;
     lastNavKeyRef.current = key;
-    if (suppressNavSyncRef.current) {
-      suppressNavSyncRef.current = false;
-      return;
-    }
     const nextUrl = buildNavUrl(
       { pathname: window.location.pathname, search: window.location.search, hash: window.location.hash },
       nav
@@ -9793,24 +9828,45 @@ export function App() {
     } else {
       window.history.pushState({}, "", nextUrl);
     }
-  }, [activePanel, viewerResourceFileIds, authStatus]);
+  }, [activePanel, viewerResourceFileIds, activeResourceCollectionId, authStatus]);
 
-  // Back/Forward: restore the panel + Lens resource from the URL the browser navigated to.
+  // Back/Forward: restore the panel, Lens resource, Resources collection, and
+  // conversation from the URL the browser navigated to. State is set to match the
+  // URL, so the state->URL sync effects above see no difference and write nothing —
+  // history entries are only ever created by app-driven navigation.
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
     const handlePopState = (): void => {
       const nav = parseNavFromSearch(window.location.search);
-      suppressNavSyncRef.current = true;
+      // Pre-arm the dedupe key instead of a sticky suppress flag: a flag armed by
+      // a pop that changes no state (chat -> chat with a different conversation)
+      // would silently swallow the NEXT legitimate panel navigation. Keying makes
+      // the state->URL effect a natural no-op for exactly this restore and
+      // nothing else.
+      lastNavKeyRef.current = navStateKey(nav);
       setActivePanel(nav.panel);
       if (nav.panel === "scientific-viewer" && nav.resourceFileIds.length > 0) {
         void restoreViewerContextForFileIds(nav.resourceFileIds);
       }
+      if (nav.panel === "resources") {
+        setActiveResourceCollectionId(nav.resourceCollectionId);
+      }
+      const urlConversationId = readConversationIdFromLocation();
+      if (urlConversationId) {
+        setActiveConversationId((current) => {
+          if (current === urlConversationId) {
+            return current;
+          }
+          void ensureConversationHydrated(urlConversationId);
+          return urlConversationId;
+        });
+      }
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [restoreViewerContextForFileIds]);
+  }, [ensureConversationHydrated, restoreViewerContextForFileIds]);
 
   const stageResourcesForConversation = (
     conversationId: string,

@@ -132,6 +132,13 @@ export type ChatStreamOptions = ChatStreamHandlers & {
 
 export type RunStreamOptions = ChatStreamOptions & {
   afterSequence?: number;
+  /** Reconnect if the stream delivers no bytes for this long (server heartbeats
+   *  every 15s; the default 60s = four missed beats — the dead-but-open socket
+   *  signature after OS sleep). Tests inject a small value. */
+  inactivityTimeoutMs?: number;
+  /** Base backoff between reconnect attempts (default 1000ms; capped at 15s).
+   *  Tests inject a small value. */
+  retryBaseDelayMs?: number;
 };
 
 export type UploadProgressEvent = {
@@ -303,6 +310,111 @@ const throwIfAborted = (signal?: AbortSignal): void => {
   if (signal?.aborted) {
     throw new DOMException("The operation was aborted.", "AbortError");
   }
+};
+
+// --- Run event stream reconnection -------------------------------------------------
+// A run outlives any single SSE connection: laptops sleep, proxies restart, networks
+// blip. The stream consumer therefore treats one connection as one ATTEMPT and holds
+// every cross-attempt invariant (event cursor, token dedupe keys, accumulated text)
+// in this context object, so a reconnect resumes exactly where the last attempt died
+// and a replay overlap can never double-apply an event or a token.
+
+const RUN_STREAM_INACTIVITY_TIMEOUT_MS = 60_000;
+const RUN_STREAM_RETRY_MAX_DELAY_MS = 15_000;
+
+type V2RunStreamContext = {
+  lastRunEventSequence: number;
+  seenTokenDeliveryKeys: Set<string>;
+  progressEvents: ProgressEvent[];
+  streamedText: string;
+  terminalEventSeen: boolean;
+  terminalStatus: "succeeded" | "failed" | "canceled" | null;
+  terminalDetail: unknown;
+  terminalResponseText: string;
+};
+
+const isAbortError = (error: unknown): boolean =>
+  error instanceof DOMException && error.name === "AbortError";
+
+// Retryable = the transport or an intermediary failed; the RUN's own outcome is
+// unknown. Auth failures, not-found, and other 4xx are real answers — rethrow.
+const isRetryableRunStreamError = (error: unknown): boolean => {
+  if (error instanceof ApiError) {
+    return (
+      error.status === 0 ||
+      error.status === 408 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
+  }
+  if (error instanceof DOMException) {
+    // Our own inactivity cancel surfaces as a TimeoutError in engines that
+    // reject the pending read on cancel.
+    return error.name === "TimeoutError";
+  }
+  // fetch() network failures (connection cut, mid-body reset) are TypeErrors.
+  return error instanceof TypeError;
+};
+
+// Exponential backoff between reconnect attempts, cut short the moment the tab
+// becomes visible again or the browser regains network — waking from sleep should
+// reconnect NOW, not after the remainder of a 15s backoff.
+const waitBeforeStreamRetry = async (
+  attempt: number,
+  signal?: AbortSignal,
+  baseDelayMs = 1000
+): Promise<void> => {
+  throwIfAborted(signal);
+  if (attempt <= 1) {
+    return; // first reconnect is immediate: the common case is a clean sever
+  }
+  const exponent = Math.min(attempt - 2, 4);
+  const delayMs =
+    Math.min(RUN_STREAM_RETRY_MAX_DELAY_MS, baseDelayMs * 2 ** exponent) +
+    Math.floor(Math.random() * 250);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisible);
+      }
+      if (typeof window !== "undefined") {
+        window.removeEventListener("online", finish);
+      }
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        resolve();
+      }
+    };
+    const onVisible = () => {
+      if (typeof document === "undefined" || document.visibilityState === "visible") {
+        finish();
+      }
+    };
+    const onAbort = () => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new DOMException("The operation was aborted.", "AbortError"));
+      }
+    };
+    timer = setTimeout(finish, delayMs);
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisible);
+    }
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", finish);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 };
 
 const readExactScalarVolumeBody = async (
@@ -2577,9 +2689,93 @@ export class ApiClient {
     fallbackRun: Record<string, unknown>,
     options?: RunStreamOptions
   ): Promise<ChatResponse> {
+    // Reconnect-with-cursor orchestration around single-connection attempts.
+    //
+    // One severed or dead-but-open connection used to surface here as a thrown
+    // "ended before a terminal event" / network error, which the App rendered
+    // as a failed run while the run kept executing server-side — the guaranteed
+    // outcome of closing a laptop on an overnight run. Instead: retry from the
+    // shared cursor until the run itself reaches a terminal state. Caller
+    // aborts and non-retryable API answers (auth, not-found) still throw
+    // immediately; a run that finished while we were disconnected settles from
+    // the run record exactly like one whose terminal event arrived in-stream.
+    const ctx: V2RunStreamContext = {
+      lastRunEventSequence: Math.max(0, Math.floor(Number(options?.afterSequence ?? 0))),
+      seenTokenDeliveryKeys: new Set<string>(),
+      progressEvents: [],
+      streamedText: "",
+      terminalEventSeen: false,
+      terminalStatus: null,
+      terminalDetail: null,
+      terminalResponseText: "",
+    };
+    let settledRun: Record<string, unknown> | null = null;
+    let attempt = 0;
+    while (!ctx.terminalEventSeen) {
+      throwIfAborted(options?.signal);
+      try {
+        await this.consumeV2RunEventStreamAttempt(runId, ctx, options);
+        if (ctx.terminalEventSeen) {
+          break;
+        }
+        // Clean stream end without a terminal event: either the run finished
+        // while we were disconnected, or the connection was cut. Settle when
+        // the run record is terminal; otherwise reconnect from the cursor.
+        const snapshot = await this.getV2Run(runId).catch(() => null);
+        const snapshotStatus = normalizeRunResultStatus(snapshot?.status ?? "");
+        if (snapshotStatus && snapshotStatus !== "pending" && snapshotStatus !== "running") {
+          settledRun = snapshot;
+          break;
+        }
+      } catch (error) {
+        if (isAbortError(error) || options?.signal?.aborted) {
+          throw error;
+        }
+        if (!isRetryableRunStreamError(error)) {
+          throw error;
+        }
+      }
+      attempt += 1;
+      await waitBeforeStreamRetry(attempt, options?.signal, options?.retryBaseDelayMs);
+    }
+
+    if (ctx.terminalStatus === "failed") {
+      throw new ApiError("Run failed", 500, ctx.terminalDetail);
+    }
+    if (ctx.terminalStatus === "canceled") {
+      throw new ApiError("Run canceled", 499, ctx.terminalDetail);
+    }
+    const finalRun = settledRun ?? (await this.getV2Run(runId).catch(() => null));
+    if (!ctx.terminalEventSeen) {
+      const finalStatus = normalizeRunResultStatus(finalRun?.status ?? fallbackRun.status);
+      if (finalStatus === "failed") {
+        throw new ApiError("Run failed", 500, finalRun ?? fallbackRun);
+      }
+      if (finalStatus === "canceled") {
+        throw new ApiError("Run canceled", 499, finalRun ?? fallbackRun);
+      }
+      // pending/running is unreachable here: the loop above only exits on a
+      // terminal in-stream event or a terminal run snapshot.
+    }
+    const responseText =
+      ctx.terminalResponseText || asTrimmedString(finalRun?.response_text) || ctx.streamedText;
+    const completedPayload = normalizeV2RunResponse(finalRun ?? fallbackRun, {
+      runId,
+      responseText,
+      progressEvents: ctx.progressEvents,
+      metadata: isRecord(ctx.terminalDetail) ? ctx.terminalDetail : null,
+    });
+    options?.onDone?.(completedPayload);
+    return completedPayload;
+  }
+
+  private async consumeV2RunEventStreamAttempt(
+    runId: string,
+    ctx: V2RunStreamContext,
+    options?: RunStreamOptions
+  ): Promise<void> {
     const streamParams: Record<string, string> = { stream: "true" };
-    const afterSequence = Math.max(0, Math.floor(Number(options?.afterSequence ?? 0)));
-    streamParams.after_sequence = String(afterSequence);
+    streamParams.after_sequence = String(ctx.lastRunEventSequence);
 
     const response = await fetch(
       buildUrl(this.baseUrl, `/v2/runs/${encodeURIComponent(runId)}/events`, streamParams),
@@ -2599,15 +2795,25 @@ export class ApiClient {
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    const progressEvents: ProgressEvent[] = [];
     let buffer = "";
-    let streamedText = "";
-    let terminalEventSeen = false;
-    let terminalStatus: "succeeded" | "failed" | "canceled" | null = null;
-    let terminalDetail: unknown = null;
-    let terminalResponseText = "";
-    let lastRunEventSequence = afterSequence;
-    const seenTokenDeliveryKeys = new Set<string>();
+    // Dead-but-open sockets (the post-sleep signature) deliver no bytes and no
+    // error. The server heartbeats every 15s, so a silent minute means the
+    // connection is gone: cancel the read and let the orchestrator reconnect.
+    const inactivityTimeoutMs = Math.max(
+      1000,
+      Math.floor(Number(options?.inactivityTimeoutMs ?? RUN_STREAM_INACTIVITY_TIMEOUT_MS))
+    );
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const armIdleTimer = () => {
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        void reader
+          .cancel(new DOMException("Run stream idle past heartbeat window", "TimeoutError"))
+          .catch(() => undefined);
+      }, inactivityTimeoutMs);
+    };
 
     const tokenDeliveryKey = (event: StreamTokenEvent): string | null => {
       const eventID = asTrimmedString(event.eventId);
@@ -2625,12 +2831,14 @@ export class ApiClient {
     const emitTokenOnce = (delta: string, event: StreamTokenEvent): void => {
       const key = tokenDeliveryKey(event);
       if (key) {
-        if (seenTokenDeliveryKeys.has(key)) {
+        // Shared across reconnect attempts: a replayed delta after resume is
+        // dropped here even when the server's replay overlaps the cursor.
+        if (ctx.seenTokenDeliveryKeys.has(key)) {
           return;
         }
-        seenTokenDeliveryKeys.add(key);
+        ctx.seenTokenDeliveryKeys.add(key);
       }
-      streamedText += delta;
+      ctx.streamedText += delta;
       options?.onToken?.(delta, event);
     };
 
@@ -2652,9 +2860,9 @@ export class ApiClient {
         return;
       }
       if (eventName === "error") {
-        terminalEventSeen = true;
-        terminalStatus = "failed";
-        terminalDetail = payload;
+        ctx.terminalEventSeen = true;
+        ctx.terminalStatus = "failed";
+        ctx.terminalDetail = payload;
         return;
       }
       if (eventName !== "run_event" || !isRecord(payload)) {
@@ -2665,10 +2873,10 @@ export class ApiClient {
       // replay overlap after reconnect) and must not be appended again.
       const eventSequence = Math.floor(asFiniteNumber(payload.sequence, 0));
       if (eventSequence > 0) {
-        if (eventSequence <= lastRunEventSequence) {
+        if (eventSequence <= ctx.lastRunEventSequence) {
           return;
         }
-        lastRunEventSequence = eventSequence;
+        ctx.lastRunEventSequence = eventSequence;
       }
 
       const eventKind =
@@ -2711,18 +2919,18 @@ export class ApiClient {
       // them, so keeping them out of progressEvents stops the array (and every
       // persisted snapshot of it) growing by one entry per ~0.4s for the whole run.
       if (eventKind !== "trace.reasoning.delta") {
-        progressEvents.push(progressEventFromV2RunEvent(payload));
+        ctx.progressEvents.push(progressEventFromV2RunEvent(payload));
       }
       options?.onRunEvent?.(normalized);
 
       if (!isV2TerminalEventKind(eventKind)) {
         return;
       }
-      terminalEventSeen = true;
-      terminalResponseText = responseTextFromV2TerminalEvent(payload);
-      terminalStatus =
+      ctx.terminalEventSeen = true;
+      ctx.terminalResponseText = responseTextFromV2TerminalEvent(payload);
+      ctx.terminalStatus =
         eventKind === "run.completed" ? "succeeded" : eventKind === "run.canceled" ? "canceled" : "failed";
-      terminalDetail = isRecord(payload.payload) ? payload.payload : payload;
+      ctx.terminalDetail = isRecord(payload.payload) ? payload.payload : payload;
     };
 
     const parseEventBlock = (rawBlock: string): void => {
@@ -2758,8 +2966,10 @@ export class ApiClient {
     };
 
     try {
+      armIdleTimer();
       while (true) {
         const { value, done } = await reader.read();
+        armIdleTimer();
         if (done) {
           break;
         }
@@ -2772,22 +2982,25 @@ export class ApiClient {
           const block = buffer.slice(0, boundary);
           buffer = buffer.slice(boundary + 2);
           parseEventBlock(block);
-          if (terminalEventSeen) {
+          if (ctx.terminalEventSeen) {
             break;
           }
         }
-        if (terminalEventSeen) {
+        if (ctx.terminalEventSeen) {
           break;
         }
       }
-      if (!terminalEventSeen) {
+      if (!ctx.terminalEventSeen) {
         buffer += decoder.decode().replace(/\r\n/g, "\n");
       }
       if (buffer.trim().length > 0) {
         parseEventBlock(buffer);
       }
     } finally {
-      if (terminalEventSeen) {
+      if (idleTimer !== undefined) {
+        clearTimeout(idleTimer);
+      }
+      if (ctx.terminalEventSeen) {
         try {
           await reader.cancel();
         } catch {
@@ -2796,41 +3009,6 @@ export class ApiClient {
       }
       reader.releaseLock();
     }
-
-    if (terminalStatus === "failed") {
-      throw new ApiError("Run failed", 500, terminalDetail);
-    }
-    if (terminalStatus === "canceled") {
-      throw new ApiError("Run canceled", 499, terminalDetail);
-    }
-
-    const finalRun = await this.getV2Run(runId);
-    if (!terminalEventSeen) {
-      const finalStatus = normalizeRunResultStatus(finalRun?.status ?? fallbackRun.status);
-      if (finalStatus === "pending" || finalStatus === "running") {
-        throw new ApiError("Run stream ended before a terminal event", 503, {
-          run_id: runId,
-          status: finalStatus,
-          response_text: streamedText,
-        });
-      }
-      if (finalStatus === "failed") {
-        throw new ApiError("Run failed", 500, finalRun ?? fallbackRun);
-      }
-      if (finalStatus === "canceled") {
-        throw new ApiError("Run canceled", 499, finalRun ?? fallbackRun);
-      }
-    }
-    const responseText =
-      terminalResponseText || asTrimmedString(finalRun?.response_text) || streamedText;
-    const completedPayload = normalizeV2RunResponse(finalRun ?? fallbackRun, {
-      runId,
-      responseText,
-      progressEvents,
-      metadata: isRecord(terminalDetail) ? terminalDetail : null,
-    });
-    options?.onDone?.(completedPayload);
-    return completedPayload;
   }
 
   async uploadFiles(files: File[], options: UploadFilesOptions = {}): Promise<UploadFilesResponse> {

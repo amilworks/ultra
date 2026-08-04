@@ -10,6 +10,7 @@ import {
   StepsTrigger,
 } from "@/components/prompt-kit/steps";
 import { TextShimmer } from "@/components/prompt-kit/text-shimmer";
+import { ThinkingConstellation } from "@/components/chat/ThinkingConstellation";
 import type { ProgressEvent, RunEvent } from "@/types";
 import { Check, Circle, CircleAlert, CircleDot, Loader2 } from "lucide-react";
 import {
@@ -420,7 +421,14 @@ export function ChatRunSteps({
   ).trim();
   const hasSteps = stepItems.length > 0;
 
-  const shimmer = <TextShimmer className="font-medium">{liveLabel}</TextShimmer>;
+  // The constellation is the activity pulse; the shimmer is the words. One
+  // gesture together, in both layouts below.
+  const shimmer = (
+    <span className="flex min-w-0 items-center gap-2">
+      <ThinkingConstellation className="shrink-0" />
+      <TextShimmer className="min-w-0 truncate font-medium">{liveLabel}</TextShimmer>
+    </span>
+  );
 
   // No steps yet: a single calm shimmer line + Stop, no chevron.
   if (!hasSteps) {

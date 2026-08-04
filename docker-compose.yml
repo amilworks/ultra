@@ -265,6 +265,15 @@ services:
       OPENAI_BASE_URL: ${ULTRA_MODEL_BASE_URL:-http://host.docker.internal:11434/v1}
       OPENAI_MODEL: ${ULTRA_MODEL_NAME:-gpt-oss:20b}
       OPENAI_API_KEY: ${ULTRA_MODEL_API_KEY:-EMPTY}
+      # Arms adaptive context compaction: with this set, the model profile exists and
+      # deepagents summarizes at 85% of the window keeping 10% (plus history offload
+      # to /conversation_history and pre-compaction tool-arg clipping). Unset, the
+      # profile-less fallback is trigger=170k tokens / keep=LAST 6 MESSAGES — a cliff
+      # no run should hit. Default = deepseek_v4's served max_model_len 786432 minus
+      # 64K generation headroom (verified via /v1/models 2026-08-04; live-validated
+      # at a forced 96K window: 3 compaction cycles, bounded context, zero guard
+      # firings, todos/ledger state intact across every cycle). Override per model.
+      ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS: ${ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS:-720896}
       ULTRA_CONTROL_BASE_URL: http://control-plane:8000
       ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
       ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222

@@ -12442,6 +12442,18 @@ details {
   border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
 }
 
+/* The live plan checklist inside the "Planning the work" step (ChatRunSteps expansion) —
+   the latest write_todos list, one row per item. Mirrors the reasoning indent. */
+.chat-run-step-plan {
+  margin-top: 0.25rem;
+  margin-left: 1.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
 /* The reasoning chain-of-thought inside the live "Thinking" step (ChatRunSteps expansion). */
 .chat-run-step-reasoning {
   margin-top: 0.25rem;

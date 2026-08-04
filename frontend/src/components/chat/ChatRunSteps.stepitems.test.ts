@@ -69,4 +69,65 @@ describe("buildStepItems (canonical RunStep grouping)", () => {
       status: "completed",
     });
   });
+
+  it("coalesces write_todos rewrites into one plan step whose latest list wins", () => {
+    const planEvent = (id: string, todos: Array<Record<string, string>>): RunEvent =>
+      ({
+        event_type: "tool_call.started",
+        payload: { tool_name: "write_todos", tool_call_id: id, status: "started", input: { todos } },
+      }) as RunEvent;
+
+    const events = [
+      planEvent("plan-1", [
+        { content: "Inspect source", status: "in_progress" },
+        { content: "Add planets", status: "pending" },
+      ]),
+      toolEvent("tool_call.completed", "plan-1", "write_todos", "completed"),
+      toolEvent("tool_call.started", "call-exec", "execute", "started"),
+      planEvent("plan-2", [
+        { content: "Inspect source", status: "completed" },
+        { content: "Add planets", status: "in_progress" },
+      ]),
+      toolEvent("tool_call.completed", "plan-2", "write_todos", "completed"),
+    ];
+
+    const steps = buildStepItems(events, []);
+    const plans = steps.filter((step) => step.id === "plan");
+
+    // One durable plan step across every rewrite, never one chip per call.
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({
+      kind: "phase",
+      label: "Planning the work",
+      detail: "1 of 2 done",
+      status: "completed",
+    });
+    expect(plans[0].todos).toEqual([
+      { content: "Inspect source", status: "completed" },
+      { content: "Add planets", status: "in_progress" },
+    ]);
+  });
+
+  it("keeps the plan checklist when the completed event carries no input", () => {
+    const events = [
+      {
+        event_type: "tool_call.started",
+        payload: {
+          tool_name: "write_todos",
+          tool_call_id: "plan-1",
+          status: "started",
+          input: { todos: [{ content: "Only item", status: "in_progress" }] },
+        },
+      } as RunEvent,
+      // Completion payloads have output_preview but no input — the checklist
+      // parsed from .started must survive the upsert.
+      toolEvent("tool_call.completed", "plan-1", "write_todos", "completed"),
+    ];
+
+    const steps = buildStepItems(events, []);
+    const plan = steps.find((step) => step.id === "plan");
+
+    expect(plan?.status).toBe("completed");
+    expect(plan?.todos).toEqual([{ content: "Only item", status: "in_progress" }]);
+  });
 });

@@ -59,6 +59,10 @@ describe("WorkOS hosted auth redirect", () => {
 
     expect(urlEffect).toContain("shouldExposeConversationInUrl");
     expect(urlEffect).toContain("replaceConversationIdInLocation(");
-    expect(urlEffect).toContain("? resolvedConversationId : null");
+    // The guard survives the push-history refactor: draft conversations resolve
+    // to a null URL target (replace path), never a pushed history entry.
+    expect(urlEffect).toContain("? resolvedConversationId");
+    expect(urlEffect).toContain(": null");
+    expect(urlEffect).toContain("pushConversationIdInLocation(");
   });
 });

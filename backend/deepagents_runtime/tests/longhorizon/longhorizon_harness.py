@@ -155,6 +155,10 @@ class TurnDecision:
 
     text: str = ""
     execute_command: str | None = None
+    # Generic tool dispatch for scripting task/map_task/etc.; mutually
+    # exclusive with execute_command (which remains the ergonomic shorthand).
+    tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
     sleep_seconds: float = 0.0
     raise_error: BaseException | None = None
 
@@ -284,13 +288,17 @@ class ScriptedChatModel(BaseChatModel):
             time.sleep(decision.sleep_seconds)
         if decision.raise_error is not None:
             raise decision.raise_error
+        tool_name = decision.tool_name
+        tool_args = decision.tool_args
         if decision.execute_command is not None:
+            tool_name, tool_args = "execute", {"command": decision.execute_command}
+        if tool_name is not None:
             message = AIMessage(
                 content=decision.text,
                 tool_calls=[
                     {
-                        "name": "execute",
-                        "args": {"command": decision.execute_command},
+                        "name": tool_name,
+                        "args": tool_args or {},
                         "id": f"call_{world.invocation}_{record.index}",
                         "type": "tool_call",
                     }

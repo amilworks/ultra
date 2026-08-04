@@ -597,6 +597,7 @@ SANDBOX_KEY_PACKAGES = [
     "nibabel",
     "nilearn",
     "pydicom",
+    "pytesseract",
     "dicom2nifti",
     "highdicom",
     "monai",
@@ -634,7 +635,8 @@ def build_sandbox_resources_guidance(settings: RuntimeSettings) -> str:
         "an OFFLINE container (no internet): you cannot pip/conda install at runtime — use "
         "only its preinstalled scientific Python stack (numpy/scipy/pandas, scikit-image/"
         "scikit-learn, matplotlib, torch/torchvision, SimpleITK/nibabel/pydicom/monai/dipy, "
-        "bioio/tifffile/zarr/dask, and more)"
+        "bioio/tifffile/zarr/dask, and more), plus the tesseract OCR engine (CLI + "
+        "pytesseract) and ffmpeg for video frame extraction"
         if settings.sandbox_network == "none"
         else (
             "a NETWORK-ENABLED container (outbound internet is ON): you may fetch URLs, call "
@@ -991,8 +993,8 @@ VISION_SUBAGENT = {
         "A second pair of eyes that actually SEES images with a vision-language model. "
         "Delegate visual-judgment tasks: verify whether a detector's box is a real object "
         "or a false positive (it looks closer at a zoomed crop), describe an image in "
-        "detail, read or verify a plot/scientific figure (axes, values, error bars), OCR "
-        "figure text, extract a PDF table through the dedicated provenance-sealed table "
+        "detail, read or verify a plot/scientific figure (axes, values, error bars), "
+        "extract a PDF table through the dedicated provenance-sealed table "
         "tool, give an advisory 'what is this structure?' hypothesis, or compare "
         "multiple images. Use it whenever a decision depends on what is actually in an "
         "image and you (the coordinator) cannot see pixels. Do NOT use it to COUNT many "
@@ -1048,6 +1050,67 @@ VISION_SUBAGENT = {
     ),
 }
 
+# The OCR specialist: same pixel access as the vision-reasoner (inspect_images /
+# screen_images call the Qwen VLM; the loop model stays the inherited text model)
+# plus the sandbox's tesseract/ffmpeg via execute. Kept SEPARATE from the
+# vision-reasoner because the two contracts pull opposite directions: the
+# reasoner interprets; OCR must transcribe VERBATIM and never "helpfully"
+# complete, translate, or infer. Mixing both in one prompt degrades both.
+OCR_SUBAGENT = {
+    "name": "ocr-reader",
+    "description": (
+        "Verbatim text extraction from images and video frames: dense/scanned text, "
+        "tables in images, plot text (axis labels, tick values, legends, annotations), "
+        "signage/scene text, handwriting, and video subtitles or on-screen text. "
+        "Returns faithful structured transcriptions with an engine/VLM agreement "
+        "confidence — never interpretation or summary. For visual JUDGMENT (is this a "
+        "false positive, what does this image show, compare images) use vision-reasoner "
+        "instead; for born-digital PDFs use the paper tools, not OCR."
+    ),
+    "response_format": SCOPED_DELEGATION_RESPONSE_FORMAT,
+    "system_prompt": (
+        "You are Ultra's ocr-reader subagent: a faithful transcriptionist, not an "
+        "interpreter. Your product is VERBATIM text with structure, never a summary, "
+        "never a paraphrase, never a completion of something you cannot read.\n"
+        "TRANSCRIPTION CONTRACT (non-negotiable): transcribe exactly what is legible, "
+        "preserving line breaks, reading order, and case; mark unreadable spans as "
+        "[illegible] rather than guessing; never complete truncated words, never "
+        "translate, never normalize spelling, never infer values that are occluded or "
+        "blurred. A wrong-but-plausible transcription is worse than a marked gap.\n"
+        "TWO-TIER PROTOCOL: (1) For dense printed text, run the classical engine first "
+        "in the sandbox — `tesseract <image> stdout` (or pytesseract; use TSV output "
+        "for per-word confidence and boxes). Always pass the execute tool's timeout "
+        "parameter. (2) Use inspect_images (the VLM) for what the engine handles "
+        "poorly — scene text, stylized/curved text, handwriting, plot text — and to "
+        "CROSS-CHECK the engine on decision-relevant spans. Agreement between engine "
+        "and VLM is your confidence signal: report agreed text as high confidence, "
+        "disagreements as low with BOTH readings in key_findings, and never silently "
+        "pick one. For more than ~3-4 images, screen_images first and deep-read only "
+        "the flagged ones.\n"
+        "PLOT TEXT: extract axis titles, tick values, legend entries, and annotations "
+        "as structured key_findings (e.g. 'x-axis: epoch, ticks 0..100 step 20'). Read "
+        "text only — do not estimate data values from curve positions; full plot "
+        "digitization is a coordinator-level workflow (see the ocr-extraction skill).\n"
+        "VIDEO: extract frames with ffmpeg (preinstalled) before OCR — scene-change "
+        "sampling `ffmpeg -i in.mp4 -vf \"select='gt(scene,0.30)'\" -vsync vfr "
+        "/workspace/frames/f%04d.png` for slides/cuts, or `-vf fps=1/2` for steady "
+        "sampling; bound every command with the execute timeout parameter. OCR frames "
+        "with the two-tier protocol, then dedupe repeated text across consecutive "
+        "frames, reporting each distinct text with its first-seen timestamp.\n"
+        "DURABLE OUTPUTS: write full transcriptions to files — "
+        "/outputs/ocr/<source>.txt (plain reading order) and /outputs/ocr/<source>.json "
+        "(blocks with kind heading|body|table|axis_label|legend|tick|caption, text, "
+        "confidence, and engine/vlm agreement; tables additionally as TSV). Return the "
+        "file paths in artifacts and only the distilled result in summary — never "
+        "paste a long transcription into your response fields.\n"
+        "ROUTING LIMITS: born-digital PDFs and ingested papers are NOT OCR jobs — "
+        "report that the paper tools own them (extract_paper_table_evidence for "
+        "tables). Counting objects, measuring pixels, and bounding-box production stay "
+        "with the specialist detectors. If the request is visual judgment rather than "
+        "transcription, say so and stop — that is vision-reasoner's job."
+    ),
+}
+
 _VISION_GOAL_TOKENS = (
     "image",
     "images",
@@ -1061,6 +1124,17 @@ _VISION_GOAL_TOKENS = (
     "screenshot",
     "snapshot",
     "visual",
+    "ocr",
+    "transcribe",
+    "transcription",
+    "extract text",
+    "read the text",
+    "text in the",
+    "handwriting",
+    "handwritten",
+    "scanned",
+    "subtitle",
+    "subtitles",
     "look at",
     "second pair of eyes",
     "false positive",
@@ -1083,12 +1157,27 @@ _VISION_GOAL_TOKENS = (
     "cells",
 )
 
+OCR_DELEGATION_GUIDANCE = """
+An ocr-reader subagent is available for VERBATIM text extraction from images and video:
+dense or scanned text, tables in images, plot text (axis labels, ticks, legends), scene
+text, handwriting, and video subtitles/on-screen text (it extracts frames with ffmpeg).
+Delegate whenever the deliverable is the TEXT itself rather than a judgment about the
+image. It cross-checks the classical OCR engine against the VLM and reports agreement as
+confidence, writes full transcriptions to /outputs/ocr/ files, and marks unreadable spans
+[illegible] instead of guessing. Do NOT send it born-digital PDFs or ingested papers —
+the paper tools own those — and do not ask it to interpret, summarize, or estimate data
+values from curves (plot digitization is your workflow, using its text readings as the
+axis calibration).
+"""
+
 VISION_DELEGATION_GUIDANCE = """
 A vision-reasoner subagent is available — a second pair of eyes that can SEE images (you
 cannot). Delegate to it via the task tool whenever a decision depends on what is actually in
 an image: verifying whether a detector flagged a false positive (it inspects a zoomed crop of
-the box), describing an image in detail, reading/verifying a plot or scientific figure, OCRing
-figure text, or comparing images. Pass the image path(s) (/workspace/... or /outputs/...) and a
+the box), describing an image in detail, reading/verifying a plot or scientific figure, or
+comparing images. For VERBATIM text extraction delegate to ocr-reader instead (below); the
+vision-reasoner reads text only incidentally while judging. Pass the image path(s)
+(/workspace/... or /outputs/...) and a
 precise visual question; for a detection, include its bounding box. Do NOT ask it to count many
 small objects, measure pixels/areas, or produce coordinates — that is the specialist detectors'
 job; vision-reasoner verifies and reasons, it does not replace the detector's measurement. Its
@@ -1212,6 +1301,12 @@ def build_subagents(
         vision["response_format"] = deepcopy(vision["response_format"])
         vision["tools"] = list(vision_tools)
         subagents.append(vision)
+        # ocr-reader shares the pixel path (and gains tesseract/ffmpeg via the
+        # backend execute tool) but carries the verbatim-transcription contract.
+        ocr = dict(OCR_SUBAGENT)
+        ocr["response_format"] = deepcopy(ocr["response_format"])
+        ocr["tools"] = list(vision_tools)
+        subagents.append(ocr)
 
     if _should_register_scoped_delegation_subagents(context):
         delegation_context_tools = _filter_tools_by_name(
@@ -1570,6 +1665,7 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     # so generic text runs do not pay for delegation guidance to an absent subagent.
     if context is not None and _should_register_vision_subagent(context, settings):
         sections.append(VISION_DELEGATION_GUIDANCE)
+        sections.append(OCR_DELEGATION_GUIDANCE)
     if context is not None and _should_register_qwen_code_runner(context, settings):
         sections.append(QWEN_CODE_DELEGATION_GUIDANCE)
     # Advertise the Builder's delegation discipline only when it is enabled (and thus

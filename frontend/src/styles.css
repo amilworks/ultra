@@ -11951,6 +11951,14 @@ details {
   min-width: 0;
 }
 
+/* The live-thinking activity pulse: a canvas constellation drawing in
+   currentColor only. Muted ink — it signals activity, it is not content;
+   the reduced-motion variant is a static frame (handled in-component). */
+.thinking-constellation {
+  display: block;
+  color: var(--text-muted);
+}
+
 @media (max-width: 640px) {
   :root {
     --font-size-body: 1rem;

@@ -11,7 +11,7 @@ import {
 } from "@/components/prompt-kit/steps";
 import { TextShimmer } from "@/components/prompt-kit/text-shimmer";
 import type { ProgressEvent, RunEvent } from "@/types";
-import { Check, CircleAlert, Loader2 } from "lucide-react";
+import { Check, Circle, CircleAlert, CircleDot, Loader2 } from "lucide-react";
 import {
   DEFAULT_THINKING_TEXT,
   getPhaseDetail,
@@ -32,12 +32,21 @@ type ChatRunStepsProps = {
 type StepStatus = "running" | "completed" | "failed";
 type StepKind = "phase" | "tool";
 
+type PlanTodoStatus = "pending" | "in_progress" | "completed";
+
+type PlanTodo = {
+  content: string;
+  status: PlanTodoStatus;
+};
+
 type ChatStepItem = {
   id: string;
   kind: StepKind;
   label: string;
   detail: string | null;
   status: StepStatus;
+  /** Present only on the "plan" step: the latest write_todos list. */
+  todos?: PlanTodo[];
 };
 
 // Calm, human phrases in the present tense — never raw tool identifiers.
@@ -62,7 +71,29 @@ const TOOL_LABELS: Record<string, string> = {
   stage_resource_for_analysis: "Staging a resource",
   stage_uploaded_files_for_analysis: "Preparing your files",
   write_file: "Writing a file",
+  write_todos: "Planning the work",
   yolo_detect: "Detecting objects",
+};
+
+// The write_todos input is the FULL todo list each call (replace semantics), so
+// the newest parsed list is always the current plan.
+const parsePlanTodos = (value: unknown): PlanTodo[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const todos: PlanTodo[] = [];
+  for (const entry of value) {
+    const record = toRecord(entry);
+    const content = String(record?.content ?? "").trim();
+    if (!content) {
+      continue;
+    }
+    const raw = String(record?.status ?? "").trim().toLowerCase();
+    const status: PlanTodoStatus =
+      raw === "completed" ? "completed" : raw === "in_progress" ? "in_progress" : "pending";
+    todos.push({ content, status });
+  }
+  return todos;
 };
 
 const toStepStatus = (value: unknown): StepStatus => {
@@ -156,6 +187,9 @@ export const buildStepItems = (
       ...items[existingIndex],
       ...nextItem,
       detail: nextItem.detail ?? items[existingIndex].detail,
+      // tool_call.completed events carry no input, so a plan update without a
+      // parsed list must not wipe the checklist rendered from .started.
+      todos: nextItem.todos ?? items[existingIndex].todos,
     };
   };
 
@@ -180,6 +214,21 @@ export const buildStepItems = (
     if (eventType.startsWith("tool_call.")) {
       const toolName = String(payload.tool_name ?? payload.tool ?? "").trim();
       if (!toolName) {
+        return;
+      }
+      if (toolName.toLowerCase() === "write_todos") {
+        // One durable "plan" step for the whole run: write_todos replaces the
+        // full list each call, so the latest event's todos are the current plan.
+        const todos = parsePlanTodos(toRecord(payload.input)?.todos);
+        const done = todos.filter((todo) => todo.status === "completed").length;
+        upsertStep("plan", {
+          id: "plan",
+          kind: "phase",
+          label: "Planning the work",
+          detail: todos.length > 0 ? `${done} of ${todos.length} done` : null,
+          status: statusFromV2ToolEvent(eventType, payload),
+          todos: todos.length > 0 ? todos : undefined,
+        });
         return;
       }
       const invocationId = String(
@@ -298,6 +347,16 @@ export const buildStepItems = (
   }
 
   return deduped.slice(0, 12);
+};
+
+const renderPlanTodoIcon = (status: PlanTodoStatus) => {
+  if (status === "completed") {
+    return <Check className="size-3" />;
+  }
+  if (status === "in_progress") {
+    return <CircleDot className="size-3" />;
+  }
+  return <Circle className="size-3" />;
 };
 
 const renderStepIcon = (item: ChatStepItem) => {
@@ -419,6 +478,36 @@ export function ChatRunSteps({
               </div>
               {item.id === "reasoning" && item.detail ? (
                 <div className="chat-run-step-reasoning">{item.detail}</div>
+              ) : null}
+              {item.id === "plan" && item.todos && item.todos.length > 0 ? (
+                <div className="chat-run-step-plan">
+                  {item.todos.map((todo) => (
+                    <div key={todo.content} className="flex items-start gap-2">
+                      <span
+                        className={cn(
+                          "mt-1 shrink-0",
+                          todo.status === "in_progress"
+                            ? "text-foreground/70"
+                            : "text-muted-foreground/50"
+                        )}
+                      >
+                        {renderPlanTodoIcon(todo.status)}
+                      </span>
+                      <span
+                        className={cn(
+                          "min-w-0 text-sm leading-5",
+                          todo.status === "in_progress"
+                            ? "text-foreground/80"
+                            : todo.status === "completed"
+                              ? "text-muted-foreground/60"
+                              : "text-muted-foreground"
+                        )}
+                      >
+                        {todo.content}
+                      </span>
+                    </div>
+                  ))}
+                </div>
               ) : null}
             </StepsItem>
           ))}

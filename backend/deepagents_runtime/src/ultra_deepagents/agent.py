@@ -57,6 +57,7 @@ from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
 from ultra_deepagents.resources.tools import build_resource_tools
 from ultra_deepagents.steering import SteeringInboxMiddleware
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
+from ultra_deepagents.todo_reminders import UltraTodoReminderMiddleware
 from ultra_deepagents.vision import build_vision_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
@@ -470,6 +471,16 @@ you may launch configured async subagents for long independent work, then check 
 reconcile their terminal status before the final answer. Use sandbox execution for
 code, statistics, image-analysis scripts, and reproducibility checks. Prefer measurable
 claims, cite uncertainty, and keep intermediate files inspectable.
+
+## Plan hygiene
+
+If you created a todo list with write_todos, maintain it while you work: mark each item
+completed as soon as it is actually done — never batch a pile of completions at the end —
+keep exactly the item you are working on in_progress, and revise the list when reality
+diverges from the plan (add discovered work, drop items that became irrelevant). Before
+finishing, reconcile the list: every item ends completed, or is removed with a one-line
+reason in your final message (blocked, or no longer necessary). Do not finish with items
+still pending or in_progress, and never mark an item completed that you did not verifiably do.
 
 {_DURABLE_CATALOG_SYSTEM_GUIDANCE}
 """
@@ -2236,6 +2247,16 @@ def build_research_agent(
         SubagentFailureIsolationMiddleware(timeout_seconds=settings.subagent_task_timeout_seconds)
     )
     middleware.append(build_runtime_prompt_middleware())
+    if settings.todo_reminders_enabled:
+        # State-echo + staleness nudge for write_todos (todo_reminders.py).
+        # Coordinator only: subagent graphs own separate todos state, and the
+        # live gap this closes (plan-once-then-forget) was measured on the
+        # coordinator loop.
+        middleware.append(
+            UltraTodoReminderMiddleware(
+                stale_after_tool_results=settings.todo_stale_after_tool_results
+            )
+        )
     if steering_inbox is not None:
         # Mid-run steering (Phase 1): a checkpointed before_model node that
         # folds user steers into COORDINATOR state between steps. Deliberately

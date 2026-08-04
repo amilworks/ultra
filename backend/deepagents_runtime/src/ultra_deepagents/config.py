@@ -198,6 +198,13 @@ class RuntimeSettings:
     # headless render. The existing no-progress breaker still bounds runs that
     # genuinely cannot render. 0/false disables.
     render_proof_required: bool = True
+    # Todo state-echo + staleness nudge (todo_reminders.py): re-show the current
+    # write_todos list in every model request and nudge after N tool results
+    # without an update. Live baseline without it (planets run 2026-08-04):
+    # 2 rewrites in 81 tool calls — plan once, batch-close at the end. Advisory
+    # prompt-append only; false disables for A/B measurement.
+    todo_reminders_enabled: bool = True
+    todo_stale_after_tool_results: int = 12
     async_subagents: tuple[dict[str, Any], ...] = ()
     nats_url: str = "nats://127.0.0.1:4222"
     nats_stream: str = "ULTRA_RUNS"
@@ -416,6 +423,14 @@ class RuntimeSettings:
             render_proof_required=_env_bool(
                 "ULTRA_DEEPAGENTS_REQUIRE_RENDER_PROOF",
                 True,
+            ),
+            todo_reminders_enabled=_env_bool(
+                "ULTRA_DEEPAGENTS_TODO_REMINDERS",
+                True,
+            ),
+            todo_stale_after_tool_results=max(
+                1,
+                int(os.getenv("ULTRA_DEEPAGENTS_TODO_STALE_AFTER_TOOL_RESULTS", "12")),
             ),
             async_subagents=_async_subagents_from_env(),
             nats_url=os.getenv(

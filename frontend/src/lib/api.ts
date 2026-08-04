@@ -374,11 +374,8 @@ const waitBeforeStreamRetry = async (
     Math.floor(Math.random() * 250);
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
+      clearTimeout(timer);
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisible);
       }
@@ -406,7 +403,7 @@ const waitBeforeStreamRetry = async (
         reject(new DOMException("The operation was aborted.", "AbortError"));
       }
     };
-    timer = setTimeout(finish, delayMs);
+    const timer = setTimeout(finish, delayMs);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisible);
     }

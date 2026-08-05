@@ -85,6 +85,7 @@ import {
   Table2,
   Trash2,
   Upload,
+  CloudDownload,
   UserPlus,
   XCircle,
 } from "lucide-react";
@@ -164,6 +165,7 @@ type ResourceBrowserProps = {
   onStatusFilterChange?: (value: ResourceStatusFilter) => void;
   onTagFilterChange?: (value: string) => void;
   onRefresh: () => void;
+  onAddFromGoogleDrive?: () => void;
   onLoadMore: () => void;
   onUploadFiles?: (files: File[], context?: ResourceUploadReselectionContext) => void;
   uploading?: boolean;
@@ -818,6 +820,7 @@ export function ResourceBrowser({
   onStatusFilterChange,
   onTagFilterChange,
   onRefresh,
+  onAddFromGoogleDrive,
   onLoadMore,
   onUploadFiles,
   uploading = false,
@@ -2282,6 +2285,15 @@ export function ResourceBrowser({
                       <FolderUp data-icon="inline-start" />
                       Upload folder
                     </DropdownMenuItem>
+                    {onAddFromGoogleDrive ? (
+                      <DropdownMenuItem
+                        disabled={uploading || loading}
+                        onSelect={() => onAddFromGoogleDrive()}
+                      >
+                        <CloudDownload data-icon="inline-start" />
+                        Add from Google Drive
+                      </DropdownMenuItem>
+                    ) : null}
                   </DropdownMenuGroup>
                 </DropdownMenuContent>
               </DropdownMenu>

@@ -13296,3 +13296,119 @@ button:active,
 [role="button"]:active {
   transition-duration: 40ms;
 }
+
+/* ============================ GOOGLE DRIVE IMPORT ============================
+   The add-from-Drive flow dialog. One journey, one surface: connect state,
+   Google-window waits, then a per-file import list whose status lives in
+   geometry and ink (icon + meta line), never in color — failures use the
+   existing danger token only. */
+.gdrive-dialog {
+  max-width: 30rem;
+}
+
+.gdrive-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 1rem 0.25rem;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.gdrive-connect {
+  display: grid;
+  justify-items: start;
+  gap: 0.85rem;
+  padding: 0.5rem 0.25rem 0.25rem;
+}
+
+.gdrive-connect p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  max-width: 46ch;
+}
+
+.gdrive-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.gdrive-popup-fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--text-main);
+  text-decoration: underline;
+}
+
+.gdrive-file-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.25rem;
+  max-height: 17rem;
+  overflow-y: auto;
+}
+
+.gdrive-file {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid color-mix(in oklab, var(--line) 85%, transparent 15%);
+  border-radius: 10px;
+}
+
+.gdrive-file-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.gdrive-file-icon svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.gdrive-file[data-status="failed"] .gdrive-file-icon {
+  color: var(--danger);
+}
+
+.gdrive-file[data-status="imported"] .gdrive-file-icon {
+  color: var(--text-main);
+}
+
+.gdrive-file-copy {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.gdrive-file-name {
+  font-size: 0.88rem;
+  color: var(--text-main);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.gdrive-file-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.gdrive-file[data-status="failed"] .gdrive-file-meta {
+  color: var(--danger);
+}
+
+.gdrive-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}

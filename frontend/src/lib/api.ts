@@ -107,6 +107,26 @@ import type * as ViewerManifest from "./viewerManifest";
 import { reportClientError } from "./client-diagnostics";
 import { isEphemeralDeltaEventKind } from "@/features/chat/run-events";
 
+export type GoogleDriveStatus = {
+  enabled: boolean;
+  connected: boolean;
+  account_email?: string;
+  status?: string;
+  connected_at?: string;
+};
+
+export type GoogleDrivePickerToken = {
+  access_token: string;
+  expires_at: string;
+  picker_api_key?: string;
+  app_id?: string;
+};
+
+export type GoogleDriveImportResponse = {
+  uploaded: { file_id: string; original_name: string; size_bytes: number; sha256: string };
+};
+
+
 export type ApiClientOptions = {
   baseUrl: string;
   apiKey?: string;
@@ -3749,6 +3769,59 @@ export class ApiClient {
       return parseError(response);
     }
     return (await response.json()) as BisqueImportResponse;
+  }
+
+  async googleDriveStatus(): Promise<GoogleDriveStatus> {
+    return this.fetchJson<GoogleDriveStatus>("/v2/integrations/google/status");
+  }
+
+  async googleDriveAuthorizeURL(): Promise<string> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/integrations/google/authorize"), {
+      method: "POST",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    const payload = (await response.json()) as { authorize_url?: string };
+    return String(payload.authorize_url || "");
+  }
+
+  async googleDrivePickerToken(): Promise<GoogleDrivePickerToken> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/integrations/google/picker-token"), {
+      method: "POST",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as GoogleDrivePickerToken;
+  }
+
+  async googleDriveImportFile(fileId: string): Promise<GoogleDriveImportResponse> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/integrations/google/import"), {
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ file_id: fileId }),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return (await response.json()) as GoogleDriveImportResponse;
+  }
+
+  async googleDriveDisconnect(): Promise<void> {
+    const response = await fetch(buildUrl(this.baseUrl, "/v2/integrations/google"), {
+      method: "DELETE",
+      headers: this.headers(),
+      credentials: "include",
+    });
+    if (!response.ok) {
+      return parseError(response);
+    }
   }
 
   async searchBisqueResources(options: BisqueSearchRequest = {}): Promise<BisqueSearchResponse> {

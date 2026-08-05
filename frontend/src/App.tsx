@@ -533,6 +533,10 @@ const LazyScientificViewerPage = lazyNamed(
   loadScientificViewerPageModule,
   "ScientificViewerPage"
 );
+const LazyGoogleDriveImportFlow = lazyNamed(
+  () => import("./components/GoogleDriveImport"),
+  "GoogleDriveImportFlow"
+);
 const LazyResourceBrowser = lazyNamed(
   loadResourceBrowserModule,
   "ResourceBrowser"
@@ -5188,6 +5192,7 @@ export function App() {
   const hostedAuthRedirectAttemptedRef = useRef(false);
   const sessionRevalidatedAtRef = useRef(0);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  const [googleDriveImportOpen, setGoogleDriveImportOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] =
     useState<SettingsTab>("general");
   const openSettings = useCallback(
@@ -13447,6 +13452,7 @@ export function App() {
                 onStatusFilterChange={updateResourceStatusFilter}
                 onTagFilterChange={updateResourceTagFilter}
                 onRefresh={refreshResources}
+                onAddFromGoogleDrive={() => setGoogleDriveImportOpen(true)}
                 onLoadMore={loadMoreResources}
                 onUploadFiles={(files: File[], context?: ResourceUploadReselectionContext) => {
                   void uploadResourceFiles(files, context);
@@ -13532,6 +13538,16 @@ export function App() {
                 onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
                 onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
               />
+              {googleDriveImportOpen ? (
+                <Suspense fallback={null}>
+                  <LazyGoogleDriveImportFlow
+                    open={googleDriveImportOpen}
+                    onOpenChange={setGoogleDriveImportOpen}
+                    apiClient={apiClient}
+                    onImported={refreshResources}
+                  />
+                </Suspense>
+              ) : null}
             </Suspense>
           ) : activePanel === "training" ? (
             <Suspense

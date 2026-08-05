@@ -299,6 +299,16 @@ const mockViewerRasterPng = Buffer.from(
 // OFF by default (mobile-smoke needs the stock resource list); opt in with
 // MOCK_SEED_HDF5=1 (the `mock-api-hdf5` launch entry does).
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Google Drive picker seed (opt-in via MOCK_SEED_GDRIVE=1): a connected
+// account, a consent page that postMessages like the real callback, and an
+// import endpoint with one deterministic first-attempt failure so the
+// retry UX can be exercised end to end without Google.
+// ---------------------------------------------------------------------------
+const seedGoogleDrive = process.env.MOCK_SEED_GDRIVE === "1";
+let mockGoogleConnected = process.env.MOCK_GDRIVE_CONNECTED !== "0";
+const mockGoogleImportAttempts = new Map();
 const seedHdf5Lens = process.env.MOCK_SEED_HDF5 === "1";
 const hdf5LensFileId = "file_hdf5_dream3d";
 const hdf5LensDefaultDataset = "/DataContainers/SyntheticVolumeDataContainer/CellData/IPFColor";
@@ -2200,6 +2210,79 @@ const server = http.createServer(async (request, response) => {
       return;
     }
     sendJson(response, 200, mockUploadViewerInfo(resource));
+    return;
+  }
+
+
+  if (url.pathname === "/v2/integrations/google/status" && request.method === "GET") {
+    sendJson(response, 200, seedGoogleDrive
+      ? { enabled: true, connected: mockGoogleConnected, account_email: mockGoogleConnected ? "scientist@ucsb.edu" : undefined, status: "active" }
+      : { enabled: false, connected: false });
+    return;
+  }
+  if (url.pathname === "/v2/integrations/google/authorize" && request.method === "POST") {
+    sendJson(response, 200, { authorize_url: `http://localhost:${port}/mock-google-consent` });
+    return;
+  }
+  if (url.pathname === "/mock-google-consent" && request.method === "GET") {
+    mockGoogleConnected = true;
+    response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    response.end(`<!doctype html><meta charset="utf-8"><title>Mock Google consent</title>
+<body style="font:15px system-ui;display:grid;place-items:center;height:96vh">
+<p>Mock consent granted. You can close this window.</p>
+<script>
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ type: "ultra-google-drive", status: "connected" }, "*");
+      window.close();
+    }
+  } catch (e) {}
+</${"script"}>`);
+    return;
+  }
+  if (url.pathname === "/v2/integrations/google/picker-token" && request.method === "POST") {
+    if (!mockGoogleConnected) {
+      sendJson(response, 409, { error: "reconnect_required" });
+      return;
+    }
+    sendJson(response, 200, { access_token: "mock-access-token", expires_at: new Date(Date.now() + 3600e3).toISOString(), picker_api_key: "", app_id: "" });
+    return;
+  }
+  if (url.pathname === "/v2/integrations/google/import" && request.method === "POST") {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      let fileId = "";
+      try { fileId = JSON.parse(body).file_id || ""; } catch {}
+      const attempts = (mockGoogleImportAttempts.get(fileId) || 0) + 1;
+      mockGoogleImportAttempts.set(fileId, attempts);
+      const finish = () => {
+        if (fileId.includes("flaky") && attempts === 1) {
+          sendJson(response, 502, { error: `"${fileId}" failed integrity verification — the download was corrupted, retry` });
+          return;
+        }
+        if (fileId.includes("native")) {
+          sendJson(response, 400, { error: "this is a native Google document; download it as a regular file in Drive first" });
+          return;
+        }
+        const record = {
+          file_id: `file_gdrive_${fileId}`,
+          original_name: `${fileId}.tif`,
+          content_type: "image/tiff",
+          size_bytes: 4200 + fileId.length,
+          sha256: `sha-gdrive-${fileId}`,
+          created_at: nowIso,
+          source_uri: `gdrive://${fileId}`,
+        };
+        sendJson(response, 200, { uploaded: record });
+      };
+      setTimeout(finish, 650 + Math.floor(Math.random() * 500));
+    });
+    return;
+  }
+  if (url.pathname === "/v2/integrations/google" && request.method === "DELETE") {
+    mockGoogleConnected = false;
+    sendJson(response, 200, { status: "disconnected" });
     return;
   }
 

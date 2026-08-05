@@ -563,7 +563,9 @@ SANDBOX_VERIFICATION_TOOLCHAIN_GUIDANCE = """
 Verification toolchain (preinstalled, offline): headless Chromium via Playwright — browsers
 live under /root/.cache/ms-playwright (launch with PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright);
 never claim no browser exists without probing that path. For self-contained 3D pages a vendored
-three.js IIFE build is at /opt/report-assets/three.iife.min.js — inline it into the page; never
+three.js IIFE build is at /opt/report-assets/three.iife.min.js, and for interactive 2D charts a
+vendored Chart.js build (global `Chart`, time axes included) is at
+/opt/report-assets/chart.iife.min.js — inline the file contents into the page; never
 reference a CDN (deliverables must work with no internet). Any HTML page you deliver requires
 RENDER PROOF before the run can complete: load the final file headlessly with network disabled,
 require zero console errors and zero page errors, exercise at least one interaction (a control

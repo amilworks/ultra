@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import io
 import os
+import pathlib
 import sys
+import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -37,6 +39,20 @@ from ultra_deepagents.imaging.scalar_semantics import (  # noqa: E402
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _DECODE_MARKERS = ("empty region", "cannot encode", "cannot decode", "unsupported")
+
+
+def test_high_channel_viewerinfo_signal_scoring_reads_no_planes(monkeypatch):
+    engine = BioioEngine()
+
+    class HighChannelSource:
+        c = 260
+
+        def read(self, **_kwargs):
+            raise AssertionError("high-channel viewer-info must stay metadata-only")
+
+    monkeypatch.setattr(engine, "_source", lambda _path: HighChannelSource())
+
+    assert engine._channel_signal_scores("hyperspectral.ome.tiff") is None
 
 
 def test_decoder_chunk_shape_accounting_handles_zarr_and_dask_layouts():
@@ -824,9 +840,7 @@ def test_nearest_integer_mask_plan_rejects_over_traversal_before_read(engine, mo
     assert source.reads == 0
 
 
-def test_nearest_integer_mask_plan_sums_complete_decoder_work_before_fanout(
-    engine, monkeypatch
-):
+def test_nearest_integer_mask_plan_sums_complete_decoder_work_before_fanout(engine, monkeypatch):
     class SyntheticSource:
         x, y, z, c, t = 8, 8, 16, 1, 1
         dtype = np.dtype("uint16")
@@ -841,9 +855,7 @@ def test_nearest_integer_mask_plan_sums_complete_decoder_work_before_fanout(
 
         def read(self, **_kwargs):
             self.reads += 1
-            raise AssertionError(
-                "aggregate exact Mask work must reject before worker reads"
-            )
+            raise AssertionError("aggregate exact Mask work must reject before worker reads")
 
     source = SyntheticSource()
     monkeypatch.setattr(engine, "_source", lambda _path: source)
@@ -1027,9 +1039,7 @@ def test_exact_mask_worker_never_reads_a_source_older_than_its_generated_plan(
     assert old_reads == 0
 
 
-def test_exact_mask_worker_detects_source_mutation_after_reads(
-    engine, tmp_path, monkeypatch
-):
+def test_exact_mask_worker_detects_source_mutation_after_reads(engine, tmp_path, monkeypatch):
     path = str(tmp_path / "mutating-mask.tif")
     tifffile.imwrite(path, np.arange(2 * 4 * 5, dtype="uint8").reshape(2, 4, 5))
     plan = engine.scalar_plan(path, sampling="nearest")
@@ -1243,6 +1253,63 @@ def test_multiple_tiff_series_report_scenes_and_withhold_volume(engine, tmp_path
     ]:
         with pytest.raises(ValueError, match="multiple.*scene|scene.*explicit"):
             getattr(engine, operation)(path, **kwargs)
+
+
+def test_bioio_multiscene_metadata_binds_the_first_source_scene(engine, monkeypatch, tmp_path):
+    class FakeDask:
+        shape = (1, 2, 1, 8, 12)
+        chunks = ((1,), (1, 1), (1,), (8,), (12,))
+        dtype = np.dtype("uint16")
+
+    class FakeBioImage:
+        scenes = ("Scene:0", "Scene:1")
+        physical_pixel_sizes = None
+
+        def __init__(self, _path):
+            self.current_scene = "Scene:1"
+            self.selected = []
+
+        def set_scene(self, scene):
+            self.selected.append(scene)
+            self.current_scene = self.scenes[scene] if isinstance(scene, int) else scene
+
+        @property
+        def dims(self):
+            shape = (1, 2, 1, 8, 12) if self.current_scene == "Scene:0" else (1, 1, 1, 2, 3)
+            return types.SimpleNamespace(order="TCZYX", shape=shape)
+
+        @property
+        def channel_names(self):
+            return ("A", "B") if self.current_scene == "Scene:0" else ("wrong-scene",)
+
+        def get_image_dask_data(self, order):
+            assert order == "TCZYX"
+            assert self.current_scene == "Scene:0"
+            return FakeDask()
+
+    monkeypatch.setitem(sys.modules, "bioio", types.SimpleNamespace(BioImage=FakeBioImage))
+    path = str(tmp_path / "scenes.czi")
+    path_obj = pathlib.Path(path)
+    path_obj.write_bytes(b"source")
+
+    info = engine.viewer_info(path)
+
+    assert info["metadata"]["scene_count"] == 2
+    assert info["metadata"]["selected_scene_index"] == 0
+    assert info["metadata"]["selected_scene_id"] == "Scene:0"
+    assert info["axis_sizes"] == {"T": 1, "C": 2, "Z": 1, "Y": 8, "X": 12}
+    assert info["channel_names"] == ["A", "B"]
+
+    strict = engine.strict_publication_viewer_info(path)
+    assert strict["kind"] == "image" and strict["decodable"] is True
+    assert strict["axis_sizes"] == {"T": 1, "C": 2, "Z": 1, "Y": 8, "X": 12}
+    assert strict["channel_names"] == ["A", "B"]
+    assert strict["scene_count"] == 2
+    assert strict["selected_scene_index"] == 0
+    assert strict["selected_scene_id"] == "Scene:0"
+    assert strict["metadata"]["scene_count"] == 2
+    assert strict["metadata"]["selected_scene_index"] == 0
+    assert strict["metadata"]["selected_scene_id"] == "Scene:0"
 
 
 def test_scalar_preview_reads_bounded_regions_and_emits_exact_box_bytes(engine, monkeypatch):

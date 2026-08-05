@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ import (
 	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
+	"golang.org/x/sync/singleflight"
 )
 
 // pyramidPlainImageMinBytes is the size past which a plain raster image (JPEG/PNG)
@@ -77,38 +79,10 @@ var thumbnailInFlightBudget = newThumbnailInFlightBudgetFromEnv()
 // thumbnails are deliberately fail-closed and never serve original source bytes
 // when a renderer or sidecar is unavailable.
 
-// derivedPyramidName is the deterministic filename the convert job writes for a
-// resource's tiled pyramid (see handleDeriveUploadPyramid). A plain BigTIFF (not
-// OME-TIFF) so every level — including the native level 0 — is tile-addressable,
-// and so pyramids of 50GB-class sources can exceed the 4GB classic-TIFF limit.
+// derivedPyramidName is the deterministic destination hint sent to the worker.
+// Publication never creates this mutable path: the worker commits an immutable,
+// digest-named artifact through derivedPyramidManifestName instead.
 func derivedPyramidName(fileID string) string { return fileID + "__pyramid.tif" }
-
-// derivedPyramidPath returns the on-disk path of a resource's derived pyramid if
-// one has been built (non-empty file), else "". Callers prefer it for tiles.
-func derivedPyramidPath(root, fileID string) string {
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return ""
-	}
-	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
-	if err != nil {
-		return ""
-	}
-	candidate := filepath.Join(rootAbs, "derived", derivedPyramidName(fileID))
-	info, err := os.Lstat(candidate)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
-		return ""
-	}
-	resolvedCandidate, err := filepath.EvalSymlinks(candidate)
-	if err != nil {
-		return ""
-	}
-	expected := filepath.Join(resolvedRoot, "derived", derivedPyramidName(fileID))
-	if filepath.Clean(resolvedCandidate) != filepath.Clean(expected) || !pathIsUnderRoot(resolvedRoot, resolvedCandidate) {
-		return ""
-	}
-	return resolvedCandidate
-}
 
 // derivedPyramidFailedName is the sidecar the convert worker writes (see
 // imaging/worker.py _failure_marker_path) when a resource's pyramid derivation
@@ -127,6 +101,8 @@ func derivedPyramidFailedMarkerPath(root, fileID string) string {
 // ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS.
 const pyramidFailureBackoff = time.Hour
 
+var derivativeFailureCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
 func pyramidFailureBackoffWindow() time.Duration {
 	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS")); raw != "" {
 		if secs, err := strconv.Atoi(raw); err == nil && secs >= 0 {
@@ -139,16 +115,66 @@ func pyramidFailureBackoffWindow() time.Duration {
 // recentPyramidFailure reports whether a permanent derivation failure was recorded for
 // this resource within the backoff window. Failure-isolated: any stat error falls
 // through to false (never blocks serving). A zero/disabled window never suppresses.
-func recentPyramidFailure(root, fileID string, now time.Time) bool {
+type derivativeFailureMarker struct {
+	Schema          string                   `json:"schema"`
+	ResourceID      string                   `json:"resource_id"`
+	SourceSHA256    string                   `json:"source_sha256"`
+	SourceSizeBytes int64                    `json:"source_size_bytes"`
+	ConversionSpec  derivativeConversionSpec `json:"conversion_spec"`
+	Code            string                   `json:"code"`
+}
+
+func decodeDerivativeFailureMarker(data []byte) (derivativeFailureMarker, error) {
+	strict := json.NewDecoder(bytes.NewReader(data))
+	strict.UseNumber()
+	if err := consumeStrictJSONValue(strict); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if _, err := strict.Token(); err != io.EOF {
+		if err == nil {
+			return derivativeFailureMarker{}, errors.New("failure marker contains trailing JSON")
+		}
+		return derivativeFailureMarker{}, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if err := exactJSONKeys(raw, "schema", "resource_id", "source_sha256", "source_size_bytes", "conversion_spec", "code"); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if err := exactJSONKeys(raw["conversion_spec"], "tile_size", "compression", "layout", "fmt"); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	var marker derivativeFailureMarker
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marker); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	return marker, nil
+}
+
+func recentPyramidFailure(root string, record resourceRecord, now time.Time) bool {
 	window := pyramidFailureBackoffWindow()
 	if window <= 0 {
 		return false
 	}
-	fi, err := os.Stat(derivedPyramidFailedMarkerPath(root, fileID))
-	if err != nil || fi.IsDir() {
+	path := derivedPyramidFailedMarkerPath(root, record.FileID)
+	file, generation, err := openRegularNoFollow(path)
+	if err != nil || generation.SizeBytes <= 0 || generation.SizeBytes > 16<<10 {
 		return false
 	}
-	return now.Sub(fi.ModTime()) < window
+	data, readErr := io.ReadAll(io.LimitReader(file, (16<<10)+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) != generation.SizeBytes {
+		return false
+	}
+	marker, markerErr := decodeDerivativeFailureMarker(data)
+	if markerErr != nil || marker.Schema != "ultra.image-derived-pyramid-failure.v1" || marker.ResourceID != record.FileID || marker.SourceSHA256 != strings.ToLower(strings.TrimSpace(record.SHA256)) || marker.SourceSizeBytes != record.SizeBytes || marker.ConversionSpec != (derivativeConversionSpec{TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "auto"}) || !derivativeFailureCodePattern.MatchString(marker.Code) {
+		return false
+	}
+	return now.Sub(time.Unix(0, generation.MtimeNS)) < window
 }
 
 // clearPyramidFailureMarker removes the failure sidecar so a derivation can be retried
@@ -218,8 +244,17 @@ func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string,
 // given open lands warm only by luck. A single shared cache here makes repeat opens
 // reliably instant. Returns a freshly-decoded map each call so callers may mutate it.
 func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path string) (map[string]any, error) {
+	return deps.cachedImageServiceViewerInfoVia(ctx, path, deps.imageCache)
+}
+
+var imageViewerInfoFlights singleflight.Group
+
+func (deps ServerDeps) cachedImageServiceViewerInfoVia(
+	ctx context.Context,
+	path string,
+	cache *imageResponseCache,
+) (map[string]any, error) {
 	query := url.Values{"path": {path}}
-	cache := deps.imageCache
 	if cache == nil {
 		return deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
 	}
@@ -234,12 +269,31 @@ func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path st
 		}
 		// Corrupt cached entry: fall through and recompute.
 	}
-	out, err := deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
+	flightKey := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/") + "|" + key
+	value, err, _ := imageViewerInfoFlights.Do(flightKey, func() (any, error) {
+		// The shared load must not inherit the first waiter's cancellation; otherwise
+		// one disconnected client cancels metadata delivery for every joined viewer.
+		out, fetchErr := deps.imageServiceGetJSON(context.WithoutCancel(ctx), "/viewerinfo", query)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		body, marshalErr := json.Marshal(out)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
+		return body, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if body, mErr := json.Marshal(out); mErr == nil {
-		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
+	body, ok := value.([]byte)
+	if !ok {
+		return nil, errors.New("image service viewer-info flight returned an invalid result")
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -276,6 +330,244 @@ func (deps ServerDeps) sourceImageServiceViewerInfo(
 		return nil, 0, 0, 0, errMalformedImageViewerAxes
 	}
 	return info, t, c, z, nil
+}
+
+// committedThumbnailDerivative performs the source-bound manifest admission needed
+// to advertise or serve a thumbnail without doing a sidecar metadata read.
+func committedThumbnailDerivative(
+	root string,
+	record resourceRecord,
+	sourcePath string,
+) (string, bool) {
+	manifest, artifactPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted || !manifest.Capabilities.Thumbnail {
+		return "", false
+	}
+	if prefersBioioReader(record.OriginalName) && manifest.Producer.Reader != "bioio" {
+		return "", false
+	}
+	return artifactPath, true
+}
+
+// compatibleDerivedPyramid returns a derived artifact only when a strict, source-
+// bound manifest commits it; both source and derivative metadata match the exact
+// manifest semantics; and the manifest declares the requested serving capability.
+// Derived pyramids are accelerators, never semantic authority.
+func (deps ServerDeps) compatibleDerivedPyramid(
+	ctx context.Context,
+	root string,
+	record resourceRecord,
+	sourcePath string,
+	sourceInfo map[string]any,
+	use derivativeUse,
+) (string, map[string]any, bool) {
+	manifest, derivedPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted {
+		return "", nil, false
+	}
+	preferredBioio := prefersBioioReader(record.OriginalName)
+	if preferredBioio && manifest.Producer.Reader != "bioio" {
+		return "", nil, false
+	}
+	repairIncompatible := func() {
+		deps.enqueuePyramidDerivation(ctx, root, record, sourcePath, "repair-incompatible")
+	}
+	if !manifest.Capabilities.supports(use) {
+		// A valid derivative may intentionally lack route-specific selectors (for
+		// example T-aware tiles). That is an intrinsic delivery limitation, not
+		// corruption; use the source fallback without scheduling futile repair.
+		return "", nil, false
+	}
+	sourceStat, sourceErr := os.Stat(sourcePath)
+	derivedStat, derivedErr := os.Stat(derivedPath)
+	if sourceErr != nil || derivedErr != nil {
+		return "", nil, false
+	}
+	if sourceInfo == nil && !preferredBioio {
+		var err error
+		sourceInfo, err = deps.cachedImageServiceViewerInfoVia(ctx, sourcePath, deps.pyramidInfoCache)
+		if err != nil {
+			return "", nil, false
+		}
+	}
+	if !preferredBioio && !derivativeSemanticsMatch(sourceInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	derivedInfo, err := deps.cachedImageServiceViewerInfoVia(ctx, derivedPath, deps.pyramidInfoCache)
+	if err != nil {
+		return "", nil, false
+	}
+	if !derivativeArtifactSemanticsMatch(derivedInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	if manifest.Capabilities != derivativeCapabilitiesForViewer(derivedInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	sourceAfter, sourceAfterErr := os.Stat(sourcePath)
+	derivedAfter, derivedAfterErr := os.Stat(derivedPath)
+	if sourceAfterErr != nil || derivedAfterErr != nil ||
+		sourceAfter.Size() != sourceStat.Size() ||
+		!sourceAfter.ModTime().Equal(sourceStat.ModTime()) ||
+		derivedAfter.Size() != derivedStat.Size() ||
+		!derivedAfter.ModTime().Equal(derivedStat.ModTime()) {
+		return "", nil, false
+	}
+	return derivedPath, derivedInfo, true
+}
+
+// preferredBioioDerivedViewerInfo admits a preferred-reader derivative without
+// consulting libbioimage for the proprietary source. The strict Go manifest is
+// the source/scene semantic authority; the derivative viewer-info contributes
+// only delivery fields after its pixel semantics and capabilities are verified.
+func (deps ServerDeps) preferredBioioDerivedViewerInfo(
+	ctx context.Context,
+	root string,
+	record resourceRecord,
+	sourcePath string,
+) (map[string]any, bool) {
+	manifest, derivedPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted || manifest.Producer.Reader != "bioio" || !manifest.Capabilities.Thumbnail {
+		return nil, false
+	}
+	derivedInfo, err := deps.cachedImageServiceViewerInfoVia(ctx, derivedPath, deps.pyramidInfoCache)
+	if err != nil || !derivativeArtifactSemanticsMatch(derivedInfo, manifest.Semantics) {
+		return nil, false
+	}
+	if manifest.Capabilities != derivativeCapabilitiesForViewer(derivedInfo, manifest.Semantics) {
+		return nil, false
+	}
+	return preferredReaderViewerInfo(manifest, derivedInfo), true
+}
+
+func preferredReaderViewerInfo(manifest derivativeManifest, delivery map[string]any) map[string]any {
+	core := make(map[string]any)
+	for _, key := range []string{
+		"kind", "modality", "backend_mode", "decodable", "is_volume", "is_timeseries",
+		"is_multichannel", "tile_scheme", "display_defaults", "selected_indices", "viewer",
+	} {
+		if value, present := delivery[key]; present {
+			core[key] = value
+		}
+	}
+	semantics := manifest.Semantics
+	core["dims_order"] = semantics.DimsOrder
+	core["dtype"] = semantics.DType
+	core["axis_sizes"] = map[string]any{
+		"T": semantics.AxisSizes.T,
+		"C": semantics.AxisSizes.C,
+		"Z": semantics.AxisSizes.Z,
+		"Y": semantics.AxisSizes.Y,
+		"X": semantics.AxisSizes.X,
+	}
+	channelNames := make([]string, len(semantics.Channels))
+	for index, channel := range semantics.Channels {
+		channelNames[index] = channel.Name
+	}
+	core["channel_names"] = channelNames
+	core["physical_spacing"] = map[string]any{
+		"x": semantics.Spacing.X.Value,
+		"y": semantics.Spacing.Y.Value,
+		"z": semantics.Spacing.Z.Value,
+	}
+	displayChannels := []int(nil)
+	if phys, ok := jsonObject(delivery["phys"]); ok {
+		displayChannels = preferredReaderDisplayChannels(
+			phys["display_channels"],
+			semantics.AxisSizes.C,
+		)
+	}
+	if len(displayChannels) == 0 {
+		if defaults, ok := jsonObject(delivery["display_defaults"]); ok {
+			displayChannels = preferredReaderDisplayChannels(
+				defaults["channels"],
+				semantics.AxisSizes.C,
+			)
+		}
+	}
+	if len(displayChannels) == 0 {
+		for channel := 0; channel < min(semantics.AxisSizes.C, 3); channel++ {
+			displayChannels = append(displayChannels, channel)
+		}
+	}
+	phys := map[string]any{
+		"x":                semantics.AxisSizes.X,
+		"y":                semantics.AxisSizes.Y,
+		"z":                semantics.AxisSizes.Z,
+		"t":                semantics.AxisSizes.T,
+		"ch":               semantics.AxisSizes.C,
+		"pixel_size":       []float64{semantics.Spacing.X.Value, semantics.Spacing.Y.Value, semantics.Spacing.Z.Value, 1},
+		"pixel_units":      []string{semantics.Spacing.X.Unit, semantics.Spacing.Y.Unit, semantics.Spacing.Z.Unit, "frame"},
+		"channel_names":    channelNames,
+		"display_channels": displayChannels,
+	}
+	if pixelDepth, pixelFormat, ok := preferredReaderDType(semantics.DType); ok {
+		phys["pixel_depth"] = pixelDepth
+		phys["pixel_format"] = pixelFormat
+	}
+	core["phys"] = phys
+	metadata := map[string]any{
+		"reader":               manifest.Producer.Reader,
+		"array_dtype":          semantics.DType,
+		"scene_count":          semantics.Scene.Count,
+		"selected_scene_index": semantics.Scene.Index,
+		"spacing_units": map[string]any{
+			"x": semantics.Spacing.X.Unit,
+			"y": semantics.Spacing.Y.Unit,
+			"z": semantics.Spacing.Z.Unit,
+		},
+	}
+	if semantics.Scene.ID != nil {
+		metadata["selected_scene_id"] = *semantics.Scene.ID
+		core["selected_scene_id"] = *semantics.Scene.ID
+	}
+	core["scene_count"] = semantics.Scene.Count
+	core["selected_scene_index"] = semantics.Scene.Index
+	core["metadata"] = metadata
+	return core
+}
+
+func preferredReaderDType(dtype string) (pixelDepth int, pixelFormat string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(dtype)) {
+	case "uint8":
+		return 8, "u", true
+	case "uint16":
+		return 16, "u", true
+	case "int16":
+		return 16, "s", true
+	case "float32":
+		return 32, "f", true
+	case "float64":
+		return 64, "f", true
+	default:
+		return 0, "", false
+	}
+}
+
+func preferredReaderDisplayChannels(value any, channelCount int) []int {
+	var raw []any
+	switch values := value.(type) {
+	case []any:
+		raw = values
+	case []int:
+		raw = make([]any, len(values))
+		for index, channel := range values {
+			raw[index] = channel
+		}
+	default:
+		return nil
+	}
+	channels := make([]int, 0, len(raw))
+	for _, item := range raw {
+		channel, ok := jsonInt(item)
+		if !ok || channel < 0 || channel >= channelCount || slices.Contains(channels, channel) {
+			return nil
+		}
+		channels = append(channels, channel)
+	}
+	return channels
 }
 
 func writeImageSourceAuthorityError(w http.ResponseWriter, err error) {
@@ -330,6 +622,16 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
 		return
 	}
+	if prefersBioioReader(record.OriginalName) {
+		if preferred, admitted := deps.preferredBioioDerivedViewerInfo(r.Context(), root, record, path); admitted {
+			injectControlPlaneViewerFields(preferred, record)
+			writeJSON(w, http.StatusOK, preferred)
+			return
+		}
+		deps.enqueuePyramidDerivation(r.Context(), root, record, path, "prefer-bioio")
+		deps.writeUnsupportedFormatViewer(w, record)
+		return
+	}
 	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
 		// The engine recognized the file but cannot decode it (415/422): a permanent,
@@ -339,19 +641,9 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		// an explicit "unsupported" descriptor so the viewer shows a clear message +
 		// download instead of a broken 1x1 canvas with an endless spinner.
 		if imageServiceUndecodable(err) {
-			// A bioio transcode->pyramid may already exist for this source (the convert
-			// worker reads LIF/etc. via bioio and writes an OME-TIFF pyramid libbioimage
-			// CAN serve). The source itself is undecodable, so drive the viewer off the
-			// derived pyramid's metadata.
-			if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-				if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-					injectControlPlaneViewerFields(pcore, record)
-					writeJSON(w, http.StatusOK, pcore)
-					return
-				}
-			}
-			// No pyramid yet. The legacy native Go viewer reads only a small raster
-			// subset; if it can produce a real plane, use it.
+			// Without authoritative source axes, an existing derivative cannot prove
+			// that it preserved C/T/Z shape. The legacy native Go viewer reads only a
+			// small raster subset; if it can produce a real plane, use it.
 			if info := uploadImageDescriptorForPath(path, record.ContentType); info.Width >= 2 && info.Height >= 2 {
 				deps.handleGetUploadViewer(w, r)
 				return
@@ -368,42 +660,29 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		deps.handleGetUploadViewer(w, r)
 		return
 	}
-	// .czi / .zarr are preferentially read by bioio (the convert worker transcodes them to
-	// an OME-TIFF pyramid). libbioimage CAN decode a .czi, but renders Zeiss mosaics
-	// blocky/unstitched, so when the bioio pyramid exists drive the viewer entirely off it
-	// — its geometry/channels then match the pixels /slice and /thumbnail serve from that
-	// same pyramid. If it isn't converted yet, kick off the (preferred) derivation.
-	if prefersBioioReader(record.OriginalName) {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-			if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-				injectControlPlaneViewerFields(pcore, record)
-				writeJSON(w, http.StatusOK, pcore)
-				return
-			}
-		} else {
-			deps.enqueuePyramidDerivation(r.Context(), root, record, path, "prefer-bioio")
-		}
-	}
+	derivedPath, derivedInfo, derivedCompatible := deps.compatibleDerivedPyramid(
+		r.Context(), root, record, path, core, derivativeUse{capability: "thumbnail"},
+	)
 	// A slice_stack volume (microscopy z-stack) derives to an OME-BigTIFF whose
 	// embedded -tile reader is broken (the OME wrapper); it serves 3D via /atlas
 	// and 2D via /slice, so it must NOT advertise the derived pyramid's tile_scheme
 	// (that would route the viewer to the failing deferred-multiscale tile path).
 	if !viewerIsSliceStackVolume(core) {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+		if derivedCompatible {
 			// The derived pyramid serves the tile PIXELS (resolveUploadTilePathForImageService),
 			// so the viewer must use the PYRAMID's tile_scheme — its tile size and level grid —
 			// even when the source advertised its own. Otherwise the viewer fetches at the
 			// source geometry (e.g. 256-px / 8 levels) while pixels come from the pyramid
 			// (512-px / 11 levels): every pyramid tile is decoded 4x and the engine is
 			// needlessly overloaded on deep zoom. Overriding here aligns grid with data.
-			if pyramid, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-				mergePyramidTileScheme(core, pyramid)
-			}
+			mergePyramidTileScheme(core, derivedInfo)
 		} else if core["tile_scheme"] == nil {
 			// No derived pyramid and the source is not directly tile-servable: kick off
 			// derivation so a later open gets the bounded DeepZoom path; the direct/slice
 			// path still works meanwhile.
-			deps.ensurePyramidDerivation(r.Context(), root, record, path, "view")
+			if derivedPath == "" {
+				deps.ensurePyramidDerivation(r.Context(), root, record, path, "view")
+			}
 		}
 	}
 	injectControlPlaneViewerFields(core, record)
@@ -448,29 +727,91 @@ func (deps ServerDeps) writeUnsupportedFormatViewer(w http.ResponseWriter, recor
 // (honoring z/t/level), which is what makes z-scrub scrub actual planes. NIfTI
 // and the unconfigured case keep the legacy behavior.
 func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *http.Request) {
-	maskRequest, maskErr := parseMaskSliceRequest(r)
-	if maskErr != nil {
-		writeError(w, http.StatusBadRequest, maskErr)
-		return
-	}
-	if !deps.imageServiceConfigured() {
-		if maskRequest.enabled {
-			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
-			return
-		}
-		deps.handleServeUpload(w, r)
-		return
-	}
-	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
+	record := authorization.record
+	// NIfTI owns an exact native MPR contract and must be routed before the
+	// generic Z-only parser. Syntax and catalog-authoritative bounds are checked
+	// before resolving/statting the source path.
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		selection, selectionErr := parseNiftiMPRSelection(r.URL.Query())
+		if selectionErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, selectionErr)
+			return
+		}
+		maskRequest, maskErr := parseMaskSliceRequest(r)
+		if maskErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, maskErr)
+			return
+		}
 		if maskRequest.enabled {
 			writeError(w, http.StatusUnprocessableEntity, errors.New("mask slices are unsupported for NIfTI sources"))
 			return
 		}
-		deps.handleServeUpload(w, r) // serveNiftiSliceAsPNG honors slice params
+		catalogBounds, boundsErr := validateCatalogNiftiMPRBounds(record, selection)
+		if boundsErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, boundsErr)
+			return
+		}
+		path, resolved := resolveAuthorizedUploadStorage(w, authorization)
+		if !resolved {
+			return
+		}
+		if !catalogBounds {
+			geometry, geometryErr := readNiftiHeaderGeometry(path)
+			if geometryErr != nil {
+				writeError(w, http.StatusUnsupportedMediaType, geometryErr)
+				return
+			}
+			if boundsErr := validateNiftiMPRBounds(
+				selection,
+				geometry.width,
+				geometry.height,
+				geometry.depth,
+				geometry.timeCount,
+				geometry.channelCount,
+			); boundsErr != nil {
+				writeError(w, http.StatusUnprocessableEntity, boundsErr)
+				return
+			}
+		}
+		if err := serveNiftiSliceAsPNG(w, path, r); err != nil {
+			writeError(w, http.StatusUnsupportedMediaType, err)
+		}
+		return
+	}
+	selectors, selectorErr := parseScientificImageSelectors(r.URL.Query(), record)
+	if selectorErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, selectorErr)
+		return
+	}
+	sliceOptions, sliceOptionsErr := parseImageSliceOptions(r.URL.Query())
+	if sliceOptionsErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, sliceOptionsErr)
+		return
+	}
+	maskRequest, maskErr := parseMaskSliceRequest(r)
+	if maskErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, maskErr)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
+		return
+	}
+	root := authorization.root
+	if !deps.imageServiceConfigured() && strings.TrimSpace(deps.NgffServiceURL) == "" {
+		if maskRequest.enabled {
+			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
+			return
+		}
+		if !legacyDisplayPhotoSliceAllowed(record, selectors, sliceOptions) {
+			deps.handleNotConfigured("scientific slices require the configured image service")(w, r)
+			return
+		}
+		deps.handleServeUpload(w, r)
 		return
 	}
 	// OME-Zarr is rendered natively by the ngff-service from the store (bundle dir path).
@@ -480,16 +821,28 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 			return
 		}
 		q := url.Values{"path": {path}}
-		for _, key := range []string{"z", "t", "level", "channels", "full_resolution"} {
-			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-				q.Set(key, v)
-			}
+		for key, values := range sliceOptions {
+			q.Set(key, values[0])
 		}
+		selectors.apply(q)
+		copyQueryValueIfPresent(q, r.URL.Query(), "cache_key")
 		deps.ngffDeps().proxyImageServiceCached(w, r, "/slice", q)
 		return
 	}
 	if deps.ngffServiceUnavailable(record, path) {
 		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
+		return
+	}
+	if !deps.imageServiceConfigured() {
+		if maskRequest.enabled {
+			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
+			return
+		}
+		if !legacyDisplayPhotoSliceAllowed(record, selectors, sliceOptions) {
+			deps.handleNotConfigured("scientific slices require the configured image service")(w, r)
+			return
+		}
+		deps.handleServeUpload(w, r)
 		return
 	}
 	maskMode := maskRequest.enabled
@@ -528,7 +881,15 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// even though its -tile reader does not (atlas/thumbnail read it the same way).
 	servePath := path
 	if !maskMode {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+		if dp, _, compatible := deps.compatibleDerivedPyramid(
+			r.Context(), root, record, path, nil, derivativeUse{
+				capability:      "slice",
+				requireT:        selectors.tPresent,
+				requireZ:        selectors.zPresent,
+				requireChannels: selectors.channelsPresent,
+				requireLUT:      selectors.colorsPresent,
+			},
+		); compatible {
 			servePath = dp
 		}
 	}
@@ -537,16 +898,10 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// a bounded pyramid level for fast scrub frames; true reads the native plane.
 	buildSliceQuery := func(p string) url.Values {
 		q := url.Values{"path": {p}}
-		for _, key := range []string{
-			"z",
-			"level",
-			"channel_colors",
-			"full_resolution",
-		} {
-			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-				q.Set(key, v)
-			}
+		for key, values := range sliceOptions {
+			q.Set(key, values[0])
 		}
+		copyQueryValueIfPresent(q, r.URL.Query(), "cache_key")
 		if maskRequest.enabled {
 			q.Set("channels", strconv.Itoa(maskRequest.channel))
 			q.Set("t", strconv.Itoa(maskRequest.time))
@@ -554,30 +909,40 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 			q.Set("scalar_threshold_value", maskRequest.thresholdRaw)
 			q.Set("scalar_threshold_foreground", "above")
 		} else {
-			for _, key := range []string{"t", "channels"} {
-				if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-					q.Set(key, v)
-				}
-			}
+			selectors.apply(q)
 		}
 		return q
 	}
-	// Robustness: prefer the pyramid, but if it can't be served (a broken/unreadable
-	// derived pyramid -> 5xx) retry the SOURCE via the image service — slower but
-	// correct (honors z/channels) — then the native Go path. A bad pyramid degrades to
-	// a working read instead of "Failed to load image".
+	// A failed derived scientific read may retry the authoritative source through the
+	// same selector-aware /slice endpoint. It must never degrade to legacy /display,
+	// which can flatten T/Z/C and silently return the wrong plane.
 	var fallback http.HandlerFunc
-	if !maskMode {
-		fallback = deps.handleServeUpload
-	}
 	if servePath != path {
 		fallback = func(w http.ResponseWriter, r *http.Request) {
-			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
+			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path))
 		}
 	}
 	// Route slices through the dedicated slice cache so a z-scrub burst can't evict
 	// the DeepZoom viewer's tile/atlas working set from the main image cache.
 	deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
+}
+
+func legacyDisplayPhotoSliceAllowed(
+	record resourceRecord,
+	selectors scientificImageSelectors,
+	sliceOptions url.Values,
+) bool {
+	if selectors.present() || len(sliceOptions) > 0 || !goNativeThumbnailable(record) {
+		return false
+	}
+	if timeCount, _, depth, authoritative := catalogImageSelectorLimits(record); authoritative {
+		return timeCount == 1 && depth == 1
+	}
+	// Common still-image decoders are intrinsically two-dimensional. Animated GIF
+	// is intentionally excluded because serving its first frame is not an exact
+	// time-series slice contract.
+	return !strings.EqualFold(filepath.Ext(record.OriginalName), ".gif") &&
+		!strings.EqualFold(strings.TrimSpace(record.ContentType), "image/gif")
 }
 
 type maskSliceRequest struct {
@@ -690,12 +1055,17 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		deps.handleGetUploadScalarVolume(w, r)
 		return
 	}
-	_, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
+	record := authorization.record
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		deps.handleGetUploadScalarVolume(w, r)
+		deps.serveAuthorizedNiftiScalarVolume(w, r, authorization)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
 		return
 	}
 	channelIndex, err := parseExactScalarIndex(r, []string{"channel", "c"})
@@ -745,16 +1115,108 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		"channel": {strconv.Itoa(channelIndex)},
 		"t":       {strconv.Itoa(timeIndex)},
 	}
-	sampling := strings.TrimSpace(r.URL.Query().Get("sampling"))
+	sampling, _, samplingErr := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"sampling"},
+		"scalar volume sampling",
+	)
+	if samplingErr != nil {
+		writeError(w, http.StatusBadRequest, samplingErr)
+		return
+	}
 	if sampling == "" {
 		sampling = "box"
-	}
-	if sampling != "box" && sampling != "nearest" {
+	} else if sampling != "box" && sampling != "nearest" {
 		writeError(w, http.StatusBadRequest, errors.New("scalar volume sampling must be box or nearest"))
 		return
 	}
 	query.Set("sampling", sampling)
 	deps.proxyImageService(w, r, "/scalar-volume", query, deps.handleGetUploadScalarVolume)
+}
+
+type niftiScalarVolumeSelection struct {
+	time     int
+	channel  int
+	sampling string
+}
+
+func parseNiftiScalarVolumeSelection(query url.Values) (niftiScalarVolumeSelection, error) {
+	allowed := map[string]bool{
+		"t": true, "time": true, "timepoint": true,
+		"channel": true, "c": true, "sampling": true,
+	}
+	for key := range query {
+		if !allowed[key] {
+			return niftiScalarVolumeSelection{}, fmt.Errorf("unsupported NIfTI scalar volume selector %q", key)
+		}
+	}
+	selection := niftiScalarVolumeSelection{sampling: "box"}
+	timeRaw, timePresent, err := exactRawQueryValue(
+		query,
+		[]string{"t", "time", "timepoint"},
+		"NIfTI scalar volume time selector",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if timePresent {
+		selection.time, err = parseExactNonNegativeDecimal(
+			timeRaw,
+			"NIfTI scalar volume time selector",
+		)
+		if err != nil {
+			return niftiScalarVolumeSelection{}, err
+		}
+	}
+	channelRaw, channelPresent, err := exactRawQueryValue(
+		query,
+		[]string{"channel", "c"},
+		"NIfTI scalar volume channel selector",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if channelPresent {
+		selection.channel, err = parseExactNonNegativeDecimal(
+			channelRaw,
+			"NIfTI scalar volume channel selector",
+		)
+		if err != nil {
+			return niftiScalarVolumeSelection{}, err
+		}
+	}
+	sampling, samplingPresent, err := exactRawQueryValue(
+		query,
+		[]string{"sampling"},
+		"NIfTI scalar volume sampling",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if samplingPresent {
+		if sampling != "box" && sampling != "nearest" {
+			return niftiScalarVolumeSelection{}, errors.New("NIfTI scalar volume sampling must be box or nearest")
+		}
+		selection.sampling = sampling
+	}
+	return selection, nil
+}
+
+func validateCatalogNiftiScalarVolumeBounds(
+	record resourceRecord,
+	selection niftiScalarVolumeSelection,
+) (bool, error) {
+	timeCount, channelCount, _, authoritative := catalogImageSelectorLimits(record)
+	if !authoritative {
+		return false, nil
+	}
+	if selection.time >= timeCount {
+		return true, errors.New("NIfTI scalar volume time selector is out of range")
+	}
+	if selection.channel >= channelCount {
+		return true, errors.New("NIfTI scalar volume channel selector is out of range")
+	}
+	return true, nil
 }
 
 func exactRawQueryValue(
@@ -1770,9 +2232,11 @@ func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *ht
 			writeRenderedThumbnailPNG(w, record.FileID, "native_raster", body)
 			return
 		}
-		if derivative := derivedPyramidPath(root, record.FileID); derivative != "" && deps.imageServiceConfigured() {
-			deps.proxyBoundedThumbnailPNG(w, r, record.FileID, "derived_raster", "/thumbnail", url.Values{"path": {derivative}, "max_size": {"512"}})
-			return
+		if deps.imageServiceConfigured() {
+			if derivative, committed := committedThumbnailDerivative(root, record, path); committed {
+				deps.proxyBoundedThumbnailPNG(w, r, record.FileID, "derived_raster", "/thumbnail", url.Values{"path": {derivative}, "max_size": {"512"}})
+				return
+			}
 		}
 		status := http.StatusUnsupportedMediaType
 		if errors.Is(err, errThumbnailAdmission) {
@@ -1806,8 +2270,8 @@ func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *ht
 		writeResourceThumbnailError(w, record.FileID, "derived_scientific", http.StatusServiceUnavailable, errors.New("scientific thumbnail service is not configured"))
 		return
 	}
-	servePath := derivedPyramidPath(root, record.FileID)
-	if servePath == "" {
+	servePath, committed := committedThumbnailDerivative(root, record, path)
+	if !committed {
 		writeResourceThumbnailError(w, record.FileID, "derived_scientific", http.StatusUnsupportedMediaType, errors.New("scientific thumbnail derivative is not ready"))
 		return
 	}
@@ -2978,13 +3442,14 @@ func hasPyramidMicroscopyExtension(name string) bool {
 
 // prefersBioioReader reports whether a resource's format should be read via bioio (the
 // convert worker transcodes it to a pyramid) in preference to libbioimage's native read:
-// Zeiss .czi, where libbioimage renders mosaics blocky/unstitched. Mirrors the Python
+// Proprietary microscopy readers whose native path is absent or semantically
+// unreliable. Mirrors the Python
 // PREFER_BIOIO_EXTENSIONS default in imaging/job.py. (.zarr is intentionally excluded:
 // OME-Zarr directory bundles are served natively by the ngff-service from the store, so
 // they never enter the bioio transcode lane — see shouldDerivePyramid / servesViaNgff.)
 func prefersBioioReader(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	for _, ext := range []string{".czi"} {
+	for _, ext := range []string{".czi", ".nd2", ".lif", ".dv", ".r3d"} {
 		if strings.HasSuffix(lower, ext) || strings.Contains(lower, ext+"_") {
 			return true
 		}
@@ -3097,10 +3562,12 @@ func (deps ServerDeps) enqueuePyramidDerivation(ctx context.Context, root string
 	if deps.DataAgentJobs == nil || !deps.imageServiceConfigured() {
 		return
 	}
-	if derivedPyramidPath(root, record.FileID) != "" {
-		return // already derived
+	if !lowercaseSHA256Pattern.MatchString(strings.ToLower(strings.TrimSpace(record.SHA256))) || record.SizeBytes < 0 {
+		slog.WarnContext(ctx, "pyramid derivation skipped: resource has no immutable source identity",
+			"resource_id", record.FileID, "trigger", trigger)
+		return
 	}
-	if recentPyramidFailure(root, record.FileID, time.Now()) {
+	if recentPyramidFailure(root, record, time.Now()) {
 		// A recent derivation PERMANENTLY failed (a source this engine build can't
 		// convert). Back off instead of re-minting a doomed convert on every viewer
 		// open — that repeated heavy imgcnv work is exactly what starved the engine
@@ -3120,14 +3587,16 @@ func (deps ServerDeps) enqueuePyramidDerivation(ctx context.Context, root string
 		ResourceIDs:   []string{record.FileID},
 		ResourceCount: 1,
 		Metadata: domain.JSONMap{
-			"resource_id": record.FileID,
-			"src_path":    path,
-			"dst_path":    dst,
-			"tile_size":   512,
-			"compression": "lzw",
-			"layout":      "topdirs", // native level stays tile-addressable (see handleDeriveUploadPyramid)
-			"fmt":         "auto",    // z-stack/volume -> OME-BigTIFF (preserves Z); flat 2D -> BigTIFF
-			"trigger":     trigger,
+			"resource_id":       record.FileID,
+			"src_path":          path,
+			"dst_path":          dst,
+			"source_sha256":     strings.ToLower(strings.TrimSpace(record.SHA256)),
+			"source_size_bytes": record.SizeBytes,
+			"tile_size":         512,
+			"compression":       "lzw",
+			"layout":            "topdirs", // native level stays tile-addressable (see handleDeriveUploadPyramid)
+			"fmt":               "auto",    // z-stack/volume -> OME-BigTIFF (preserves Z); flat 2D -> BigTIFF
+			"trigger":           trigger,
 		},
 	}); err != nil {
 		// Visible, not silent: the image stays viewable via the direct/slice fallback

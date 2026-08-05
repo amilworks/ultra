@@ -3311,11 +3311,8 @@ func TestV2UploadAndResourceHandlers(t *testing.T) {
 	sliceReq.Header.Set("X-Ultra-Org-Id", "smithsonian")
 	sliceRec := httptest.NewRecorder()
 	router.ServeHTTP(sliceRec, sliceReq)
-	if sliceRec.Code != http.StatusOK {
-		t.Fatalf("slice status = %d body=%s", sliceRec.Code, sliceRec.Body.String())
-	}
-	if !bytes.Equal(sliceRec.Body.Bytes(), pngBytes) {
-		t.Fatalf("slice body = %q, want uploaded PNG bytes", sliceRec.Body.String())
+	if sliceRec.Code != http.StatusNotImplemented {
+		t.Fatalf("selector-bearing photo slice status = %d body=%s, want 501", sliceRec.Code, sliceRec.Body.String())
 	}
 
 	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+uploaded.FileID+"/viewer", nil)
@@ -3603,7 +3600,7 @@ func TestResourceThumbnailMetadataIsConservative(t *testing.T) {
 		}
 		return domain.ResourceRecord{
 			ResourceID: fileID, OriginalName: name, ContentType: "application/octet-stream",
-			SizeBytes: int64(len(body)), SHA256: "sha", StoragePath: storageName,
+			SizeBytes: int64(len(body)), SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), StoragePath: storageName,
 			SourceType: "upload", ResourceKind: "file", OwnerUserID: "alice", CreatedAt: domain.Now(),
 		}
 	}
@@ -3699,12 +3696,12 @@ func TestResourceThumbnailMetadataIsConservative(t *testing.T) {
 	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); record.HasThumbnail {
 		t.Fatal("scientific resource advertised a thumbnail without a ready derivative")
 	}
-	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_czi")), []byte("ready pyramid"), 0o600); err != nil {
-		t.Fatalf("write ready derivative: %v", err)
-	}
+	writeCommittedThumbnailDerivativeForTest(
+		t,
+		root,
+		filepath.Join(root, scientificResource.StoragePath),
+		resourceRecordFromCatalogState(scientificResource, true),
+	)
 	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); !record.HasThumbnail || record.ThumbnailInteraction != "z_scrub" {
 		t.Fatalf("scientific thumbnail metadata = %+v, want ready z-scrub", record)
 	}
@@ -10566,9 +10563,10 @@ func TestOmeTiffUploadViewerKeepsScientificMetadata(t *testing.T) {
 			ContentType string   `json:"content_type"`
 		} `json:"metadata"`
 		Viewer struct {
-			Status           string   `json:"status"`
-			Available        []string `json:"available_surfaces"`
-			AssetPreparation struct {
+			Status              string   `json:"status"`
+			Available           []string `json:"available_surfaces"`
+			DisplayCapabilities []string `json:"display_capabilities"`
+			AssetPreparation    struct {
 				Status          string `json:"status"`
 				NativeSupported bool   `json:"native_supported"`
 				TilePyramid     string `json:"tile_pyramid"`
@@ -10611,29 +10609,19 @@ func TestOmeTiffUploadViewerKeepsScientificMetadata(t *testing.T) {
 	if len(viewerResponse.Viewer.Available) != 2 || viewerResponse.Viewer.Available[0] != "2d" || viewerResponse.Viewer.Available[1] != "metadata" {
 		t.Fatalf("available surfaces = %v, want 2d + metadata for OME-TIFF stack", viewerResponse.Viewer.Available)
 	}
+	for _, capability := range []string{"channel_visibility", "channel_color", "channel_lut_transport"} {
+		if !sliceContains(viewerResponse.Viewer.DisplayCapabilities, capability) {
+			t.Fatalf("display capabilities = %v, want %s", viewerResponse.Viewer.DisplayCapabilities, capability)
+		}
+	}
 
 	displayReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=1&channels=2&window_min=600&window_max=900", nil)
 	displayReq.Header.Set("X-Ultra-User-Id", "test-user")
 	displayReq.Header.Set("X-Ultra-Org-Id", "test-org")
 	displayRec := httptest.NewRecorder()
 	router.ServeHTTP(displayRec, displayReq)
-	if displayRec.Code != http.StatusOK {
-		t.Fatalf("display status = %d body=%s", displayRec.Code, displayRec.Body.String())
-	}
-	if got := displayRec.Header().Get("Content-Type"); got != "image/png" {
-		t.Fatalf("display content type = %q, want image/png", got)
-	}
-	displayImage, format, err := image.Decode(bytes.NewReader(displayRec.Body.Bytes()))
-	if err != nil {
-		t.Fatalf("decode display PNG: %v", err)
-	}
-	if format != "png" || displayImage.Bounds().Dx() != 2 || displayImage.Bounds().Dy() != 1 {
-		t.Fatalf("display config = %dx%d %s, want 2x1 png", displayImage.Bounds().Dx(), displayImage.Bounds().Dy(), format)
-	}
-	first := color.GrayModel.Convert(displayImage.At(0, 0)).(color.Gray).Y
-	second := color.GrayModel.Convert(displayImage.At(1, 0)).(color.Gray).Y
-	if first > 5 || second < 250 {
-		t.Fatalf("selected OME plane pixels = %d,%d, want windowed z1 c2 low/high contrast", first, second)
+	if displayRec.Code != http.StatusNotImplemented {
+		t.Fatalf("scientific slice status = %d body=%s, want 501 without image service", displayRec.Code, displayRec.Body.String())
 	}
 }
 
@@ -10796,6 +10784,30 @@ func TestNiftiUploadViewerServesScalarVolume(t *testing.T) {
 		if got != want {
 			t.Fatalf("voxel[%d] = %d, want %d", index, got, want)
 		}
+	}
+
+	for _, rawQuery := range []string{
+		"channel=-1", "channel=1.5", "channel=0&channel=0", "channel=0&c=0",
+		"channel=0,1", "channels=0", "channel=1", "t=1", "t=", "time=0&timepoint=0",
+		"sampling=linear", "sampling=box&sampling=box",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?"+rawQuery, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("query %q status=%d body=%s, want 400", rawQuery, rec.Code, rec.Body.String())
+		}
+	}
+
+	nearestReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?sampling=nearest", nil)
+	nearestReq.Header.Set("X-Ultra-User-Id", "test-user")
+	nearestReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	nearestRec := httptest.NewRecorder()
+	router.ServeHTTP(nearestRec, nearestReq)
+	if nearestRec.Code != http.StatusOK || nearestRec.Header().Get("x-volume-sampling") != "nearest" {
+		t.Fatalf("nearest response status=%d sampling=%q body=%s", nearestRec.Code, nearestRec.Header().Get("x-volume-sampling"), nearestRec.Body.String())
 	}
 }
 
@@ -11200,6 +11212,100 @@ func TestNiftiUploadViewerServesSelectedScalarTimepoint(t *testing.T) {
 	}
 }
 
+func TestNiftiUploadSliceServesExactMPRPlanesAndTimeAliases(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: uploadRoot})
+	values := []uint16{
+		0, 10, 20, 30, 40, 50,
+		60, 70, 80, 90, 100, 110,
+		100, 110, 120, 130, 140, 150,
+		160, 170, 180, 190, 200, 210,
+	}
+	fileID := writeTestUploadFile(t, uploadRoot, "mpr-time-series.nii", testNifti1Uint16TimeBytes(t, 3, 2, 2, 2, values))
+
+	cases := []struct {
+		name       string
+		query      string
+		wantWidth  int
+		wantHeight int
+		wantFirst  uint8
+		wantLast   uint8
+	}{
+		{name: "sagittal x with t", query: "axis=x&x=2&t=1", wantWidth: 2, wantHeight: 2, wantFirst: 46, wantLast: 255},
+		{name: "coronal y with time", query: "axis=y&y=1&time=1", wantWidth: 3, wantHeight: 2, wantFirst: 70, wantLast: 255},
+		{name: "axial z with timepoint", query: "axis=z&z=1&timepoint=1", wantWidth: 3, wantHeight: 2, wantFirst: 139, wantLast: 255},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?"+tc.query+"&window_min=100&window_max=210", nil)
+			req.Header.Set("X-Ultra-User-Id", "test-user")
+			req.Header.Set("X-Ultra-Org-Id", "test-org")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("slice status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			img, err := png.Decode(bytes.NewReader(rec.Body.Bytes()))
+			if err != nil {
+				t.Fatalf("decode slice png: %v", err)
+			}
+			if got := img.Bounds().Dx(); got != tc.wantWidth {
+				t.Fatalf("slice width = %d, want %d", got, tc.wantWidth)
+			}
+			if got := img.Bounds().Dy(); got != tc.wantHeight {
+				t.Fatalf("slice height = %d, want %d", got, tc.wantHeight)
+			}
+			gotFirst := color.GrayModel.Convert(img.At(0, 0)).(color.Gray).Y
+			gotLast := color.GrayModel.Convert(img.At(tc.wantWidth-1, tc.wantHeight-1)).(color.Gray).Y
+			if gotFirst != tc.wantFirst || gotLast != tc.wantLast {
+				t.Fatalf("slice corner pixels = %d,%d, want %d,%d", gotFirst, gotLast, tc.wantFirst, tc.wantLast)
+			}
+		})
+	}
+}
+
+func TestNiftiUploadSliceRejectsInexactMPRSelectors(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: uploadRoot})
+	values := make([]uint16, 3*2*2*2)
+	fileID := writeTestUploadFile(t, uploadRoot, "strict-mpr.nii", testNifti1Uint16TimeBytes(t, 3, 2, 2, 2, values))
+
+	cases := []string{
+		"x=1",
+		"axis=q&z=0",
+		"axis=x",
+		"axis=y",
+		"axis=z",
+		"axis=x&x=1&y=0",
+		"axis=x&x=1&x=2",
+		"axis=z&z=-1",
+		"axis=z&z=2",
+		"axis=y&y=2",
+		"axis=x&x=3",
+		"axis=z&z=0&t=-1",
+		"axis=z&z=0&t=2",
+		"axis=z&z=0&t=one",
+		"axis=z&z=0&t=0&t=1",
+		"axis=z&z=0&t=0&time=0",
+	}
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?"+query, nil)
+			req.Header.Set("X-Ultra-User-Id", "test-user")
+			req.Header.Set("X-Ultra-Org-Id", "test-org")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("slice status = %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	t.Parallel()
 
@@ -11261,6 +11367,9 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	}
 	if !sliceContains(viewerResponse.Viewer.DisplayCapabilities, "channel_visibility") {
 		t.Fatalf("display capabilities = %v, want channel_visibility", viewerResponse.Viewer.DisplayCapabilities)
+	}
+	if sliceContains(viewerResponse.Viewer.DisplayCapabilities, "channel_lut_transport") {
+		t.Fatalf("NIfTI display capabilities = %v, must not advertise channel LUT transport", viewerResponse.Viewer.DisplayCapabilities)
 	}
 	if len(viewerResponse.Metadata.ArrayShape) != 4 || viewerResponse.Metadata.ArrayShape[0] != 2 || viewerResponse.Metadata.ArrayShape[1] != 2 || viewerResponse.Metadata.ArrayShape[2] != 1 || viewerResponse.Metadata.ArrayShape[3] != 2 {
 		t.Fatalf("array_shape = %v, want [2 2 1 2] (C,Z,Y,X)", viewerResponse.Metadata.ArrayShape)

@@ -636,18 +636,25 @@ const buildUrl = (
  * the same order as `channels`. Projecting at this shared request boundary keeps
  * display, slice, and atlas URLs consistent and prevents cardinality mismatches.
  */
+const MAX_IMAGE_CHANNEL_SELECTION = 8;
+
 const applyImageChannelSelection = (
   params: Record<string, string>,
   channels?: number[],
   channelPalette?: string[]
 ): void => {
-  const selectedChannels = Array.isArray(channels)
-    ? channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => Math.max(0, Math.floor(value)))
-    : [];
+  const selectedChannels = Array.isArray(channels) ? channels : [];
   if (selectedChannels.length === 0) {
     return;
+  }
+  if (selectedChannels.length > MAX_IMAGE_CHANNEL_SELECTION) {
+    throw new RangeError(`At most ${MAX_IMAGE_CHANNEL_SELECTION} image channels may be selected.`);
+  }
+  if (selectedChannels.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new RangeError("Image channel indices must be non-negative safe integers.");
+  }
+  if (new Set(selectedChannels).size !== selectedChannels.length) {
+    throw new RangeError("Duplicate image channel indices are not allowed.");
   }
   params.channels = selectedChannels.map(String).join(",");
 
@@ -4964,6 +4971,10 @@ export class ApiClient {
       z?: number | null;
       c?: number | null;
       t?: number | null;
+      channels?: number[];
+      /** Source-channel-indexed color palette. */
+      channelColors?: string[];
+      cacheKey?: string;
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -4987,6 +4998,11 @@ export class ApiClient {
     }
     if (typeof config.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
+    }
+    applyImageChannelSelection(params, config.channels, config.channelColors);
+    const cacheKey = String(config.cacheKey ?? "").trim();
+    if (cacheKey) {
+      params.cache_key = cacheKey;
     }
     return buildUrl(
       this.baseUrl,

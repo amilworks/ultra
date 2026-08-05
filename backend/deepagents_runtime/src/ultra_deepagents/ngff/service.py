@@ -19,6 +19,7 @@ from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
+from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS, MAX_TILE_EDGE
 from ultra_deepagents.ngff.reader import (
     NgffError,
     NgffImage,
@@ -68,7 +69,7 @@ def _get_image(path: str) -> NgffImage:
 
 
 def _parse_channels(channels: str | None) -> list[int] | None:
-    if not channels:
+    if channels is None:
         return None
     out: list[int] = []
     for tok in channels.split(","):
@@ -76,7 +77,32 @@ def _parse_channels(channels: str | None) -> list[int] | None:
         if not tok or not tok.isdigit():
             raise ValueError("channels must be a comma-separated list of non-negative integers")
         out.append(int(tok))
+    if len(set(out)) != len(out):
+        raise ValueError("channels must not contain duplicates")
+    if len(out) > MAX_COMPOSITE_CHANNELS:
+        raise ValueError(f"channels supports at most {MAX_COMPOSITE_CHANNELS} selections")
     return out
+
+
+def _parse_channel_colors(
+    channel_colors: str | None, channels: list[int] | None
+) -> list[str] | None:
+    if channel_colors is None:
+        return None
+    colors = [part.strip().removeprefix("#").upper() for part in channel_colors.split(",")]
+    if any(
+        len(color) != 6 or any(char not in "0123456789ABCDEF" for char in color) for color in colors
+    ):
+        raise ValueError("channel colors must be comma-separated six-digit hex values")
+    if channels is None or len(colors) != len(channels):
+        raise ValueError("channel colors must match the selected channel count")
+    return colors
+
+
+def _validate_tile_size(size: int) -> int:
+    if isinstance(size, bool) or size <= 0 or size > MAX_TILE_EDGE:
+        raise ValueError(f"tile size must be between 1 and {MAX_TILE_EDGE} pixels")
+    return size
 
 
 def create_app() -> FastAPI:
@@ -108,9 +134,12 @@ def create_app() -> FastAPI:
         z: int = 0,
         level: int | None = None,
         channels: str | None = None,
+        channel_colors: str | None = None,
         full_resolution: bool = True,
     ) -> Response:
         try:
+            selected = _parse_channels(channels)
+            colors = _parse_channel_colors(channel_colors, selected)
             img = await run_in_threadpool(_get_image, path)
             lvl = 0 if level is None else int(level)
             max_dim = None if full_resolution else SCRUB_MAX_DIMENSION
@@ -120,7 +149,8 @@ def create_app() -> FastAPI:
                 t=t,
                 z=z,
                 level=lvl,
-                channels=_parse_channels(channels),
+                channels=selected,
+                channel_colors=colors,
                 max_dim=max_dim,
             )
             return Response(content=png, media_type="image/png")
@@ -140,9 +170,13 @@ def create_app() -> FastAPI:
         t: int = 0,
         z: int = 0,
         channels: str | None = None,
+        channel_colors: str | None = None,
     ) -> Response:
         # One DeepZoom tile, reading ONLY the chunks covering the tile region (gigapixel-safe).
         try:
+            size = _validate_tile_size(size)
+            selected = _parse_channels(channels)
+            colors = _parse_channel_colors(channel_colors, selected)
             img = await run_in_threadpool(_get_image, path)
             png = await run_in_threadpool(
                 render_tile_png,
@@ -153,7 +187,8 @@ def create_app() -> FastAPI:
                 tile_size=int(size),
                 t=int(t),
                 z=int(z),
-                channels=_parse_channels(channels),
+                channels=selected,
+                channel_colors=colors,
             )
             return Response(content=png, media_type="image/png")
         except (NgffError, ValueError) as exc:

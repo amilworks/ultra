@@ -26,12 +26,55 @@ __all__ = [
     "convert_command",
     "derive_pyramid",
     "DEFAULT_IMGCNV",
+    "ConversionError",
+    "ConversionInputError",
+    "ConversionDependencyError",
+    "ConversionResourceError",
+    "ConversionProcessError",
 ]
 
 DEFAULT_IMGCNV = "imgcnv"
 
 _COMPRESSIONS = frozenset({"none", "packbits", "lzw", "jpeg", "zip", "lzma", "jxr"})
 _LAYOUTS = frozenset({"subdirs", "topdirs"})
+_FAILURE_DETAIL_LIMIT = 4096
+_DETERMINISTIC_INPUT_DIAGNOSTICS = (
+    "input format is not supported",
+    "unsupported input format",
+)
+
+
+class ConversionError(RuntimeError):
+    """Base class for converter failures with an explicit retry disposition."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        self.returncode = returncode
+        self.stdout = str(stdout or "")[:_FAILURE_DETAIL_LIMIT]
+        self.stderr = str(stderr or "")[:_FAILURE_DETAIL_LIMIT]
+        super().__init__(message)
+
+
+class ConversionInputError(ConversionError):
+    """The immutable input/spec is unsupported, corrupt, or invalid."""
+
+
+class ConversionDependencyError(ConversionError):
+    """The converter executable or runtime dependency is unavailable."""
+
+
+class ConversionResourceError(ConversionError):
+    """The converter was killed, timed out, or exhausted a runtime resource."""
+
+
+class ConversionProcessError(ConversionError):
+    """The converter failed operationally without proving deterministic input failure."""
 
 
 @dataclass(frozen=True)
@@ -71,13 +114,17 @@ def pyramid_options(tile_size: int = 512, compression: str = "lzw", layout: str 
     if not isinstance(tile_size, int) or isinstance(tile_size, bool) or tile_size <= 0:
         raise ValueError(f"tile_size must be a positive int, got {tile_size!r}")
     if compression not in _COMPRESSIONS:
-        raise ValueError(f"unknown compression {compression!r}; expected one of {sorted(_COMPRESSIONS)}")
+        raise ValueError(
+            f"unknown compression {compression!r}; expected one of {sorted(_COMPRESSIONS)}"
+        )
     if layout not in _LAYOUTS:
         raise ValueError(f"layout must be one of {sorted(_LAYOUTS)}, got {layout!r}")
     return f"compression {compression} tiles {tile_size} pyramid {layout}"
 
 
-def convert_command(src, dst, *, spec: PyramidSpec | None = None, imgcnv_bin: str = DEFAULT_IMGCNV) -> list[str]:
+def convert_command(
+    src, dst, *, spec: PyramidSpec | None = None, imgcnv_bin: str = DEFAULT_IMGCNV
+) -> list[str]:
     """Build the ``imgcnv`` argv that converts ``src`` to a tiled pyramid at ``dst``."""
     spec = spec or PyramidSpec()
     return [imgcnv_bin, "-i", str(src), "-o", str(dst), "-t", spec.fmt, "-options", spec.options()]
@@ -104,10 +151,34 @@ def derive_pyramid(
     if parent:
         os.makedirs(parent, exist_ok=True)
     cmd = convert_command(src, dst, spec=spec, imgcnv_bin=resolved)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise ConversionDependencyError("imgcnv executable is unavailable") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConversionResourceError("imgcnv conversion timed out") from exc
+    except OSError as exc:
+        raise ConversionProcessError("imgcnv could not be executed") from exc
     result = ConvertResult(str(src), str(dst), proc.returncode, proc.stdout, proc.stderr)
     if not result.ok:
-        raise RuntimeError(
-            f"imgcnv conversion failed (exit {proc.returncode}): {proc.stderr.strip()[:500]}"
+        message = f"imgcnv conversion failed (exit {proc.returncode})"
+        if proc.returncode in (-9, 137):
+            raise ConversionResourceError(
+                message,
+                returncode=proc.returncode,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+            )
+        diagnostic = f"{proc.stdout}\n{proc.stderr}".lower()
+        error_type = (
+            ConversionInputError
+            if any(marker in diagnostic for marker in _DETERMINISTIC_INPUT_DIAGNOSTICS)
+            else ConversionProcessError
+        )
+        raise error_type(
+            message,
+            returncode=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
         )
     return result

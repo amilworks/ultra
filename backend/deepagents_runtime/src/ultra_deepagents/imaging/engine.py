@@ -36,6 +36,11 @@ from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from ultra_deepagents.imaging import fusion, hdf5, pipelines, viewerinfo
+from ultra_deepagents.imaging.constants import (
+    MAX_COMPOSITE_CHANNELS,
+    MAX_VIEWERINFO_SIGNAL_CHANNELS,
+    is_ultra_owned_pyramid,
+)
 
 __all__ = [
     "ImageEngine",
@@ -263,7 +268,7 @@ def write_viewerinfo_sidecar(path: str, info: dict[str, Any]) -> None:
         pass  # best-effort cache; never block serving
 
 
-class EngineUnavailable(RuntimeError):
+class EngineUnavailable(RuntimeError):  # noqa: N818 - stable public exception name
     """Raised when a backend's native dependencies are not installed."""
 
 
@@ -287,6 +292,8 @@ class ImageEngine(Protocol):
         col: int,
         row: int,
         tile_size: int = 512,
+        t: int = 0,
+        z: int = 0,
         channels: Sequence[int] | None = None,
         colors: Any = None,
         windows: Any = None,
@@ -352,6 +359,7 @@ class ImageEngine(Protocol):
         grid: tuple[int, int] | None = None,
         level: int | None = None,
         atlas_scale: float | None = None,
+        t: int = 0,
         channels: Sequence[int] | None = None,
         colors: Any = None,
         windows: Any = None,
@@ -428,11 +436,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
         if _lower_ext(path) not in TIFF_EXTENSIONS:
             return None
-        normalized = os.path.normpath(os.fspath(path))
-        if (
-            os.path.basename(os.path.dirname(normalized)) == "derived"
-            and os.path.basename(normalized).endswith("__pyramid.tif")
-        ):
+        if is_ultra_owned_pyramid(path):
             return None
         if self._semantic_tiff_engine is None:
             self._semantic_tiff_engine = BioioEngine()
@@ -448,6 +452,26 @@ class LibBioImageEngine(_Hdf5EngineMixin):
 
     def meta(self, path: str) -> dict[str, Any]:
         return dict(self._bim.meta(path, self._cache))
+
+    def _bounded_default_channels(self, path: str, channels: Sequence[int] | None):
+        """Cap omitted scientific selections before constructing a pixel-read pipeline.
+
+        Explicit selections were already validated by the service. Omitted
+        scientific selections render source channel zero; authoritatively native
+        RGB(A) photos retain the engine's untouched display pipeline.
+        """
+        if channels is not None:
+            if len(channels) > MAX_COMPOSITE_CHANNELS:
+                raise ValueError(
+                    f"channel selection supports at most {MAX_COMPOSITE_CHANNELS} channels"
+                )
+            return channels
+        meta = self._bim.meta(path, self._cache)
+        if int(meta.get("image_num_c", 1) or 1) <= 1:
+            return None
+        if self._is_display_photo(path):
+            return None
+        return [1]
 
     def _is_display_photo(self, path: str) -> bool:
         """True for an 8-bit RGB(A) PHOTO (orthomosaic, slide): already display-ready,
@@ -520,8 +544,27 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         return windows
 
     def tile(
-        self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None
+        self,
+        path,
+        *,
+        level,
+        col,
+        row,
+        tile_size=512,
+        t=0,
+        z=0,
+        channels=None,
+        colors=None,
+        windows=None,
     ) -> bytes:
+        meta = dict(self._bim.meta(path, self._cache))
+        time_index = _validate_native_axis(t, "time", _native_axis_count(meta, "time"))
+        depth_index = _validate_native_axis(z, "z", _native_axis_count(meta, "z"))
+        if time_index != 0 or depth_index != 0:
+            raise ValueError(
+                "native embedded tile decoder cannot truthfully select nonzero time/z planes"
+            )
+        channels = self._bounded_default_channels(path, channels)
         try:
             if colors:
                 return self._render_fused(
@@ -654,6 +697,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
     def region(
         self, path, *, x1, y1, x2, y2, region_scale=None, channels=None, colors=None, windows=None
     ) -> bytes:
+        channels = self._bounded_default_channels(path, channels)
         if colors:
             return self._render_fused(
                 path,
@@ -733,6 +777,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         if str(scalar_render_mode).strip().lower() == "mask":
             raise ValueError("unsupported mask slice for this source decoder")
         meta = self._bim.meta(path, self._cache)
+        channels = self._bounded_default_channels(path, channels)
         paged = z is not None and t is None and viewerinfo.paged_depth(meta)
         # A transient z-scrub frame (full_resolution=False) only needs to fill the
         # viewport. Two complementary bounds keep it fast: read a bounded pyramid
@@ -803,6 +848,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 colors=colors,
                 windows=windows,
             )
+        channels = self._bounded_default_channels(path, channels)
         if level is None:
             try:
                 level = _thumbnail_level_for_meta(dict(self._bim.meta(path, self._cache)), max_size)
@@ -857,6 +903,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         channels=None,
         colors=None,
         windows=None,
+        t=0,
     ) -> bytes:
         """Assemble a z-stack texture atlas (the 3D slice_stack volume source).
 
@@ -873,7 +920,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         # orchestrator (imaging/atlas.py) uses, so both produce byte-identical output.
         from ultra_deepagents.imaging.atlas import compose_atlas_png
 
-        plan = self.atlas_plan(path, channels=channels, colors=colors, level=level)
+        plan = self.atlas_plan(path, channels=channels, colors=colors, level=level, t=t)
         if windows is None:
             windows = self.atlas_windows(
                 path,
@@ -881,6 +928,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 level=plan["read_level"],
                 channels=plan["read_channels"],
                 paged=plan["paged"],
+                t=plan["t"],
             )
         cells = [
             self.atlas_cell(
@@ -893,15 +941,17 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 cell_w=plan["cell_w"],
                 cell_h=plan["cell_h"],
                 paged=plan["paged"],
+                t=plan["t"],
             )
             for z in range(plan["depth"])
         ]
         return compose_atlas_png(cells, plan)
 
-    def atlas_plan(self, path, *, channels=None, colors=None, level=None) -> dict:
+    def atlas_plan(self, path, *, channels=None, colors=None, level=None, t=0) -> dict:
         """Layout + channel/level decisions for an atlas — the serializable plan the
         parallel orchestrator fans out from (one engine.meta read; no decode)."""
         meta = dict(self._bim.meta(path, self._cache))
+        time_index = _validate_native_axis(t, "time", _native_axis_count(meta, "time"))
         paged = bool(viewerinfo.paged_depth(meta))
         depth = viewerinfo.paged_depth(meta) or int(meta.get("image_num_z", 1) or 1)
         width = int(meta.get("image_num_x", 0) or 0)
@@ -929,20 +979,23 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             "read_channels": read_channels,
             "cell_colors": cell_colors,
             "paged": paged,
+            "t": time_index,
         }
 
-    def atlas_windows(self, path, *, depth, level, channels, paged):
+    def atlas_windows(self, path, *, depth, level, channels, paged, t=0):
         """The one global per-channel window for the whole stack (see _atlas_global_windows)."""
-        return self._atlas_global_windows(path, depth, level, channels, paged)
+        return self._atlas_global_windows(path, depth, level, channels, paged, t=t)
 
-    def atlas_cell(self, path, *, z, level, channels, colors, windows, cell_w, cell_h, paged):
+    def atlas_cell(self, path, *, z, level, channels, colors, windows, cell_w, cell_h, paged, t=0):
         """Render one atlas cell: read plane z's channels (float), composite with the global
         windows, resize to the cell size. Returns a (cell_h, cell_w, 3) uint8 array."""
-        plane = self._atlas_plane_float(path, z, level, channels, paged)
+        plane = self._atlas_plane_float(path, z, level, channels, paged, t=t)
         cell = fusion.composite_channels(plane, colors, np=self._np, windows=windows)
         return self._resize_cell(cell, cell_w, cell_h)
 
-    def atlas_cells(self, path, *, zs, level, channels, colors, windows, cell_w, cell_h, paged):
+    def atlas_cells(
+        self, path, *, zs, level, channels, colors, windows, cell_w, cell_h, paged, t=0
+    ):
         """Render a contiguous range of atlas cells in one task — the unit of parallelism
         (one worker reads its chunk of planes sequentially; chunks run across workers)."""
         return [
@@ -956,6 +1009,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
                 cell_w=cell_w,
                 cell_h=cell_h,
                 paged=paged,
+                t=t,
             )
             for z in zs
         ]
@@ -968,7 +1022,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             return 0
         return max(0, min(levels - 1, int(math.floor(math.log2(downsample)))))
 
-    def _atlas_plane_float(self, path, z, level, channels, paged):
+    def _atlas_plane_float(self, path, z, level, channels, paged, t=0):
         """Read one z-plane's selected channels as float (C, H, W)."""
         np = self._np
         if paged:
@@ -977,14 +1031,18 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             )
         else:
             pipeline = pipelines.slice_plane(
-                z=z, level=level, channels=channels, out_depth=pipelines.DEPTH_SCALAR_F32
+                z=z,
+                t=t,
+                level=level,
+                channels=channels,
+                out_depth=pipelines.DEPTH_SCALAR_F32,
             )
         arr = self._bim.read(path, pipeline, self._cache)
         if arr.ndim == 2:
             arr = arr[np.newaxis, ...]
         return np.ascontiguousarray(arr, dtype="float32")
 
-    def _atlas_global_windows(self, path, depth, level, channels, paged):
+    def _atlas_global_windows(self, path, depth, level, channels, paged, t=0):
         """One robust [p1, p99] window per channel, sampled across depth, so the
         whole volume shares a window (per-plane auto-scaling would flicker in z)."""
         np = self._np
@@ -992,7 +1050,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         sample_zs = sorted({max(0, min(depth - 1, int(round(depth * f)))) for f in fractions})
         per_channel: list[list] = []
         for z in sample_zs:
-            plane = self._atlas_plane_float(path, z, level, channels, paged)
+            plane = self._atlas_plane_float(path, z, level, channels, paged, t=t)
             if not per_channel:
                 per_channel = [[] for _ in range(plane.shape[0])]
             for ci in range(plane.shape[0]):
@@ -1246,6 +1304,8 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             c = int(meta.get("image_num_c", 1) or 1)
             if c <= 1:
                 return None
+            if c > MAX_VIEWERINFO_SIGNAL_CHANNELS:
+                return None
             try:
                 cache_key = (path, os.path.getmtime(path), c)
             except OSError:
@@ -1312,11 +1372,7 @@ class LibBioImageEngine(_Hdf5EngineMixin):
             t=plan["t"],
             pages=plan["pages"],
             sampling=plan.get("sampling", "box"),
-            plan=(
-                plan
-                if plan.get("preview_policy") == "mask-native-integer-v1"
-                else None
-            ),
+            plan=(plan if plan.get("preview_policy") == "mask-native-integer-v1" else None),
         )
         return build_scalar_volume_dict(planes, plan["channel"], plan)
 
@@ -1326,13 +1382,9 @@ class LibBioImageEngine(_Hdf5EngineMixin):
         if sampling_mode not in {"box", "nearest"}:
             raise ValueError("unsupported scalar volume sampling")
         if semantic_tiff := self._tiff_scalar_engine(path):
-            return semantic_tiff.scalar_plan(
-                path, channel=channel, t=t, sampling=sampling_mode
-            )
+            return semantic_tiff.scalar_plan(path, channel=channel, t=t, sampling=sampling_mode)
         if sampling_mode == "nearest":
-            raise ValueError(
-                "unsupported nearest scalar sampling: exact Mask source required"
-            )
+            raise ValueError("unsupported nearest scalar sampling: exact Mask source required")
         from ultra_deepagents.imaging.atlas import plan_scalar_preview
 
         meta = dict(self._bim.meta(path, self._cache))
@@ -1540,10 +1592,23 @@ class StubEngine(_Hdf5EngineMixin):
         }
 
     def tile(
-        self, path, *, level, col, row, tile_size=512, channels=None, colors=None, windows=None
+        self,
+        path,
+        *,
+        level,
+        col,
+        row,
+        tile_size=512,
+        t=0,
+        z=0,
+        channels=None,
+        colors=None,
+        windows=None,
     ) -> bytes:
         return self._png(
-            tile_size, tile_size, _seed(path, "tile", level, col, row, channels, colors)
+            tile_size,
+            tile_size,
+            _seed(path, "tile", level, col, row, t, z, channels, colors),
         )
 
     def region(
@@ -1595,8 +1660,9 @@ class StubEngine(_Hdf5EngineMixin):
         channels=None,
         colors=None,
         windows=None,
+        t=0,
     ) -> bytes:
-        return self._png(512, 512, _seed(path, "atlas", grid, level, channels, colors))
+        return self._png(512, 512, _seed(path, "atlas", grid, level, t, channels, colors))
 
     def histogram(self, path, *, bins=256, channels=None, t=0, scope="volume") -> dict[str, Any]:
         seed = _seed(path, "hist", bins)
@@ -1650,9 +1716,7 @@ class StubEngine(_Hdf5EngineMixin):
 
     def scalar_volume(self, path, *, channel=0, t=0, sampling="box") -> dict[str, Any]:
         if str(sampling or "box").strip().lower() == "nearest":
-            raise ValueError(
-                "unsupported nearest scalar sampling: exact Mask source required"
-            )
+            raise ValueError("unsupported nearest scalar sampling: exact Mask source required")
         seed = _seed(path, "vol", channel, t)
         w = h = 16
         d = 1 + seed % 8
@@ -1849,6 +1913,8 @@ class Hdf5OnlyEngine(_Hdf5EngineMixin):
         col=0,
         row=0,
         tile_size=512,
+        t=0,
+        z=0,
         channels=None,
         colors=None,
         windows=None,

@@ -1167,19 +1167,122 @@ paths:
                   released: { type: boolean }
         "409":
           description: Lease token is invalid
+  /v2/uploads/{file_id}/derive-pyramid:
+    post:
+      operationId: deriveUploadPyramid
+      description: >-
+        Authorize the upload first, then enqueue strict source-bound pyramid
+        publication. The destination hint names the immutable manifest contract;
+        it is not a readable server filesystem path.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "202":
+          description: Strict pyramid derivation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2PyramidDerivationResponse"
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: Background job queue is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "422":
+          description: Upload has no immutable source identity for strict derivation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Pyramid derivation could not be published to the background job queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/preview:
     get:
       operationId: getUploadPreview
       parameters:
         - $ref: "#/components/parameters/FileID"
+        - name: Range
+          in: header
+          description: Optional byte range for native PDF/video/original-file delivery.
+          schema: { type: string }
       responses:
         "200":
-          description: Upload preview bytes
+          description: Native browser-displayable bytes, or a rendered PNG for scientific formats
           content:
+            "*/*":
+              schema: { type: string, format: binary }
             application/octet-stream:
               schema:
                 type: string
                 format: binary
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "206":
+          description: Byte range of native PDF, video, or original browser-displayable bytes
+          headers:
+            Content-Range:
+              required: true
+              schema: { type: string }
+            Accept-Ranges:
+              required: true
+              schema: { type: string, enum: [bytes] }
+          content:
+            "*/*":
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned upload cannot be rendered as a browser preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The owned upload has malformed preview metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/viewer:
     get:
       operationId: getUploadViewer
@@ -1234,6 +1337,26 @@ paths:
                         maxItems: 3
                         uniqueItems: true
                         items: { type: string, enum: [2d, mpr, volume] }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Upload viewer metadata is malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Source viewer metadata is temporarily unavailable or malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Upload viewer dependencies are temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/display:
     get:
       operationId: getUploadDisplay
@@ -1267,14 +1390,83 @@ paths:
           in: query
           description: Explicit source-value upper window bound for grayscale preview output.
           schema: { type: number }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached representations.
+          schema: { type: string }
+        - name: Range
+          in: header
+          description: Optional byte range for native PDF/video/original-file delivery.
+          schema: { type: string }
       responses:
         "200":
-          description: Upload display bytes
+          description: Native browser-displayable bytes, or a transformed PNG
           content:
-            application/octet-stream:
+            "*/*":
+              schema: { type: string, format: binary }
+            image/png:
               schema:
                 type: string
                 format: binary
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "206":
+          description: Byte range of native PDF, video, or original browser-displayable bytes
+          headers:
+            Content-Range:
+              required: true
+              schema: { type: string }
+            Accept-Ranges:
+              required: true
+              schema: { type: string, enum: [bytes] }
+          content:
+            "*/*":
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned upload cannot be rendered with the requested transform
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The requested display transform is malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/slice:
     get:
       operationId: getUploadSlice
@@ -1282,15 +1474,23 @@ paths:
         - $ref: "#/components/parameters/FileID"
         - name: axis
           in: query
-          schema: { type: string }
-        - name: z
+          description: Exact scientific slice axis. NIfTI MPR requires x, y, or z; other scientific sources support z only.
+          schema: { type: string, enum: [x, y, z] }
+        - name: x
           in: query
+          description: Exact NIfTI X coordinate; required only when axis=x and cannot be mixed with y or z.
           schema: { type: integer, minimum: 0 }
         - name: y
           in: query
+          description: Exact NIfTI Y coordinate; required only when axis=y and cannot be mixed with x or z.
           schema: { type: integer, minimum: 0 }
-        - name: x
+        - name: z
           in: query
+          description: Exact Z coordinate. NIfTI requires it only when axis=z.
+          schema: { type: integer, minimum: 0 }
+        - name: level
+          in: query
+          description: Exact nonnegative source pyramid level. When present, this overrides full_resolution.
           schema: { type: integer, minimum: 0 }
         - name: c
           in: query
@@ -1302,31 +1502,28 @@ paths:
           schema: { type: integer, minimum: 0 }
         - name: channels
           in: query
-          description: Comma-separated zero-based source channels. Mask rendering requires exactly one.
+          description: Ordered comma-separated zero-based source channels (maximum 8). Mask rendering requires exactly one.
+          schema: { type: string }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels.
+          schema: { type: string }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached slice representations.
           schema: { type: string }
         - name: t
           in: query
+          description: Zero-based time index. For NIfTI, alias of time and timepoint; do not mix aliases.
           schema: { type: integer, minimum: 0 }
-        - name: enhancement
+        - name: time
           in: query
-          description: Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
-          schema: { type: string }
-        - name: negative
+          description: NIfTI-only alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
           in: query
-          description: Invert grayscale preview output.
-          schema: { type: boolean }
-        - name: gamma
-          in: query
-          description: Gamma adjustment for grayscale preview output.
-          schema: { type: number, minimum: 0.05, maximum: 8 }
-        - name: window_min
-          in: query
-          description: Explicit source-value lower window bound for grayscale preview output.
-          schema: { type: number }
-        - name: window_max
-          in: query
-          description: Explicit source-value upper window bound for grayscale preview output.
-          schema: { type: number }
+          description: NIfTI-only alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: scalar_render_mode
           in: query
           description: Scalar slice rendering mode. Mask thresholds the raw source plane before display mapping.
@@ -1339,14 +1536,67 @@ paths:
           in: query
           description: Strict foreground comparison for mask rendering.
           schema: { type: string, enum: [above], default: above }
+        - name: full_resolution
+          in: query
+          description: Whether to render the native plane rather than a bounded scrub frame.
+          schema: { type: boolean, default: true }
       responses:
         "200":
-          description: Upload slice bytes
+          description: Exact scientific PNG slice, or native browser bytes for an unselected 2D photo fallback
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+        "400":
+          description: Slice selection or mask parameters are malformed or out of range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned source format cannot render the requested slice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid or ambiguous scientific selector or source metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: Scientific slice delivery is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2NotConfiguredResponse" }
+        "502":
+          description: Source image metadata or rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF scientific slice delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "500":
+          description: Scientific slice rendering failed unexpectedly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/scalar-volume:
     get:
       operationId: getUploadScalarVolume
@@ -1356,9 +1606,21 @@ paths:
           in: query
           description: Zero-based time index in the authoritative source image.
           schema: { type: integer, minimum: 0 }
+        - name: time
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: channel
           in: query
           description: Zero-based channel index in the authoritative source image.
+          schema: { type: integer, minimum: 0 }
+        - name: c
+          in: query
+          description: Alias of channel; do not mix channel aliases.
           schema: { type: integer, minimum: 0 }
         - name: sampling
           in: query
@@ -1401,6 +1663,9 @@ paths:
             x-volume-time:
               required: true
               schema: { type: integer, minimum: 0 }
+            x-volume-time-count:
+              required: true
+              schema: { type: integer, minimum: 1 }
             x-volume-source-width:
               required: true
               schema: { type: integer, minimum: 1 }
@@ -1423,8 +1688,8 @@ paths:
               required: true
               schema: { type: string, minLength: 1 }
             x-volume-sampling:
-              required: false
-              description: Explicit scalar-volume sampling policy. Older box-sampling responses may omit it.
+              required: true
+              description: Exact scalar-volume sampling policy echoed from the request (default box).
               schema: { type: string, enum: [box, nearest] }
           content:
             application/octet-stream:
@@ -1437,24 +1702,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "422":
           description: Authoritative source axis metadata is malformed or the source cannot be rendered
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
+        "415":
+          description: Upload is not a supported NIfTI scalar volume or cannot be decoded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scalar-volume admission is temporarily saturated or NGFF delivery is unavailable
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "502":
           description: Authoritative source metadata is temporarily unavailable
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
-        "501":
-          description: Upload scalar volume preparation is not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}:
     get:
       operationId: getUploadTile
@@ -1463,7 +1740,8 @@ paths:
         - name: axis
           in: path
           required: true
-          schema: { type: string }
+          description: Exact tile axis. Only z is supported by both libbioimage and NGFF delivery.
+          schema: { type: string, enum: [z] }
         - name: level
           in: path
           required: true
@@ -1479,50 +1757,138 @@ paths:
         - name: z
           in: query
           schema: { type: integer, minimum: 0 }
-        - name: c
-          in: query
-          schema: { type: integer, minimum: 0 }
         - name: t
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: size
+          in: query
+          description: Requested square tile edge in pixels.
+          schema: { type: integer, minimum: 1, maximum: 1024 }
+        - name: channels
+          in: query
+          description: Ordered comma-separated zero-based source channel indices (maximum 8).
+          schema: { type: string }
+        - name: c
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with channel or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with c or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels.
+          schema: { type: string }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached tile representations.
+          schema: { type: string }
       responses:
         "200":
           description: Upload tile bytes
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid tile axis, size, selector, or missing owned storage object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "501":
           description: Upload tile pyramid preparation is not configured
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "502":
+          description: Tile rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF tile delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/atlas:
     get:
       operationId: getUploadAtlas
       parameters:
         - $ref: "#/components/parameters/FileID"
-        - name: enhancement
-          in: query
-          schema: { type: string }
         - name: t
           in: query
+          description: Exact zero-based source timepoint for the atlas.
           schema: { type: integer, minimum: 0 }
+        - name: level
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: grid_rows
+          in: query
+          description: Grid rows; must be paired with grid_cols and the product must not exceed 65536.
+          schema: { type: integer, minimum: 1, maximum: 4096 }
+        - name: grid_cols
+          in: query
+          description: Grid columns; must be paired with grid_rows and the product must not exceed 65536.
+          schema: { type: integer, minimum: 1, maximum: 4096 }
+        - name: scale
+          in: query
+          description: Finite atlas scale greater than zero and at most one.
+          schema: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 1 }
+        - name: channels
+          in: query
+          description: Ordered comma-separated zero-based source channel indices (maximum 8).
+          schema: { type: string }
+        - name: c
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with channel or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with c or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels, including explicit single-channel LUTs.
+          schema: { type: string }
       responses:
         "200":
           description: Upload atlas payload
           content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid time, channel, LUT, grid, or missing owned storage object
+          content:
             application/json:
               schema:
-                type: object
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "501":
           description: Upload atlas preparation is not configured
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "502":
+          description: Atlas rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/histogram:
     get:
       operationId: getUploadHistogram
@@ -1547,6 +1913,14 @@ paths:
           in: query
           description: Exact zero-based source time index to profile.
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: time
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: scope
           in: query
           description: >-
@@ -1651,15 +2025,31 @@ paths:
                       threshold:
                         type: object
                         additionalProperties: true
+        "400":
+          description: Histogram selectors are malformed, ambiguous, or out of range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "415":
           description: Upload histogram could not be decoded for this resource
           content:
             application/json:
-              schema:
-                type: object
-                required: [error]
-                properties:
-                  error: { type: string }
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Source histogram metadata is malformed or owned storage is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Source histogram dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/cifti/carpet:
     get:
       operationId: getUploadCiftiCarpet
@@ -2939,12 +3329,37 @@ paths:
         - $ref: "#/components/parameters/FileID"
       responses:
         "200":
-          description: Resource thumbnail bytes
+          description: Rendered PNG thumbnail
           content:
             image/png:
               schema:
                 type: string
                 format: binary
+        "404":
+          description: Resource is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource cannot be decoded as a thumbnail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The owned catalog resource has no valid storage object
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Thumbnail rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF thumbnail delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/runs:
     get:
       operationId: listRuns
@@ -5117,6 +5532,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2PyramidDerivationResponse:
+      type: object
+      required: [job_id, job_type, resource_id, destination_hint, status]
+      properties:
+        job_id: { type: string }
+        job_type: { type: string, enum: [image.derive_pyramid] }
+        resource_id: { type: string }
+        destination_hint:
+          type: string
+          description: Basename of the strict publication manifest; never an absolute storage path.
+        status: { type: string, enum: [queued] }
     V2UploadBundleFinalizeResponse:
       type: object
       required: [bundles]

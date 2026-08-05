@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from ultra_deepagents.imaging.constants import MAX_TILE_EDGE
+
 __all__ = [
     "build_viewer_info",
     "build_tile_scheme",
@@ -113,7 +115,7 @@ def _parse_color(raw: Any) -> dict[str, Any] | None:
     scale = 255.0 if max(vals) <= 1.0 else 1.0
     rgb = [max(0, min(255, int(round(v * scale)))) for v in vals]
     rgb = (rgb + [0, 0, 0])[:3]
-    return {"hex": "#%02x%02x%02x" % tuple(rgb), "rgb": rgb}
+    return {"hex": f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}", "rgb": rgb}
 
 
 def paged_depth(meta: dict[str, Any]) -> int:
@@ -146,7 +148,7 @@ def build_tile_scheme(meta: dict[str, Any], tile_size_default: int = 256) -> dic
     scales = _resolution_scales(meta, levels_n)
     if x <= 0 or y <= 0 or levels_n <= 1 or len(scales) <= 1:
         return None
-    tile_size = _first_int(meta.get("tile_size_x"), tile_size_default)
+    tile_size = max(1, min(MAX_TILE_EDGE, _first_int(meta.get("tile_size_x"), tile_size_default)))
     levels: list[dict[str, Any]] = []
     for i, scale in enumerate(scales):
         if scale <= 0:
@@ -232,7 +234,7 @@ def _convention_color_dict(index: int) -> dict[str, Any]:
 
     rgb01 = fusion.convention_channel_color(index)
     rgb = [max(0, min(255, int(round(component * 255)))) for component in rgb01]
-    return {"hex": "#%02x%02x%02x" % tuple(rgb), "rgb": rgb}
+    return {"hex": f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}", "rgb": rgb}
 
 
 def build_channels(
@@ -539,10 +541,10 @@ def build_viewer_info(
         k in fmt_lower
         for k in ("czi", "fluoview", "lsm", "nd2", "ome", "lif", "oib", "scn", "svs", "ndpi", "vsi")
     )
-    # A 2D RGB(A) photo. A z>1 RGB stack is left to the microscopy/volume path so a
-    # genuine stack is never flattened onto the single-channel display surface — keep
-    # modality/channel_mode/render_policy consistent by gating all three on is_photo.
-    is_photo = photo_like and z <= 1
+    # A single-plane, single-time RGB(A) photo. A Z or T stack stays on the
+    # selector-aware scientific path so neither controlled axis can be flattened.
+    # Keep modality/channel_mode/render_policy consistent by gating all three here.
+    is_photo = photo_like and z <= 1 and t <= 1
     if "dicom" in fmt_lower or "nifti" in fmt_lower:
         modality = "medical"
     elif is_photo:
@@ -706,6 +708,15 @@ def build_viewer_info(
         "delivery_mode": delivery_mode,
         "first_paint_mode": "webgl",
         "texture_policy": "linear",
+        "display_capabilities": [
+            "slice_navigation",
+            "intensity_window",
+            *(
+                ["channel_visibility", "channel_color", "channel_lut_transport"]
+                if c > 1 and not multi_scene
+                else []
+            ),
+        ],
         "asset_preparation": {
             "status": "unsupported" if multi_scene else "ready",
             "native_supported": not multi_scene,

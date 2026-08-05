@@ -71,6 +71,28 @@ const clampNonNegativeInt = (value: unknown, fallback: number): number => {
   return Number.isFinite(numeric) ? numeric : Math.max(0, fallback);
 };
 
+const normalizeExactChannelIndices = (value: unknown, channelCount: number): number[] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const normalized: number[] = [];
+  const seen = new Set<number>();
+  for (const entry of value) {
+    if (
+      typeof entry !== "number" ||
+      !Number.isSafeInteger(entry) ||
+      entry < 0 ||
+      entry >= channelCount ||
+      seen.has(entry)
+    ) {
+      continue;
+    }
+    normalized.push(entry);
+    seen.add(entry);
+  }
+  return normalized;
+};
+
 const normalizeDimsOrder = (value: unknown): string => {
   const raw = String(value ?? "").toUpperCase();
   const seen = new Set<string>();
@@ -424,6 +446,14 @@ const normalizePhys = (
   modality: string
 ): NonNullable<UploadViewerInfo["phys"]> => {
   const physSource = toRecord(source.phys);
+  const physicalSpacingSource = toRecord(
+    metadataSource.physical_spacing ?? source.physical_spacing
+  );
+  const spacingUnitsSource = toRecord(metadataSource.spacing_units);
+  const sourceChannelNames = Array.isArray(source.channel_names)
+    ? source.channel_names.map((value) => String(value))
+    : [];
+  const sourceDisplayDefaults = toRecord(source.display_defaults);
   const channelCount = Math.max(1, axisSizes.C);
   const channelColors = Array.isArray(physSource.channel_colors)
     ? physSource.channel_colors.map((item, index) => {
@@ -455,23 +485,39 @@ const normalizePhys = (
     z: toPositiveInt(physSource.z, axisSizes.Z),
     t: toPositiveInt(physSource.t, axisSizes.T),
     ch: toPositiveInt(physSource.ch, axisSizes.C),
-    pixel_depth: toPositiveInt(physSource.pixel_depth, 8),
-    pixel_format: String(physSource.pixel_format ?? "u"),
+    pixel_depth:
+      physSource.pixel_depth == null ? undefined : toPositiveInt(physSource.pixel_depth, 1),
+    pixel_format:
+      physSource.pixel_format == null ? undefined : String(physSource.pixel_format),
     pixel_size: Array.isArray(physSource.pixel_size)
       ? physSource.pixel_size.map((value) => toFiniteNumber(value, 1))
-      : [1, 1, 1, 1],
+      : [
+        positiveSpacing(physicalSpacingSource.x),
+        positiveSpacing(physicalSpacingSource.y),
+        positiveSpacing(physicalSpacingSource.z),
+        1,
+      ],
     pixel_units: Array.isArray(physSource.pixel_units)
       ? physSource.pixel_units.map((value) => String(value))
-      : ["px", "px", "px", "frame"],
+      : [
+        String(spacingUnitsSource.x ?? "px"),
+        String(spacingUnitsSource.y ?? "px"),
+        String(spacingUnitsSource.z ?? "px"),
+        "frame",
+      ],
     channel_names: Array.isArray(physSource.channel_names)
       ? physSource.channel_names.map((value) => String(value))
-      : Array.from({ length: channelCount }, (_, index) => (channelCount === 1 ? "Intensity" : `Ch${index + 1}`)),
+      : sourceChannelNames.length === channelCount
+        ? sourceChannelNames
+        : Array.from({ length: channelCount }, (_, index) => (channelCount === 1 ? "Intensity" : `Ch${index + 1}`)),
     display_channels: Array.isArray(physSource.display_channels)
-      ? physSource.display_channels.map((value) => Math.round(Number(value) || 0))
+      ? normalizeExactChannelIndices(physSource.display_channels, channelCount)
+      : Array.isArray(sourceDisplayDefaults.channels)
+        ? normalizeExactChannelIndices(sourceDisplayDefaults.channels, channelCount)
       : channelCount === 1
-        ? [0, 0, 0]
+        ? [0]
         : channelCount === 2
-          ? [0, 1, -1]
+          ? [0, 1]
           : [0, 1, 2],
     channel_colors: channelColors,
     units: String(physSource.units ?? (modality === "medical" ? "physical" : "pixel")),
@@ -508,8 +554,11 @@ const normalizeDisplayDefaults = (
     ),
     channel_mode: String(merged.channel_mode ?? "composite"),
     channels: Array.isArray(merged.channels)
-      ? merged.channels.map((value) => clampNonNegativeInt(value, 0))
-      : (phys.display_channels ?? [0, 1, 2]).filter((value) => value >= 0),
+      ? normalizeExactChannelIndices(merged.channels, Math.max(1, phys.ch ?? 1))
+      : normalizeExactChannelIndices(
+          phys.display_channels ?? [0, 1, 2],
+          Math.max(1, phys.ch ?? 1)
+        ),
     channel_colors: Array.isArray(merged.channel_colors)
       ? merged.channel_colors.map((value) => String(value))
       : (phys.channel_colors ?? []).map((entry) => entry.hex),
@@ -1138,6 +1187,17 @@ const normalizeHdf5ViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
       filename_hints: toRecord(metadataSource.filename_hints),
       physical_spacing: physicalSpacing,
       physical_spacing_unit: physicalSpacingUnit,
+      spacing_units: (() => {
+        const units = toRecord(metadataSource.spacing_units);
+        if (Object.keys(units).length === 0) {
+          return undefined;
+        }
+        return {
+          x: units.x == null ? null : String(units.x),
+          y: units.y == null ? null : String(units.y),
+          z: units.z == null ? null : String(units.z),
+        };
+      })(),
       exif: {},
       geo: null,
       dicom: null,
@@ -1555,6 +1615,17 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
       ),
       physical_spacing: physicalSpacing,
       physical_spacing_unit: physicalSpacingUnit,
+      spacing_units: (() => {
+        const units = toRecord(metadataSource.spacing_units);
+        if (Object.keys(units).length === 0) {
+          return undefined;
+        }
+        return {
+          x: units.x == null ? null : String(units.x),
+          y: units.y == null ? null : String(units.y),
+          z: units.z == null ? null : String(units.z),
+        };
+      })(),
       scene: metadataSource.scene == null ? null : String(metadataSource.scene),
       scene_count: toPositiveInt(metadataSource.scene_count ?? source.scene_count, 1),
       header: Object.fromEntries(Object.entries(toRecord(metadataSource.header)).map(([key, value]) => [key, String(value)])),

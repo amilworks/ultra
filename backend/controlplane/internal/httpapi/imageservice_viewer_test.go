@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/color"
 	"image/png"
 	"math"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +66,303 @@ func uploadNamedFileForProxyTest(t *testing.T, router http.Handler, filename str
 		t.Fatalf("upload response = %+v, want one uploaded file", resp)
 	}
 	return resp.Uploaded[0].FileID
+}
+
+func uploadedResourceRecordForTest(t *testing.T, mem *store.MemoryStore, fileID string) resourceRecord {
+	t.Helper()
+	resource, err := mem.GetResourceForUser(context.Background(), fileID, "field-researcher", "smithsonian")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resourceRecord{
+		FileID:       fileID,
+		OriginalName: resource.OriginalName,
+		ContentType:  resource.ContentType,
+		SizeBytes:    resource.SizeBytes,
+		SHA256:       resource.SHA256,
+	}
+}
+
+func uploadedSourcePathForTest(t *testing.T, root, fileID string) string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(root, fileID+"__*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("uploaded source matches = %v, err=%v", matches, err)
+	}
+	return matches[0]
+}
+
+func setAuthoritativeImageAxesForTest(
+	t *testing.T,
+	mem *store.MemoryStore,
+	fileID string,
+	timeCount int,
+	channelCount int,
+	depth int,
+) {
+	t.Helper()
+	_, err := mem.MergeResourceMetadataForUser(context.Background(), domain.MergeResourceMetadataInput{
+		ResourceID: fileID,
+		UserID:     "field-researcher",
+		OrgID:      "smithsonian",
+		Patch: domain.JSONMap{"image_header": domain.JSONMap{
+			"time_count":    timeCount,
+			"channel_count": channelCount,
+			"depth":         depth,
+			"warnings":      []any{},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("set authoritative image axes: %v", err)
+	}
+}
+
+func TestNiftiScalarVolumeCatalogBoundsPrecedeStorageResolution(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		configured := configured
+		t.Run(fmt.Sprintf("image_service_configured_%t", configured), func(t *testing.T) {
+			imageServiceCalls := 0
+			imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				imageServiceCalls++
+				http.Error(w, "scalar volume must not reach image service", http.StatusInternalServerError)
+			}))
+			defer imageService.Close()
+
+			mem := store.NewMemoryStore()
+			root := t.TempDir()
+			imageServiceURL := ""
+			if configured {
+				imageServiceURL = imageService.URL
+			}
+			router := NewRouter(ServerDeps{
+				Version:         "test-version",
+				Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+				Store:           mem,
+				UploadRoot:      root,
+				ImageServiceURL: imageServiceURL,
+			})
+			fileID := uploadNamedFileForProxyTest(
+				t,
+				router,
+				"series.nii",
+				testNifti1Uint16TimeBytes(t, 2, 1, 1, 2, []uint16{10, 20, 30, 40}),
+			)
+			setAuthoritativeImageAxesForTest(t, mem, fileID, 2, 1, 1)
+			if err := os.Remove(uploadedSourcePathForTest(t, root, fileID)); err != nil {
+				t.Fatalf("remove uploaded source: %v", err)
+			}
+
+			for _, rawQuery := range []string{"t=2", "channel=1"} {
+				req := httptest.NewRequest(
+					http.MethodGet,
+					"/v2/uploads/"+fileID+"/scalar-volume?"+rawQuery,
+					nil,
+				)
+				setProxyOwnerHeaders(req)
+				rec := httptest.NewRecorder()
+				router.ServeHTTP(rec, req)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("authorized %s status = %d body=%s, want 400 before storage", rawQuery, rec.Code, rec.Body.String())
+				}
+			}
+
+			unauthorized := httptest.NewRequest(
+				http.MethodGet,
+				"/v2/uploads/"+fileID+"/scalar-volume?t=2",
+				nil,
+			)
+			unauthorized.Header.Set("X-Ultra-User-Id", "other-researcher")
+			unauthorized.Header.Set("X-Ultra-Org-Id", "smithsonian")
+			unauthorizedRec := httptest.NewRecorder()
+			router.ServeHTTP(unauthorizedRec, unauthorized)
+			if unauthorizedRec.Code != http.StatusNotFound {
+				t.Fatalf("unauthorized out-of-range status = %d body=%s, want hidden 404", unauthorizedRec.Code, unauthorizedRec.Body.String())
+			}
+
+			valid := httptest.NewRequest(
+				http.MethodGet,
+				"/v2/uploads/"+fileID+"/scalar-volume?t=1",
+				nil,
+			)
+			setProxyOwnerHeaders(valid)
+			validRec := httptest.NewRecorder()
+			router.ServeHTTP(validRec, valid)
+			if validRec.Code != http.StatusNotFound {
+				t.Fatalf("authorized valid missing-storage status = %d body=%s, want 404", validRec.Code, validRec.Body.String())
+			}
+			if imageServiceCalls != 0 {
+				t.Fatalf("image service calls = %d, want zero for native NIfTI", imageServiceCalls)
+			}
+		})
+	}
+}
+
+func TestUploadPreviewAndDisplayRuntimeMediaAreCoveredByWildcardContract(t *testing.T) {
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: t.TempDir(),
+	})
+	for _, fixture := range []struct {
+		name        string
+		body        []byte
+		contentType string
+	}{
+		{name: "notes.txt", body: []byte("scientific notes"), contentType: "text/plain"},
+		{name: "clip.mpeg", body: []byte("mpeg bytes"), contentType: "video/mpeg"},
+	} {
+		fileID := uploadNamedFileForProxyTest(t, router, fixture.name, fixture.body)
+		for _, surface := range []string{"preview", "display"} {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/"+surface, nil)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			mediaType, _, mediaErr := mime.ParseMediaType(rec.Header().Get("Content-Type"))
+			if rec.Code != http.StatusOK || mediaErr != nil || mediaType != fixture.contentType {
+				t.Fatalf("%s %s status/content-type = %d/%q body=%q", fixture.name, surface, rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+			}
+		}
+	}
+
+	png := testPNGBytes(t, 4, 4)
+	fileID := uploadNamedFileForProxyTest(t, router, "plane.png", png)
+	for _, surface := range []string{"preview", "display"} {
+		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/"+surface, nil)
+		req.Header.Set("Range", "bytes=0-7")
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusPartialContent || rec.Header().Get("Content-Type") != "image/png" {
+			t.Fatalf("PNG %s range status/content-type = %d/%q body=%q", surface, rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+		}
+		if !bytes.Equal(rec.Body.Bytes(), png[:8]) {
+			t.Fatalf("PNG %s range body = %x, want first 8 source bytes", surface, rec.Body.Bytes())
+		}
+	}
+}
+
+func derivativeViewerInfoForTest(tCount, channelCount, depth, height, width, tileSize int) map[string]any {
+	channelNames := make([]any, channelCount)
+	for index := range channelNames {
+		channelNames[index] = fmt.Sprintf("channel-%d", index)
+	}
+	var tileScheme any
+	viewer := map[string]any{}
+	if tileSize > 0 {
+		tileScheme = map[string]any{"tile_size": tileSize, "format": "png", "levels": []any{
+			map[string]any{"level": 0, "width": width, "height": height, "downsample": 1},
+		}}
+		viewer["tile_scheme"] = tileScheme
+	}
+	if depth > 1 {
+		viewer["atlas_scheme"] = map[string]any{"columns": 2, "rows": 2}
+	}
+	return map[string]any{
+		"dims_order":       "TCZYX",
+		"axis_sizes":       map[string]any{"T": tCount, "C": channelCount, "Z": depth, "Y": height, "X": width},
+		"dtype":            "uint8",
+		"channel_names":    channelNames,
+		"physical_spacing": map[string]any{"x": 1.0, "y": 1.0, "z": 1.0},
+		"metadata": map[string]any{
+			"spacing_units": map[string]any{"x": "pixel", "y": "pixel", "z": "voxel"},
+		},
+		"viewer":      viewer,
+		"tile_scheme": tileScheme,
+	}
+}
+
+func writeStrictDerivativeForTest(
+	t *testing.T,
+	root, _ string,
+	record resourceRecord,
+	viewerInfo map[string]any,
+	capabilities derivativeCapabilities,
+	artifactBytes []byte,
+) string {
+	t.Helper()
+	semantics, ok := viewerDerivativeSemantics(viewerInfo)
+	if !ok {
+		t.Fatalf("invalid strict derivative test viewer info: %#v", viewerInfo)
+	}
+	seriesName := ""
+	if semantics.Scene.ID != nil {
+		seriesName = *semantics.Scene.ID
+	}
+	artifactDigest := fmt.Sprintf("%x", sha256.Sum256(artifactBytes))
+	artifactBasename := fmt.Sprintf("%s__pyramid.sha256-%s.tif", record.FileID, artifactDigest)
+	derivedDir := filepath.Join(root, "derived")
+	if err := os.MkdirAll(derivedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifactPath := filepath.Join(derivedDir, artifactBasename)
+	if err := os.WriteFile(artifactPath, artifactBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	manifest := derivativeManifest{
+		Schema:             derivedPyramidManifestSchema,
+		ConversionContract: derivedPyramidConversionSchema,
+		ConversionSpec: derivativePublicationSpec{
+			Requested: derivativeConversionSpec{
+				TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "auto",
+			},
+			Effective: derivativeConversionSpec{
+				TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "bigtiff",
+			},
+			ProducerRevision:  derivedPyramidProducerRevision,
+			ConverterRevision: derivedPyramidConverterRevision,
+		},
+		Producer: derivativeProducer{
+			Reader: "libbioimage", SeriesCount: semantics.Scene.Count,
+			SeriesIndex: semantics.Scene.Index, SeriesName: seriesName,
+		},
+		Source: derivativeManifestSource{
+			SHA256:    record.SHA256,
+			SizeBytes: record.SizeBytes,
+		},
+		Semantics: semantics,
+		Artifact: derivativeArtifact{
+			Basename:  artifactBasename,
+			SizeBytes: int64(len(artifactBytes)),
+			SHA256:    artifactDigest,
+		},
+		Capabilities: capabilities,
+	}
+	if semantics.AxisSizes.T > 1 || semantics.AxisSizes.Z > 1 {
+		manifest.ConversionSpec.Effective.Format = "ome-bigtiff"
+	}
+	manifestBytes, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(derivedDir, derivedPyramidManifestName(record.FileID)),
+		manifestBytes,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return artifactPath
+}
+
+func writeCommittedThumbnailDerivativeForTest(
+	t *testing.T,
+	root string,
+	sourcePath string,
+	record resourceRecord,
+) string {
+	t.Helper()
+	viewerInfo := derivativeViewerInfoForTest(1, 1, 1, 8, 8, 512)
+	return writeStrictDerivativeForTest(
+		t,
+		root,
+		sourcePath,
+		record,
+		viewerInfo,
+		derivativeCapabilities{Thumbnail: true},
+		[]byte("committed thumbnail derivative for "+record.FileID),
+	)
 }
 
 func TestV2UploadViewerProxiesImageService(t *testing.T) {
@@ -139,6 +439,16 @@ func TestV2UploadViewerProxiesImageService(t *testing.T) {
 func TestV2UploadViewerPrefersDerivedPyramidTileScheme(t *testing.T) {
 	t.Parallel()
 
+	sourceInfo := derivativeViewerInfoForTest(1, 3, 1, 4096, 4096, 256)
+	sourceInfo["backend_mode"] = "pyramid"
+	derivedInfo := derivativeViewerInfoForTest(1, 3, 1, 4096, 4096, 512)
+	derivedInfo["backend_mode"] = "pyramid"
+	derivedTileScheme := derivedInfo["tile_scheme"].(map[string]any)
+	derivedTileScheme["levels"] = []any{
+		map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
+		map[string]any{"level": 1, "width": 2048, "height": 2048, "downsample": 2},
+		map[string]any{"level": 2, "width": 1024, "height": 1024, "downsample": 4},
+	}
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/viewerinfo" {
 			http.NotFound(w, r)
@@ -146,24 +456,11 @@ func TestV2UploadViewerPrefersDerivedPyramidTileScheme(t *testing.T) {
 		}
 		if strings.Contains(r.URL.Query().Get("path"), "pyramid") {
 			// The derived pyramid: 512-px tiles, 3 levels — this is what serves the pixels.
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"axis_sizes": map[string]any{"X": 4096, "Y": 4096, "Z": 1, "C": 3, "T": 1},
-				"tile_scheme": map[string]any{"tile_size": 512, "format": "png", "levels": []any{
-					map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
-					map[string]any{"level": 1, "width": 2048, "height": 2048, "downsample": 2},
-					map[string]any{"level": 2, "width": 1024, "height": 1024, "downsample": 4},
-				}},
-			})
+			_ = json.NewEncoder(w).Encode(derivedInfo)
 			return
 		}
 		// The source advertises its OWN, mismatched 256-px / 2-level scheme.
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"axis_sizes": map[string]any{"X": 4096, "Y": 4096, "Z": 1, "C": 3, "T": 1},
-			"tile_scheme": map[string]any{"tile_size": 256, "format": "png", "levels": []any{
-				map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
-				map[string]any{"level": 1, "width": 2048, "height": 2048, "downsample": 2},
-			}},
-		})
+		_ = json.NewEncoder(w).Encode(sourceInfo)
 	}))
 	defer imageSvc.Close()
 
@@ -177,12 +474,12 @@ func TestV2UploadViewerPrefersDerivedPyramidTileScheme(t *testing.T) {
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "ortho.tif", testPNGBytes(t, 4, 4))
-	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName(fileID)), []byte("pyramid bytes"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	record := uploadedResourceRecordForTest(t, mem, fileID)
+	writeStrictDerivativeForTest(
+		t, root, uploadedSourcePathForTest(t, root, fileID), record, sourceInfo,
+		derivativeCapabilities{Tile: true, TileT: true, TileZ: true, Slice: true, Thumbnail: true, OrderedChannels: true, LUT: true},
+		[]byte("pyramid bytes"),
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
 	setProxyOwnerHeaders(req)
@@ -207,6 +504,355 @@ func TestV2UploadViewerPrefersDerivedPyramidTileScheme(t *testing.T) {
 	}
 	if vi["backend_mode"] != "pyramid" {
 		t.Fatalf("backend_mode = %v, want pyramid", vi["backend_mode"])
+	}
+}
+
+func TestV2PreferredBioioViewerUsesManifestAuthorityWithoutSourceViewerInfo(t *testing.T) {
+	t.Parallel()
+
+	sourceInfo := derivativeViewerInfoForTest(2, 2, 3, 8, 16, 0)
+	sourceInfo["channel_names"] = []any{"DAPI", "FITC"}
+	sourceInfo["physical_spacing"] = map[string]any{"x": 0.11, "y": 0.22, "z": 1.7}
+	sourceInfo["metadata"].(map[string]any)["spacing_units"] = map[string]any{
+		"x": "um", "y": "um", "z": "um",
+	}
+	sourceInfo["display_defaults"] = map[string]any{"channels": []any{1, 0}}
+	sourceInfo["scene_count"] = 3
+	sourceInfo["selected_scene_index"] = 0
+	sourceInfo["selected_scene_id"] = "Scene0"
+	derivedInfo := derivativeViewerInfoForTest(2, 2, 3, 8, 16, 512)
+	derivedInfo["channel_names"] = []any{"DAPI", "FITC"}
+	derivedInfo["physical_spacing"] = map[string]any{"x": 0.11, "y": 0.22, "z": 1.7}
+	derivedInfo["metadata"].(map[string]any)["spacing_units"] = map[string]any{
+		"x": "um", "y": "um", "z": "um",
+	}
+	derivedInfo["display_defaults"] = map[string]any{"channels": []any{1, 0}}
+	derivedInfo["metadata"].(map[string]any)["reader"] = "libbioimage"
+	var sourceViewerInfoCalls, derivativeViewerInfoCalls int
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/viewerinfo":
+			if strings.Contains(r.URL.Query().Get("path"), "sha256-") {
+				derivativeViewerInfoCalls++
+				_ = json.NewEncoder(w).Encode(derivedInfo)
+				return
+			}
+			sourceViewerInfoCalls++
+			writeError(w, http.StatusUnprocessableEntity, errors.New("libbioimage source reader must not be consulted"))
+		case "/tile", "/slice", "/atlas":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("PNG"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer imageSvc.Close()
+
+	root := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      root,
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "source.nd2", testPNGBytes(t, 4, 4))
+	record := uploadedResourceRecordForTest(t, mem, fileID)
+	writeStrictDerivativeForTest(
+		t,
+		root,
+		uploadedSourcePathForTest(t, root, fileID),
+		record,
+		sourceInfo,
+		derivativeCapabilitiesForViewer(derivedInfo, func() derivativeSemantics {
+			semantics, _ := viewerDerivativeSemantics(sourceInfo)
+			return semantics
+		}()),
+		[]byte("bioio-derived-pyramid"),
+	)
+	manifestPath := derivedPyramidManifestPath(root, fileID)
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest derivativeManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Producer.Reader = "bioio"
+	manifestBytes, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, admitted := readDerivativeManifest(root, record, uploadedSourcePathForTest(t, root, fileID)); !admitted {
+		t.Fatal("preferred-reader strict manifest was not admitted")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if sourceViewerInfoCalls != 0 || derivativeViewerInfoCalls != 1 {
+		t.Fatalf("viewer-info calls source=%d derivative=%d, want 0/1", sourceViewerInfoCalls, derivativeViewerInfoCalls)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	metadata := response["metadata"].(map[string]any)
+	if metadata["reader"] != "bioio" || metadata["scene_count"] != float64(3) || metadata["selected_scene_id"] != "Scene0" {
+		t.Fatalf("preferred reader authority metadata = %#v", metadata)
+	}
+	phys, ok := response["phys"].(map[string]any)
+	if !ok {
+		t.Fatalf("preferred reader response omitted phys: %#v", response)
+	}
+	if !slices.Equal(phys["channel_names"].([]any), []any{"DAPI", "FITC"}) {
+		t.Fatalf("preferred reader phys channel_names = %#v", phys["channel_names"])
+	}
+	if !slices.Equal(phys["pixel_size"].([]any), []any{0.11, 0.22, 1.7, float64(1)}) {
+		t.Fatalf("preferred reader phys pixel_size = %#v", phys["pixel_size"])
+	}
+	if !slices.Equal(phys["pixel_units"].([]any), []any{"um", "um", "um", "frame"}) {
+		t.Fatalf("preferred reader phys pixel_units = %#v", phys["pixel_units"])
+	}
+	if !slices.Equal(phys["display_channels"].([]any), []any{float64(1), float64(0)}) {
+		t.Fatalf("preferred reader phys display_channels = %#v", phys["display_channels"])
+	}
+	for _, requestPath := range []string{
+		"/v2/uploads/" + fileID + "/tiles/z/0/0/0",
+		"/v2/uploads/" + fileID + "/slice?axis=z&z=0",
+		"/v2/uploads/" + fileID + "/atlas",
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preferred reader delivery %q status = %d body=%s", requestPath, rec.Code, rec.Body.String())
+		}
+	}
+	if sourceViewerInfoCalls != 0 {
+		t.Fatalf("preferred-reader delivery consulted libbioimage source viewer-info %d times", sourceViewerInfoCalls)
+	}
+}
+
+func TestV2PreferredBioioViewerPublishesExactManifestDTypeMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		dtype       string
+		pixelDepth  float64
+		pixelFormat string
+	}{
+		{dtype: "uint16", pixelDepth: 16, pixelFormat: "u"},
+		{dtype: "float64", pixelDepth: 64, pixelFormat: "f"},
+	} {
+		t.Run(tc.dtype, func(t *testing.T) {
+			sourceInfo := derivativeViewerInfoForTest(1, 1, 1, 8, 16, 0)
+			sourceInfo["dtype"] = tc.dtype
+			derivedInfo := derivativeViewerInfoForTest(1, 1, 1, 8, 16, 512)
+			derivedInfo["dtype"] = tc.dtype
+			imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/viewerinfo" && strings.Contains(r.URL.Query().Get("path"), "sha256-") {
+					_ = json.NewEncoder(w).Encode(derivedInfo)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer imageSvc.Close()
+
+			root := t.TempDir()
+			mem := store.NewMemoryStore()
+			router := NewRouter(ServerDeps{
+				Version:         "test-version",
+				Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+				Store:           mem,
+				UploadRoot:      root,
+				ImageServiceURL: imageSvc.URL,
+			})
+			fileID := uploadNamedFileForProxyTest(t, router, "source.nd2", testPNGBytes(t, 4, 4))
+			record := uploadedResourceRecordForTest(t, mem, fileID)
+			semantics, semanticsOK := viewerDerivativeSemantics(sourceInfo)
+			if !semanticsOK {
+				t.Fatal("source viewer semantics are invalid")
+			}
+			writeStrictDerivativeForTest(
+				t,
+				root,
+				uploadedSourcePathForTest(t, root, fileID),
+				record,
+				sourceInfo,
+				derivativeCapabilitiesForViewer(derivedInfo, semantics),
+				[]byte("bioio-derived-pyramid"),
+			)
+			manifestPath := derivedPyramidManifestPath(root, fileID)
+			manifestBytes, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var manifest derivativeManifest
+			if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+				t.Fatal(err)
+			}
+			manifest.Producer.Reader = "bioio"
+			manifestBytes, err = json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			var response map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			metadata, _ := response["metadata"].(map[string]any)
+			phys, _ := response["phys"].(map[string]any)
+			if response["dtype"] != tc.dtype || metadata["array_dtype"] != tc.dtype {
+				t.Fatalf("dtype authority response=%v metadata=%v, want %s", response["dtype"], metadata["array_dtype"], tc.dtype)
+			}
+			if phys["pixel_depth"] != tc.pixelDepth || phys["pixel_format"] != tc.pixelFormat {
+				t.Fatalf("phys dtype = depth:%v format:%v, want %.0f/%s", phys["pixel_depth"], phys["pixel_format"], tc.pixelDepth, tc.pixelFormat)
+			}
+		})
+	}
+}
+
+func TestV2UploadViewerAndPixelsIgnoreShapeIncompatibleDerivedPyramid(t *testing.T) {
+	t.Parallel()
+
+	servedPaths := map[string]string{}
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Query().Get("path")
+		if r.URL.Path == "/viewerinfo" {
+			channelCount := 260
+			tileSize := 256
+			if strings.Contains(path, "__pyramid.tif") {
+				channelCount = 1
+				tileSize = 512
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"T": 1, "C": channelCount, "Z": 1, "Y": 4096, "X": 4096},
+				"tile_scheme": map[string]any{"tile_size": tileSize, "format": "png", "levels": []any{
+					map[string]any{"level": 0, "width": 4096, "height": 4096, "downsample": 1},
+				}},
+			})
+			return
+		}
+		servedPaths[r.URL.Path] = path
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\nX"))
+	}))
+	defer imageSvc.Close()
+
+	root := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      root,
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "hyperspectral.tif", testPNGBytes(t, 4, 4))
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName(fileID)), []byte("collapsed pyramid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/viewer", nil)
+	setProxyOwnerHeaders(viewerReq)
+	viewerRec := httptest.NewRecorder()
+	router.ServeHTTP(viewerRec, viewerReq)
+	if viewerRec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", viewerRec.Code, viewerRec.Body.String())
+	}
+	var viewer map[string]any
+	if err := json.Unmarshal(viewerRec.Body.Bytes(), &viewer); err != nil {
+		t.Fatal(err)
+	}
+	tileScheme, _ := viewer["tile_scheme"].(map[string]any)
+	if tileScheme["tile_size"] != float64(256) {
+		t.Fatalf("viewer advertised incompatible derived tile scheme: %#v", tileScheme)
+	}
+
+	for _, endpoint := range []string{
+		"/tiles/z/0/0/0",
+		"/slice?axis=z&z=0",
+		"/atlas",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+endpoint, nil)
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d body=%s", endpoint, rec.Code, rec.Body.String())
+		}
+	}
+	for endpoint, path := range servedPaths {
+		if strings.Contains(path, "__pyramid.tif") {
+			t.Fatalf("%s used shape-incompatible derived pyramid %q", endpoint, path)
+		}
+	}
+}
+
+func TestCompatibleDerivedPyramidRejectsArtifactOlderThanSource(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	fileID := "file_freshness"
+	sourcePath := filepath.Join(root, "source.tif")
+	if err := os.WriteFile(sourcePath, []byte("source"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	derivedPath := filepath.Join(root, "derived", derivedPyramidName(fileID))
+	if err := os.WriteFile(derivedPath, []byte("stale derivative"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(sourcePath, now, now); err != nil {
+		t.Fatal(err)
+	}
+	staleTime := now.Add(-time.Hour)
+	if err := os.Chtimes(derivedPath, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+
+	metadataCalls := 0
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metadataCalls++
+		http.Error(w, "stale artifact metadata must not be consulted", http.StatusInternalServerError)
+	}))
+	defer imageSvc.Close()
+	deps := ServerDeps{ImageServiceURL: imageSvc.URL}
+
+	if path, info, compatible := deps.compatibleDerivedPyramid(
+		context.Background(), root, resourceRecord{FileID: fileID}, sourcePath, nil,
+		derivativeUse{capability: "tile"},
+	); compatible || path != "" || info != nil {
+		t.Fatalf("stale derived artifact accepted: path=%q info=%v", path, info)
+	}
+	if metadataCalls != 0 {
+		t.Fatalf("viewer metadata calls = %d, want freshness rejection before decode", metadataCalls)
 	}
 }
 
@@ -271,6 +917,7 @@ func TestV2UploadSliceProxiesImageServiceWithZ(t *testing.T) {
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
+	setAuthoritativeImageAxesForTest(t, mem, fileID, 1, 1, 8)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=7", nil)
 	setProxyOwnerHeaders(req)
@@ -297,7 +944,12 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 	// level is pixel-identical but a far faster bounded read), and forward the
 	// full_resolution scrub/settle signal to the image service.
 	var gotPath, gotFullRes string
+	viewerInfo := derivativeViewerInfoForTest(1, 3, 10, 4, 4, 0)
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(viewerInfo)
+			return
+		}
 		if r.URL.Path != "/slice" {
 			http.NotFound(w, r)
 			return
@@ -319,14 +971,13 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "zstack.ome.tiff", testPNGBytes(t, 4, 4))
-
-	derivedDir := filepath.Join(uploadRoot, "derived")
-	if err := os.MkdirAll(derivedDir, 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(derivedDir, derivedPyramidName(fileID)), []byte("OME-BIGTIFF"), 0o644); err != nil {
-		t.Fatalf("write pyramid: %v", err)
-	}
+	setAuthoritativeImageAxesForTest(t, mem, fileID, 1, 3, 10)
+	record := uploadedResourceRecordForTest(t, mem, fileID)
+	writeStrictDerivativeForTest(
+		t, uploadRoot, uploadedSourcePathForTest(t, uploadRoot, fileID), record, viewerInfo,
+		derivativeCapabilities{Slice: true, Atlas: true, AtlasT: true, Thumbnail: true, OrderedChannels: true, LUT: true},
+		[]byte("OME-BIGTIFF"),
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=5&full_resolution=false", nil)
 	setProxyOwnerHeaders(req)
@@ -335,7 +986,7 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 	if rec.Code != http.StatusOK {
 		t.Fatalf("slice status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(gotPath, "__pyramid.tif") {
+	if !strings.Contains(gotPath, "__pyramid.sha256-") {
 		t.Fatalf("slice served from %q, want the derived pyramid", gotPath)
 	}
 	if gotFullRes != "false" {
@@ -343,7 +994,7 @@ func TestV2UploadSlicePrefersDerivedPyramidAndForwardsFullResolution(t *testing.
 	}
 }
 
-func TestV2UploadSliceFallsBackWhenImageServiceUnreachable(t *testing.T) {
+func TestV2UploadScientificSliceFailsClosedWhenImageServiceUnreachable(t *testing.T) {
 	t.Parallel()
 
 	// A configured-but-unreachable image service (server created, then closed).
@@ -365,9 +1016,8 @@ func TestV2UploadSliceFallsBackWhenImageServiceUnreachable(t *testing.T) {
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	// Degrades to the legacy native path (serves the source image), not a 502.
-	if rec.Code != http.StatusOK {
-		t.Fatalf("slice fallback status = %d, want 200 (legacy native path)", rec.Code)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("scientific slice status = %d, want 502 without legacy display fallback", rec.Code)
 	}
 }
 
@@ -868,6 +1518,7 @@ func TestV2MaskSliceUsesOriginalSourceAndCanonicalThreshold(t *testing.T) {
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "mask.tif", testPNGBytes(t, 4, 4))
+	setAuthoritativeImageAxesForTest(t, mem, fileID, 2, 3, 4)
 	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -967,7 +1618,7 @@ func TestMaskSliceFailsClosedWithoutSidecarOrForNifti(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, maskPath, nil)
 	rec := httptest.NewRecorder()
 	unconfigured.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotImplemented {
+	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unconfigured mask status = %d body=%s", rec.Code, rec.Body.String())
 	}
 
@@ -1062,6 +1713,92 @@ func TestV2UploadScalarVolumeRejectsAmbiguousOrOutOfRangeIndices(t *testing.T) {
 	}
 }
 
+func TestConfiguredNiftiScalarVolumeRejectsMalformedSelectorsBeforeDecode(t *testing.T) {
+	t.Parallel()
+
+	scalarRequests := 0
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scalarRequests++
+		http.Error(w, "NIfTI must use the native loader", http.StatusInternalServerError)
+	}))
+	defer imageSvc.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(
+		t,
+		router,
+		"volume.nii",
+		testNifti1Uint16Bytes(t, 2, 2, 2, []uint16{1, 2, 3, 4, 5, 6, 7, 8}),
+	)
+
+	for _, rawQuery := range []string{
+		"channel=-1", "channel=1.5", "channel=0&channel=0", "channel=0&c=0",
+		"channel=0,1", "channels=0", "channel=1", "t=1", "t=", "time=0&timepoint=0",
+		"sampling=linear", "sampling=box&sampling=box",
+	} {
+		t.Run(rawQuery, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?"+rawQuery, nil)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("query %q status=%d body=%s, want 400", rawQuery, rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if scalarRequests != 0 {
+		t.Fatalf("configured NIfTI selectors reached image service %d times", scalarRequests)
+	}
+}
+
+func TestImageServiceRasterProxyRejectsUnsafeSuccessfulMediaType(t *testing.T) {
+	t.Parallel()
+
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"T": 1, "C": 1, "Z": 1},
+			})
+			return
+		}
+		if r.URL.Path != "/slice" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte("<script>unsafe()</script>"))
+	}))
+	defer imageSvc.Close()
+
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:         "test-version",
+		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:           mem,
+		UploadRoot:      t.TempDir(),
+		ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "cells.czi", []byte("source"))
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
+	setProxyOwnerHeaders(req)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("unsafe raster proxy status=%d body=%s, want 502", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "unsafe()") {
+		t.Fatalf("unsafe upstream body crossed proxy: %s", rec.Body.String())
+	}
+}
+
 func TestConvertOnUploadEnqueuesPyramidForMicroscopy(t *testing.T) {
 	t.Parallel()
 
@@ -1088,6 +1825,9 @@ func TestConvertOnUploadEnqueuesPyramidForMicroscopy(t *testing.T) {
 		}
 		if job.Metadata["trigger"] != "upload" {
 			t.Fatalf("auto job trigger = %v, want upload", job.Metadata["trigger"])
+		}
+		if force, present := job.Metadata["force"]; present && force == true {
+			t.Fatalf("automatic derivation disabled replay with force=%v", force)
 		}
 	default:
 		t.Fatal("convert-on-upload did not enqueue image.derive_pyramid for a .czi upload")
@@ -1142,6 +1882,7 @@ func TestV2AdminOverviewIncludesImageCacheStats(t *testing.T) {
 		ImageServiceURL: imageSvc.URL,
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
+	setAuthoritativeImageAxesForTest(t, mem, fileID, 1, 1, 3)
 
 	for i := 0; i < 2; i++ { // same slice twice: a miss then a hit
 		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=2", nil)
@@ -1221,7 +1962,7 @@ func TestImageServiceProxyErrorMatrix(t *testing.T) {
 			})
 			fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
 
-			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=3", nil)
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
 			setProxyOwnerHeaders(req)
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, req)
@@ -1263,12 +2004,12 @@ func TestThumbnailMapsUnreachableServiceTo503(t *testing.T) {
 	})
 	scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
 	fileID := uploadNamedFileForProxyTest(t, router, "stack.ome.tiff", scientificSource)
-	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(fileID)), []byte("ready pyramid"), 0o600); err != nil {
-		t.Fatalf("write ready derivative: %v", err)
-	}
+	writeCommittedThumbnailDerivativeForTest(
+		t,
+		uploadRoot,
+		uploadedSourcePathForTest(t, uploadRoot, fileID),
+		uploadedResourceRecordForTest(t, mem, fileID),
+	)
 	req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
@@ -1305,7 +2046,7 @@ func TestImageServiceProxyHidesUpstreamErrorBody(t *testing.T) {
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "stack.png", testPNGBytes(t, 4, 4))
 
-	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=3", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=0", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -1361,6 +2102,7 @@ func TestEnsurePyramidDerivationSelfHeals(t *testing.T) {
 			OriginalName: name,
 			ContentType:  "image/tiff",
 			SizeBytes:    1 << 30,
+			SHA256:       strings.Repeat("a", 64),
 			Principal:    principalRecord{UserID: "u", OrgID: "o"},
 		}
 	}
@@ -1381,9 +2123,12 @@ func TestEnsurePyramidDerivationSelfHeals(t *testing.T) {
 		if len(job.ResourceIDs) != 1 || job.ResourceIDs[0] != rec.FileID {
 			t.Fatalf("job resources = %v, want [%s]", job.ResourceIDs, rec.FileID)
 		}
+		if job.Metadata["source_sha256"] != rec.SHA256 || job.Metadata["source_size_bytes"] != rec.SizeBytes {
+			t.Fatalf("job source identity = sha %v size %v", job.Metadata["source_sha256"], job.Metadata["source_size_bytes"])
+		}
 	})
 
-	t.Run("skips when a derived pyramid already exists", func(t *testing.T) {
+	t.Run("legacy raw artifact does not suppress strict derivation", func(t *testing.T) {
 		pub := &recordingDataAgentJobPublisher{}
 		deps := ServerDeps{DataAgentJobs: pub, ImageServiceURL: "http://image-service.invalid"}
 		rec := newRec("scan.ome.tiff")
@@ -1395,8 +2140,8 @@ func TestEnsurePyramidDerivationSelfHeals(t *testing.T) {
 			t.Fatal(err)
 		}
 		deps.ensurePyramidDerivation(context.Background(), root, rec, "/data/scan.ome.tiff", "view")
-		if len(pub.jobs) != 0 {
-			t.Fatalf("enqueued %d jobs for an already-derived resource, want 0", len(pub.jobs))
+		if len(pub.jobs) != 1 {
+			t.Fatalf("enqueued %d jobs with only a legacy raw artifact, want 1", len(pub.jobs))
 		}
 	})
 
@@ -1886,7 +2631,12 @@ func TestV2TilesPreferDerivedPyramid(t *testing.T) {
 	t.Parallel()
 
 	var gotPath string
+	viewerInfo := derivativeViewerInfoForTest(1, 3, 1, 4, 4, 512)
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(viewerInfo)
+			return
+		}
 		if r.URL.Path == "/tile" {
 			gotPath = r.URL.Query().Get("path")
 		}
@@ -1906,15 +2656,12 @@ func TestV2TilesPreferDerivedPyramid(t *testing.T) {
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "slide.png", testPNGBytes(t, 4, 4))
 
-	// Simulate a completed pyramid derivation on disk.
-	derivedDir := filepath.Join(uploadRoot, "derived")
-	if err := os.MkdirAll(derivedDir, 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
-	}
-	pyramidPath := filepath.Join(derivedDir, derivedPyramidName(fileID))
-	if err := os.WriteFile(pyramidPath, []byte("PYRAMID-BYTES"), 0o644); err != nil {
-		t.Fatalf("write pyramid: %v", err)
-	}
+	record := uploadedResourceRecordForTest(t, mem, fileID)
+	writeStrictDerivativeForTest(
+		t, uploadRoot, uploadedSourcePathForTest(t, uploadRoot, fileID), record, viewerInfo,
+		derivativeCapabilities{Tile: true, TileT: true, TileZ: true, Slice: true, Thumbnail: true, OrderedChannels: true, LUT: true},
+		[]byte("PYRAMID-BYTES"),
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/tiles/z/0/0/0", nil)
 	setProxyOwnerHeaders(req)
@@ -1923,7 +2670,7 @@ func TestV2TilesPreferDerivedPyramid(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tile status = %d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(gotPath, "__pyramid.tif") {
+	if !strings.Contains(gotPath, "__pyramid.sha256-") {
 		t.Fatalf("tile served from %q, want the derived pyramid", gotPath)
 	}
 }
@@ -1970,18 +2717,18 @@ func TestResourceThumbnailRoutesByFormat(t *testing.T) {
 	// Valid multi-plane scientific container -> ready derived pyramid -> libbioimage thumbnail.
 	scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
 	cziID := uploadNamedFileForProxyTest(t, router, "cells.ome.tiff", scientificSource)
-	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
-		t.Fatalf("mkdir derived thumbnails: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(cziID)), []byte("ready pyramid"), 0o600); err != nil {
-		t.Fatalf("write derived thumbnail: %v", err)
-	}
+	artifactPath := writeCommittedThumbnailDerivativeForTest(
+		t,
+		uploadRoot,
+		uploadedSourcePathForTest(t, uploadRoot, cziID),
+		uploadedResourceRecordForTest(t, mem, cziID),
+	)
 	cziRec := getThumb(cziID)
 	if cziRec.Code != http.StatusOK || !bytes.Equal(cziRec.Body.Bytes(), thumbBytes) {
 		t.Fatalf("czi thumbnail not served from image service: code=%d", cziRec.Code)
 	}
-	if !strings.Contains(gotThumbPath, derivedPyramidName(cziID)) {
-		t.Fatalf("image service thumbnail path = %q, want ready derivative %q", gotThumbPath, derivedPyramidName(cziID))
+	if gotThumbPath != artifactPath {
+		t.Fatalf("image service thumbnail path = %q, want committed derivative %q", gotThumbPath, artifactPath)
 	}
 
 	// Video -> server-side ffmpeg poster frame (not the whole file, not 415).
@@ -2020,18 +2767,18 @@ func TestLegacyResourceThumbnailCapabilityMatchesImmediateEndpoint(t *testing.T)
 
 	root := t.TempDir()
 	stack := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
-	if err := os.WriteFile(filepath.Join(root, "file_ready__stack.ome.tiff"), stack, 0o600); err != nil {
+	readySourcePath := filepath.Join(root, "file_ready__stack.ome.tiff")
+	if err := os.WriteFile(readySourcePath, stack, 0o600); err != nil {
 		t.Fatalf("write ready scientific source: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "file_unready__stack.ome.tiff"), stack, 0o600); err != nil {
 		t.Fatalf("write unready scientific source: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
+	readyRecord, err := uploadResourceFromPath(root, readySourcePath)
+	if err != nil {
+		t.Fatalf("shape ready scientific resource: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_ready")), []byte("ready pyramid"), 0o600); err != nil {
-		t.Fatalf("write ready derivative: %v", err)
-	}
+	artifactPath := writeCommittedThumbnailDerivativeForTest(t, root, readySourcePath, readyRecord)
 	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: root, ImageServiceURL: imageService.URL})
 
 	listRequest := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
@@ -2071,8 +2818,8 @@ func TestLegacyResourceThumbnailCapabilityMatchesImmediateEndpoint(t *testing.T)
 	if err := validateThumbnailPNG(thumbnailResponse.Header().Get("Content-Type"), thumbnailResponse.Body.Bytes()); err != nil {
 		t.Fatalf("advertised thumbnail is not bounded PNG: %v", err)
 	}
-	if !strings.Contains(servedPath, derivedPyramidName("file_ready")) {
-		t.Fatalf("legacy endpoint served %q, want ready derivative", servedPath)
+	if servedPath != artifactPath {
+		t.Fatalf("legacy endpoint served %q, want committed derivative %q", servedPath, artifactPath)
 	}
 }
 
@@ -2104,12 +2851,11 @@ func TestResourceThumbnailLargeRasterFallsThroughOnlyToReadyDerivative(t *testin
 	if err := source.Close(); err != nil {
 		t.Fatalf("close large raster: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
-		t.Fatalf("mkdir derived: %v", err)
+	record, err := uploadResourceFromPath(root, sourcePath)
+	if err != nil {
+		t.Fatalf("shape large raster resource: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_large")), []byte("ready pyramid"), 0o600); err != nil {
-		t.Fatalf("write ready derivative: %v", err)
-	}
+	artifactPath := writeCommittedThumbnailDerivativeForTest(t, root, sourcePath, record)
 	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: root, ImageServiceURL: imageService.URL})
 	request := httptest.NewRequest(http.MethodGet, "/v2/resources/file_large/thumbnail", nil)
 	response := httptest.NewRecorder()
@@ -2117,8 +2863,8 @@ func TestResourceThumbnailLargeRasterFallsThroughOnlyToReadyDerivative(t *testin
 	if response.Code != http.StatusOK {
 		t.Fatalf("large raster thumbnail status = %d body=%s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(servedPath, derivedPyramidName("file_large")) {
-		t.Fatalf("large raster sidecar path = %q, want ready derivative", servedPath)
+	if servedPath != artifactPath {
+		t.Fatalf("large raster sidecar path = %q, want committed derivative %q", servedPath, artifactPath)
 	}
 }
 
@@ -2405,37 +3151,6 @@ func TestRenderNiftiThumbnailPreservesNegativeSlopeContrast(t *testing.T) {
 	}
 }
 
-func TestDerivedPyramidPathRejectsSymlinks(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	derived := filepath.Join(root, "derived")
-	if err := os.MkdirAll(derived, 0o755); err != nil {
-		t.Fatalf("mkdir derived directory: %v", err)
-	}
-	target := filepath.Join(root, "outside-ready-pyramid.tif")
-	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
-		t.Fatalf("write symlink target: %v", err)
-	}
-	link := filepath.Join(derived, derivedPyramidName("file_link"))
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatalf("create derived pyramid symlink: %v", err)
-	}
-	if got := derivedPyramidPath(root, "file_link"); got != "" {
-		t.Fatalf("derivedPyramidPath accepted symlink %q", got)
-	}
-	regular := filepath.Join(derived, derivedPyramidName("file_regular"))
-	if err := os.WriteFile(regular, []byte("ready"), 0o600); err != nil {
-		t.Fatalf("write regular derivative: %v", err)
-	}
-	resolvedRegular, err := filepath.EvalSymlinks(regular)
-	if err != nil {
-		t.Fatalf("resolve regular derivative: %v", err)
-	}
-	if got := derivedPyramidPath(root, "file_regular"); got != resolvedRegular {
-		t.Fatalf("derivedPyramidPath regular file = %q, want %q", got, resolvedRegular)
-	}
-}
-
 func TestThumbnailAdmissionRejectsConcurrentDecodedBytes(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "admission.nii")
@@ -2547,12 +3262,12 @@ func TestResourceThumbnailRejectsUnsupportedAndInvalidSidecarResponses(t *testin
 			})
 			scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
 			fileID := uploadNamedFileForProxyTest(t, router, "cells.ome.tiff", scientificSource)
-			if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
-				t.Fatalf("mkdir derived thumbnails: %v", err)
-			}
-			if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(fileID)), []byte("ready pyramid"), 0o600); err != nil {
-				t.Fatalf("write derived thumbnail: %v", err)
-			}
+			writeCommittedThumbnailDerivativeForTest(
+				t,
+				uploadRoot,
+				uploadedSourcePathForTest(t, uploadRoot, fileID),
+				uploadedResourceRecordForTest(t, mem, fileID),
+			)
 			req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
 			setProxyOwnerHeaders(req)
 			rec := httptest.NewRecorder()
@@ -2583,6 +3298,24 @@ func TestShouldDerivePyramidMatrix(t *testing.T) {
 	for _, tc := range cases {
 		if got := shouldDerivePyramid(tc.rec); got != tc.want {
 			t.Errorf("shouldDerivePyramid(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPrefersBioioReaderMatchesWorkerProprietaryFormatSet(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"scene.czi", "movie.nd2", "acquisition.lif", "volume.dv", "volume.r3d",
+		"scene.czi_3", "acquisition.LIF_15",
+	} {
+		if !prefersBioioReader(name) {
+			t.Errorf("prefersBioioReader(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"slide.tif", "slide.svs", "store.ome.zarr", "brain.nii.gz"} {
+		if prefersBioioReader(name) {
+			t.Errorf("prefersBioioReader(%q) = true", name)
 		}
 	}
 }

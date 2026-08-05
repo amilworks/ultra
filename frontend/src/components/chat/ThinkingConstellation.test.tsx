@@ -20,13 +20,14 @@ describe("buildConstellationGeometry", () => {
     const first = buildConstellationGeometry();
     const second = buildConstellationGeometry();
     expect(second).toEqual(first);
-    expect(first.nodes).toHaveLength(26);
+    /* Variant C (owner-approved on the design mock): 30 nodes. */
+    expect(first.nodes).toHaveLength(30);
     /* Every node sits on the unit sphere (the projection math depends on it). */
     for (const node of first.nodes) {
       expect(node.x ** 2 + node.y ** 2 + node.z ** 2).toBeCloseTo(1, 6);
     }
     /* Nearest-neighbor links + a few chords: connected enough to read as a
-       network, sparse enough to stay calm at 22px. */
+       network, sparse enough to stay calm at header size. */
     expect(first.edges.length).toBeGreaterThanOrEqual(first.nodes.length);
     expect(first.edges.length).toBeLessThan(first.nodes.length * 3);
     const keys = first.edges.map((edge) => `${edge.a}:${edge.b}`);
@@ -60,5 +61,17 @@ describe("ThinkingConstellation", () => {
     expect(componentSource).not.toMatch(/setInterval/);
     expect(componentSource).toMatch(/aria-hidden="true"/);
     expect(componentSource).toMatch(/visibilitychange/);
+  });
+
+  it("ships the approved variant-C recipe at 36px", () => {
+    /* The owner picked C at 36 on the design mock; these are its signature
+       moves. Changing them is a design decision, not a refactor. */
+    expect(componentSource).toMatch(/size = 36/);
+    expect(componentSource).toMatch(/PRECESSION_AMPLITUDE = 0.18/);
+    expect(componentSource).toMatch(/createLinearGradient/); // signal trails
+    expect(componentSource).toMatch(/RING_DURATION_MS = 280/); // arrival rings
+    expect(componentSource).toMatch(/MAX_PULSES = 4/);
+    /* The trail gradient's transparent stop is alpha-only, not a hue. */
+    expect(componentSource).toMatch(/rgba\(0, 0, 0, 0\)/);
   });
 });

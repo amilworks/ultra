@@ -294,8 +294,10 @@ import {
   FolderOpen,
   FileUp,
   FolderUp,
+  History,
   ImageIcon,
   Images,
+  Layers,
   Link2,
   Pencil,
   Plus,
@@ -12872,6 +12874,37 @@ export function App() {
       })).filter((group) => group.conversations.length > 0),
     [historyItems]
   );
+  /* Welcome stage: an empty, hydrated desktop chat composes hero + composer +
+     starters as one centered cluster (the phone hero is already
+     composer-forward, and thumb reach wants the phone composer docked). The
+     flag flips off the instant the optimistic user message lands — that
+     reflow IS the composer re-docking; one composer instance, no remount,
+     draft and focus survive. */
+  const welcomeStageActive =
+    activePanel === "chat" &&
+    !isPhoneView &&
+    activeConversationHydrated &&
+    activeMessages.length === 0;
+  const welcomeStarterConversation = useMemo(
+    () =>
+      historyItems.find(
+        (item) => item.id !== activeConversationId && item.title.trim().length > 0
+      ) ?? null,
+    [historyItems, activeConversationId]
+  );
+  const startDashboardDraft = useCallback((): void => {
+    setActivePromptValue("Build an interactive dashboard from my data: ");
+    focusComposerTextarea();
+  }, [focusComposerTextarea, setActivePromptValue]);
+  /* The hero asks a question; the keyboard should already be the answer.
+     Re-fires per conversation so switching into any empty chat lands typing-
+     ready, exactly like the New-chat action feels. */
+  useEffect(() => {
+    if (welcomeStageActive) {
+      focusComposerTextarea();
+    }
+  }, [welcomeStageActive, activeConversationId, focusComposerTextarea]);
+
   // Contextual title for the mobile top bar: the panel name, or the active
   // conversation's title once it has a real exchange (else the shared app wordmark).
   const mobileShellTitle =
@@ -13321,6 +13354,7 @@ export function App() {
         <main
           ref={setMainShellElement}
           className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden"
+          data-welcome-stage={welcomeStageActive ? "true" : undefined}
           /* Split-mode report canvas: the attribute flips the shell from a
              column into a named-area grid (bar / stage+canvas / composer),
              so the canvas gets a real column without re-nesting the chat
@@ -13706,6 +13740,7 @@ export function App() {
               composerScrolledAway && !activeSending ? "true" : undefined
             }
             data-composer-slim={
+              !welcomeStageActive &&
               activeConversationHydrated &&
               !activeSending &&
               !composerPromptOverflows &&
@@ -13716,6 +13751,7 @@ export function App() {
                 : undefined
             }
             data-composer-idle={
+              !welcomeStageActive &&
               activeConversationHydrated &&
               !activeSending &&
               activePrompt.trim().length === 0 &&
@@ -14427,6 +14463,40 @@ export function App() {
               </FileUpload>
             </div>
           </div>
+          {welcomeStageActive ? (
+            <div className="welcome-starters">
+              {welcomeStarterConversation ? (
+                <button
+                  type="button"
+                  className="welcome-starter-chip"
+                  onClick={() => openHistoryItem(welcomeStarterConversation)}
+                >
+                  <History aria-hidden="true" />
+                  <span className="welcome-starter-label">
+                    Continue “{welcomeStarterConversation.title}”
+                  </span>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="welcome-starter-chip"
+                onClick={startDashboardDraft}
+              >
+                <Table2 aria-hidden="true" />
+                <span className="welcome-starter-label">
+                  Build a dashboard from your data
+                </span>
+              </button>
+              <button
+                type="button"
+                className="welcome-starter-chip"
+                onClick={openScientificViewerPanel}
+              >
+                <Layers aria-hidden="true" />
+                <span className="welcome-starter-label">Open an image in Lens</span>
+              </button>
+            </div>
+          ) : null}
           {reportCanvasVisible && activeReportCanvasVersions ? (
             <Suspense fallback={null}>
               <LazyReportCanvas

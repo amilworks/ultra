@@ -2440,6 +2440,90 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   justify-content: center;
 }
 
+/* ============================ WELCOME STAGE ============================
+   An empty, hydrated desktop chat composes as ONE centered cluster:
+   eyebrow -> hero -> composer -> starter chips. The stage stops growing and
+   the shell centers the group, so the primary action sits where the eye
+   already is instead of docked a viewport away. The first send renders the
+   optimistic message, the flag drops, the stage grows back and the composer
+   re-docks — one composer instance, no remount, the draft survives. `safe`
+   keeps short viewports top-anchored instead of clipping both ends; the
+   :not() guard leaves the split report-canvas grid alone. */
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) {
+  justify-content: safe center;
+}
+
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) .chat-stage-scroller {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.app-main-shell[data-welcome-stage="true"] .blank-chat-usage-state {
+  padding-bottom: 0.5rem;
+}
+
+/* The welcome block's own 80vh min-height was the OLD centering mechanism —
+   inside the centered cluster it would just re-inflate the void the cluster
+   exists to remove. The shell centers now; the block is content-sized. */
+.app-main-shell[data-welcome-stage="true"] .blank-chat-welcome {
+  min-height: 0;
+  gap: 1.4rem;
+}
+
+.app-main-shell[data-welcome-stage="true"] .app-composer-shell {
+  padding-bottom: 0;
+}
+
+.welcome-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1.1rem 1.5rem 2.4rem;
+}
+
+/* Quiet ghost pills: hairline border, label at full ink, icon one voice
+   quieter — suggestions, not commands. Hover is a background whisper, the
+   same affordance model as the sidebar rows. */
+.welcome-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease);
+}
+
+.welcome-starter-chip svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-muted);
+  flex: none;
+}
+
+.welcome-starter-chip:hover {
+  background: color-mix(in oklab, var(--accent) 80%, transparent);
+}
+
+.welcome-starter-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.welcome-starter-label {
+  max-width: 26ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* Mobile composer-forward empty-chat hero: a calm greeting fills the space
    above the docked composer; usage analytics are tucked into a quiet,
    tap-to-expand disclosure below. Phone-only (rendered only when isPhoneView). */

@@ -13535,7 +13535,7 @@ export function App() {
                 }}
                 onClearActiveCollection={clearActiveResourceCollection}
                 thumbnailUrlFor={(resource: ResourceRecord) =>
-                  apiClient.resourceThumbnailUrl(resource.file_id)
+                  apiClient.resourceThumbnailUrl(resource)
                 }
                 zScrubThumbnail={{
                   // Gallery scrub is a transient thumbnail (never measured), so request

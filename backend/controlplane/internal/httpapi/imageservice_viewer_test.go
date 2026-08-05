@@ -2,8 +2,13 @@ package httpapi
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
+	"image/color"
+	"image/png"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -12,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1240,27 +1246,35 @@ func TestImageServiceProxyErrorMatrix(t *testing.T) {
 	}
 }
 
-// TestImageServiceProxyMapsUnreachableServiceTo502 covers a dependency-down path without
+// TestThumbnailMapsUnreachableServiceTo503 covers a dependency-down path without
 // a native fallback: when the image service can't be reached at all, the viewer gets a
-// clean 502 (not a hang or a raw connection error), so the frontend can show a clear
+// clean 503 (not a hang, raw connection error, or original file), so the frontend can show a clear
 // "preview unavailable" state.
-func TestImageServiceProxyMapsUnreachableServiceTo502(t *testing.T) {
+func TestThumbnailMapsUnreachableServiceTo503(t *testing.T) {
 	t.Parallel()
+	uploadRoot := t.TempDir()
 	mem := store.NewMemoryStore()
 	router := NewRouter(ServerDeps{
 		Version:         "test-version",
 		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
 		Store:           mem,
-		UploadRoot:      t.TempDir(),
+		UploadRoot:      uploadRoot,
 		ImageServiceURL: "http://127.0.0.1:1", // nothing listening
 	})
-	fileID := uploadNamedFileForProxyTest(t, router, "stack.czi", testPNGBytes(t, 4, 4))
+	scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	fileID := uploadNamedFileForProxyTest(t, router, "stack.ome.tiff", scientificSource)
+	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
+		t.Fatalf("mkdir derived: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(fileID)), []byte("ready pyramid"), 0o600); err != nil {
+		t.Fatalf("write ready derivative: %v", err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
 	setProxyOwnerHeaders(req)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadGateway {
-		t.Fatalf("status = %d body=%s, want 502 when the image service is unreachable", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d body=%s, want 503 when the image service is unreachable", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1917,8 +1931,8 @@ func TestV2TilesPreferDerivedPyramid(t *testing.T) {
 func TestResourceThumbnailRoutesByFormat(t *testing.T) {
 	t.Parallel()
 
-	thumbBytes := []byte("\x89PNG\r\n\x1a\nLIBBIO-THUMB")
-	posterBytes := []byte("\x89PNG\r\n\x1a\nFFMPEG-POSTER")
+	thumbBytes := testPNGBytes(t, 7, 5)
+	posterBytes := testPNGBytes(t, 6, 4)
 	var gotThumbPath, gotPosterPath string
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -1936,12 +1950,13 @@ func TestResourceThumbnailRoutesByFormat(t *testing.T) {
 	}))
 	defer imageSvc.Close()
 
+	uploadRoot := t.TempDir()
 	mem := store.NewMemoryStore()
 	router := NewRouter(ServerDeps{
 		Version:         "test-version",
 		Runs:            runcontrol.NewService(mem, eventbus.NewMemoryBus()),
 		Store:           mem,
-		UploadRoot:      t.TempDir(),
+		UploadRoot:      uploadRoot,
 		ImageServiceURL: imageSvc.URL,
 	})
 	getThumb := func(id string) *httptest.ResponseRecorder {
@@ -1952,14 +1967,21 @@ func TestResourceThumbnailRoutesByFormat(t *testing.T) {
 		return rec
 	}
 
-	// Scientific container (CZI) the native decoder can't read -> libbioimage thumbnail.
-	cziID := uploadNamedFileForProxyTest(t, router, "cells.czi", testPNGBytes(t, 4, 4))
+	// Valid multi-plane scientific container -> ready derived pyramid -> libbioimage thumbnail.
+	scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	cziID := uploadNamedFileForProxyTest(t, router, "cells.ome.tiff", scientificSource)
+	if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
+		t.Fatalf("mkdir derived thumbnails: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(cziID)), []byte("ready pyramid"), 0o600); err != nil {
+		t.Fatalf("write derived thumbnail: %v", err)
+	}
 	cziRec := getThumb(cziID)
 	if cziRec.Code != http.StatusOK || !bytes.Equal(cziRec.Body.Bytes(), thumbBytes) {
 		t.Fatalf("czi thumbnail not served from image service: code=%d", cziRec.Code)
 	}
-	if !strings.Contains(gotThumbPath, cziID) {
-		t.Fatalf("image service thumbnail path = %q, want resolved path with %q", gotThumbPath, cziID)
+	if !strings.Contains(gotThumbPath, derivedPyramidName(cziID)) {
+		t.Fatalf("image service thumbnail path = %q, want ready derivative %q", gotThumbPath, derivedPyramidName(cziID))
 	}
 
 	// Video -> server-side ffmpeg poster frame (not the whole file, not 415).
@@ -1972,11 +1994,573 @@ func TestResourceThumbnailRoutesByFormat(t *testing.T) {
 		t.Fatalf("video poster path = %q, want resolved path with %q", gotPosterPath, vidID)
 	}
 
-	// Common web image -> fast native path (serves the uploaded bytes, not the stub).
-	pngID := uploadNamedFileForProxyTest(t, router, "plain.png", testPNGBytes(t, 6, 6))
+	// Common web image -> fast native path, always re-encoded as a bounded PNG.
+	originalPNG := testPNGBytes(t, 1024, 256)
+	pngID := uploadNamedFileForProxyTest(t, router, "plain.png", originalPNG)
 	pngRec := getThumb(pngID)
-	if pngRec.Code != http.StatusOK || bytes.Equal(pngRec.Body.Bytes(), thumbBytes) {
+	if pngRec.Code != http.StatusOK || bytes.Equal(pngRec.Body.Bytes(), thumbBytes) || bytes.Equal(pngRec.Body.Bytes(), originalPNG) {
 		t.Fatalf("png thumbnail should use the native path, not the image service")
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(pngRec.Body.Bytes()))
+	if err != nil || config.Width != 512 || config.Height != 128 {
+		t.Fatalf("bounded PNG thumbnail config = %+v err=%v, want 512x128", config, err)
+	}
+}
+
+func TestLegacyResourceThumbnailCapabilityMatchesImmediateEndpoint(t *testing.T) {
+	t.Parallel()
+	thumbnail := testPNGBytes(t, 9, 6)
+	var servedPath string
+	imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		servedPath = r.URL.Query().Get("path")
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(thumbnail)
+	}))
+	defer imageService.Close()
+
+	root := t.TempDir()
+	stack := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	if err := os.WriteFile(filepath.Join(root, "file_ready__stack.ome.tiff"), stack, 0o600); err != nil {
+		t.Fatalf("write ready scientific source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file_unready__stack.ome.tiff"), stack, 0o600); err != nil {
+		t.Fatalf("write unready scientific source: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatalf("mkdir derived: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_ready")), []byte("ready pyramid"), 0o600); err != nil {
+		t.Fatalf("write ready derivative: %v", err)
+	}
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: root, ImageServiceURL: imageService.URL})
+
+	listRequest := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+	listResponse := httptest.NewRecorder()
+	router.ServeHTTP(listResponse, listRequest)
+	if listResponse.Code != http.StatusOK {
+		t.Fatalf("legacy resource list status = %d body=%s", listResponse.Code, listResponse.Body.String())
+	}
+	var listed resourcesResponse
+	if err := json.Unmarshal(listResponse.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode legacy resources: %v", err)
+	}
+	byID := make(map[string]resourceRecord, len(listed.Resources))
+	for _, resource := range listed.Resources {
+		byID[resource.FileID] = resource
+	}
+	ready := byID["file_ready"]
+	if !ready.HasThumbnail || ready.ThumbnailURL == "" || ready.ThumbnailInteraction != "z_scrub" {
+		t.Fatalf("ready legacy thumbnail metadata = %+v", ready)
+	}
+	if unready := byID["file_unready"]; unready.HasThumbnail || unready.ThumbnailURL != "" {
+		t.Fatalf("scientific source without derivative was advertised: %+v", unready)
+	}
+	unreadyRequest := httptest.NewRequest(http.MethodGet, "/v2/resources/file_unready/thumbnail", nil)
+	unreadyResponse := httptest.NewRecorder()
+	router.ServeHTTP(unreadyResponse, unreadyRequest)
+	if unreadyResponse.Code != http.StatusUnsupportedMediaType || strings.Contains(unreadyResponse.Body.String(), root) {
+		t.Fatalf("unready scientific thumbnail = %d/%q, want sanitized 415", unreadyResponse.Code, unreadyResponse.Body.String())
+	}
+
+	thumbnailRequest := httptest.NewRequest(http.MethodGet, ready.ThumbnailURL, nil)
+	thumbnailResponse := httptest.NewRecorder()
+	router.ServeHTTP(thumbnailResponse, thumbnailRequest)
+	if thumbnailResponse.Code != http.StatusOK || thumbnailResponse.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("advertised thumbnail endpoint = %d/%q body=%s", thumbnailResponse.Code, thumbnailResponse.Header().Get("Content-Type"), thumbnailResponse.Body.String())
+	}
+	if err := validateThumbnailPNG(thumbnailResponse.Header().Get("Content-Type"), thumbnailResponse.Body.Bytes()); err != nil {
+		t.Fatalf("advertised thumbnail is not bounded PNG: %v", err)
+	}
+	if !strings.Contains(servedPath, derivedPyramidName("file_ready")) {
+		t.Fatalf("legacy endpoint served %q, want ready derivative", servedPath)
+	}
+}
+
+func TestResourceThumbnailLargeRasterFallsThroughOnlyToReadyDerivative(t *testing.T) {
+	t.Parallel()
+	thumbnail := testPNGBytes(t, 8, 8)
+	var servedPath string
+	imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		servedPath = r.URL.Query().Get("path")
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(thumbnail)
+	}))
+	defer imageService.Close()
+
+	root := t.TempDir()
+	sourcePath := filepath.Join(root, "file_large__large.png")
+	source, err := os.OpenFile(sourcePath, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("create large raster: %v", err)
+	}
+	if _, err := source.Write(testPNGBytes(t, 2, 2)); err != nil {
+		_ = source.Close()
+		t.Fatalf("write large raster header: %v", err)
+	}
+	if err := source.Truncate(rasterThumbnailMaxInput + 1); err != nil {
+		_ = source.Close()
+		t.Fatalf("truncate large raster: %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("close large raster: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatalf("mkdir derived: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_large")), []byte("ready pyramid"), 0o600); err != nil {
+		t.Fatalf("write ready derivative: %v", err)
+	}
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: root, ImageServiceURL: imageService.URL})
+	request := httptest.NewRequest(http.MethodGet, "/v2/resources/file_large/thumbnail", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("large raster thumbnail status = %d body=%s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(servedPath, derivedPyramidName("file_large")) {
+		t.Fatalf("large raster sidecar path = %q, want ready derivative", servedPath)
+	}
+}
+
+func TestResourceCiftiThumbnailEndpoint(t *testing.T) {
+	t.Parallel()
+	_, fixture := writeCifti2Fixture(t, "route.dtseries.nii", 220, 300, func(row, col int) float32 {
+		return float32(math.Sin(float64(col)/9) + float64(row%11))
+	})
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store: mem, UploadRoot: t.TempDir(),
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "route.dtseries.nii", fixture)
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	first := request()
+	second := request()
+	if first.Code != http.StatusOK || first.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("CIFTI thumbnail status/type = %d/%q body=%s", first.Code, first.Header().Get("Content-Type"), first.Body.String())
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(first.Body.Bytes()))
+	if err != nil || config.Width != 512 || config.Height != 288 {
+		t.Fatalf("CIFTI endpoint PNG config = %+v err=%v", config, err)
+	}
+	if !bytes.Equal(first.Body.Bytes(), second.Body.Bytes()) {
+		t.Fatal("repeated CIFTI endpoint output is not byte-identical")
+	}
+
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(fixture); err != nil {
+		t.Fatalf("gzip CIFTI fixture: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close gzip CIFTI fixture: %v", err)
+	}
+	gzipID := uploadNamedFileForProxyTest(t, router, "route.dtseries.nii.gz", compressed.Bytes())
+	gzipReq := httptest.NewRequest(http.MethodGet, "/v2/resources/"+gzipID+"/thumbnail", nil)
+	setProxyOwnerHeaders(gzipReq)
+	gzipRec := httptest.NewRecorder()
+	router.ServeHTTP(gzipRec, gzipReq)
+	if gzipRec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("gzip CIFTI thumbnail status = %d body=%s, want 415", gzipRec.Code, gzipRec.Body.String())
+	}
+}
+
+func TestRenderNiftiThumbnailBoundsPlaneAndOutput(t *testing.T) {
+	t.Parallel()
+	width, height := 1024, 256
+	values := make([]uint16, width*height)
+	for index := range values {
+		values[index] = uint16(index % 4096)
+	}
+	path := filepath.Join(t.TempDir(), "wide-brain.nii")
+	if err := os.WriteFile(path, testNifti1Uint16Bytes(t, width, height, 1, values), 0o600); err != nil {
+		t.Fatalf("write NIfTI thumbnail fixture: %v", err)
+	}
+	body, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), newByteAdmissionBudget(defaultThumbnailInFlightBytes))
+	if err != nil {
+		t.Fatalf("render NIfTI thumbnail: %v", err)
+	}
+	if int64(len(body)) > thumbnailMaxEncodedBytes {
+		t.Fatalf("NIfTI thumbnail encoded bytes = %d, want <= %d", len(body), thumbnailMaxEncodedBytes)
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(body))
+	if err != nil || config.Width != 512 || config.Height != 128 {
+		t.Fatalf("NIfTI thumbnail config = %+v err=%v, want 512x128", config, err)
+	}
+
+	header := testNifti1Uint16Bytes(t, 1, 1, 1, []uint16{0})[:niftiHeaderReadSize]
+	oversizedAxis := append([]byte(nil), header...)
+	binary.LittleEndian.PutUint16(oversizedAxis[42:44], uint16(niftiThumbnailMaxAxis+1))
+	axisPath := filepath.Join(t.TempDir(), "oversized-axis.nii")
+	if err := os.WriteFile(axisPath, oversizedAxis, 0o600); err != nil {
+		t.Fatalf("write oversized-axis NIfTI: %v", err)
+	}
+	if _, err := niftiThumbnailPreflight(axisPath); err == nil {
+		t.Fatal("oversized NIfTI axis passed thumbnail preflight")
+	}
+
+	oversizedPlane := append([]byte(nil), header...)
+	binary.LittleEndian.PutUint16(oversizedPlane[42:44], 8192)
+	binary.LittleEndian.PutUint16(oversizedPlane[44:46], 8192)
+	planePath := filepath.Join(t.TempDir(), "oversized-plane.nii")
+	if err := os.WriteFile(planePath, oversizedPlane, 0o600); err != nil {
+		t.Fatalf("write oversized-plane NIfTI: %v", err)
+	}
+	if _, err := niftiThumbnailPreflight(planePath); err == nil {
+		t.Fatal("oversized NIfTI plane passed thumbnail preflight")
+	}
+}
+
+func TestRenderNiftiThumbnailSupportsBoundedGzipAndRejectsDeclaredWork(t *testing.T) {
+	t.Parallel()
+	values := make([]uint16, 64*48*16)
+	for index := range values {
+		values[index] = uint16(index % 1024)
+	}
+	var validCompressed bytes.Buffer
+	validWriter := gzip.NewWriter(&validCompressed)
+	if _, err := validWriter.Write(testNifti1Uint16Bytes(t, 64, 48, 16, values)); err != nil {
+		t.Fatalf("gzip valid NIfTI: %v", err)
+	}
+	if err := validWriter.Close(); err != nil {
+		t.Fatalf("close valid NIfTI gzip: %v", err)
+	}
+	validPath := filepath.Join(t.TempDir(), "brain.nii.gz")
+	if err := os.WriteFile(validPath, validCompressed.Bytes(), 0o600); err != nil {
+		t.Fatalf("write valid gzip NIfTI: %v", err)
+	}
+	if _, err := renderNiftiThumbnailPNG(validPath, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), newByteAdmissionBudget(defaultThumbnailInFlightBytes)); err != nil {
+		t.Fatalf("bounded gzip NIfTI thumbnail failed: %v", err)
+	}
+
+	header := append([]byte(nil), testNifti1Uint16Bytes(t, 1, 1, 1, []uint16{0})[:niftiHeaderReadSize]...)
+	binary.LittleEndian.PutUint16(header[42:44], 512)
+	binary.LittleEndian.PutUint16(header[44:46], 512)
+	binary.LittleEndian.PutUint16(header[46:48], 2048)
+	var rejectedCompressed bytes.Buffer
+	rejectedWriter := gzip.NewWriter(&rejectedCompressed)
+	if _, err := rejectedWriter.Write(header); err != nil {
+		t.Fatalf("gzip rejected NIfTI header: %v", err)
+	}
+	if err := rejectedWriter.Close(); err != nil {
+		t.Fatalf("close rejected NIfTI gzip: %v", err)
+	}
+	rejectedPath := filepath.Join(t.TempDir(), "too-much-work.nii.gz")
+	if err := os.WriteFile(rejectedPath, rejectedCompressed.Bytes(), 0o600); err != nil {
+		t.Fatalf("write rejected gzip NIfTI: %v", err)
+	}
+	if _, err := niftiThumbnailPreflight(rejectedPath); err == nil {
+		t.Fatal("gzip NIfTI exceeding declared thumbnail work budget passed preflight")
+	}
+}
+
+func TestNiftiThumbnailIgnoresLegacyDecompressedSidecar(t *testing.T) {
+	t.Parallel()
+	payload := testNifti1Uint16Bytes(t, 2, 1, 1, []uint16{0, 100})
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatalf("gzip NIfTI fixture: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close NIfTI gzip fixture: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "authenticated.nii.gz")
+	if err := os.WriteFile(path, compressed.Bytes(), 0o600); err != nil {
+		t.Fatalf("write gzip NIfTI fixture: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(niftiDecompressedSidecarPath(path)), 0o755); err != nil {
+		t.Fatalf("mkdir stale sidecar directory: %v", err)
+	}
+	if err := os.WriteFile(niftiDecompressedSidecarPath(path), []byte("stale untrusted sidecar"), 0o600); err != nil {
+		t.Fatalf("write stale sidecar: %v", err)
+	}
+	if readyDecompressedNiftiSidecar(path) == "" {
+		t.Fatal("test setup did not produce a legacy-ready sidecar")
+	}
+	plan, err := niftiThumbnailPreflight(path)
+	if err != nil {
+		t.Fatalf("preflight authenticated gzip source: %v", err)
+	}
+	if plan.path != path || !plan.gzipped {
+		t.Fatalf("thumbnail plan selected path=%q gzipped=%v, want authenticated gzip source", plan.path, plan.gzipped)
+	}
+	if _, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), newByteAdmissionBudget(defaultThumbnailInFlightBytes)); err != nil {
+		t.Fatalf("render authenticated gzip source with stale sidecar present: %v", err)
+	}
+}
+
+func TestNiftiThumbnailGzipAdmissionIncludesDeepDecompressionWork(t *testing.T) {
+	t.Parallel()
+	header := append([]byte(nil), testNifti1Uint16Bytes(t, 1, 1, 1, []uint16{0})[:niftiHeaderReadSize]...)
+	binary.LittleEndian.PutUint16(header[46:48], 30_000)
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(header); err != nil {
+		t.Fatalf("gzip deep NIfTI header: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close deep NIfTI gzip: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "deep-tiny-plane.nii.gz")
+	if err := os.WriteFile(path, compressed.Bytes(), 0o600); err != nil {
+		t.Fatalf("write deep NIfTI gzip: %v", err)
+	}
+	plan, err := niftiThumbnailPreflight(path)
+	if err != nil {
+		t.Fatalf("preflight deep NIfTI gzip: %v", err)
+	}
+	baseReservation := plan.planeBytes + thumbnailDecodeBytesPerPixel
+	if plan.decompressionWork <= 0 || plan.reservation <= baseReservation {
+		t.Fatalf("gzip admission plan = %+v, want decompression work charged", plan)
+	}
+	budget := newByteAdmissionBudget(plan.reservation)
+	if !budget.tryAcquire(plan.decompressionWork) {
+		t.Fatal("occupy gzip decompression portion of thumbnail budget")
+	}
+	defer budget.release(plan.decompressionWork)
+	if _, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), budget); !errors.Is(err, errThumbnailAdmission) {
+		t.Fatalf("deep gzip thumbnail error = %v, want admission rejection before truncated plane work", err)
+	}
+}
+
+func TestRenderNiftiThumbnailAppliesPhysicalWindow(t *testing.T) {
+	t.Parallel()
+	payload := testNifti1Int16Bytes(t, 2, 1, 1, []int16{1024, 1104})
+	binary.LittleEndian.PutUint32(payload[112:116], math.Float32bits(1))
+	binary.LittleEndian.PutUint32(payload[116:120], math.Float32bits(-1024))
+	path := filepath.Join(t.TempDir(), "ct.nii")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write CT NIfTI: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/thumbnail?enhancement=hounsfield:40:80", nil)
+	body, err := renderNiftiThumbnailPNG(path, request, newByteAdmissionBudget(defaultThumbnailInFlightBytes))
+	if err != nil {
+		t.Fatalf("render CT NIfTI thumbnail: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode CT NIfTI thumbnail: %v", err)
+	}
+	if low, high := color.GrayModel.Convert(decoded.At(0, 0)).(color.Gray).Y, color.GrayModel.Convert(decoded.At(1, 0)).(color.Gray).Y; low != 0 || high != 255 {
+		t.Fatalf("physical CT window pixels = %d/%d, want 0/255", low, high)
+	}
+
+	bigEndian := make([]byte, niftiHeaderReadSize+4)
+	binary.BigEndian.PutUint32(bigEndian[0:4], nifti1HeaderSize)
+	binary.BigEndian.PutUint16(bigEndian[40:42], 3)
+	binary.BigEndian.PutUint16(bigEndian[42:44], 2)
+	binary.BigEndian.PutUint16(bigEndian[44:46], 1)
+	binary.BigEndian.PutUint16(bigEndian[46:48], 1)
+	binary.BigEndian.PutUint16(bigEndian[70:72], 4)
+	binary.BigEndian.PutUint16(bigEndian[72:74], 16)
+	binary.BigEndian.PutUint32(bigEndian[108:112], math.Float32bits(float32(niftiHeaderReadSize)))
+	copy(bigEndian[344:348], []byte{'n', '+', '1', 0})
+	binary.BigEndian.PutUint16(bigEndian[niftiHeaderReadSize:niftiHeaderReadSize+2], 0)
+	binary.BigEndian.PutUint16(bigEndian[niftiHeaderReadSize+2:niftiHeaderReadSize+4], 100)
+	bigEndianPath := filepath.Join(t.TempDir(), "big-endian.nii")
+	if err := os.WriteFile(bigEndianPath, bigEndian, 0o600); err != nil {
+		t.Fatalf("write big-endian NIfTI: %v", err)
+	}
+	bigEndianBody, err := renderNiftiThumbnailPNG(bigEndianPath, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), newByteAdmissionBudget(defaultThumbnailInFlightBytes))
+	if err != nil {
+		t.Fatalf("render big-endian NIfTI thumbnail: %v", err)
+	}
+	bigEndianImage, err := png.Decode(bytes.NewReader(bigEndianBody))
+	if err != nil {
+		t.Fatalf("decode big-endian NIfTI thumbnail: %v", err)
+	}
+	if low, high := color.GrayModel.Convert(bigEndianImage.At(0, 0)).(color.Gray).Y, color.GrayModel.Convert(bigEndianImage.At(1, 0)).(color.Gray).Y; low != 0 || high != 255 {
+		t.Fatalf("big-endian NIfTI pixels = %d/%d, want 0/255", low, high)
+	}
+}
+
+func TestRenderNiftiThumbnailPreservesNegativeSlopeContrast(t *testing.T) {
+	t.Parallel()
+	payload := testNifti1Int16Bytes(t, 2, 1, 1, []int16{0, 100})
+	binary.LittleEndian.PutUint32(payload[112:116], math.Float32bits(-1))
+	binary.LittleEndian.PutUint32(payload[116:120], math.Float32bits(100))
+	path := filepath.Join(t.TempDir(), "negative-slope.nii")
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatalf("write negative-slope NIfTI: %v", err)
+	}
+	body, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), newByteAdmissionBudget(defaultThumbnailInFlightBytes))
+	if err != nil {
+		t.Fatalf("render negative-slope NIfTI thumbnail: %v", err)
+	}
+	decoded, err := png.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("decode negative-slope thumbnail: %v", err)
+	}
+	first := color.GrayModel.Convert(decoded.At(0, 0)).(color.Gray).Y
+	second := color.GrayModel.Convert(decoded.At(1, 0)).(color.Gray).Y
+	if first != 255 || second != 0 {
+		t.Fatalf("negative-slope pixels = %d/%d, want physical high/low = 255/0", first, second)
+	}
+}
+
+func TestDerivedPyramidPathRejectsSymlinks(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	derived := filepath.Join(root, "derived")
+	if err := os.MkdirAll(derived, 0o755); err != nil {
+		t.Fatalf("mkdir derived directory: %v", err)
+	}
+	target := filepath.Join(root, "outside-ready-pyramid.tif")
+	if err := os.WriteFile(target, []byte("target"), 0o600); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	link := filepath.Join(derived, derivedPyramidName("file_link"))
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("create derived pyramid symlink: %v", err)
+	}
+	if got := derivedPyramidPath(root, "file_link"); got != "" {
+		t.Fatalf("derivedPyramidPath accepted symlink %q", got)
+	}
+	regular := filepath.Join(derived, derivedPyramidName("file_regular"))
+	if err := os.WriteFile(regular, []byte("ready"), 0o600); err != nil {
+		t.Fatalf("write regular derivative: %v", err)
+	}
+	resolvedRegular, err := filepath.EvalSymlinks(regular)
+	if err != nil {
+		t.Fatalf("resolve regular derivative: %v", err)
+	}
+	if got := derivedPyramidPath(root, "file_regular"); got != resolvedRegular {
+		t.Fatalf("derivedPyramidPath regular file = %q, want %q", got, resolvedRegular)
+	}
+}
+
+func TestThumbnailAdmissionRejectsConcurrentDecodedBytes(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "admission.nii")
+	if err := os.WriteFile(path, testNifti1Uint16Bytes(t, 2, 2, 1, []uint16{0, 1, 2, 3}), 0o600); err != nil {
+		t.Fatalf("write NIfTI: %v", err)
+	}
+	plan, err := niftiThumbnailPreflight(path)
+	if err != nil {
+		t.Fatalf("preflight NIfTI: %v", err)
+	}
+	budget := newByteAdmissionBudget(plan.reservation)
+	if !budget.tryAcquire(plan.reservation) {
+		t.Fatal("reserve simulated concurrent thumbnail")
+	}
+	if _, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), budget); !errors.Is(err, errThumbnailAdmission) {
+		t.Fatalf("concurrent thumbnail error = %v, want admission rejection", err)
+	}
+	budget.release(plan.reservation)
+	if _, err := renderNiftiThumbnailPNG(path, httptest.NewRequest(http.MethodGet, "/thumbnail", nil), budget); err != nil {
+		t.Fatalf("thumbnail did not recover after reservation release: %v", err)
+	}
+
+	rasterPath := filepath.Join(t.TempDir(), "admission.png")
+	if err := os.WriteFile(rasterPath, testPNGBytes(t, 4, 4), 0o600); err != nil {
+		t.Fatalf("write raster: %v", err)
+	}
+	rasterReservation := int64(4*4) * thumbnailDecodeBytesPerPixel
+	rasterBudget := newByteAdmissionBudget(rasterReservation)
+	if !rasterBudget.tryAcquire(rasterReservation) {
+		t.Fatal("reserve simulated concurrent raster thumbnail")
+	}
+	if _, err := renderBoundedRasterThumbnailPNG(rasterPath, rasterBudget); !errors.Is(err, errThumbnailAdmission) {
+		t.Fatalf("concurrent raster thumbnail error = %v, want admission rejection", err)
+	}
+	rasterBudget.release(rasterReservation)
+	if _, err := renderBoundedRasterThumbnailPNG(rasterPath, rasterBudget); err != nil {
+		t.Fatalf("raster thumbnail did not recover after reservation release: %v", err)
+	}
+}
+
+func TestResourceThumbnailAuthorizesBeforeSidecar(t *testing.T) {
+	t.Parallel()
+	var sidecarCalls atomic.Int64
+	sidecarPNG := testPNGBytes(t, 4, 4)
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sidecarCalls.Add(1)
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(sidecarPNG)
+	}))
+	defer imageSvc.Close()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(mem, eventbus.NewMemoryBus()), Store: mem,
+		UploadRoot: t.TempDir(), ImageServiceURL: imageSvc.URL,
+	})
+	fileID := uploadNamedFileForProxyTest(t, router, "private.czi", []byte("private-scientific-source"))
+	req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
+	req.Header.Set("X-Ultra-User-Id", "different-user")
+	req.Header.Set("X-Ultra-Org-Id", "smithsonian")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unauthorized thumbnail status = %d body=%s, want 404", rec.Code, rec.Body.String())
+	}
+	if calls := sidecarCalls.Load(); calls != 0 {
+		t.Fatalf("sidecar invoked %d times before ownership rejection", calls)
+	}
+}
+
+func TestResourceThumbnailRejectsUnsupportedAndInvalidSidecarResponses(t *testing.T) {
+	t.Parallel()
+	t.Run("unsupported never returns source", func(t *testing.T) {
+		mem := store.NewMemoryStore()
+		router := NewRouter(ServerDeps{
+			Version: "test-version", Runs: runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+			Store: mem, UploadRoot: t.TempDir(),
+		})
+		source := []byte("%PDF-source-must-not-be-served")
+		fileID := uploadNamedFileForProxyTest(t, router, "report.pdf", source)
+		req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnsupportedMediaType || bytes.Contains(rec.Body.Bytes(), source) {
+			t.Fatalf("unsupported thumbnail status/body = %d/%q, want clean 415", rec.Code, rec.Body.Bytes())
+		}
+	})
+	validPNG := testPNGBytes(t, 4, 4)
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		body        []byte
+	}{
+		{name: "wrong type", contentType: "application/octet-stream", body: validPNG},
+		{name: "malformed png", contentType: "image/png", body: validPNG[:len(validPNG)-4]},
+		{name: "oversized", contentType: "image/png", body: bytes.Repeat([]byte{'x'}, int(thumbnailMaxEncodedBytes)+1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				_, _ = w.Write(tc.body)
+			}))
+			defer imageSvc.Close()
+			uploadRoot := t.TempDir()
+			mem := store.NewMemoryStore()
+			router := NewRouter(ServerDeps{
+				Version: "test-version", Runs: runcontrol.NewService(mem, eventbus.NewMemoryBus()), Store: mem,
+				UploadRoot: uploadRoot, ImageServiceURL: imageSvc.URL,
+			})
+			scientificSource := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+			fileID := uploadNamedFileForProxyTest(t, router, "cells.ome.tiff", scientificSource)
+			if err := os.MkdirAll(filepath.Join(uploadRoot, "derived"), 0o755); err != nil {
+				t.Fatalf("mkdir derived thumbnails: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(uploadRoot, "derived", derivedPyramidName(fileID)), []byte("ready pyramid"), 0o600); err != nil {
+				t.Fatalf("write derived thumbnail: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/v2/resources/"+fileID+"/thumbnail", nil)
+			setProxyOwnerHeaders(req)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable || bytes.Equal(rec.Body.Bytes(), scientificSource) {
+				t.Fatalf("invalid sidecar response status/body = %d/%q, want clean 503", rec.Code, rec.Body.Bytes())
+			}
+		})
 	}
 }
 

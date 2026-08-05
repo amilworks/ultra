@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"math"
@@ -3588,6 +3589,170 @@ func TestResourceRecordFromCatalogExposesDataAgentMetadata(t *testing.T) {
 	}
 	if caption["status"] != "succeeded" || caption["caption"] == "" || caption["job_id"] != "data_agent_job_caption" {
 		t.Fatalf("caption_resources metadata = %#v, want persisted caption job state", caption)
+	}
+}
+
+func TestResourceThumbnailMetadataIsConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write := func(fileID, name string, body []byte) domain.ResourceRecord {
+		t.Helper()
+		storageName := fileID + "__" + safeOriginalFilename(name)
+		if err := os.WriteFile(filepath.Join(root, storageName), body, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return domain.ResourceRecord{
+			ResourceID: fileID, OriginalName: name, ContentType: "application/octet-stream",
+			SizeBytes: int64(len(body)), SHA256: "sha", StoragePath: storageName,
+			SourceType: "upload", ResourceKind: "file", OwnerUserID: "alice", CreatedAt: domain.Now(),
+		}
+	}
+	pngResource := write("file_png", "image.png", testPNGBytes(t, 12, 8))
+	pngRecord := (ServerDeps{}).resourceRecordFromCatalog(root, pngResource)
+	if !pngRecord.HasThumbnail || pngRecord.ThumbnailURL != "/v2/resources/file_png/thumbnail" {
+		t.Fatalf("PNG thumbnail metadata = has:%v url:%q", pngRecord.HasThumbnail, pngRecord.ThumbnailURL)
+	}
+	if pngRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("PNG thumbnail interaction = %q, want static", pngRecord.ThumbnailInteraction)
+	}
+	if pngRecord.PreviewURL != "/v2/uploads/file_png/preview" {
+		t.Fatalf("PNG preview URL = %q", pngRecord.PreviewURL)
+	}
+
+	_, ciftiBytes := writeCifti2Fixture(t, "metadata.dtseries.nii", 8, 300, func(row, col int) float32 {
+		return float32(row + col)
+	})
+	ciftiRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_cifti", "metadata.dtseries.nii", ciftiBytes))
+	if !ciftiRecord.HasThumbnail || ciftiRecord.ThumbnailURL != "/v2/resources/file_cifti/thumbnail" {
+		t.Fatalf("CIFTI thumbnail metadata = has:%v url:%q", ciftiRecord.HasThumbnail, ciftiRecord.ThumbnailURL)
+	}
+	if ciftiRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("CIFTI thumbnail interaction = %q, want static", ciftiRecord.ThumbnailInteraction)
+	}
+	genericCiftiResource := write("file_cifti_generic", "connectome-data", ciftiBytes)
+	genericCiftiResource.ContentType = "application/x-nifti"
+	genericCifti := (ServerDeps{}).resourceRecordFromCatalog(root, genericCiftiResource)
+	if !genericCifti.HasThumbnail || genericCifti.ThumbnailInteraction != "static" {
+		t.Fatalf("generic-name CIFTI thumbnail metadata = %+v, want static", genericCifti)
+	}
+	_, scalarCiftiBytes := writeCifti2FixtureWithOptions(t, "metadata.dscalar.nii", 8, 3, ciftiFixtureOptions{
+		physicalRowRole: "brain_models", physicalColRole: "scalars", dim7: 1,
+	}, func(row, col int) float32 { return float32(row + col) })
+	scalarCifti := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_dscalar", "metadata.dscalar.nii", scalarCiftiBytes))
+	if scalarCifti.HasThumbnail || scalarCifti.ThumbnailURL != "" {
+		t.Fatalf("dscalar advertised carpet thumbnail capability: %+v", scalarCifti)
+	}
+
+	niftiBytes := testNifti1Uint16Bytes(t, 2, 2, 2, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	niftiRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_nifti", "brain.nii", niftiBytes))
+	if !niftiRecord.HasThumbnail || niftiRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("NIfTI thumbnail metadata = %+v, want admitted static thumbnail", niftiRecord)
+	}
+	gzipCifti := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_cifti_gz", "metadata.dtseries.nii.gz", []byte("gzip")))
+	if gzipCifti.HasThumbnail || gzipCifti.ThumbnailURL != "" {
+		t.Fatalf("gzip CIFTI advertised thumbnail: %+v", gzipCifti)
+	}
+
+	jpegBytes := testJPEGBytes(t, 8, 6)
+	pngBytes := testPNGBytes(t, 4, 4)
+	malformedPNG := append([]byte(nil), pngBytes...)
+	malformedPNG[29] ^= 0xff // Corrupt the bounded IHDR checksum.
+	if jpegRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_jpeg", "photo.jpg", jpegBytes)); !jpegRecord.HasThumbnail || jpegRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("valid JPEG thumbnail metadata = %+v", jpegRecord)
+	}
+	invalidRasters := []struct {
+		fileID string
+		name   string
+		body   []byte
+	}{
+		{fileID: "file_truncated_png", name: "truncated.png", body: pngBytes[:len(pngBytes)-4]},
+		{fileID: "file_malformed_png", name: "malformed.png", body: malformedPNG},
+		{fileID: "file_truncated_jpeg", name: "truncated.jpg", body: jpegBytes[:len(jpegBytes)-2]},
+		{fileID: "file_malformed_jpeg", name: "malformed.jpg", body: []byte{0xff, 0xd8, 0x00, 0xff, 0xd9}},
+	}
+	for _, invalid := range invalidRasters {
+		record := (ServerDeps{}).resourceRecordFromCatalog(root, write(invalid.fileID, invalid.name, invalid.body))
+		if record.HasThumbnail || record.ThumbnailURL != "" {
+			t.Fatalf("invalid native raster %s advertised thumbnail: %+v", invalid.name, record)
+		}
+	}
+
+	for index, name := range []string{"report.pdf", "slides.ppt", "slides.pptx", "letter.doc", "letter.docx"} {
+		record := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_doc_"+strconv.Itoa(index), name, []byte("binary")))
+		if record.ResourceKind != "document" || record.HasThumbnail || record.ThumbnailURL != "" {
+			t.Fatalf("binary document metadata for %s = kind:%q has:%v url:%q", name, record.ResourceKind, record.HasThumbnail, record.ThumbnailURL)
+		}
+	}
+
+	videoResource := write("file_video", "clip.mp4", []byte("\x00\x00\x00\x18ftypmp42____moovdata"))
+	if record := (ServerDeps{}).resourceRecordFromCatalog(root, videoResource); record.HasThumbnail {
+		t.Fatal("video advertised a thumbnail without the image service")
+	}
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, videoResource); !record.HasThumbnail || record.ThumbnailInteraction != "video_hover" {
+		t.Fatalf("video thumbnail metadata = %+v, want video_hover with configured service", record)
+	}
+	scientificBytes := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	scientificResource := write("file_czi", "cells.ome.tiff", scientificBytes)
+	if record := (ServerDeps{}).resourceRecordFromCatalog(root, scientificResource); record.HasThumbnail {
+		t.Fatal("scientific resource advertised a thumbnail without its service")
+	}
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); record.HasThumbnail {
+		t.Fatal("scientific resource advertised a thumbnail without a ready derivative")
+	}
+	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
+		t.Fatalf("mkdir derived: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "derived", derivedPyramidName("file_czi")), []byte("ready pyramid"), 0o600); err != nil {
+		t.Fatalf("write ready derivative: %v", err)
+	}
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); !record.HasThumbnail || record.ThumbnailInteraction != "z_scrub" {
+		t.Fatalf("scientific thumbnail metadata = %+v, want ready z-scrub", record)
+	}
+}
+
+func TestLegacyUploadResourceThumbnailMetadataIsConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	pngPath := filepath.Join(root, "file_png__image.png")
+	if err := os.WriteFile(pngPath, testPNGBytes(t, 10, 5), 0o600); err != nil {
+		t.Fatalf("write legacy PNG: %v", err)
+	}
+	pngRecord, err := uploadResourceFromPath(root, pngPath)
+	if err != nil {
+		t.Fatalf("legacy PNG metadata: %v", err)
+	}
+	if !pngRecord.HasThumbnail || pngRecord.ThumbnailURL != "/v2/resources/file_png/thumbnail" {
+		t.Fatalf("legacy PNG thumbnail metadata = %+v", pngRecord)
+	}
+	pdfPath := filepath.Join(root, "file_pdf__report.pdf")
+	if err := os.WriteFile(pdfPath, []byte("%PDF"), 0o600); err != nil {
+		t.Fatalf("write legacy PDF: %v", err)
+	}
+	pdfRecord, err := uploadResourceFromPath(root, pdfPath)
+	if err != nil {
+		t.Fatalf("legacy PDF metadata: %v", err)
+	}
+	if pdfRecord.ResourceKind != "document" || pdfRecord.HasThumbnail || pdfRecord.ThumbnailURL != "" {
+		t.Fatalf("legacy PDF metadata = %+v", pdfRecord)
+	}
+}
+
+func TestResourceKindClassifiesBinaryAndTextDocuments(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"report.pdf", "slides.ppt", "slides.pptx", "letter.doc", "letter.docx"} {
+		if got := resourceKindForContent(name, "application/octet-stream"); got != "document" {
+			t.Errorf("resourceKindForContent(%q, octet-stream) = %q, want document", name, got)
+		}
+	}
+	for _, tc := range []struct{ name, contentType string }{
+		{name: "report", contentType: "application/pdf"},
+		{name: "slides", contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+		{name: "notes.txt", contentType: "application/octet-stream"},
+		{name: "notes", contentType: "text/plain"},
+	} {
+		if got := resourceKindForContent(tc.name, tc.contentType); got != "document" {
+			t.Errorf("resourceKindForContent(%q, %q) = %q, want document", tc.name, tc.contentType, got)
+		}
 	}
 }
 
@@ -13796,6 +13961,21 @@ func testPNGBytes(t *testing.T, width int, height int) []byte {
 	var buffer bytes.Buffer
 	if err := png.Encode(&buffer, img); err != nil {
 		t.Fatalf("encode test PNG: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func testJPEGBytes(t *testing.T, width int, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(20 * x), G: uint8(30 * y), B: 100, A: 255})
+		}
+	}
+	var buffer bytes.Buffer
+	if err := jpeg.Encode(&buffer, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatalf("encode test JPEG: %v", err)
 	}
 	return buffer.Bytes()
 }

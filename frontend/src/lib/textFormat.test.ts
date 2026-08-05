@@ -26,11 +26,20 @@ describe("classifyTextResource", () => {
     expect(classifyTextResource({ original_name: "data.json.gz" })).toBe("json");
   });
 
-  it("falls back to resource_kind and content_type when there is no known extension", () => {
+  it("falls back to table kind and textual content_type when there is no known extension", () => {
     expect(classifyTextResource({ original_name: "export", resource_kind: "table" })).toBe("csv");
     expect(classifyTextResource({ original_name: "blob", content_type: "application/json" })).toBe("json");
     expect(classifyTextResource({ original_name: "blob", content_type: "text/plain" })).toBe("text");
-    expect(classifyTextResource({ original_name: "doc", resource_kind: "document" })).toBe("text");
+  });
+
+  it("does not mistake binary or generic documents and CIFTI matrices for text", () => {
+    for (const original_name of ["report.pdf", "slides.ppt", "slides.pptx", "letter.doc", "letter.docx"]) {
+      expect(
+        classifyTextResource({ original_name, content_type: "application/octet-stream", resource_kind: "document" })
+      ).toBeNull();
+    }
+    expect(classifyTextResource({ original_name: "rest.dtseries.nii", resource_kind: "document" })).toBeNull();
+    expect(classifyTextResource({ original_name: "extensionless", resource_kind: "document" })).toBeNull();
   });
 
   it("never claims image or video resources (so the image viewer still wins)", () => {

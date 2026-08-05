@@ -91,6 +91,27 @@ genuinely empty, and then say so explicitly:
     `matchMedia("(prefers-reduced-motion: reduce)")` matches, start with
     auto-rotate off and let OrbitControls' user-driven motion be the only
     motion.
+- **2D charts and dashboards**: Chart.js is vendored at
+  `/opt/report-assets/chart.iife.min.js` (MIT; license alongside). Inline the
+  FILE CONTENTS in a classic `<script>` tag ahead of your chart code — same
+  rule as three.js, never a path or URL. It exposes the standard global
+  `Chart` (constructor, as in `new Chart(ctx, config)`) with every chart
+  type registered and `type: "time"` axes working out of the box (a date
+  adapter is baked in). Discipline:
+  - Reach for it when the page needs LIVE charts — series toggling, tooltips
+    on dense data, a dashboard the reader filters, charts fed by controls or
+    simulation state. A figure nobody interacts with stays a matplotlib PNG;
+    a bespoke visual that isn't chart-shaped (grids, flows, diagrams) stays
+    hand-written SVG/canvas per the bullet above.
+  - It costs ~0.3MB inline — one inclusion covers every chart on the page.
+  - Feed it plain arrays/objects computed in the sandbox and embedded as a
+    JSON `<script type="application/json">` block or a `const` — cross-check
+    those numbers against the source computation before shipping, exactly as
+    for hand-written interactivity.
+  - Give every chart fixed-height containers (`position: relative` wrapper;
+    `maintainAspectRatio: false`) so layouts don't jump, label axes with
+    units in `scales.*.title`, and pass `prefers-reduced-motion` through
+    `options.animation = false` when it matches.
 - **Table of contents**: plain fragment links (`<a href="#results">`) with
   matching section `id`s are fully supported — the reading canvas turns them
   into in-document scrolling. Give sections `scroll-margin-top` (the template
@@ -120,8 +141,9 @@ genuinely empty, and then say so explicitly:
   the evidence file for a failing page; fix the page instead.
 - **Pages must work offline.** No CDN or external URLs of any kind — the
   sandbox has no network and neither may the deliverable. For 3D, inline the
-  vendored build at `/opt/report-assets/three.iife.min.js`. Static + numeric
-  checks cannot see load-time failures; only the render proves the page.
+  vendored build at `/opt/report-assets/three.iife.min.js`; for 2D charts,
+  `/opt/report-assets/chart.iife.min.js`. Static + numeric checks cannot see
+  load-time failures; only the render proves the page.
 - **Verifiers must be bounded.** Pass the execute tool's `timeout` parameter
   on every verification or subprocess call. Do not hand-roll character-scanning
   parsers or state machines (a non-advancing state hangs the run for hours);

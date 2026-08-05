@@ -11,6 +11,7 @@ import {
 import * as THREE from "three";
 
 import type { ApiClient } from "@/lib/api";
+import { supportsSliceChannelColor } from "@/lib/viewerSliceContract";
 import type { UploadViewerInfo } from "@/types";
 
 import {
@@ -35,6 +36,10 @@ type DeepZoomCanvasProps = {
   axis?: "z" | "y" | "x";
   zIndex: number;
   tIndex: number;
+  channels?: number[];
+  /** Source-channel-indexed LUT palette. */
+  channelColors?: string[];
+  cacheKey?: string;
   className?: string;
 };
 
@@ -136,7 +141,18 @@ export const niceScaleBar = (
 type ViewReadout = { zoom: string; atFit: boolean; scaleBar: { widthPx: number; label: string } | null };
 
 export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps>(function DeepZoomCanvas(
-  { apiClient, fileId, viewerInfo, axis = "z", zIndex, tIndex, className },
+  {
+    apiClient,
+    fileId,
+    viewerInfo,
+    axis = "z",
+    zIndex,
+    tIndex,
+    channels,
+    channelColors,
+    cacheKey,
+    className,
+  },
   ref
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -172,9 +188,20 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
     const units = viewerInfo.phys?.pixel_units;
     return Array.isArray(units) && units[0] ? String(units[0]) : "px";
   }, [viewerInfo.phys]);
+  const effectiveChannelColors = supportsSliceChannelColor(viewerInfo)
+    ? channelColors
+    : undefined;
   const fallbackImageUrl = useMemo(
-    () => apiClient.uploadSliceUrl(fileId, { axis, z: zIndex, t: tIndex }),
-    [apiClient, axis, fileId, tIndex, zIndex]
+    () =>
+      apiClient.uploadSliceUrl(fileId, {
+        axis,
+        z: zIndex,
+        t: tIndex,
+        channels,
+        channelColors: effectiveChannelColors,
+        cacheKey,
+      }),
+    [apiClient, axis, cacheKey, channels, effectiveChannelColors, fileId, tIndex, zIndex]
   );
 
   // Stable callback the imperative layer calls to publish the current view to the toolbar.
@@ -344,6 +371,9 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
         size: tileSize,
         z: zIndex,
         t: tIndex,
+        channels,
+        channelColors: effectiveChannelColors,
+        cacheKey,
       });
       // Permanently drop a tile only after retries are exhausted (a genuinely
       // unservable tile), removing its scene resources.
@@ -396,6 +426,7 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
               return;
             }
             dropTile();
+            commitRenderError("Tile delivery failed after retries.");
           }
         );
       };
@@ -655,10 +686,13 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
   }, [
     apiClient,
     axis,
+    cacheKey,
+    channels,
     descriptor.pixel_size.width,
     descriptor.world_size.height,
     descriptor.world_size.width,
     fileId,
+    effectiveChannelColors,
     physicalUnit,
     publishReadout,
     renderError,
@@ -682,6 +716,7 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
   };
 
   if (renderError) {
+    const tileDeliveryFailed = renderError.startsWith("Tile delivery failed");
     return (
       <div
         className={className ?? "viewer-canvas-root"}
@@ -692,7 +727,11 @@ export const DeepZoomCanvas = forwardRef<ViewerCanvasHandle, DeepZoomCanvasProps
         <div className="viewer-image-fallback" style={{ aspectRatio: `${Math.max(1e-6, descriptor.aspect_ratio)}` }}>
           <img src={fallbackImageUrl} alt={`${descriptor.label} fallback`} className="viewer-image-fallback-media" />
         </div>
-        <p className="viewer-fallback-note">WebGL unavailable. Showing static plane preview instead of tiled deep zoom.</p>
+        <p className="viewer-fallback-note">
+          {tileDeliveryFailed
+            ? "Tile delivery failed after retries. Showing the selector-aware static plane instead."
+            : "WebGL unavailable. Showing static plane preview instead of tiled deep zoom."}
+        </p>
       </div>
     );
   }

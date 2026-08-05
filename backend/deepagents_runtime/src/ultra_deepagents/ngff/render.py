@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS
 from ultra_deepagents.ngff.reader import NgffChannel, NgffError, NgffImage
 
 if TYPE_CHECKING:
@@ -94,6 +95,8 @@ def _window_to_uint8(plane: np.ndarray, start: float, end: float) -> np.ndarray:
 
 def _selected_channels(img: NgffImage, channels: list[int] | None) -> list[int]:
     if channels:
+        if len(channels) > MAX_COMPOSITE_CHANNELS:
+            raise NgffError(f"channel selection supports at most {MAX_COMPOSITE_CHANNELS} channels")
         selected: list[int] = []
         for channel in channels:
             if isinstance(channel, (bool, np.bool_)) or not isinstance(channel, (int, np.integer)):
@@ -106,15 +109,15 @@ def _selected_channels(img: NgffImage, channels: list[int] | None) -> list[int]:
             selected.append(index)
         return selected
     active = [i for i, ch in enumerate(img.channels[: img.num_c]) if ch.active]
-    return active or list(range(img.num_c))
-
-
-def _is_grayscale(ch: NgffChannel) -> bool:
-    return ch.color.upper() in ("FFFFFF", "")
+    defaults = active or list(range(img.num_c))
+    return defaults[:MAX_COMPOSITE_CHANNELS]
 
 
 def _compose_channels(
-    img: NgffImage, planes: dict[int, np.ndarray], selected: list[int]
+    img: NgffImage,
+    planes: dict[int, np.ndarray],
+    selected: list[int],
+    channel_colors: list[str] | None = None,
 ) -> Image.Image:
     """Composite already-read per-channel 2D arrays into a display image, using the global
     (cached) per-channel window so every plane/tile maps identically. Shared by the full-plane
@@ -122,9 +125,11 @@ def _compose_channels(
     from PIL import Image
 
     # Single grayscale/white channel → 8-bit grayscale (matches brightfield/typical 1ch).
-    if len(selected) == 1 and _is_grayscale(
+    first_channel = (
         img.channels[selected[0]] if img.channels else NgffChannel("", "FFFFFF", None, None, True)
-    ):
+    )
+    first_color = channel_colors[0] if channel_colors else first_channel.color
+    if len(selected) == 1 and first_color.upper() in ("FFFFFF", ""):
         ci = selected[0]
         start, end = _global_window(img, ci)
         gray = _window_to_uint8(planes[ci], start, end)
@@ -132,7 +137,7 @@ def _compose_channels(
 
     # Otherwise composite the selected channels additively in RGB.
     rgb: np.ndarray | None = None
-    for ci in selected:
+    for selected_index, ci in enumerate(selected):
         ch = (
             img.channels[ci]
             if ci < len(img.channels)
@@ -142,7 +147,8 @@ def _compose_channels(
         gray = _window_to_uint8(planes[ci], start, end).astype(np.float32)
         if rgb is None:
             rgb = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.float32)
-        rgb_w = _hex_to_rgb(ch.color)
+        color = channel_colors[selected_index] if channel_colors else ch.color
+        rgb_w = _hex_to_rgb(color)
         for k in range(3):
             if rgb_w[k]:
                 rgb[:, :, k] += gray * rgb_w[k]
@@ -153,11 +159,19 @@ def _compose_channels(
 
 
 def _render(
-    img: NgffImage, *, t: int, z: int, level: int, channels: list[int] | None
+    img: NgffImage,
+    *,
+    t: int,
+    z: int,
+    level: int,
+    channels: list[int] | None,
+    channel_colors: list[str] | None = None,
 ) -> Image.Image:
     selected = _selected_channels(img, channels)
+    if channel_colors is not None and len(channel_colors) != len(selected):
+        raise NgffError("channel colors must match the selected channel count")
     planes = {ci: img.read_plane(t=t, c=ci, z=z, level=level) for ci in selected}
-    return _compose_channels(img, planes, selected)
+    return _compose_channels(img, planes, selected, channel_colors)
 
 
 def _to_png(image) -> bytes:
@@ -173,13 +187,21 @@ def render_slice_png(
     z: int = 0,
     level: int = 0,
     channels: list[int] | None = None,
+    channel_colors: list[str] | None = None,
     max_dim: int | None = None,
 ) -> bytes:
     """Render one composited 2D plane (one t/z, selected channels) to PNG. ``max_dim``
     downscales the result (bounded scrub frame) while still only reading the level."""
     from PIL import Image
 
-    image = _render(img, t=t, z=z, level=level, channels=channels)
+    image = _render(
+        img,
+        t=t,
+        z=z,
+        level=level,
+        channels=channels,
+        channel_colors=channel_colors,
+    )
     if max_dim and max(image.size) > max_dim:
         image.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
     return _to_png(image)
@@ -195,6 +217,7 @@ def render_tile_png(
     t: int = 0,
     z: int = 0,
     channels: list[int] | None = None,
+    channel_colors: list[str] | None = None,
 ) -> bytes:
     """Render ONE DeepZoom tile (col,row) at a multiscale level — reading ONLY the chunks
     covering the tile's bounded region, so a gigapixel (1 TB) level-0 plane is never
@@ -209,11 +232,13 @@ def render_tile_png(
         return _to_png(Image.new("L", (1, 1)))  # out-of-range: viewer ignores
     y1, x1 = min(y0 + tile_size, h), min(x0 + tile_size, w)
     selected = _selected_channels(img, channels)
+    if channel_colors is not None and len(channel_colors) != len(selected):
+        raise NgffError("channel colors must match the selected channel count")
     planes = {
         ci: img.read_region(level=level, y0=y0, y1=y1, x0=x0, x1=x1, t=t, c=ci, z=z)
         for ci in selected
     }
-    return _to_png(_compose_channels(img, planes, selected))
+    return _to_png(_compose_channels(img, planes, selected, channel_colors))
 
 
 def render_thumbnail_png(img: NgffImage, *, max_size: int = 256, t: int = 0, z: int = 0) -> bytes:

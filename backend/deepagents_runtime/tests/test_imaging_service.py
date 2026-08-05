@@ -81,6 +81,94 @@ def test_warm_localized_pyramid_recency_does_not_mutate_source_generation(
     assert generation_after == generation_before
 
 
+def test_cold_localized_pyramid_singleflights_copy_and_publishes_without_temp_orphans(
+    tmp_path,
+    monkeypatch,
+):
+    derived = tmp_path / "derived"
+    derived.mkdir()
+    source = derived / "fixture__pyramid.tif"
+    source.write_bytes(b"stable pyramid bytes" * 1024)
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(cache))
+    original_copy = service_module.shutil.copyfileobj
+    copy_started = threading.Event()
+    release_copy = threading.Event()
+    copy_calls = 0
+    calls_lock = threading.Lock()
+
+    def blocked_copy(source_stream, destination_stream, length):
+        nonlocal copy_calls
+        with calls_lock:
+            copy_calls += 1
+        copy_started.set()
+        assert release_copy.wait(5)
+        return original_copy(source_stream, destination_stream, length)
+
+    monkeypatch.setattr(service_module.shutil, "copyfileobj", blocked_copy)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(service_module.localize_pyramid, str(source)) for _ in range(8)]
+        assert copy_started.wait(5)
+        release_copy.set()
+        localized = [future.result(timeout=5) for future in futures]
+
+    assert copy_calls == 1
+    assert len(set(localized)) == 1
+    assert localized[0] != str(source)
+    assert os.path.exists(localized[0])
+    assert not any(".tmp-" in path.name for path in cache.rglob("*"))
+    assert service_module._PYRAMID_CACHE_LOCKS == {}
+
+
+def test_cold_localized_pyramid_rejects_source_replacement_during_copy(
+    tmp_path,
+    monkeypatch,
+):
+    derived = tmp_path / "derived"
+    derived.mkdir()
+    source = derived / "fixture__pyramid.tif"
+    source.write_bytes(b"source-one")
+    original_stat = source.stat()
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(cache))
+    original_copy = service_module.shutil.copyfileobj
+
+    def replacing_copy(source_stream, destination_stream, length):
+        original_copy(source_stream, destination_stream, length)
+        replacement = tmp_path / "replacement.tif"
+        replacement.write_bytes(b"source-two")
+        os.utime(replacement, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+        os.replace(replacement, source)
+
+    monkeypatch.setattr(service_module.shutil, "copyfileobj", replacing_copy)
+
+    assert service_module.localize_pyramid(str(source)) == str(source)
+    assert not any(path.name.endswith("__pyramid.tif") for path in cache.rglob("*"))
+    assert not any(".tmp-" in path.name for path in cache.rglob("*"))
+
+
+def test_oversize_localized_pyramid_is_rejected_before_cache_eviction(
+    tmp_path,
+    monkeypatch,
+):
+    derived = tmp_path / "derived"
+    derived.mkdir()
+    source = derived / "fixture__pyramid.tif"
+    source.write_bytes(b"too large")
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE_BYTES", "4")
+    monkeypatch.setattr(
+        service_module,
+        "_evict_pyramid_cache",
+        lambda _incoming: pytest.fail("oversize source must reject before eviction"),
+    )
+
+    assert service_module.localize_pyramid(str(source)) == str(source)
+
+
 def test_pyramid_cache_eviction_covers_owned_subdir_and_legacy_root(
     tmp_path,
     monkeypatch,
@@ -112,6 +200,8 @@ def test_pyramid_cache_eviction_covers_owned_subdir_and_legacy_root(
         "/cache/derived/nested/sample__pyramid.tif",
         "/cache/derived/sample.tif",
         "/cache/derived/sample__pyramid.tiff",
+        "/cache/derived/sample__pyramid.sha256-abc.tif",
+        "/cache/derived/sample__pyramid.sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.tif",
     ],
 )
 def test_localize_pyramid_does_not_promote_ordinary_tiffs_to_owned_identity(path):
@@ -119,11 +209,46 @@ def test_localize_pyramid_does_not_promote_ordinary_tiffs_to_owned_identity(path
     assert service_module.localize_pyramid(path) == path
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/cache/derived/sample__pyramid.tif",
+        "/cache/derived/sample__pyramid.sha256-" + ("a" * 64) + ".tif",
+    ],
+)
+def test_owned_pyramid_classifier_accepts_legacy_and_strict_names(path):
+    assert service_module._is_derived_pyramid(path) is True
+
+
 def test_tile_returns_png(client):
     r = client.get("/tile", params={"path": "a.czi", "level": 0, "col": 1, "row": 2, "size": 64})
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
     assert r.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "params"),
+    [
+        ("/tile", {"path": "a.czi", "level": -1}),
+        ("/tile", {"path": "a.czi", "col": -1}),
+        ("/tile", {"path": "a.czi", "row": -1}),
+        ("/tile", {"path": "a.czi", "t": -1}),
+        ("/tile", {"path": "a.czi", "z": -1}),
+        ("/slice", {"path": "a.czi", "level": -1}),
+        ("/slice", {"path": "a.czi", "t": -1}),
+        ("/slice", {"path": "a.czi", "z": -1}),
+        ("/atlas", {"path": "a.czi", "level": -1}),
+        ("/atlas", {"path": "a.czi", "t": -1}),
+        ("/atlas", {"path": "a.czi", "grid_rows": 0, "grid_cols": 1}),
+        ("/atlas", {"path": "a.czi", "grid_rows": 1}),
+        ("/atlas", {"path": "a.czi", "scale": 0}),
+        ("/atlas", {"path": "a.czi", "scale": 1.1}),
+    ],
+)
+def test_scientific_delivery_rejects_invalid_geometry_before_decode(client, endpoint, params):
+    response = client.get(endpoint, params=params)
+    assert response.status_code == 422
 
 
 def test_slice_full_resolution_param_is_threaded_through(client):

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import type * as ThreeModule from "three";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
+import { ApiClient, type ScalarVolumePayload } from "@/lib/api";
 import type { UploadViewerInfo } from "@/types";
 import type * as ScalarVolumeModule from "./scalarVolume";
 import type { ResolvedScalarRendering } from "./scalarMask";
@@ -1059,6 +1059,91 @@ describe("SliceStackVolumeCanvas delivered GPU admission and recovery", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry volume/i }));
     await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
     expect(getUploadScalarVolume).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the strict scalar selector contract in the real failed-volume fallback image", async () => {
+    const strictInfo = {
+      ...viewerInfo,
+      axis_sizes: { ...viewerInfo.axis_sizes, C: 2 },
+      selected_indices: { ...viewerInfo.selected_indices, C: 1 },
+      viewer: {
+        ...viewerInfo.viewer,
+        display_capabilities: ["strict_scalar_slice", "channel_visibility", "channel_color"],
+        service_urls: {
+          ...viewerInfo.viewer.service_urls,
+          slice: "/v2/uploads/file-nifti/slice",
+        },
+      },
+      service_urls: {
+        ...viewerInfo.service_urls,
+        slice: "/v2/uploads/file-nifti/slice",
+      },
+    } as UploadViewerInfo;
+    const apiClient = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    vi.spyOn(apiClient, "getUploadScalarVolume").mockRejectedValue(
+      new Error("scalar/WebGL source failed")
+    );
+
+    render(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="file-nifti"
+        viewerInfo={strictInfo}
+        displayState={{
+          ...displayState,
+          channels: [1],
+          channel_colors: ["#00ff00", "#ff00ff"],
+        }}
+        zIndex={1}
+        tIndex={1}
+        resolvedScalarRendering={resolvedIntensity(1, 1)}
+      />
+    );
+
+    const fallback = await screen.findByAltText("Volume fallback preview");
+    const fallbackUrl = new URL((fallback as HTMLImageElement).src);
+    expect(fallbackUrl.searchParams.get("axis")).toBe("z");
+    expect(fallbackUrl.searchParams.get("z")).toBe("1");
+    expect(fallbackUrl.searchParams.get("t")).toBe("1");
+    expect(fallbackUrl.searchParams.get("c")).toBe("1");
+    expect(fallbackUrl.searchParams.has("channels")).toBe(false);
+    expect(fallbackUrl.searchParams.has("channel_colors")).toBe(false);
+  });
+
+  it("keeps mixed physical/voxel volume axes in voxel-space geometry", async () => {
+    const apiClient = {
+      getUploadScalarVolume: vi.fn(async () => payload),
+      uploadAtlasUrl: vi.fn(() => "/atlas.png"),
+      uploadSliceUrl: vi.fn(() => "/slice.png"),
+    } as unknown as ApiClient;
+    const info = {
+      ...viewerInfo,
+      metadata: {
+        ...viewerInfo.metadata,
+        physical_spacing: { x: 0.5, y: 0.5, z: 2 },
+        spacing_units: { x: "um", y: "um", z: "voxel" },
+      },
+    } as UploadViewerInfo;
+
+    render(
+      <SliceStackVolumeCanvas
+        apiClient={apiClient}
+        fileId="file-nifti"
+        viewerInfo={info}
+        displayState={displayState}
+        tIndex={0}
+        resolvedScalarRendering={resolvedIntensity()}
+      />
+    );
+
+    await waitFor(() => expect(textureInitialization).toHaveBeenCalledTimes(1));
+    const surface = document.querySelector("[data-viewer-surface='volume']");
+    expect(surface).toHaveAttribute("data-viewer-physical-width", "2.0000");
+    expect(surface).toHaveAttribute("data-viewer-physical-height", "2.0000");
+    expect(surface).toHaveAttribute("data-viewer-physical-depth", "2.0000");
+    expect(surface).toHaveAttribute("data-viewer-physical-scale-x", "1.0000");
+    expect(surface).toHaveAttribute("data-viewer-physical-scale-y", "1.0000");
+    expect(surface).toHaveAttribute("data-viewer-physical-scale-z", "1.0000");
   });
 
   it("rejects invalid time indices before an API request", async () => {

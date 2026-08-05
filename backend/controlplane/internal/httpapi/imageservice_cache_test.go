@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,6 +65,12 @@ func TestImageCacheBeforeAfterPanZoom(t *testing.T) {
 	const perTileDecode = 5 * time.Millisecond // representative bounded-tile decode latency
 	var engineCalls int64
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"axis_sizes": map[string]any{"T": 1, "C": 3, "Z": 1, "Y": 4, "X": 4},
+			})
+			return
+		}
 		if r.URL.Path != "/tile" {
 			http.NotFound(w, r)
 			return
@@ -166,7 +176,12 @@ func TestImageCacheBeforeAfterPanZoom(t *testing.T) {
 func TestImageCacheInvalidatesOnReDerive(t *testing.T) {
 	t.Setenv("ULTRA_CONTROL_IMAGE_CACHE_BYTES", "0")
 	var engineCalls int64
+	viewerInfo := derivativeViewerInfoForTest(1, 3, 1, 4, 4, 512)
 	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/viewerinfo" {
+			_ = json.NewEncoder(w).Encode(viewerInfo)
+			return
+		}
 		atomic.AddInt64(&engineCalls, 1)
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write([]byte("X"))
@@ -184,12 +199,10 @@ func TestImageCacheInvalidatesOnReDerive(t *testing.T) {
 		imageCache:      newImageResponseCache(8 << 20),
 	})
 	fileID := uploadNamedFileForProxyTest(t, router, "slide.png", testPNGBytes(t, 4, 4))
-	derivedDir := filepath.Join(uploadRoot, "derived")
-	_ = os.MkdirAll(derivedDir, 0o755)
-	derivedPath := filepath.Join(derivedDir, derivedPyramidName(fileID))
-	if err := os.WriteFile(derivedPath, []byte("PYRAMID-V1"), 0o644); err != nil {
-		t.Fatalf("write pyramid: %v", err)
-	}
+	record := uploadedResourceRecordForTest(t, mem, fileID)
+	sourcePath := uploadedSourcePathForTest(t, uploadRoot, fileID)
+	capabilities := derivativeCapabilities{Tile: true, TileT: true, TileZ: true, Slice: true, Thumbnail: true, OrderedChannels: true, LUT: true}
+	writeStrictDerivativeForTest(t, uploadRoot, sourcePath, record, viewerInfo, capabilities, []byte("PYRAMID-V1"))
 
 	get := func() {
 		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/tiles/z/0/0/0", nil)
@@ -206,12 +219,109 @@ func TestImageCacheInvalidatesOnReDerive(t *testing.T) {
 	if got := atomic.LoadInt64(&engineCalls); got != 1 {
 		t.Fatalf("after warm cache, engine calls=%d want 1", got)
 	}
-	// Re-derive: the served file changes size (and mtime), so the key must change.
-	if err := os.WriteFile(derivedPath, []byte("PYRAMID-VERSION-2-LARGER"), 0o644); err != nil {
-		t.Fatalf("re-derive: %v", err)
-	}
+	// Re-derive: manifest-last publication points at a new immutable artifact, so the
+	// served path and cache key both change.
+	writeStrictDerivativeForTest(t, uploadRoot, sourcePath, record, viewerInfo, capabilities, []byte("PYRAMID-VERSION-2-LARGER"))
 	get() // must be a fresh miss, not a stale hit
 	if got := atomic.LoadInt64(&engineCalls); got != 2 {
 		t.Fatalf("after re-derive, engine calls=%d want 2 (stale tile served!)", got)
+	}
+}
+
+func TestImageCacheKeyRejectsSameSizeSameMtimeReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "image.tif")
+	fixedTime := time.Unix(1_700_000_000, 123_000_000)
+	if err := os.WriteFile(path, []byte("AAAA"), 0o600); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+	if err := os.Chtimes(path, fixedTime, fixedTime); err != nil {
+		t.Fatalf("stamp initial file: %v", err)
+	}
+	query := url.Values{"path": {path}, "z": {"0"}}
+	initialKey, ok := imageCacheKey("/slice", query)
+	if !ok {
+		t.Fatal("initial file did not produce a cache key")
+	}
+
+	replacement := filepath.Join(root, "replacement.tif")
+	if err := os.WriteFile(replacement, []byte("BBBB"), 0o600); err != nil {
+		t.Fatalf("write replacement: %v", err)
+	}
+	if err := os.Chtimes(replacement, fixedTime, fixedTime); err != nil {
+		t.Fatalf("stamp replacement: %v", err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("replace file: %v", err)
+	}
+	replacementKey, ok := imageCacheKey("/slice", query)
+	if !ok {
+		t.Fatal("replacement file did not produce a cache key")
+	}
+	if replacementKey == initialKey {
+		t.Fatal("same-size/same-mtime replacement reused the stale cache key")
+	}
+}
+
+func TestCachedViewerInfoCoalescesConcurrentMisses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "source.czi")
+	if err := os.WriteFile(path, []byte("source"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	var calls int64
+	release := make(chan struct{})
+	called := make(chan struct{}, 1)
+	imageSvc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/viewerinfo" {
+			http.NotFound(w, r)
+			return
+		}
+		atomic.AddInt64(&calls, 1)
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"axis_sizes": map[string]any{"T": 1, "C": 3, "Z": 1},
+		})
+	}))
+	defer imageSvc.Close()
+
+	deps := ServerDeps{ImageServiceURL: imageSvc.URL}
+	cache := newImageResponseCache(8 << 20)
+	const concurrency = 16
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	var done sync.WaitGroup
+	errs := make(chan error, concurrency)
+	ready.Add(concurrency)
+	done.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-start
+			info, err := deps.cachedImageServiceViewerInfoVia(context.Background(), path, cache)
+			if err == nil {
+				if _, _, _, ok := sourceViewerAxes(info); !ok {
+					errs <- fmt.Errorf("viewer info axes are malformed: %#v", info)
+				}
+			} else {
+				errs <- err
+			}
+		}()
+	}
+	ready.Wait()
+	close(start)
+	<-called
+	close(release)
+	done.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("viewer-info upstream calls = %d, want 1", got)
 	}
 }

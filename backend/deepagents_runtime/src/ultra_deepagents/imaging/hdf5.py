@@ -70,31 +70,36 @@ __all__ = [
 # thumbnail the sidecar won't render, or skips one it would.
 HDF5_DATA_EXTS = (
     # Generic HDF5 containers.
-    ".h5", ".hdf5", ".hdf", ".he5",
+    ".h5",
+    ".hdf5",
+    ".hdf",
+    ".he5",
     # Materials: DREAM.3D reconstruction pipelines + EBSD orientation scans.
-    ".dream3d", ".h5ebsd",
+    ".dream3d",
+    ".h5ebsd",
     # Single-cell bio: AnnData / Loom matrices.
-    ".h5ad", ".loom",
+    ".h5ad",
+    ".loom",
     # NeXus: neutron / X-ray / synchrotron beamline data.
     ".nxs",
 )
 
 # --- Bounding caps (documented; surfaced to the UI where relevant) ----------
-MAX_TREE_NODES = 4000          # total nodes visited during the viewer tree walk
-MAX_TREE_DEPTH = 64            # guards against pathological deep nesting / cycles
-MAX_GROUP_CHILDREN = 512       # children materialized per group (rest → truncated)
-PREVIEW_MAX_PLANE = 2048       # long-edge cap (px) for a preview slice plane
+MAX_TREE_NODES = 4000  # total nodes visited during the viewer tree walk
+MAX_TREE_DEPTH = 64  # guards against pathological deep nesting / cycles
+MAX_GROUP_CHILDREN = 512  # children materialized per group (rest → truncated)
+PREVIEW_MAX_PLANE = 2048  # long-edge cap (px) for a preview slice plane
 PREVIEW_MAX_VOXELS = 32_000_000  # preview grid voxel cap (~128MB float32); bounds volume+atlas
 SAMPLE_MAX_VALUES = 2_000_000  # values sampled for statistics + histogram
 WINDOW_SAMPLE_VALUES = 400_000  # values sampled for the robust display window
-TABLE_CHART_MAX_ROWS = 4000    # rows sampled for table preview charts
+TABLE_CHART_MAX_ROWS = 4000  # rows sampled for table preview charts
 HISTOGRAM_MAX_BINS = 256
-DISCRETE_MAX_LABELS = 64       # >this many distinct integers → treat as continuous
-LABEL_MAX_UNIQUE = 256         # unnamed integer volume with ≤this many distinct values → label_volume
-ATLAS_CELL_CAP = 256           # matches viewerinfo.ATLAS_CELL_CAP (kept local to avoid import cost)
-SAMPLE_CORNER = 4              # per-axis size of the sample_values corner block
-MAX_ATTRS = 48                 # attributes materialized per node
-MAX_ATTR_ARRAY = 32            # elements kept from an array-valued attribute
+DISCRETE_MAX_LABELS = 64  # >this many distinct integers → treat as continuous
+LABEL_MAX_UNIQUE = 256  # unnamed integer volume with ≤this many distinct values → label_volume
+ATLAS_CELL_CAP = 256  # matches viewerinfo.ATLAS_CELL_CAP (kept local to avoid import cost)
+SAMPLE_CORNER = 4  # per-axis size of the sample_values corner block
+MAX_ATTRS = 48  # attributes materialized per node
+MAX_ATTR_ARRAY = 32  # elements kept from an array-valued attribute
 MATERIAL_PHASE_MAX_NAMES = 256  # stored ensemble labels read by the materials probe
 MATERIAL_PHASE_MAX_ITEM_BYTES = 1024
 MATERIAL_PHASE_MAX_TOTAL_BYTES = 16 * 1024
@@ -132,8 +137,17 @@ _ENSEMBLE_GROUP_NAMES = frozenset(
 _VOLUME_KINDS = frozenset({"scalar_volume", "label_volume", "rgb_volume", "vector_volume"})
 # Dataset/group name hints that a categorical (label) integer volume.
 _LABEL_NAME_HINTS = (
-    "featureids", "grainids", "cellids", "phases", "phaseid", "labels", "mask",
-    "segmentation", "ids", "regionids", "parentids",
+    "featureids",
+    "grainids",
+    "cellids",
+    "phases",
+    "phaseid",
+    "labels",
+    "mask",
+    "segmentation",
+    "ids",
+    "regionids",
+    "parentids",
 )
 
 
@@ -585,14 +599,22 @@ def _interpret_volume(
     sx = base_plane_stride * factor
     return {
         "layout": layout,
-        "z": z, "y": y, "x": x, "comp": comp,
-        "sz": sz, "sy": sy, "sx": sx,
-        "pz": _pdim(z, sz), "py": _pdim(y, sy), "px": _pdim(x, sx),
+        "z": z,
+        "y": y,
+        "x": x,
+        "comp": comp,
+        "sz": sz,
+        "sy": sy,
+        "sx": sx,
+        "pz": _pdim(z, sz),
+        "py": _pdim(y, sy),
+        "px": _pdim(x, sx),
     }
 
 
-def _refine_preview_kind(shallow: str | None, dt: Any, vol: dict[str, Any] | None,
-                         name: str, integer_unique: int | None) -> str:
+def _refine_preview_kind(
+    shallow: str | None, dt: Any, vol: dict[str, Any] | None, name: str, integer_unique: int | None
+) -> str:
     """Finalize the volume preview kind using the sampled unique count (for
     label detection) and the shallow guess. Non-volume kinds pass through."""
     if shallow not in _VOLUME_KINDS or vol is None:
@@ -634,7 +656,9 @@ def _strided_sample(dset: Any, vol: dict[str, Any] | None, comp: int, max_values
         return flat.astype("float32", copy=False)
     z, y, x = vol["z"], vol["y"], vol["x"]
     total = z * y * x
-    factor = max(1, math.ceil((total / max(1, max_values)) ** (1.0 / 3.0))) if total > max_values else 1
+    factor = (
+        max(1, math.ceil((total / max(1, max_values)) ** (1.0 / 3.0))) if total > max_values else 1
+    )
     sz2, sy2, sx2 = factor, factor, factor
     layout = vol["layout"]
     try:
@@ -659,7 +683,13 @@ def _sample_statistics(values, dt: Any) -> dict[str, Any]:
 
     values = values[np.isfinite(values)] if values.size else values
     n = int(values.size)
-    stats: dict[str, Any] = {"sample_count": n, "min": None, "max": None, "mean": None, "unique_values": None}
+    stats: dict[str, Any] = {
+        "sample_count": n,
+        "min": None,
+        "max": None,
+        "mean": None,
+        "unique_values": None,
+    }
     if n == 0:
         return stats
     stats["min"] = float(values.min())
@@ -689,7 +719,9 @@ def _robust_window(values) -> tuple[float, float]:
 _WINDOW_CACHE: dict[tuple, tuple[float, float]] = {}
 
 
-def _global_window(path: str, dset: Any, dataset_path: str, vol: dict[str, Any] | None, comp: int) -> tuple[float, float]:
+def _global_window(
+    path: str, dset: Any, dataset_path: str, vol: dict[str, Any] | None, comp: int
+) -> tuple[float, float]:
     try:
         mtime = os.stat(path).st_mtime_ns
     except OSError:
@@ -809,7 +841,9 @@ def _feature_mask_rgba(image: Any, identities: Any, selected: tuple[int, ...]):
 # ---------------------------------------------------------------------------
 # Plane extraction (bounded, strided)
 # ---------------------------------------------------------------------------
-def _read_preview_plane(dset: Any, vol: dict[str, Any], axis: str, index: int, comp: int, *, rgb: bool):
+def _read_preview_plane(
+    dset: Any, vol: dict[str, Any], axis: str, index: int, comp: int, *, rgb: bool
+):
     """Extract one preview plane (matching the summary's ``preview_planes`` dims).
 
     ``index`` is a *preview-grid* index; it maps to the native index ``index*stride``.
@@ -875,9 +909,7 @@ def _read_preview_volume(dset: Any, vol: dict[str, Any], comp: int):
     except TypeError as exc:
         raise Hdf5Error("scalar volume channel must be an integer") from exc
     if comp < 0 or comp >= int(vol["comp"]):
-        raise Hdf5Error(
-            f"scalar volume channel {comp} is out of range for C={int(vol['comp'])}"
-        )
+        raise Hdf5Error(f"scalar volume channel {comp} is out of range for C={int(vol['comp'])}")
     if layout == "zyx":
         arr = dset[::sz, ::sy, ::sx]
     elif layout == "zyxc":
@@ -976,15 +1008,11 @@ def _is_orientation_array(name: str, dset: Any, shape: tuple[int, ...]) -> bool:
     if not _is_dataset(dset) or len(shape) < 2:
         return False
     itemsize = int(getattr(dset.dtype, "itemsize", 0) or 0)
-    if getattr(dset.dtype, "kind", "") not in {"i", "u", "f"} or not (
-        0 < itemsize <= 8
-    ):
+    if getattr(dset.dtype, "kind", "") not in {"i", "u", "f"} or not (0 < itemsize <= 8):
         return False
     normalized = "".join(char for char in str(name).casefold() if char.isalnum())
     components = int(shape[-1]) if shape else 0
-    return ("euler" in normalized and components >= 3) or (
-        "quat" in normalized and components >= 4
-    )
+    return ("euler" in normalized and components >= 3) or ("quat" in normalized and components >= 4)
 
 
 def _read_bounded_phase_names(
@@ -1014,7 +1042,7 @@ def _read_bounded_phase_names(
         shape = tuple(int(value) for value in dset.shape)
         total_items = int(np.prod(shape)) if shape else 1
         limit = min(total_items, max_names, MATERIAL_PHASE_MAX_NAMES)
-        indices = (iter([()]) if not shape else itertools.islice(np.ndindex(shape), limit))
+        indices = iter([()]) if not shape else itertools.islice(np.ndindex(shape), limit)
         names: list[str] = []
         decoded_bytes = 0
         items_read = 0
@@ -1263,15 +1291,11 @@ def _feature_group_has_reserved_zero(
     if not geometry_container:
         return False
     for cell_name in ("CellData", "Cell Data", "Cell_Data"):
-        cell_group = _hard_object_at_path(
-            h5, geometry_container.rstrip("/") + "/" + cell_name
-        )
+        cell_group = _hard_object_at_path(h5, geometry_container.rstrip("/") + "/" + cell_name)
         if not _is_group(cell_group):
             continue
         for child_key in _bounded_child_names(cell_group):
-            normalized = "".join(
-                char for char in str(child_key).casefold() if char.isalnum()
-            )
+            normalized = "".join(char for char in str(child_key).casefold() if char.isalnum())
             if normalized not in {"featureids", "grainids"}:
                 continue
             try:
@@ -1312,7 +1336,9 @@ def _cell_dataset_matches_geometry(shape: tuple[int, ...], dimensions: list[Any]
     return bool(shape) and int(shape[0]) == voxel_count and len(shape) <= 2
 
 
-def _geometry_cell_data_evidence(parent: Any, dimensions: list[Any] | None) -> tuple[bool, bool, str | None]:
+def _geometry_cell_data_evidence(
+    parent: Any, dimensions: list[Any] | None
+) -> tuple[bool, bool, str | None]:
     """Inspect bounded CellData metadata for geometry/tuple-shape consistency."""
 
     if parent is None or not isinstance(dimensions, list):
@@ -1382,10 +1408,7 @@ def _find_geometry(h5: Any) -> dict[str, Any] | None:
                 parent, dimensions
             )
             complete = bool(
-                valid_dimensions
-                and valid_spacing
-                and valid_origin
-                and cell_data_consistent
+                valid_dimensions and valid_spacing and valid_origin and cell_data_consistent
             )
             voxel_count = (
                 math.prod(float(value) for value in dimensions[:3])
@@ -1541,8 +1564,7 @@ def _dataset_local_geometry(
     spacing_dataset = _direct_hard_child(geometry_group, "SPACING")
     origin_dataset = _direct_hard_child(geometry_group, "ORIGIN")
     if not all(
-        _is_dataset(dataset)
-        and _hard_links_scoped_to_parent(dataset, geometry_group)
+        _is_dataset(dataset) and _hard_links_scoped_to_parent(dataset, geometry_group)
         for dataset in (dimensions_dataset, spacing_dataset, origin_dataset)
     ):
         return None
@@ -1627,7 +1649,9 @@ def _resolve_feature_registration(
     )
     if target_volume is None or target_volume.get("layout") not in {"zyx", "zyxc"}:
         raise Hdf5Error("unsupported: selected CellData map has no exact ZYX volume layout")
-    target_kind = target_kind or _classify_shallow(target_name, target.dtype, tuple(target.shape)) or ""
+    target_kind = (
+        target_kind or _classify_shallow(target_name, target.dtype, tuple(target.shape)) or ""
+    )
     target_role = _semantic_role(target_name, target_kind)
     dtype_kind = getattr(target.dtype, "kind", "")
     components = int(target_volume.get("comp", 0))
@@ -1637,7 +1661,9 @@ def _resolve_feature_registration(
         or (target_role == "ipf_colors" and dtype_kind in {"i", "u"} and components in {3, 4})
     )
     if not role_is_exact:
-        raise Hdf5Error("unsupported: selected CellData map is not FeatureIds, Euler angles, or IPF colors")
+        raise Hdf5Error(
+            "unsupported: selected CellData map is not FeatureIds, Euler angles, or IPF colors"
+        )
 
     feature_ids_present = "FeatureIds" in cell_group
     grain_ids_present = "GrainIds" in cell_group
@@ -1699,8 +1725,7 @@ def _feature_filter_metadata(registration: dict[str, Any]) -> dict[str, Any]:
         "background_id": 0,
         "provenance": "co_registered_raw_integer_feature_ids",
         "registration_key": (
-            f"{source}|{native[0]}x{native[1]}x{native[2]}|"
-            f"{stride[0]}x{stride[1]}x{stride[2]}"
+            f"{source}|{native[0]}x{native[1]}x{native[2]}|{stride[0]}x{stride[1]}x{stride[2]}"
         ),
         "target_role": registration["target_role"],
         "native_shape": list(native),
@@ -1734,7 +1759,7 @@ def _materials_probe(h5: Any) -> dict[str, Any]:
         "referenced_positive_feature_count": None,
         "feature_id_scan_complete": False,
         "feature_id_consistency": None,
-        "maps": [],          # list of (path, name, kind, role)
+        "maps": [],  # list of (path, name, kind, role)
         "feature_groups": [],  # selected relationship-backed feature group
         "feature_group_reserved_zero": {},
         "feature_zero_reserved": None,
@@ -1762,8 +1787,7 @@ def _materials_probe(h5: Any) -> dict[str, Any]:
         dataset_path = "/" + name
         parent = "/" + name.rsplit("/", 1)[0] if "/" in name else "/"
         in_selected_container = bool(
-            geometry_container
-            and dataset_path.startswith(geometry_container.rstrip("/") + "/")
+            geometry_container and dataset_path.startswith(geometry_container.rstrip("/") + "/")
         )
 
         # Phase/material labels are accepted only from a direct, typed ensemble
@@ -1863,6 +1887,7 @@ def _materials_probe(h5: Any) -> dict[str, Any]:
 
     selected_declaration = None
     if declarations:
+
         def _relationship_score(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int, int]:
             index, declaration = item
             consistency = declaration["consistency"]
@@ -1915,7 +1940,7 @@ def _materials_probe(h5: Any) -> dict[str, Any]:
     priority = ["ipf_colors", "feature_ids", "confidence_index", "image_quality"]
     recommended = None
     for want in priority:
-        for (path, _n, _k, role) in maps:
+        for path, _n, _k, role in maps:
             if role == want:
                 recommended = path
                 break
@@ -2086,7 +2111,9 @@ def _walk_tree(h5: Any) -> tuple[list[dict[str, Any]], dict[str, int], bool, int
 # ---------------------------------------------------------------------------
 # viewerinfo payload
 # ---------------------------------------------------------------------------
-def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str = "") -> dict[str, Any]:
+def build_hdf5_viewer_info(
+    path: str, *, file_id: str = "", original_name: str = ""
+) -> dict[str, Any]:
     """Build the ``kind:"hdf5"`` viewer-info payload for ``path``.
 
     Never raises on an undecodable/corrupt HDF5 file: returns ``supported:false`` +
@@ -2136,9 +2163,7 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
                 "phase_names_provenance": materials_probe["phase_names_provenance"],
                 "feature_count": materials_probe["feature_count"],
                 "grain_count": materials_probe["grain_count"],
-                "declared_feature_tuple_count": materials_probe[
-                    "declared_feature_tuple_count"
-                ],
+                "declared_feature_tuple_count": materials_probe["declared_feature_tuple_count"],
                 "referenced_positive_feature_count": materials_probe[
                     "referenced_positive_feature_count"
                 ],
@@ -2185,7 +2210,9 @@ def build_hdf5_viewer_info(path: str, *, file_id: str = "", original_name: str =
                 f"This file is large; the group tree was truncated to {MAX_TREE_NODES} nodes "
                 "for a fast open. Datasets beyond the shown tree are not listed."
             )
-        limitations.append("Previews are sampled/downsampled for interactivity; exact values are in the source file.")
+        limitations.append(
+            "Previews are sampled/downsampled for interactivity; exact values are in the source file."
+        )
 
         hdf5_block = {
             "enabled": True,
@@ -2323,7 +2350,9 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
         structured_fields: list[dict[str, str]] = []
         if _is_compound(dt):
             for fname in dt.names:
-                structured_fields.append({"name": str(fname), "dtype": _dtype_str(dt.fields[fname][0])})
+                structured_fields.append(
+                    {"name": str(fname), "dtype": _dtype_str(dt.fields[fname][0])}
+                )
 
         # Sampling (numeric volumes/series only).
         sample_stats = None
@@ -2390,7 +2419,11 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             capabilities.append("slice")
         if volume_eligible:
             capabilities.append("volume")
-        if _is_numeric_dtype(dt) and preview_kind in ("scalar_volume", "label_volume", "vector_volume"):
+        if _is_numeric_dtype(dt) and preview_kind in (
+            "scalar_volume",
+            "label_volume",
+            "vector_volume",
+        ):
             capabilities.append("histogram")
         if sample_stats is not None:
             capabilities.append("statistics")
@@ -2421,7 +2454,9 @@ def dataset_summary(path: str, dataset_path: str, *, file_id: str = "") -> dict[
             "delivery_mode": delivery_mode,
             "diagnostic_surface": "none",
             "first_paint_mode": "image",
-            "measurement_policy": "spacing-aware" if (physical_spacing and any(physical_spacing.values())) else "pixel-only",
+            "measurement_policy": "spacing-aware"
+            if (physical_spacing and any(physical_spacing.values()))
+            else "pixel-only",
             "texture_policy": texture_policy,
             "display_capabilities": [],
             "viewer_capabilities": [],
@@ -2510,7 +2545,11 @@ def _units_hint(name: str, dataset: Any | None = None) -> str | None:
 
 
 def _spacing_from_geometry(geometry: dict[str, Any] | None) -> dict[str, Any]:
-    if geometry and isinstance(geometry.get("spacing"), (list, tuple)) and len(geometry["spacing"]) >= 3:
+    if (
+        geometry
+        and isinstance(geometry.get("spacing"), (list, tuple))
+        and len(geometry["spacing"]) >= 3
+    ):
         sp = geometry["spacing"]
         return {"x": _num(sp[0]), "y": _num(sp[1]), "z": _num(sp[2])}
     return {"x": None, "y": None, "z": None}
@@ -2574,7 +2613,9 @@ def _num(v: Any) -> float | None:
         return None
 
 
-def _build_preview_planes(vol: dict[str, Any], slice_axes: list[str], spacing: dict[str, Any]) -> dict[str, Any]:
+def _build_preview_planes(
+    vol: dict[str, Any], slice_axes: list[str], spacing: dict[str, Any]
+) -> dict[str, Any]:
     pz, py, px = vol["pz"], vol["py"], vol["px"]
     sx = spacing.get("x") or 1.0
     sy = spacing.get("y") or 1.0
@@ -2667,7 +2708,9 @@ def _volume_context(path: str, dataset_path: str):
         shape = tuple(int(s) for s in dset.shape)
         name = dataset_path.rsplit("/", 1)[-1] or dataset_path
         if not _is_numeric_dtype(dt):
-            raise Hdf5Error("unsupported: dataset is not numeric and cannot be rendered as an image")
+            raise Hdf5Error(
+                "unsupported: dataset is not numeric and cannot be rendered as an image"
+            )
         shallow = _classify_shallow(name, dt, shape)
         if _semantic_role(name, shallow or "") in {"feature_ids", "euler_angles", "ipf_colors"}:
             try:
@@ -2760,8 +2803,15 @@ def thumbnail_png(path: str, *, max_size: int = 512) -> bytes:
     return buf.getvalue()
 
 
-def slice_png(path: str, dataset_path: str, *, axis: str = "z", index: int | None = None,
-              component: int = 0, feature_ids: str | None = None) -> bytes:
+def slice_png(
+    path: str,
+    dataset_path: str,
+    *,
+    axis: str = "z",
+    index: int | None = None,
+    component: int = 0,
+    feature_ids: str | None = None,
+) -> bytes:
     """One preview slice as PNG. ``index`` is a preview-grid index (clamped, never 500)."""
     selected = _feature_filter_ids(feature_ids)
     h5, dset, dt, vol, kind = _volume_context(path, dataset_path)
@@ -2771,13 +2821,14 @@ def slice_png(path: str, dataset_path: str, *, axis: str = "z", index: int | Non
         if index is None:
             index = pdim // 2
         rgb = kind == "rgb_volume"
-        plane = _read_preview_plane(dset, vol, axis, int(index), int(component), rgb=rgb)
+        component = _atlas_component_index(component, vol, kind)
+        plane = _read_preview_plane(dset, vol, axis, int(index), component, rgb=rgb)
         if kind == "label_volume":
             img = _label_to_rgb(plane)
         elif kind == "rgb_volume":
             img = _rgb_to_uint8(plane)
         else:  # scalar_volume / vector_volume(component)
-            lo, hi = _global_window(path, dset, dataset_path, vol, int(component))
+            lo, hi = _global_window(path, dset, dataset_path, vol, component)
             img = _window_to_uint8(plane, lo, hi)
         if selected is not None:
             registration = _resolve_feature_registration(
@@ -2832,7 +2883,11 @@ def atlas_png(
         cell_w, cell_h = scheme["slice_width"], scheme["slice_height"]
         channels = 4 if selected is not None else 3
         atlas = np.zeros((cell_h * rows, cell_w * cols, channels), dtype="uint8")
-        lo, hi = _global_window(path, dset, dataset_path, vol, component) if kind not in ("label_volume", "rgb_volume") else (0.0, 1.0)
+        lo, hi = (
+            _global_window(path, dset, dataset_path, vol, component)
+            if kind not in ("label_volume", "rgb_volume")
+            else (0.0, 1.0)
+        )
         dataset_name = dataset_path.rsplit("/", 1)[-1] or dataset_path
         preserve_voxel_colors = (
             kind == "label_volume" or _semantic_role(dataset_name, kind) == "ipf_colors"
@@ -2846,9 +2901,7 @@ def atlas_png(
                 target_kind=kind,
             )
         for z in range(pz):
-            plane = _read_preview_plane(
-                dset, vol, "z", z, component, rgb=(kind == "rgb_volume")
-            )
+            plane = _read_preview_plane(dset, vol, "z", z, component, rgb=(kind == "rgb_volume"))
             if kind == "label_volume":
                 cell = _label_to_rgb(plane)
             elif kind == "rgb_volume":
@@ -2883,15 +2936,15 @@ def atlas_png(
                     cell = _resize_nearest(cell, cell_h, cell_w)
                 else:
                     cell = np.asarray(
-                        Image.fromarray(cell).resize(
-                            (cell_w, cell_h), Image.Resampling.BILINEAR
-                        ),
+                        Image.fromarray(cell).resize((cell_w, cell_h), Image.Resampling.BILINEAR),
                         dtype="uint8",
                     )
             r, c = divmod(z, cols)
-            atlas[r * cell_h:(r + 1) * cell_h, c * cell_w:(c + 1) * cell_w, :] = cell
+            atlas[r * cell_h : (r + 1) * cell_h, c * cell_w : (c + 1) * cell_w, :] = cell
         buf = io.BytesIO()
-        Image.fromarray(atlas, mode="RGBA" if selected is not None else "RGB").save(buf, format="PNG")
+        Image.fromarray(atlas, mode="RGBA" if selected is not None else "RGB").save(
+            buf, format="PNG"
+        )
         return buf.getvalue()
     finally:
         _safe_close(h5)
@@ -2956,8 +3009,9 @@ def scalar_volume(path: str, dataset_path: str, *, channel: int = 0) -> dict[str
 # ---------------------------------------------------------------------------
 # Histogram
 # ---------------------------------------------------------------------------
-def dataset_histogram(path: str, dataset_path: str, *, component: int = 0, bins: int = 24,
-                      file_id: str = "") -> dict[str, Any]:
+def dataset_histogram(
+    path: str, dataset_path: str, *, component: int = 0, bins: int = 24, file_id: str = ""
+) -> dict[str, Any]:
     import numpy as np
 
     bins = max(8, min(int(bins or 24), HISTOGRAM_MAX_BINS))
@@ -2970,12 +3024,31 @@ def dataset_histogram(path: str, dataset_path: str, *, component: int = 0, bins:
         if not _is_numeric_dtype(dt):
             raise Hdf5Error("unsupported: cannot histogram a non-numeric dataset")
         vol = _interpret_volume(shape, dt) if len(shape) >= 2 else None
-        sample = _strided_sample(dset, vol, int(component), SAMPLE_MAX_VALUES)
+        shallow = _classify_shallow(name, dt, shape)
+        if vol is not None:
+            if shallow is None:
+                raise Hdf5Error("unsupported: dataset preview kind is unavailable")
+            component = _atlas_component_index(component, vol, shallow)
+        else:
+            if isinstance(component, bool):
+                raise Hdf5Error("unsupported: histogram component must be an integer")
+            try:
+                component = operator.index(component)
+            except TypeError as exc:
+                raise Hdf5Error("unsupported: histogram component must be an integer") from exc
+            if component != 0:
+                raise Hdf5Error(
+                    "unsupported: histogram component selection requires a vector dataset"
+                )
+        sample = _strided_sample(dset, vol, component, SAMPLE_MAX_VALUES)
         sample = sample[np.isfinite(sample)] if sample.size else sample
         sample_count = int(sample.size)
-        shallow = _classify_shallow(name, dt, shape)
-        component_labels = _component_labels(name, vol["comp"]) if (vol and shallow == "vector_volume") else []
-        component_label = component_labels[int(component)] if 0 <= int(component) < len(component_labels) else None
+        component_labels = (
+            _component_labels(name, vol["comp"]) if (vol and shallow == "vector_volume") else []
+        )
+        component_label = (
+            component_labels[component] if 0 <= component < len(component_labels) else None
+        )
 
         out_bins: list[dict[str, Any]] = []
         discrete = False
@@ -2990,7 +3063,14 @@ def dataset_histogram(path: str, dataset_path: str, *, component: int = 0, bins:
                 vmin = float(uniq.min())
                 vmax = float(uniq.max())
                 for value, count in zip(uniq.tolist(), counts.tolist()):
-                    out_bins.append({"label": str(value), "start": float(value), "end": float(value), "count": int(count)})
+                    out_bins.append(
+                        {
+                            "label": str(value),
+                            "start": float(value),
+                            "end": float(value),
+                            "count": int(count),
+                        }
+                    )
             else:
                 out_bins, vmin, vmax = _continuous_bins(sample, bins, np)
         else:
@@ -3036,8 +3116,9 @@ def _fmt_num(v: float) -> str:
 # ---------------------------------------------------------------------------
 # Table preview
 # ---------------------------------------------------------------------------
-def table_preview(path: str, dataset_path: str, *, offset: int = 0, limit: int = 12,
-                  file_id: str = "") -> dict[str, Any]:
+def table_preview(
+    path: str, dataset_path: str, *, offset: int = 0, limit: int = 12, file_id: str = ""
+) -> dict[str, Any]:
     import numpy as np
 
     offset = max(0, int(offset))
@@ -3050,16 +3131,24 @@ def table_preview(path: str, dataset_path: str, *, offset: int = 0, limit: int =
         name = dataset_path.rsplit("/", 1)[-1] or dataset_path
 
         if _is_compound(dt):
-            columns, rows, total_rows, total_columns, charts = _compound_table(dset, dt, offset, limit, np)
+            columns, rows, total_rows, total_columns, charts = _compound_table(
+                dset, dt, offset, limit, np
+            )
             preview_kind = "table"
         elif _is_string_dtype(dt):
-            columns, rows, total_rows, total_columns, charts = _string_table(dset, shape, offset, limit)
+            columns, rows, total_rows, total_columns, charts = _string_table(
+                dset, shape, offset, limit
+            )
             preview_kind = "table"
         elif _is_numeric_dtype(dt) and len(shape) == 1:
-            columns, rows, total_rows, total_columns, charts = _series_table(dset, name, offset, limit, np)
+            columns, rows, total_rows, total_columns, charts = _series_table(
+                dset, name, offset, limit, np
+            )
             preview_kind = "series"
         elif _is_numeric_dtype(dt) and len(shape) == 2:
-            columns, rows, total_rows, total_columns, charts = _matrix_table(dset, shape, offset, limit, np)
+            columns, rows, total_rows, total_columns, charts = _matrix_table(
+                dset, shape, offset, limit, np
+            )
             preview_kind = "table"
         else:
             raise Hdf5Error("unsupported: dataset is not tabular")
@@ -3096,7 +3185,14 @@ def _compound_table(dset, dt, offset, limit, np):
         numeric = _is_numeric_dtype(fdt)
         if numeric:
             numeric_fields.append(fname)
-        columns.append({"key": str(fname), "label": str(fname), "dtype": _dtype_str(fdt), "numeric": bool(numeric)})
+        columns.append(
+            {
+                "key": str(fname),
+                "label": str(fname),
+                "dtype": _dtype_str(fdt),
+                "numeric": bool(numeric),
+            }
+        )
     rows = []
     for i, r in enumerate(block):
         row = _compound_row_to_dict(dt, r)
@@ -3122,11 +3218,20 @@ def _compound_charts(dset, dt, numeric_fields, total_rows, np):
         vals = vals[np.isfinite(vals)]
         if vals.size:
             counts, edges = np.histogram(vals, bins=min(24, max(8, int(math.sqrt(vals.size)))))
-            data = [{"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])} for i in range(len(counts))]
-            charts.append({
-                "kind": "histogram", "title": f"{f0} distribution", "description": None,
-                "x_key": "label", "y_key": "count", "data": data,
-            })
+            data = [
+                {"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])}
+                for i in range(len(counts))
+            ]
+            charts.append(
+                {
+                    "kind": "histogram",
+                    "title": f"{f0} distribution",
+                    "description": None,
+                    "x_key": "label",
+                    "y_key": "count",
+                    "data": data,
+                }
+            )
     except Exception:  # noqa: BLE001
         pass
     # Scatter of the first two numeric fields.
@@ -3136,13 +3241,22 @@ def _compound_charts(dset, dt, numeric_fields, total_rows, np):
             xs = np.asarray(block[f0], dtype="float64").ravel()
             ys = np.asarray(block[f1], dtype="float64").ravel()
             n = min(xs.size, ys.size, 1000)
-            data = [{f0: _num(xs[i]), "value": _num(ys[i])} for i in range(n)
-                    if math.isfinite(xs[i]) and math.isfinite(ys[i])]
+            data = [
+                {f0: _num(xs[i]), "value": _num(ys[i])}
+                for i in range(n)
+                if math.isfinite(xs[i]) and math.isfinite(ys[i])
+            ]
             if data:
-                charts.append({
-                    "kind": "scatter", "title": f"{f0} vs {f1}", "description": None,
-                    "x_key": f0, "y_key": "value", "data": data,
-                })
+                charts.append(
+                    {
+                        "kind": "scatter",
+                        "title": f"{f0} vs {f1}",
+                        "description": None,
+                        "x_key": f0,
+                        "y_key": "value",
+                        "data": data,
+                    }
+                )
         except Exception:  # noqa: BLE001
             pass
     return charts
@@ -3169,7 +3283,9 @@ def _series_table(dset, name, offset, limit, np):
     block = np.asarray(dset[lo:hi]) if total_rows else np.zeros(0)
     key = "value"
     rows = [{key: _to_jsonable(block[i]), "row_index": lo + i} for i in range(block.shape[0])]
-    columns = [{"key": key, "label": name or "Value", "dtype": _dtype_str(dset.dtype), "numeric": True}]
+    columns = [
+        {"key": key, "label": name or "Value", "dtype": _dtype_str(dset.dtype), "numeric": True}
+    ]
     # Histogram chart over a bounded sample of the whole series.
     charts: list[dict[str, Any]] = []
     step = max(1, math.ceil(total_rows / TABLE_CHART_MAX_ROWS)) if total_rows else 1
@@ -3178,11 +3294,20 @@ def _series_table(dset, name, offset, limit, np):
         sample = sample[np.isfinite(sample)]
         if sample.size:
             counts, edges = np.histogram(sample, bins=min(24, max(8, int(math.sqrt(sample.size)))))
-            data = [{"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])} for i in range(len(counts))]
-            charts.append({
-                "kind": "histogram", "title": f"{name or 'Series'} distribution", "description": None,
-                "x_key": "label", "y_key": "count", "data": data,
-            })
+            data = [
+                {"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])}
+                for i in range(len(counts))
+            ]
+            charts.append(
+                {
+                    "kind": "histogram",
+                    "title": f"{name or 'Series'} distribution",
+                    "description": None,
+                    "x_key": "label",
+                    "y_key": "count",
+                    "data": data,
+                }
+            )
     except Exception:  # noqa: BLE001
         pass
     return columns, rows, total_rows, 1, charts
@@ -3195,7 +3320,10 @@ def _matrix_table(dset, shape, offset, limit, np):
     lo = min(offset, total_rows)
     hi = min(lo + limit, total_rows)
     block = np.asarray(dset[lo:hi, :ncols]) if total_rows else np.zeros((0, ncols))
-    columns = [{"key": f"c{j}", "label": f"[{j}]", "dtype": _dtype_str(dset.dtype), "numeric": True} for j in range(ncols)]
+    columns = [
+        {"key": f"c{j}", "label": f"[{j}]", "dtype": _dtype_str(dset.dtype), "numeric": True}
+        for j in range(ncols)
+    ]
     rows = []
     for i in range(block.shape[0]):
         row = {f"c{j}": _to_jsonable(block[i, j]) for j in range(ncols)}
@@ -3222,23 +3350,27 @@ def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
             spacing_note = f"Voxel spacing {geometry['spacing']} (from _SIMPL_GEOMETRY)."
 
         maps = []
-        for (mpath, mname, kind, role) in probe["maps"]:
-            maps.append({
-                "title": _titleize(mname),
-                "description": None,
-                "dataset_path": mpath,
-                "semantic_role": role,
-                "preview_kind": kind,
-            })
+        for mpath, mname, kind, role in probe["maps"]:
+            maps.append(
+                {
+                    "title": _titleize(mname),
+                    "description": None,
+                    "dataset_path": mpath,
+                    "semantic_role": role,
+                    "preview_kind": kind,
+                }
+            )
 
         dataset_links = []
-        for (mpath, mname, kind, role) in probe["maps"]:
-            dataset_links.append({
-                "label": _titleize(mname),
-                "dataset_path": mpath,
-                "semantic_role": role,
-                "group": mpath.rsplit("/", 1)[0] if "/" in mpath else "/",
-            })
+        for mpath, mname, kind, role in probe["maps"]:
+            dataset_links.append(
+                {
+                    "label": _titleize(mname),
+                    "dataset_path": mpath,
+                    "semantic_role": role,
+                    "group": mpath.rsplit("/", 1)[0] if "/" in mpath else "/",
+                }
+            )
 
         grain_charts = _grain_charts(h5, probe, np)
         orientation_charts = _orientation_charts(h5, probe, np)
@@ -3253,9 +3385,7 @@ def materials_dashboard(path: str, *, file_id: str = "") -> dict[str, Any]:
             "feature_count": probe["feature_count"],
             "grain_count": probe["grain_count"],
             "declared_feature_tuple_count": probe["declared_feature_tuple_count"],
-            "referenced_positive_feature_count": probe[
-                "referenced_positive_feature_count"
-            ],
+            "referenced_positive_feature_count": probe["referenced_positive_feature_count"],
             "feature_id_scan_complete": probe["feature_id_scan_complete"],
             "feature_id_consistency": probe["feature_id_consistency"],
             "feature_zero_reserved": probe["feature_zero_reserved"],
@@ -3341,25 +3471,30 @@ def _grain_charts(h5, probe, np) -> list[dict[str, Any]]:
                 if vals.size < 2:
                     continue
                 counts, edges = np.histogram(vals, bins=min(24, max(8, int(math.sqrt(vals.size)))))
-                data = [{"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])} for i in range(len(counts))]
-                charts.append({
-                    "kind": "bar",
-                    "title": f"{_titleize(key)} distribution",
-                    "description": f"{vals.size} features sampled",
-                    "x_key": "label",
-                    "y_key": "count",
-                    "data": data,
-                    "source_paths": [grp_path.rstrip("/") + "/" + key],
-                    "units_hint": _units_hint(key, d),
-                    "provenance": (
-                        "Bounded sample of per-feature values; reserved feature row 0 "
-                        "excluded by index based on selected-container FeatureIds/GrainIds "
-                        "schema evidence. Zero-valued measurements in real rows are retained."
-                        if reserved_zero
-                        else "Bounded sample of per-feature values; no reserved feature row "
-                        "was established by file/schema evidence, so row 0 is retained."
-                    ),
-                })
+                data = [
+                    {"label": _fmt_num((edges[i] + edges[i + 1]) / 2), "count": int(counts[i])}
+                    for i in range(len(counts))
+                ]
+                charts.append(
+                    {
+                        "kind": "bar",
+                        "title": f"{_titleize(key)} distribution",
+                        "description": f"{vals.size} features sampled",
+                        "x_key": "label",
+                        "y_key": "count",
+                        "data": data,
+                        "source_paths": [grp_path.rstrip("/") + "/" + key],
+                        "units_hint": _units_hint(key, d),
+                        "provenance": (
+                            "Bounded sample of per-feature values; reserved feature row 0 "
+                            "excluded by index based on selected-container FeatureIds/GrainIds "
+                            "schema evidence. Zero-valued measurements in real rows are retained."
+                            if reserved_zero
+                            else "Bounded sample of per-feature values; no reserved feature row "
+                            "was established by file/schema evidence, so row 0 is retained."
+                        ),
+                    }
+                )
             except Exception:  # noqa: BLE001
                 continue
             if len(charts) >= 4:
@@ -3398,24 +3533,26 @@ def _orientation_charts(h5, probe, np) -> list[dict[str, Any]]:
                     if math.isfinite(arr[i, 0]) and math.isfinite(arr[i, 1])
                 ]
                 if data:
-                    charts.append({
-                        "kind": "scatter",
-                        "title": f"{_titleize(key)}: φ1 vs Φ",
-                        "description": f"{len(data)} features sampled",
-                        "x_key": "phi1",
-                        "y_key": "value",
-                        "data": data,
-                        "source_paths": [grp_path.rstrip("/") + "/" + key],
-                        "units_hint": _units_hint(key, d),
-                        "provenance": (
-                            "Bounded sample of stored per-feature orientation angles; reserved "
-                            "feature row 0 excluded by index based on selected-container "
-                            "FeatureIds/GrainIds schema evidence."
-                            if reserved_zero
-                            else "Bounded sample of stored per-feature orientation angles; no "
-                            "reserved feature row was established, so row 0 is retained."
-                        ),
-                    })
+                    charts.append(
+                        {
+                            "kind": "scatter",
+                            "title": f"{_titleize(key)}: φ1 vs Φ",
+                            "description": f"{len(data)} features sampled",
+                            "x_key": "phi1",
+                            "y_key": "value",
+                            "data": data,
+                            "source_paths": [grp_path.rstrip("/") + "/" + key],
+                            "units_hint": _units_hint(key, d),
+                            "provenance": (
+                                "Bounded sample of stored per-feature orientation angles; reserved "
+                                "feature row 0 excluded by index based on selected-container "
+                                "FeatureIds/GrainIds schema evidence."
+                                if reserved_zero
+                                else "Bounded sample of stored per-feature orientation angles; no "
+                                "reserved feature row was established, so row 0 is retained."
+                            ),
+                        }
+                    )
             except Exception:  # noqa: BLE001
                 continue
             if len(charts) >= 2:

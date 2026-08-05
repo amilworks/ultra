@@ -79,6 +79,11 @@ type ServerDeps struct {
 	// LRU so pan/zoom + 3D re-loads skip the engine. Set by NewRouter from
 	// ULTRA_CONTROL_IMAGE_CACHE_BYTES; nil disables (plain streaming proxy).
 	imageCache *imageResponseCache
+	// pyramidInfoCache keeps source/derived viewer axes in a separate bounded
+	// cache. Compatibility checks must not pollute the tile cache's budget or
+	// observability counters, and the shared stat-stamped cache keys invalidate
+	// metadata automatically when either artifact changes.
+	pyramidInfoCache *imageResponseCache
 	// sliceCache is a separate, smaller LRU for /slice responses so a z-scrub burst
 	// of one-shot slices can't evict the viewer's tile/atlas working set.
 	sliceCache *imageResponseCache
@@ -553,6 +558,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 	}
 	if deps.imageCache == nil {
 		deps.imageCache = newImageResponseCacheFromEnv()
+	}
+	if deps.pyramidInfoCache == nil {
+		deps.pyramidInfoCache = newImageResponseCache(8 << 20)
 	}
 	if deps.ModelPrices == nil {
 		deps.ModelPrices = loadModelPricesFromEnv()
@@ -7924,21 +7932,59 @@ func (deps ServerDeps) handleServeUploadSlice(w http.ResponseWriter, r *http.Req
 }
 
 func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *http.Request) {
-	root, err := deps.resolvedUploadRoot()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
+	if !ok {
 		return
 	}
-	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
+	record := authorization.record
 	if !isNiftiUpload(record.OriginalName, record.ContentType) {
+		if _, ok := resolveAuthorizedUploadStorage(w, authorization); !ok {
+			return
+		}
 		writeError(w, http.StatusUnsupportedMediaType, errors.New("upload scalar volume is only available for NIfTI resources"))
 		return
 	}
-	volume, err := loadNiftiScalarVolumeAt(path, parseUploadScalarTimeIndex(r), parseUploadScalarChannelIndex(r))
+	deps.serveAuthorizedNiftiScalarVolume(w, r, authorization)
+}
+
+func (deps ServerDeps) serveAuthorizedNiftiScalarVolume(
+	w http.ResponseWriter,
+	r *http.Request,
+	authorization uploadServingAuthorization,
+) {
+	selection, err := parseNiftiScalarVolumeSelection(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	catalogBounds, boundsErr := validateCatalogNiftiScalarVolumeBounds(
+		authorization.record,
+		selection,
+	)
+	if boundsErr != nil {
+		writeError(w, http.StatusBadRequest, boundsErr)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
+		return
+	}
+	geometry, err := readNiftiHeaderGeometry(path)
+	if err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, err)
+		return
+	}
+	if !catalogBounds {
+		if selection.time >= geometry.timeCount {
+			writeError(w, http.StatusBadRequest, errors.New("NIfTI scalar volume time selector is out of range"))
+			return
+		}
+		if selection.channel >= geometry.channelCount {
+			writeError(w, http.StatusBadRequest, errors.New("NIfTI scalar volume channel selector is out of range"))
+			return
+		}
+	}
+	volume, err := loadNiftiScalarVolumeAt(path, selection.time, selection.channel)
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
@@ -7974,7 +8020,7 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-downsample-y", "1")
 	w.Header().Set("x-volume-downsample-z", "1")
 	w.Header().Set("x-volume-preview-policy", "native-exact-v1")
-	w.Header().Set("x-volume-sampling", "box")
+	w.Header().Set("x-volume-sampling", selection.sampling)
 	// Rescale to physical units (HU/SUV) so the client can window in true
 	// intensities: physical = slope*code + inter.
 	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))
@@ -8197,7 +8243,12 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 		measurementPolicy = "spacing-aware"
 	}
 	if meta.SizeC > 1 {
-		displayCapabilities = append(displayCapabilities, "channel_visibility")
+		displayCapabilities = append(
+			displayCapabilities,
+			"channel_visibility",
+			"channel_color",
+			"channel_lut_transport",
+		)
 		viewerCapabilities = append(viewerCapabilities, "channel_selection")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -8319,7 +8370,7 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 	dimsOrder := niftiScalarDimsOrder(volume)
 	arrayShape := niftiScalarArrayShape(volume)
 	channelColors := niftiDefaultChannelColors(volume.ChannelCount)
-	displayCapabilities := []string{"slice_navigation", "histogram", "volume_context", "physical_scale", "window_level", "scalar_probe", "diagnostic_mpr"}
+	displayCapabilities := []string{"slice_navigation", "histogram", "volume_context", "physical_scale", "window_level", "scalar_probe", "diagnostic_mpr", "strict_scalar_slice"}
 	viewerCapabilities := []string{"webgl_first_paint", "scalar_volume_delivery", "linear_sampling", "mpr_truth_surface", "slice_navigation", "volume_context", "physical_scale", "window_level"}
 	if volume.ChannelCount > 1 {
 		displayCapabilities = append(displayCapabilities, "channel_visibility")
@@ -12437,6 +12488,20 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 			stagedLocally = !info.IsDir() || detectSpecialFormatByDir(path) != nil
 		}
 	}
+	record := resourceRecordFromCatalogState(resource, stagedLocally)
+	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, path, stagedLocally)
+	if record.HasThumbnail {
+		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(resource.ResourceID) + "/thumbnail"
+	}
+	return record
+}
+
+// resourceRecordFromCatalogState shapes catalog-owned metadata without resolving
+// or probing its storage location. Viewer handlers use this form immediately
+// after the owner-scoped catalog lookup so request selectors can be rejected
+// before any source localization or stat. List/detail responses use the wrapper
+// above when they need the staged/cache flags.
+func resourceRecordFromCatalogState(resource domain.ResourceRecord, stagedLocally bool) resourceRecord {
 	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
 	// Read-time classification repair: chunked/bundle uploads persist an
 	// "application/octet-stream" content type (handlers.go:3819,3944), so a large
@@ -12483,10 +12548,6 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		Metadata:     resource.Metadata,
 		ShareSummary: resource.ShareSummary,
 	}
-	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, path, stagedLocally)
-	if record.HasThumbnail {
-		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(resource.ResourceID) + "/thumbnail"
-	}
 	return record
 }
 
@@ -12510,7 +12571,7 @@ func (deps ServerDeps) resourceThumbnailCapability(root string, record resourceR
 		if err := boundedRasterThumbnailPreflight(path); err == nil {
 			return true, "static"
 		}
-		if deps.imageServiceConfigured() && derivedPyramidPath(root, record.FileID) != "" {
+		if _, committed := committedThumbnailDerivative(root, record, path); deps.imageServiceConfigured() && committed {
 			return true, "static"
 		}
 		return false, ""
@@ -12527,8 +12588,10 @@ func (deps ServerDeps) resourceThumbnailCapability(root string, record resourceR
 		}
 		return false, ""
 	}
-	if isScientificThumbnailCandidate(record) && deps.imageServiceConfigured() && derivedPyramidPath(root, record.FileID) != "" {
-		return true, "z_scrub"
+	if isScientificThumbnailCandidate(record) && deps.imageServiceConfigured() {
+		if _, committed := committedThumbnailDerivative(root, record, path); committed {
+			return true, "z_scrub"
+		}
 	}
 	return false, ""
 }

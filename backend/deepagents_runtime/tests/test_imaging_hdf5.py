@@ -187,23 +187,23 @@ def test_is_hdf5_data_file_extension_gate():
     assert hdf5.is_hdf5_data_file("vol.h5")
     assert hdf5.is_hdf5_data_file("VOL.HDF5")
     assert hdf5.is_hdf5_data_file("micro.hdf")
-    assert hdf5.is_hdf5_data_file("grid.he5")        # HDF-EOS5
+    assert hdf5.is_hdf5_data_file("grid.he5")  # HDF-EOS5
     # Materials.
     assert hdf5.is_hdf5_data_file("micro.dream3d")
     assert hdf5.is_hdf5_data_file("orientation.h5ebsd")  # EBSD scans
-    assert hdf5.is_hdf5_data_file("SCAN.H5EBSD")          # case-insensitive
+    assert hdf5.is_hdf5_data_file("SCAN.H5EBSD")  # case-insensitive
     # Single-cell bio + NeXus.
-    assert hdf5.is_hdf5_data_file("cells.h5ad")      # AnnData
-    assert hdf5.is_hdf5_data_file("matrix.loom")     # Loom
-    assert hdf5.is_hdf5_data_file("beamline.nxs")    # NeXus
+    assert hdf5.is_hdf5_data_file("cells.h5ad")  # AnnData
+    assert hdf5.is_hdf5_data_file("matrix.loom")  # Loom
+    assert hdf5.is_hdf5_data_file("beamline.nxs")  # NeXus
     # Page/series suffix tolerated across the family.
     assert hdf5.is_hdf5_data_file("series.h5_3")
     assert hdf5.is_hdf5_data_file("series.h5_12")
     assert hdf5.is_hdf5_data_file("scan.h5ebsd_2")
     # HDF5-based image/non-image formats must NOT be captured by the data explorer.
-    assert not hdf5.is_hdf5_data_file("cells.ims")   # Imaris -> libbioimage/bioio
-    assert not hdf5.is_hdf5_data_file("data.mat")    # only v7.3 is HDF5
-    assert not hdf5.is_hdf5_data_file("scan.nc")     # NetCDF (v3 is not HDF5)
+    assert not hdf5.is_hdf5_data_file("cells.ims")  # Imaris -> libbioimage/bioio
+    assert not hdf5.is_hdf5_data_file("data.mat")  # only v7.3 is HDF5
+    assert not hdf5.is_hdf5_data_file("scan.nc")  # NetCDF (v3 is not HDF5)
     assert not hdf5.is_hdf5_data_file("scan.nc4")
     assert not hdf5.is_hdf5_data_file("photo.tif")
     # .he5 must not be shadowed by the .h5 entry, and .h5ad must not by .h5.
@@ -226,7 +226,14 @@ def test_viewerinfo_general_structure(general_h5):
     block = vi["hdf5"]
     assert block["enabled"] and block["supported"] and block["status"] == "ready"
     assert block["error"] is None
-    assert set(block["root_keys"]) == {"image2d", "volume", "empty_group", "table", "series", "strings"}
+    assert set(block["root_keys"]) == {
+        "image2d",
+        "volume",
+        "empty_group",
+        "table",
+        "series",
+        "strings",
+    }
     # root attributes are JSON-safe and present.
     assert block["root_attributes"]["description"] == "synthetic sample"
     assert block["summary"]["dataset_count"] == 8
@@ -480,7 +487,19 @@ def test_slice_index_out_of_range_clamps(general_h5):
 def test_slice_label_and_rgb_and_vector(general_h5):
     assert hdf5.slice_png(general_h5, "/volume/labels", axis="z", index=3).startswith(_PNG_MAGIC)
     assert hdf5.slice_png(general_h5, "/volume/ipf", axis="z", index=3).startswith(_PNG_MAGIC)
-    assert hdf5.slice_png(general_h5, "/volume/euler", axis="z", index=3, component=2).startswith(_PNG_MAGIC)
+    assert hdf5.slice_png(general_h5, "/volume/euler", axis="z", index=3, component=2).startswith(
+        _PNG_MAGIC
+    )
+
+
+@pytest.mark.parametrize("component", [-1, 3, 1.5, True])
+def test_vector_slice_rejects_component_before_plane_read(general_h5, monkeypatch, component):
+    def fail_read(*_args, **_kwargs):
+        raise AssertionError("invalid component reached the HDF5 plane read")
+
+    monkeypatch.setattr(hdf5, "_read_preview_plane", fail_read)
+    with pytest.raises(hdf5.Hdf5Error, match="component"):
+        hdf5.slice_png(general_h5, "/volume/euler", axis="z", index=3, component=component)
 
 
 def test_default_dataset_path_prefers_materials_recommendation(general_h5, dream3d_h5):
@@ -595,8 +614,7 @@ def test_atlas_png_matches_scheme(general_h5):
 
 def test_vector_atlas_renders_the_requested_component(general_h5):
     atlases = [
-        hdf5.atlas_png(general_h5, "/volume/euler", component=component)
-        for component in range(3)
+        hdf5.atlas_png(general_h5, "/volume/euler", component=component) for component in range(3)
     ]
     assert all(atlas.startswith(_PNG_MAGIC) for atlas in atlases)
     assert len(set(atlases)) == 3
@@ -648,10 +666,7 @@ def test_large_ipf_atlas_resizes_without_inventing_orientation_colors(tmp_path):
         Image.open(io.BytesIO(hdf5.atlas_png(path, "/IPFColor"))).convert("RGB"),
         dtype="u1",
     )
-    actual_colors = {
-        tuple(int(channel) for channel in pixel)
-        for pixel in decoded.reshape(-1, 3)
-    }
+    actual_colors = {tuple(int(channel) for channel in pixel) for pixel in decoded.reshape(-1, 3)}
     assert actual_colors <= {(0, 0, 0), (255, 0, 0), (0, 0, 255)}
     assert {(255, 0, 0), (0, 0, 255)} <= actual_colors
 
@@ -692,8 +707,8 @@ def test_filtered_atlas_keeps_every_disconnected_occurrence_of_selected_id(featu
     for z in range(scheme["slice_count"]):
         row, column = divmod(z, scheme["columns"])
         cell = atlas[
-            row * scheme["slice_height"]:(row + 1) * scheme["slice_height"],
-            column * scheme["slice_width"]:(column + 1) * scheme["slice_width"],
+            row * scheme["slice_height"] : (row + 1) * scheme["slice_height"],
+            column * scheme["slice_width"] : (column + 1) * scheme["slice_width"],
         ]
         selected.extend(np.argwhere(cell[..., 3] == 255).tolist())
         assert np.all(cell[cell[..., 3] == 0] == 0)
@@ -764,9 +779,7 @@ def test_feature_filter_rejects_distinct_feature_and_grain_identities(feature_fi
     with h5py.File(feature_filter_h5, "r+") as file:
         cell = file["/DataContainers/Image/CellData"]
         cell.create_dataset("GrainIds", data=np.asarray(cell["FeatureIds"]))
-    summary = hdf5.dataset_summary(
-        feature_filter_h5, "/DataContainers/Image/CellData/IPFColor"
-    )
+    summary = hdf5.dataset_summary(feature_filter_h5, "/DataContainers/Image/CellData/IPFColor")
     assert summary["feature_filter"] is None
     with pytest.raises(hdf5.Hdf5Error, match="ambiguous"):
         hdf5.atlas_png(
@@ -780,9 +793,7 @@ def test_feature_filter_accepts_feature_and_grain_aliases(feature_filter_h5):
     with h5py.File(feature_filter_h5, "r+") as file:
         cell = file["/DataContainers/Image/CellData"]
         cell["GrainIds"] = cell["FeatureIds"]
-    summary = hdf5.dataset_summary(
-        feature_filter_h5, "/DataContainers/Image/CellData/IPFColor"
-    )
+    summary = hdf5.dataset_summary(feature_filter_h5, "/DataContainers/Image/CellData/IPFColor")
     assert summary["feature_filter"]["source_dataset_path"].endswith("/FeatureIds")
 
 
@@ -827,16 +838,12 @@ def test_dataset_summary_calibrates_preview_spacing_to_native_geometry_extent(
         cell_b = image_b.create_group("CellData")
         cell_b.create_dataset("FeatureIds", data=np.ones((*native_zyx, 1), dtype="u4"))
 
-        file.create_group("Other").create_dataset(
-            "Scalar", data=np.ones(native_zyx, dtype="f4")
-        )
+        file.create_group("Other").create_dataset("Scalar", data=np.ones(native_zyx, dtype="f4"))
 
     monkeypatch.setattr(hdf5, "ATLAS_CELL_CAP", 4)
     monkeypatch.setattr(hdf5, "PREVIEW_MAX_PLANE", 5)
 
-    summary = hdf5.dataset_summary(
-        path, "/DataContainers/Image/CellData/FeatureIds"
-    )
+    summary = hdf5.dataset_summary(path, "/DataContainers/Image/CellData/FeatureIds")
     assert summary["geometry"]["path"].endswith("/Image/_SIMPL_GEOMETRY")
     assert summary["geometry"]["dimensions"] == [7, 9, 11]
     assert summary["geometry"]["spacing"] == pytest.approx(raw_spacing_xyz)
@@ -874,9 +881,7 @@ def test_dataset_summary_calibrates_preview_spacing_to_native_geometry_extent(
         {"width": 9 * raw_spacing_xyz[1], "height": 11 * raw_spacing_xyz[2]}
     )
 
-    summary_b = hdf5.dataset_summary(
-        path, "/DataContainers/ImageB/CellData/FeatureIds"
-    )
+    summary_b = hdf5.dataset_summary(path, "/DataContainers/ImageB/CellData/FeatureIds")
     assert summary_b["geometry"]["path"].endswith("/ImageB/_SIMPL_GEOMETRY")
     assert summary_b["geometry"]["spacing"] == [2.0, 3.0, 4.0]
     assert summary_b["physical_spacing"] == pytest.approx(
@@ -889,9 +894,7 @@ def test_dataset_summary_calibrates_preview_spacing_to_native_geometry_extent(
     assert mismatched["measurement_policy"] == "pixel-only"
 
 
-def test_dataset_summary_rejects_overflowed_effective_preview_spacing(
-    tmp_path, monkeypatch
-):
+def test_dataset_summary_rejects_overflowed_effective_preview_spacing(tmp_path, monkeypatch):
     path = str(tmp_path / "overflow-spacing.dream3d")
     native_zyx = (11, 9, 7)
     with h5py.File(path, "w") as file:
@@ -908,9 +911,7 @@ def test_dataset_summary_rejects_overflowed_effective_preview_spacing(
     monkeypatch.setattr(hdf5, "ATLAS_CELL_CAP", 4)
     monkeypatch.setattr(hdf5, "PREVIEW_MAX_PLANE", 5)
 
-    summary = hdf5.dataset_summary(
-        path, "/DataContainers/Image/CellData/FeatureIds"
-    )
+    summary = hdf5.dataset_summary(path, "/DataContainers/Image/CellData/FeatureIds")
     assert summary["geometry"]["spacing"][0] == np.finfo("f8").max
     assert summary["axis_sizes"] == {"T": 1, "C": 1, "Z": 4, "Y": 5, "X": 4}
     assert summary["physical_spacing"] == {"x": None, "y": None, "z": None}
@@ -931,9 +932,7 @@ def test_dataset_summary_rejects_nonfinite_native_extent_before_preview_planes(t
         cell = image.create_group("CellData")
         cell.create_dataset("FeatureIds", data=np.ones((*native_zyx, 1), dtype="u4"))
 
-    summary = hdf5.dataset_summary(
-        path, "/DataContainers/Image/CellData/FeatureIds"
-    )
+    summary = hdf5.dataset_summary(path, "/DataContainers/Image/CellData/FeatureIds")
     assert summary["geometry"]["spacing"][0] == np.finfo("f8").max
     assert summary["axis_sizes"] == {"T": 1, "C": 1, "Z": 2, "Y": 2, "X": 2}
     assert summary["physical_spacing"] == {"x": None, "y": None, "z": None}
@@ -999,9 +998,7 @@ def test_feature_filter_rejects_cross_container_aliased_target_map(tmp_path):
             cell = image.create_group("CellData")
             cell.create_dataset("FeatureIds", data=np.ones((*native_zyx, 1), dtype="u4"))
             cells.append(cell)
-        ipf = cells[0].create_dataset(
-            "IPFColor", data=np.full((*native_zyx, 3), 127, dtype="u1")
-        )
+        ipf = cells[0].create_dataset("IPFColor", data=np.full((*native_zyx, 3), 127, dtype="u1"))
         cells[1]["IPFColor"] = ipf
 
     for container_name in ("ImageA", "ImageB"):
@@ -1134,7 +1131,9 @@ def test_nonintegral_nearest_grid_aligns_label_atlas_and_filter(tmp_path, monkey
     delivered_ids = hdf5._resize_nearest(ids[0, :, :, 0], 1, 5)
 
     label_atlas = np.asarray(
-        Image.open(io.BytesIO(hdf5.atlas_png(path, "/DataContainers/Image/CellData/FeatureIds"))).convert("RGB")
+        Image.open(
+            io.BytesIO(hdf5.atlas_png(path, "/DataContainers/Image/CellData/FeatureIds"))
+        ).convert("RGB")
     )
     assert np.array_equal(label_atlas[0, :5], hdf5._label_to_rgb(delivered_ids[0]))
 
@@ -1232,6 +1231,30 @@ def test_histogram_vector_component(general_h5):
     h = hdf5.dataset_histogram(general_h5, "/volume/euler", component=1, bins=16)
     assert h["component_index"] == 1
     assert h["component_label"] == "Phi"
+
+
+@pytest.mark.parametrize("component", [-1, 3, 1.5, True])
+def test_histogram_rejects_vector_component_before_sample_read(general_h5, monkeypatch, component):
+    def fail_read(*_args, **_kwargs):
+        raise AssertionError("invalid component reached the HDF5 sample read")
+
+    monkeypatch.setattr(hdf5, "_strided_sample", fail_read)
+    with pytest.raises(hdf5.Hdf5Error, match="component"):
+        hdf5.dataset_histogram(general_h5, "/volume/euler", component=component, bins=16)
+
+
+def test_histogram_fails_closed_when_volume_kind_is_unavailable(general_h5, monkeypatch):
+    monkeypatch.setattr(hdf5, "_classify_shallow", lambda *_args: None)
+    monkeypatch.setattr(
+        hdf5,
+        "_strided_sample",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unclassified volume reached the sample read")
+        ),
+    )
+
+    with pytest.raises(hdf5.Hdf5Error, match="preview kind.*unavailable"):
+        hdf5.dataset_histogram(general_h5, "/volume/euler", component=0, bins=16)
 
 
 # ---------------------------------------------------------------------------
@@ -1672,9 +1695,7 @@ def test_dream3d_units_are_metadata_backed_not_inferred_from_dataset_name(tmp_pa
         )
         eulers.attrs["Units"] = "degrees"
 
-    diameter = hdf5.dataset_summary(
-        path, "/DataContainers/Image/Grain Data/EquivalentDiameters"
-    )
+    diameter = hdf5.dataset_summary(path, "/DataContainers/Image/Grain Data/EquivalentDiameters")
     eulers = hdf5.dataset_summary(path, "/DataContainers/Image/Grain Data/EulerAngles")
     charts = hdf5.materials_dashboard(path)["orientation_charts"]
     assert diameter["units_hint"] is None

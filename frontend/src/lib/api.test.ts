@@ -153,7 +153,7 @@ describe("ApiClient browser auth hardening", () => {
 
   it("projects source-channel colors into selected order for image-service URLs", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const channels = [1, 3, 5];
+    const channels = [5, 1, 3];
     const channelColors = [
       "#1e90ff",
       "#00ff66",
@@ -166,14 +166,24 @@ describe("ApiClient browser auth hardening", () => {
     const urls = [
       client.uploadDisplayUrl("file-123", undefined, { channels, channelColors }),
       client.uploadSliceUrl("file-123", { axis: "z", z: 40, channels, channelColors }),
+      client.uploadTileUrl("file-123", {
+        axis: "z",
+        level: 2,
+        tileX: 3,
+        tileY: 4,
+        channels,
+        channelColors,
+        cacheKey: "windowed-v2:channels",
+      }),
       client.uploadAtlasUrl("file-123", { channels, channelColors }),
     ];
 
     urls.forEach((value) => {
       const parsed = new URL(value);
-      expect(parsed.searchParams.get("channels")).toBe("1,3,5");
-      expect(parsed.searchParams.get("channel_colors")).toBe("#00ff66,#ff00ff,#00e5ff");
+      expect(parsed.searchParams.get("channels")).toBe("5,1,3");
+      expect(parsed.searchParams.get("channel_colors")).toBe("#00e5ff,#00ff66,#ff00ff");
     });
+    expect(new URL(urls[2]).searchParams.get("cache_key")).toBe("windowed-v2:channels");
   });
 
   it("omits an incomplete color projection instead of sending invalid cardinality", () => {
@@ -188,6 +198,37 @@ describe("ApiClient browser auth hardening", () => {
 
     expect(parsed.searchParams.get("channels")).toBe("1,3");
     expect(parsed.searchParams.has("channel_colors")).toBe(false);
+  });
+
+  it("rejects invalid channel arrays consistently across image URL builders", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const builders = [
+      (channels: number[]) => client.uploadDisplayUrl("file-123", undefined, { channels }),
+      (channels: number[]) => client.uploadSliceUrl("file-123", { axis: "z", channels }),
+      (channels: number[]) =>
+        client.uploadTileUrl("file-123", {
+          axis: "z",
+          level: 0,
+          tileX: 0,
+          tileY: 0,
+          channels,
+        }),
+      (channels: number[]) => client.uploadAtlasUrl("file-123", { channels }),
+    ];
+    const invalidSelections = [
+      [Number.NaN],
+      [Number.POSITIVE_INFINITY],
+      [1.5],
+      [-1],
+      [3, 3],
+      [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    ];
+
+    builders.forEach((build) => {
+      invalidSelections.forEach((channels) => {
+        expect(() => build(channels)).toThrow(RangeError);
+      });
+    });
   });
 
   it("builds scientific upload viewer URLs through the V2 upload API", () => {

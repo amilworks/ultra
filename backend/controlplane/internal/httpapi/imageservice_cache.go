@@ -4,8 +4,10 @@ import (
 	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -136,18 +138,23 @@ func (c *imageResponseCache) stats() (hits, misses uint64, entries int, bytes in
 }
 
 // imageCacheKey derives a stable cache key from the upstream endpoint+query and the served
-// file's stat stamp. Returns ("", false) when the file can't be stamped (then we don't cache,
-// the safe default). The stamp (size+mtime) means a re-derived pyramid never serves stale tiles.
+// file's robust generation identity. Returns ("", false) when the file can't be identified
+// without following links (then we don't cache, the safe default). Device, inode, ctime,
+// size, and mtime prevent a same-size/same-mtime replacement from serving stale pixels.
 func imageCacheKey(endpoint string, query url.Values) (string, bool) {
 	path := query.Get("path")
 	if path == "" {
 		return "", false
 	}
-	fi, err := os.Stat(path)
-	if err != nil || fi.IsDir() {
+	fi, err := regularFileInfo(path)
+	if err != nil {
 		return "", false
 	}
-	stamp := strconv.FormatInt(fi.Size(), 10) + ":" + strconv.FormatInt(fi.ModTime().UnixNano(), 10)
+	generation, ok := fileGeneration(fi)
+	if !ok {
+		return "", false
+	}
+	stamp := generationCacheKey(path, generation)
 	sum := sha256.Sum256([]byte(endpoint + "?" + query.Encode() + "|" + stamp))
 	return hex.EncodeToString(sum[:]), true
 }
@@ -211,8 +218,23 @@ func (deps ServerDeps) proxyImageServiceCachedVia(cache *imageResponseCache, w h
 		// Never cache or forward an upstream error body (internal paths / tracebacks);
 		// reply with a clean, bounded error at the same status. See the streaming proxy.
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if len(fallback) > 0 && fallback[0] != nil {
+			fallback[0](w, r)
+			return
+		}
 		writeImageServiceUpstreamError(r.Context(), w, endpoint, resp.StatusCode, detail)
 		return
+	}
+	if imageServiceRasterEndpoint(endpoint) {
+		contentType, _, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+		if parseErr != nil || !safeRasterMediaType(contentType) {
+			writeError(
+				w,
+				http.StatusBadGateway,
+				errors.New("image service returned an unsafe raster media type"),
+			)
+			return
+		}
 	}
 
 	contentType := resp.Header.Get("Content-Type")

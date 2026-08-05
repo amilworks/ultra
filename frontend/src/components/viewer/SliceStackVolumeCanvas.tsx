@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { TrackballControls } from "three/examples/jsm/controls/TrackballControls.js";
 
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
+import { sliceChannelSelection } from "@/lib/viewerSliceContract";
 import type { UploadViewerInfo } from "@/types";
 
 import {
@@ -2001,19 +2002,31 @@ export const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string
   if (coordinateUnit) {
     return coordinateUnit;
   }
-  const pixelUnit = normalizedSpatialUnit(viewerInfo?.phys?.pixel_units?.[0]);
-  if (pixelUnit) {
-    return pixelUnit;
+  const pixelUnits =
+    viewerInfo?.phys?.pixel_units
+      ?.slice(0, 3)
+      .map(normalizedSpatialUnit) ?? [];
+  if (
+    pixelUnits.length === 3 &&
+    pixelUnits.every((unit): unit is string => unit != null) &&
+    new Set(pixelUnits.map((unit) => unit.toLowerCase())).size === 1
+  ) {
+    return pixelUnits[0] as string;
+  }
+  if (pixelUnits.length === 3 && pixelUnits.some((unit) => unit != null)) {
+    return "vox";
   }
   const spacingUnits = viewerInfo?.metadata.spacing_units;
   const spacingUnitValues = [spacingUnits?.x, spacingUnits?.y, spacingUnits?.z]
-    .map(normalizedSpatialUnit)
-    .filter((unit): unit is string => unit != null);
+    .map(normalizedSpatialUnit);
   if (
-    spacingUnitValues.length > 0 &&
+    spacingUnitValues.every((unit): unit is string => unit != null) &&
     new Set(spacingUnitValues.map((unit) => unit.toLowerCase())).size === 1
   ) {
     return spacingUnitValues[0] as string;
+  }
+  if (spacingUnitValues.some((unit) => unit != null)) {
+    return "vox";
   }
   return viewerInfo?.metadata.physical_spacing ? "units" : "vox";
 };
@@ -2111,15 +2124,17 @@ export function SliceStackVolumeCanvas({
     [viewerInfo?.axis_sizes, volumeSource?.axisSizes]
   );
   const spacing = volumeSource?.physicalSpacing ?? viewerInfo?.metadata.physical_spacing ?? null;
+  const geometrySpatialUnit = resolveSpatialUnit(viewerInfo);
+  const geometrySpacing = geometrySpatialUnit === "vox" ? null : spacing;
   const volumeDepth = Math.max(1, axisSizes.Z);
   const physicalGeometry = useMemo(
     () =>
       computePhysicalVolumeGeometry({
         planePixelSize: plane.pixel_size,
         volumeDepth,
-        physicalSpacing: spacing,
+        physicalSpacing: geometrySpacing,
       }),
-    [plane.pixel_size, spacing, volumeDepth]
+    [geometrySpacing, plane.pixel_size, volumeDepth]
   );
   const normalizedScale = physicalGeometry.normalizedScale;
   // Max-normalized voxel SPACING ratio (sx:sy:sz) for the lighting gradient —
@@ -2238,10 +2253,12 @@ export function SliceStackVolumeCanvas({
       enhancement: displayState?.enhancement,
       fusionMethod: displayState?.fusion_method,
       negative: displayState?.negative,
-      channels: effectiveMaskMode
-        ? enabledVolumeChannels
-        : displayState?.channels,
-      channelColors: displayState?.channel_colors,
+      ...sliceChannelSelection(
+        viewerInfo,
+        effectiveMaskMode ? enabledVolumeChannels : displayState?.channels,
+        displayState?.channel_colors,
+        scalarChannel
+      ),
       t: requestedTime,
     });
   }, [
@@ -2255,8 +2272,8 @@ export function SliceStackVolumeCanvas({
     enabledVolumeChannels,
     fileId,
     requestedTime,
-    viewerInfo?.service_urls?.atlas,
-    viewerInfo?.viewer.service_urls?.atlas,
+    scalarChannel,
+    viewerInfo,
     volumeSelection.error,
   ]);
 
@@ -2400,10 +2417,12 @@ export function SliceStackVolumeCanvas({
       enhancement: displayState?.enhancement,
       fusionMethod: displayState?.fusion_method,
       negative: displayState?.negative,
-      channels: effectiveMaskMode
-        ? enabledVolumeChannels
-        : displayState?.channels,
-      channelColors: displayState?.channel_colors,
+      ...sliceChannelSelection(
+        viewerInfo,
+        effectiveMaskMode ? enabledVolumeChannels : displayState?.channels,
+        displayState?.channel_colors,
+        scalarChannel
+      ),
       scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
       scalarThresholdValue: effectiveMaskMode ? rawMaskThreshold : undefined,
       scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
@@ -2420,10 +2439,10 @@ export function SliceStackVolumeCanvas({
     fileId,
     rawMaskThreshold,
     requestedTime,
+    scalarChannel,
     volumeSource,
     volumeSelection.error,
-    viewerInfo?.service_urls?.slice,
-    viewerInfo?.viewer.service_urls?.slice,
+    viewerInfo,
     zIndex,
   ]);
 

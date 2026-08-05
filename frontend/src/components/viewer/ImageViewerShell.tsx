@@ -24,7 +24,6 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Slider } from "@/components/ui/slider";
 import {
   Select,
@@ -39,10 +38,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import type { ApiClient, ScalarVolumePayload } from "@/lib/api";
 import { normalizeViewerCalibrations } from "@/lib/viewerManifest";
+import {
+  sliceAxisCoordinates,
+  sliceChannelSelection,
+  supportsSliceChannelColor,
+} from "@/lib/viewerSliceContract";
 import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
 import { DeepZoomCanvas } from "./DeepZoomCanvas";
 import { DirectPlaneImage } from "./DirectPlaneImage";
+import { ChannelControls, MAX_COMPOSITE_CHANNELS } from "./ChannelControls";
 import {
   canCopyImageToClipboard,
   copyBlobToClipboard,
@@ -286,18 +291,32 @@ const resolveMetadataSpatialUnit = (viewerInfo: UploadViewerInfo): string => {
     return spatial.trim();
   }
   const pixelUnits = viewerInfo.phys?.pixel_units;
-  if (Array.isArray(pixelUnits) && isMeaningfulSpatialUnit(pixelUnits[0])) {
-    return pixelUnits[0].trim();
+  const uniformPixelUnits = Array.isArray(pixelUnits)
+    ? pixelUnits.slice(0, 3).map((unit) =>
+        isMeaningfulSpatialUnit(unit) ? unit.trim() : null
+      )
+    : [];
+  if (
+    uniformPixelUnits.length === 3 &&
+    uniformPixelUnits.every((unit): unit is string => unit != null) &&
+    new Set(uniformPixelUnits.map((unit) => unit.toLowerCase())).size === 1
+  ) {
+    return uniformPixelUnits[0] ?? "";
+  }
+  if (uniformPixelUnits.length === 3 && uniformPixelUnits.some((unit) => unit != null)) {
+    return "";
   }
   const spacingUnits = viewerInfo.metadata.spacing_units;
   const uniformSpacingUnits = [spacingUnits?.x, spacingUnits?.y, spacingUnits?.z]
-    .filter(isMeaningfulSpatialUnit)
-    .map((unit) => unit.trim());
+    .map((unit) => (isMeaningfulSpatialUnit(unit) ? unit.trim() : null));
   if (
-    uniformSpacingUnits.length > 0 &&
+    uniformSpacingUnits.every((unit): unit is string => unit != null) &&
     new Set(uniformSpacingUnits.map((unit) => unit.toLowerCase())).size === 1
   ) {
     return uniformSpacingUnits[0] ?? "";
+  }
+  if (uniformSpacingUnits.some((unit) => unit != null)) {
+    return "";
   }
   if (viewerInfo.metadata.physical_spacing && String(viewerInfo.modality) === "medical") {
     return "mm";
@@ -672,16 +691,6 @@ const getSpatialUnit = (viewerInfo: UploadViewerInfo): string | null => {
   return typeof spatial === "string" && spatial.trim() ? spatial.trim() : null;
 };
 
-const measurementUnitLabel = (viewerInfo: UploadViewerInfo): string => {
-  if (viewerInfo.viewer.measurement_policy === "orientation-aware") {
-    return getSpatialUnit(viewerInfo) ?? "vox";
-  }
-  if (viewerInfo.viewer.measurement_policy === "spacing-aware") {
-    return "vox";
-  }
-  return viewerInfo.is_volume ? "vox" : "px";
-};
-
 const formatDistance = (value: number, unit: string): string => {
   if (!Number.isFinite(value)) {
     return `0 ${unit}`;
@@ -697,11 +706,28 @@ const computeMeasurementDistance = (
 ): string => {
   const rowDelta = Math.abs(measurement.end.row - measurement.start.row);
   const colDelta = Math.abs(measurement.end.col - measurement.start.col);
-  const usePhysicalScale = viewerInfo.viewer.measurement_policy !== "pixel-only";
+  const axisUnits = viewerInfo.metadata.spacing_units;
+  const unitsByAxis: Record<string, unknown> = {
+    X: axisUnits?.x,
+    Y: axisUnits?.y,
+    Z: axisUnits?.z,
+  };
+  const planeUnits = descriptor.axes.map((axis) => {
+    const unit = unitsByAxis[axis];
+    return isMeaningfulSpatialUnit(unit) ? unit.trim() : null;
+  });
+  const physicalPlaneUnit =
+    planeUnits.length === 2 &&
+    planeUnits.every((unit): unit is string => unit != null) &&
+    new Set(planeUnits.map((unit) => unit.toLowerCase())).size === 1
+      ? planeUnits[0]
+      : null;
+  const usePhysicalScale =
+    viewerInfo.viewer.measurement_policy !== "pixel-only" && physicalPlaneUnit != null;
   const rowScale = usePhysicalScale ? Number(descriptor.spacing.row || 1) : 1;
   const colScale = usePhysicalScale ? Number(descriptor.spacing.col || 1) : 1;
   const distance = Math.sqrt((rowDelta * rowScale) ** 2 + (colDelta * colScale) ** 2);
-  return formatDistance(distance, measurementUnitLabel(viewerInfo));
+  return formatDistance(distance, physicalPlaneUnit ?? (viewerInfo.is_volume ? "vox" : "px"));
 };
 
 const computeCursorWorldPosition = (
@@ -753,6 +779,34 @@ const currentFullscreenElement = (): Element | null =>
   document.fullscreenElement ??
   (document as unknown as { webkitFullscreenElement?: Element | null }).webkitFullscreenElement ??
   null;
+
+const normalizeSelectedChannelIndices = (
+  values: readonly number[] | null | undefined,
+  channelCount: number,
+): number[] => {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  const normalized: number[] = [];
+  const seen = new Set<number>();
+  for (const value of values) {
+    if (
+      !Number.isFinite(value) ||
+      !Number.isInteger(value) ||
+      value < 0 ||
+      value >= channelCount ||
+      seen.has(value)
+    ) {
+      continue;
+    }
+    normalized.push(value);
+    seen.add(value);
+    if (normalized.length === MAX_COMPOSITE_CHANNELS) {
+      break;
+    }
+  }
+  return normalized;
+};
 
 export function ImageViewerShell({
   viewerInfo,
@@ -915,6 +969,13 @@ export function ImageViewerShell({
   // from also closing a host sheet; ignored while typing or holding a modifier.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        event.key === "Escape" &&
+        target?.closest('[role="dialog"], [data-radix-dismissable-layer]')
+      ) {
+        return;
+      }
       const action = keyToFullscreenAction(
         event.key,
         isTypingTarget(event.target),
@@ -1215,22 +1276,43 @@ export function ImageViewerShell({
       const sy = finitePositive(spacing.y);
       const sz = finitePositive(spacing.z);
       const geometryDetails: MetadataDetail[] = [];
-      const spacingParts: string[] = [];
-      if (sx) spacingParts.push(`X ${sx.toFixed(3)}`);
-      if (sy) spacingParts.push(`Y ${sy.toFixed(3)}`);
-      if (sz) spacingParts.push(`Z ${sz.toFixed(3)}`);
+      const explicitAxisUnits = md.spacing_units;
+      const physicalAxisUnits = viewerInfo.phys?.pixel_units;
+      const resolveAxisUnit = (metadataUnit: unknown, axisIndex: number): string => {
+        for (const candidate of [metadataUnit, physicalAxisUnits?.[axisIndex], spatialUnit]) {
+          if (typeof candidate === "string" && candidate.trim()) {
+            return candidate.trim();
+          }
+        }
+        return "";
+      };
+      const spacingAxes = [
+        { label: "X", value: sx, unit: resolveAxisUnit(explicitAxisUnits?.x, 0) },
+        { label: "Y", value: sy, unit: resolveAxisUnit(explicitAxisUnits?.y, 1) },
+        { label: "Z", value: sz, unit: resolveAxisUnit(explicitAxisUnits?.z, 2) },
+      ].filter((axis) => axis.value > 0);
+      const hasAxisUnit = spacingAxes.some((axis) => axis.unit);
+      const mixedAxisUnits =
+        hasAxisUnit &&
+        (spacingAxes.some((axis) => !axis.unit) ||
+          new Set(spacingAxes.map((axis) => axis.unit.toLowerCase())).size > 1);
+      const spacingParts = spacingAxes.map((axis) =>
+        mixedAxisUnits
+          ? `${axis.label} ${axis.value.toFixed(3)} ${axis.unit || "unit unknown"}`
+          : `${axis.label} ${axis.value.toFixed(3)}`
+      );
       if (spacingParts.length > 0) {
         geometryDetails.push({
           label: "Voxel spacing",
           value: spacingParts.join(" · "),
-          hint: spatialUnit || undefined,
+          hint: mixedAxisUnits ? undefined : spatialUnit || undefined,
         });
       }
       const extentParts: string[] = [];
       if (sx) extentParts.push(formatExtent(axisSizes.X * sx));
       if (sy) extentParts.push(formatExtent(axisSizes.Y * sy));
       if (sz && (viewerInfo.is_volume || axisSizes.Z > 1)) extentParts.push(formatExtent(axisSizes.Z * sz));
-      if (extentParts.length > 0) {
+      if (extentParts.length > 0 && !mixedAxisUnits) {
         geometryDetails.push({
           label: "Field of view",
           value: extentParts.join(" × "),
@@ -1238,7 +1320,7 @@ export function ImageViewerShell({
         });
       }
       const positiveSpacings = [sx, sy, sz].filter((value) => value > 0);
-      if (positiveSpacings.length >= 2) {
+      if (positiveSpacings.length >= 2 && !mixedAxisUnits) {
         const ratio = Math.max(...positiveSpacings) / Math.min(...positiveSpacings);
         geometryDetails.push({
           label: "Sampling",
@@ -1335,16 +1417,44 @@ export function ImageViewerShell({
   })();
 
   const displayCapabilities = new Set((viewerInfo.viewer.display_capabilities ?? []).map((value) => String(value)));
-  const selectedChannelIndices = Array.isArray(selectedDisplayState?.channels)
-    ? selectedDisplayState.channels.filter((value) => Number.isFinite(value)).map((value) => Math.max(0, Math.floor(value)))
-    : [];
+  const channelCount = Math.max(0, Math.floor(Number(viewerInfo.axis_sizes.C) || 0));
+  const microscopyChannelNames = viewerInfo.metadata.microscopy?.channel_names;
+  const physicalChannelNames = viewerInfo.phys?.channel_names;
+  const channelNames = useMemo(
+    () =>
+      Array.from({ length: channelCount }, (_value, index) => {
+        const microscopyName = String(microscopyChannelNames?.[index] ?? "").trim();
+        const physicalName = String(physicalChannelNames?.[index] ?? "").trim();
+        return microscopyName || physicalName || `Channel ${index + 1}`;
+      }),
+    [channelCount, microscopyChannelNames, physicalChannelNames],
+  );
+  const selectedChannelIndices = useMemo(
+    () => normalizeSelectedChannelIndices(selectedDisplayState?.channels, channelCount),
+    [channelCount, selectedDisplayState?.channels],
+  );
+  const channelColors = useMemo(
+    () =>
+      channelNames.map((_, index) =>
+        hexColorOrDefault(
+          selectedDisplayState?.channel_colors?.[index],
+          viewerInfo.phys?.channel_colors?.[index]?.hex ?? "#ffffff",
+        ),
+      ),
+    [channelNames, selectedDisplayState?.channel_colors, viewerInfo.phys?.channel_colors],
+  );
   const selectedChannelKey = selectedChannelIndices.join(",");
-  const selectedChannelColorKey = (selectedDisplayState?.channel_colors ?? []).map((value) => String(value || "").trim()).join(",");
+  const selectedChannelColorKey = selectedChannelIndices
+    .map((index) => channelColors[index])
+    .join(",");
   const hasMultipleChannels = Boolean(viewerInfo.is_multichannel) || viewerInfo.axis_sizes.C > 1;
   // An RGB(A) photo (render_policy "display") renders its native colors directly — its
   // bands are not science channels, so the per-channel pills + LUT colors don't apply
   // (e.g. an RGBA orthomosaic must not expose Red/Green/Blue/Alpha composite controls).
-  const isDisplayPhoto = viewerInfo.viewer.render_policy === "display";
+  const isDisplayPhoto =
+    viewerInfo.viewer.render_policy === "display" &&
+    viewerInfo.axis_sizes.T === 1 &&
+    viewerInfo.axis_sizes.Z === 1;
   const canControlChannels =
     !isDisplayPhoto &&
     (hasMultipleChannels ||
@@ -1432,9 +1542,6 @@ export function ImageViewerShell({
       abortTimer: null as number | null,
     };
     uploadHistogramRequestRef.current = request;
-    const histogramChannels = selectedChannelKey
-      ? selectedChannelKey.split(",").map((value) => Number(value)).filter((value) => Number.isFinite(value))
-      : [];
     const histogramConfig = viewerInfo.is_volume
       ? {
           bins: 256,
@@ -1443,10 +1550,10 @@ export function ImageViewerShell({
           scope: "volume" as const,
           signal: requestController.signal,
         }
-      : canControlChannels && histogramChannels.length > 0
+      : canControlChannels && selectedChannelIndices.length > 0
         ? {
             bins: 256,
-            channels: histogramChannels,
+            channels: selectedChannelIndices,
             signal: requestController.signal,
           }
         : { bins: 256, signal: requestController.signal };
@@ -1490,6 +1597,7 @@ export function ImageViewerShell({
     canControlChannels,
     maskHistogramChannel,
     resolvedScalarTime,
+    selectedChannelIndices,
     selectedChannelKey,
     uploadHistogramRequestKey,
     viewerInfo.file_id,
@@ -1543,7 +1651,16 @@ export function ImageViewerShell({
       Number.isFinite(arrayMin) &&
       Number.isFinite(arrayMax)
   );
-  const directIntensityReady = Boolean(!viewerInfo.is_volume && sourceIntensityReady);
+  // These controls are only honest when the selected 2D renderer consumes the
+  // display transform. Scientific slice/tile URLs are intentionally exact and
+  // ignore window/enhancement/negative, so exposing the controls there creates
+  // a convincing no-op. Native display photos keep the effective controls.
+  const directIntensityReady = Boolean(
+    isDisplayPhoto &&
+      !viewerInfo.is_volume &&
+      viewerInfo.service_urls?.display &&
+      sourceIntensityReady
+  );
   const volumeIntensityReady = Boolean(viewerInfo.is_volume && sourceIntensityReady);
   const histogramMaxCount = Math.max(1, ...(uploadHistogram?.histogram.bins ?? [1]));
   const scalarDtype = String(
@@ -1800,15 +1917,6 @@ export function ImageViewerShell({
     return () => window.clearTimeout(timeoutId);
   }, [maskSelectionKey, maskThresholdValue]);
   const clipBounds = normalizeClipBounds(selectedDisplayState);
-  const channelNames =
-    viewerInfo.metadata.microscopy?.channel_names?.length || viewerInfo.phys?.channel_names?.length
-      ? (viewerInfo.metadata.microscopy?.channel_names ?? viewerInfo.phys?.channel_names ?? []).map((value) =>
-          String(value)
-        )
-      : Array.from({ length: viewerInfo.axis_sizes.C }, (_value, index) => `Channel ${index + 1}`);
-  const channelColors = channelNames.map((_, index) =>
-    hexColorOrDefault(selectedDisplayState?.channel_colors?.[index], viewerInfo.phys?.channel_colors?.[index]?.hex ?? "#ffffff")
-  );
   const isSliceStackVolume = viewerInfo.viewer.volume_mode === "slice_stack";
   const showSliceStack2DControls = Boolean(
     selectedSurface === "2d" && viewerInfo.is_volume && isSliceStackVolume && selectedDisplayState
@@ -1824,12 +1932,28 @@ export function ImageViewerShell({
     ? computePhysicalVolumeGeometry({
         planePixelSize: viewerInfo.viewer.default_plane.pixel_size,
         volumeDepth: viewerInfo.axis_sizes.Z,
-        physicalSpacing: viewerInfo.metadata.physical_spacing,
+        physicalSpacing: resolveMetadataSpatialUnit(viewerInfo)
+          ? viewerInfo.metadata.physical_spacing
+          : null,
       })
     : null;
   const physicalVolumeUnit = resolveMetadataSpatialUnit(viewerInfo);
-  const withPhysicalUnit = (value: string): string =>
-    physicalVolumeUnit ? `${value} ${physicalVolumeUnit}` : value;
+  const volumeGeometryUnit = physicalVolumeUnit || "vox";
+  const withPhysicalUnit = (value: string): string => `${value} ${volumeGeometryUnit}`;
+  const volumeSpacingLabel = (() => {
+    if (physicalVolumeUnit && physicalVolumeGeometry) {
+      return `${physicalVolumeGeometry.spacingLabel} ${physicalVolumeUnit}`;
+    }
+    const spacing = viewerInfo.metadata.physical_spacing;
+    const units = viewerInfo.metadata.spacing_units;
+    return (["x", "y", "z"] as const)
+      .map((axis) => {
+        const value = finitePositive(spacing?.[axis]) || 1;
+        const unit = String(units?.[axis] || "voxel");
+        return `${axis.toUpperCase()} ${value.toFixed(2)} ${unit}`;
+      })
+      .join(" · ");
+  })();
   const canShowVolumeGeometry =
     viewerInfo.is_volume && displayCapabilities.has("physical_scale") && physicalVolumeGeometry != null;
   const volumeSummaryRows: MetadataCard[] = (() => {
@@ -1852,7 +1976,7 @@ export function ImageViewerShell({
         },
       ];
       if (canShowVolumeGeometry && physicalVolumeGeometry) {
-        rows.push({ label: "Spacing", value: withPhysicalUnit(physicalVolumeGeometry.spacingLabel) });
+        rows.push({ label: "Spacing", value: volumeSpacingLabel });
         rows.push({
           label: "Sampling",
           value: physicalVolumeGeometry.isAnisotropic ? "Anisotropic voxels" : "Isotropic voxels",
@@ -1882,7 +2006,7 @@ export function ImageViewerShell({
     ];
     if (canShowVolumeGeometry && physicalVolumeGeometry) {
       rows.push({ label: "Extent", value: withPhysicalUnit(physicalVolumeGeometry.aspectLabel) });
-      rows.push({ label: "Spacing", value: withPhysicalUnit(physicalVolumeGeometry.spacingLabel) });
+      rows.push({ label: "Spacing", value: volumeSpacingLabel });
       rows.push({
         label: "Sampling",
         value: physicalVolumeGeometry.isAnisotropic ? "Anisotropic voxels" : "Isotropic voxels",
@@ -2078,8 +2202,9 @@ export function ImageViewerShell({
     viewerInfo.file_id,
   ]);
   const displayTransformKey = [
-    selectedDisplayState?.enhancement ?? "d",
-    selectedDisplayState?.negative ? "negative" : "positive",
+    isDisplayPhoto
+      ? `${selectedDisplayState?.enhancement ?? "d"}:${selectedDisplayState?.negative ? "negative" : "positive"}`
+      : "scientific-server-exact",
     canControlChannels ? selectedChannelKey || "channels-default" : "channels-all",
     canControlChannelColor ? selectedChannelColorKey || "colors-default" : "colors-source",
     effectiveMaskMode ? "mask" : "intensity",
@@ -2090,22 +2215,23 @@ export function ImageViewerShell({
     : String(viewerInfo.metadata.sha256 ?? viewerInfo.file_id).trim() ||
       viewerInfo.file_id;
   const previewCacheKey = `windowed-v2:${previewSourceIdentity}:${displayTransformKey}`;
+  const resolvedSliceChannel = resolvedScalarRendering?.channel;
+  const resolvedSliceTime = resolvedScalarRendering?.time;
 
   const buildMprSliceUrl = useCallback(
     (axis: "x" | "y" | "z", indices: { x: number; y: number; z: number }) =>
       apiClient.uploadSliceUrl(viewerInfo.file_id, {
         axis,
-        x: indices.x,
-        y: indices.y,
-        z: indices.z,
-        t: resolvedScalarRendering?.time,
-        enhancement: selectedDisplayState?.enhancement,
-        fusionMethod: selectedDisplayState?.fusion_method,
-        negative: selectedDisplayState?.negative,
-        channels: effectiveMaskMode
-          ? [resolvedScalarRendering?.channel ?? -1]
-          : selectedDisplayState?.channels,
-        channelColors: selectedDisplayState?.channel_colors,
+        ...sliceAxisCoordinates(viewerInfo, axis, indices),
+        t: resolvedSliceTime,
+        ...sliceChannelSelection(
+          viewerInfo,
+          effectiveMaskMode && resolvedSliceChannel !== undefined
+            ? [resolvedSliceChannel]
+            : selectedChannelIndices,
+          channelColors,
+          resolvedSliceChannel
+        ),
         scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
         scalarThresholdValue: effectiveMaskMode ? serverMaskThresholdValue : undefined,
         scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
@@ -2115,30 +2241,28 @@ export function ImageViewerShell({
       apiClient,
       previewCacheKey,
       effectiveMaskMode,
-      resolvedScalarRendering?.channel,
-      resolvedScalarRendering?.time,
+      resolvedSliceChannel,
+      resolvedSliceTime,
       serverMaskThresholdValue,
-      selectedDisplayState?.channel_colors,
-      selectedDisplayState?.channels,
-      selectedDisplayState?.enhancement,
-      selectedDisplayState?.fusion_method,
-      selectedDisplayState?.negative,
-      viewerInfo.file_id,
+      channelColors,
+      selectedChannelIndices,
+      viewerInfo,
     ]
   );
   const buildDirect2dSliceUrl = useCallback(
-    (z: number, t: number = resolvedScalarRendering?.time ?? resolvedScalarTime) =>
+    (z: number, t: number = resolvedSliceTime ?? resolvedScalarTime) =>
       apiClient.uploadSliceUrl(viewerInfo.file_id, {
         axis: "z",
         z,
         t,
-        enhancement: selectedDisplayState?.enhancement,
-        fusionMethod: selectedDisplayState?.fusion_method,
-        negative: selectedDisplayState?.negative,
-        channels: effectiveMaskMode
-          ? [resolvedScalarRendering?.channel ?? -1]
-          : selectedDisplayState?.channels,
-        channelColors: selectedDisplayState?.channel_colors,
+        ...sliceChannelSelection(
+          viewerInfo,
+          effectiveMaskMode && resolvedSliceChannel !== undefined
+            ? [resolvedSliceChannel]
+            : selectedChannelIndices,
+          channelColors,
+          resolvedSliceChannel
+        ),
         scalarRenderMode: effectiveMaskMode ? "mask" : "intensity",
         scalarThresholdValue: effectiveMaskMode ? serverMaskThresholdValue : undefined,
         scalarThresholdForeground: effectiveMaskMode ? "above" : undefined,
@@ -2149,16 +2273,13 @@ export function ImageViewerShell({
       apiClient,
       previewCacheKey,
       effectiveMaskMode,
-      resolvedScalarRendering?.channel,
-      resolvedScalarRendering?.time,
+      resolvedSliceChannel,
+      resolvedSliceTime,
       resolvedScalarTime,
       serverMaskThresholdValue,
-      selectedDisplayState?.channel_colors,
-      selectedDisplayState?.channels,
-      selectedDisplayState?.enhancement,
-      selectedDisplayState?.fusion_method,
-      selectedDisplayState?.negative,
-      viewerInfo.file_id,
+      channelColors,
+      selectedChannelIndices,
+      viewerInfo,
     ]
   );
   const mprSliceUrls = {
@@ -2324,26 +2445,25 @@ export function ImageViewerShell({
     tAxisSize,
   ]);
   const direct2dDisplayUrl =
-    !viewerInfo.is_volume && viewerInfo.service_urls?.display
+    isDisplayPhoto && !viewerInfo.is_volume && viewerInfo.service_urls?.display
       ? apiClient.uploadDisplayUrl(viewerInfo.file_id, viewerInfo.service_urls.display, {
           enhancement: selectedDisplayState?.enhancement,
           negative: selectedDisplayState?.negative,
           channels: canControlChannels ? selectedChannelIndices : undefined,
-          channelColors: canControlChannelColor ? selectedDisplayState?.channel_colors : undefined,
+          channelColors: canControlChannelColor ? channelColors : undefined,
           cacheKey: previewCacheKey,
         })
       : null;
-  // OME-Zarr (ngff) renders the 2D plane natively via the t/z-aware /slice — its /display is
-  // the same omero-aware render but t-agnostic, so a time-lapse/z-stack would freeze on one
-  // frame. Driving the slice URL makes the main plane track the time/z scrubber. libbioimage
-  // keeps its optimized /display.
+  // Scientific images render through selector-aware /slice regardless of reader. The
+  // legacy /display path is reserved for native-color RGB(A) photos: it is not allowed
+  // to flatten or silently replace a failed T/Z/C/LUT scientific request.
   const direct2dImageUrl =
-    effectiveMaskMode || viewerInfo.metadata.reader === "ngff"
-      ? direct2dSliceUrl
-      : (direct2dDisplayUrl ?? direct2dSliceUrl);
+    isDisplayPhoto ? (direct2dDisplayUrl ?? direct2dSliceUrl) : direct2dSliceUrl;
   const direct2dPreviewUrl = apiClient.uploadPreviewUrl(viewerInfo.file_id);
   const canUseDeepZoom2D =
     !viewerInfo.is_volume &&
+    viewerInfo.axis_sizes.T === 1 &&
+    viewerInfo.axis_sizes.Z === 1 &&
     (viewerInfo.backend_mode === "pyramid" ||
       viewerInfo.viewer.backend_mode === "pyramid" ||
       viewerInfo.viewer.delivery_mode === "deferred_multiscale") &&
@@ -2566,10 +2686,10 @@ export function ImageViewerShell({
       const current = new Set(selectedChannelIndices);
       if (active && current.size > 1) {
         current.delete(index);
-      } else if (!active) {
+      } else if (!active && current.size < MAX_COMPOSITE_CHANNELS) {
         current.add(index);
       }
-      const nextChannels = Array.from(current).sort((a, b) => a - b);
+      const nextChannels = Array.from(current);
       const patch: Partial<ViewerDisplayState> = { channels: nextChannels };
       if (viewerInfo.viewer.volume_mode === "scalar" && nextChannels.length === 1) {
         patch.volume_channel = nextChannels[0];
@@ -2581,62 +2701,17 @@ export function ImageViewerShell({
       nextColors[index] = hex;
       updateSelectedDisplay({ channel_colors: nextColors });
     };
-    // Dense, calm chips: one pill per channel that toggles visibility on click. The
-    // LUT color is a small swatch; editing it opens a Popover (replacing the old
-    // always-visible full-size color rectangles that wasted space). Inactive channels
-    // recede via opacity; active ones lead. The wavelength reads as a muted suffix.
     return (
-      <div className="viewer-channel-controls" data-viewer-channel-controls="true" role="group" aria-label="Channels">
-        {channelNames.map((label, index) => {
-          const active = selectedChannelIndices.includes(index);
-          const color = channelColors[index];
-          const dash = label.lastIndexOf(" - ");
-          const name = dash > 0 ? label.slice(0, dash) : label;
-          const meta = dash > 0 ? label.slice(dash + 3) : "";
-          return (
-            <div key={`${label}-${index}`} className="viewer-channel-chip" data-active={active}>
-              {canControlChannelColor ? (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <button
-                      type="button"
-                      className="viewer-channel-swatch-btn"
-                      aria-label={`Edit ${name} color`}
-                    >
-                      <span className="viewer-channel-swatch" style={{ backgroundColor: color }} aria-hidden="true" />
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent align="start" sideOffset={8} className="viewer-channel-color-popover">
-                    <span className="viewer-channel-color-popover-label">{name}</span>
-                    <input
-                      type="color"
-                      aria-label={`${name} color`}
-                      value={color}
-                      onChange={(event) => setChannelColor(index, event.target.value)}
-                    />
-                  </PopoverContent>
-                </Popover>
-              ) : (
-                <span
-                  className="viewer-channel-swatch viewer-channel-swatch-static"
-                  style={{ backgroundColor: color }}
-                  aria-hidden="true"
-                />
-              )}
-              <button
-                type="button"
-                className="viewer-channel-toggle"
-                aria-pressed={active}
-                title={label}
-                onClick={() => toggleChannel(index, active)}
-              >
-                <span className="viewer-channel-name">{name}</span>
-                {meta ? <span className="viewer-channel-meta">{meta}</span> : null}
-              </button>
-            </div>
-          );
-        })}
-      </div>
+      <ChannelControls
+        channelNames={channelNames}
+        channelColors={channelColors}
+        selectedIndices={selectedChannelIndices}
+        canEditColor={canControlChannelColor}
+        singleChannelMode={singleChannelMode}
+        portalContainer={shellPortalContainer}
+        onToggleChannel={toggleChannel}
+        onSetChannelColor={setChannelColor}
+      />
     );
   };
 
@@ -3087,6 +3162,7 @@ export function ImageViewerShell({
   const effectiveVolumeDisplayState: ViewerDisplayState | null = selectedDisplayState
     ? {
         ...selectedDisplayState,
+        channels: selectedChannelIndices,
         scalar_render_mode: effectiveMaskMode ? "mask" : "intensity",
         scalar_threshold_method: maskThresholdMethod,
         scalar_threshold_value: maskThresholdValue,
@@ -3164,6 +3240,13 @@ export function ImageViewerShell({
                         axis="z"
                         zIndex={clampedIndices.z}
                         tIndex={clampedIndices.t}
+                        channels={isDisplayPhoto ? undefined : selectedChannelIndices}
+                        channelColors={
+                          isDisplayPhoto || !supportsSliceChannelColor(viewerInfo)
+                            ? undefined
+                            : channelColors
+                        }
+                        cacheKey={isDisplayPhoto ? undefined : previewCacheKey}
                         className="viewer-canvas-root"
                       />
                     ) : (

@@ -10703,8 +10703,9 @@ func (deps ServerDeps) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 type steerRunRequest struct {
-	SteerID string `json:"steer_id"`
-	Text    string `json:"text"`
+	SteerID string   `json:"steer_id"`
+	Text    string   `json:"text"`
+	FileIDs []string `json:"file_ids"`
 }
 
 type ackRunSteerRequest struct {
@@ -10733,6 +10734,7 @@ func (deps ServerDeps) handleSteerRun(w http.ResponseWriter, r *http.Request) {
 		UserID:  principal.UserID,
 		SteerID: req.SteerID,
 		Text:    req.Text,
+		FileIDs: req.FileIDs,
 	})
 	if err != nil {
 		if errors.Is(err, runcontrol.ErrInvalidSteer) {

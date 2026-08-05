@@ -28,6 +28,7 @@ from ultra_deepagents.code_execution.cleanup import (
     reap_orphaned_sandbox_containers,
 )
 from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.context_tools import clear_steer_file_authorizations
 from ultra_deepagents.evaluation_profiles import evaluation_profile_policy
 from ultra_deepagents.runner import RunEventSequencer, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
@@ -1252,6 +1253,9 @@ class NATSDeepAgentsWorker:
                     finally:
                         await _stop_run_heartbeat_task(heartbeat_task)
                         heartbeat_task = None
+                        # Steer-attached upload authority is per-attempt: a
+                        # fresh attempt re-learns it from the control plane.
+                        clear_steer_file_authorizations(job.run_id)
                     if not terminal_event_published:
                         await self._publish_completed_event(
                             js,

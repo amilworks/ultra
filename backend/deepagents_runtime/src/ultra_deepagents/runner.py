@@ -34,7 +34,7 @@ from ultra_deepagents.code_execution.progress import (
 )
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
-from ultra_deepagents.context_tools import stage_uploaded_files
+from ultra_deepagents.context_tools import authorize_steer_files, stage_uploaded_files
 from ultra_deepagents.evaluation_profiles import (
     EVALUATION_PROFILE_EVENT_KIND,
     EVALUATION_SURFACE_EVENT_KIND,
@@ -77,7 +77,9 @@ from ultra_deepagents.steering import (
     STEER_CONTENT_PREFIX,
     build_steering_inbox,
     steer_agent_content,
+    steer_file_ids,
     steer_ids_in_messages,
+    steer_injection_content,
     steer_message_id,
 )
 from ultra_deepagents.title_generation import (
@@ -917,6 +919,7 @@ async def run_job(
                 # or was already injected — it can never silently miss the run.
                 if await _steer_barrier_continuation(
                     steering_inbox,
+                    settings=settings,
                     messages=messages,
                     attempt_result=attempt_result,
                     artifact_events=artifact_events,
@@ -944,6 +947,7 @@ async def run_job(
             ):
                 if await _steer_barrier_continuation(
                     steering_inbox,
+                    settings=settings,
                     messages=messages,
                     attempt_result=attempt_result,
                     artifact_events=artifact_events,
@@ -1080,6 +1084,7 @@ def _stitch_continuation_answers(parts: list[str], final_text: str) -> str:
 async def _steer_barrier_continuation(
     steering_inbox: Any | None,
     *,
+    settings: RuntimeSettings,
     messages: list[dict[str, Any]],
     attempt_result: AgentAttemptResult,
     artifact_events: list[dict[str, Any]],
@@ -1158,10 +1163,16 @@ async def _steer_barrier_continuation(
             # is usually just the steer delta.
             prior_answer_parts.append(current_response_text)
     for steer in fresh:
+        content = await asyncio.to_thread(
+            steer_injection_content,
+            steer,
+            context=context,
+            upload_roots=settings.rarespot_upload_roots,
+        )
         messages.append(
             {
                 "role": "user",
-                "content": steer_agent_content(str(steer.get("content") or "")),
+                "content": content,
                 "id": steer_message_id(steer),
             }
         )
@@ -2568,8 +2579,25 @@ def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
             if row_id and not message.get("id"):
                 message = {**message, "id": row_id}
             content = str(message.get("content") or "")
+            # A reseeded steer that carried uploads must keep its attachment
+            # authority and point the model back at the staging tool — the
+            # live injection's staged-path note does not survive into the
+            # transcript row.
+            metadata = message.get("metadata")
+            attached = steer_file_ids(metadata if isinstance(metadata, dict) else {})
+            if attached:
+                authorize_steer_files(job.run_id, attached)
+                note = (
+                    "\n[This steer attached uploaded file ids "
+                    + ", ".join(attached)
+                    + " — stage them with stage_uploaded_files_for_analysis.]"
+                )
+                if note not in content:
+                    content = content + note
             if content and not content.startswith(STEER_CONTENT_PREFIX):
                 message = {**message, "content": steer_agent_content(content)}
+            elif attached:
+                message = {**message, "content": content}
         normalized.append(message)
     return normalized
 

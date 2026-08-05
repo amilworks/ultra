@@ -200,11 +200,15 @@ CREATE TABLE IF NOT EXISTS control_run_steer_messages (
   user_id text NOT NULL,
   message_id text NOT NULL,
   content text NOT NULL,
+  file_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
   status text NOT NULL DEFAULT 'pending',
   created_at timestamptz NOT NULL,
   applied_at timestamptz,
   updated_at timestamptz NOT NULL
 );
+
+ALTER TABLE control_run_steer_messages
+  ADD COLUMN IF NOT EXISTS file_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_control_run_steer_messages_run
   ON control_run_steer_messages(run_id);

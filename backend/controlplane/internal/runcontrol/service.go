@@ -628,14 +628,55 @@ type SteerRunRequest struct {
 	UserID  string
 	SteerID string
 	Text    string
+	// FileIDs attach uploads to the steer. They must travel this trusted
+	// channel — workers only grant filesystem authority to control-plane-
+	// stamped ids, never to ids that merely appear in message text.
+	FileIDs []string
 }
 
-const maxSteerTextLength = 32_000
+const (
+	maxSteerTextLength = 32_000
+	maxSteerFileIDs    = 16
+)
 
 // steerIDPattern bounds the CLIENT-supplied idempotency id: it becomes a URL
 // path segment on worker-token-authenticated requests and a primary key, so
 // it must never carry slashes, dots, or anything URL-hostile.
 var steerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// steerFileIDPattern matches the shape run creation accepts for upload ids
+// (opaque capability ids minted by the upload endpoints). Anything else is
+// rejected before it can reach a worker's filesystem lookup.
+var steerFileIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+
+func normalizedSteerFileIDs(fileIDs []string) ([]string, error) {
+	if len(fileIDs) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(fileIDs))
+	normalized := make([]string, 0, len(fileIDs))
+	for _, raw := range fileIDs {
+		fileID := strings.TrimSpace(raw)
+		if fileID == "" {
+			continue
+		}
+		if !steerFileIDPattern.MatchString(fileID) {
+			return nil, fmt.Errorf("%w: file_ids entries must match %s", ErrInvalidSteer, steerFileIDPattern)
+		}
+		if _, dup := seen[fileID]; dup {
+			continue
+		}
+		seen[fileID] = struct{}{}
+		normalized = append(normalized, fileID)
+	}
+	if len(normalized) > maxSteerFileIDs {
+		return nil, fmt.Errorf("%w: at most %d files may be attached to a steer", ErrInvalidSteer, maxSteerFileIDs)
+	}
+	if len(normalized) == 0 {
+		return nil, nil
+	}
+	return normalized, nil
+}
 
 // SteerRun accepts a mid-run steering message (Phase 1). The store call is
 // the atomic gate: it locks the run row, verifies the run is live and the
@@ -656,6 +697,10 @@ func (s *Service) SteerRun(ctx context.Context, req SteerRunRequest) (domain.Run
 	} else if !steerIDPattern.MatchString(steerID) {
 		return domain.RunSteerMessageRecord{}, fmt.Errorf("%w: steer_id must match %s", ErrInvalidSteer, steerIDPattern)
 	}
+	fileIDs, err := normalizedSteerFileIDs(req.FileIDs)
+	if err != nil {
+		return domain.RunSteerMessageRecord{}, err
+	}
 	run, err := s.store.GetRun(ctx, req.RunID)
 	if err != nil {
 		return domain.RunSteerMessageRecord{}, err
@@ -673,6 +718,7 @@ func (s *Service) SteerRun(ctx context.Context, req SteerRunRequest) (domain.Run
 		UserID:    req.UserID,
 		MessageID: domain.NewID("msg"),
 		Content:   text,
+		FileIDs:   fileIDs,
 	})
 	if err != nil {
 		return domain.RunSteerMessageRecord{}, err

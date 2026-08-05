@@ -22,6 +22,34 @@ from ultra_deepagents.code_execution.git_staging import (
 )
 from ultra_deepagents.context import AgentRunContext
 
+# Uploads a mid-run steer attached, keyed by run id. AgentRunContext is frozen
+# at run start, so files that arrive later need a second authority source —
+# populated ONLY from control-plane steer rows (the trusted channel), never
+# from ids the model produces in text. The worker event loop is single-
+# threaded per process, so a plain dict is safe; entries are cleared when the
+# run's execution ends.
+_STEER_AUTHORIZED_FILE_IDS: dict[str, set[str]] = {}
+
+
+def authorize_steer_files(run_id: str, file_ids: Iterable[str]) -> None:
+    """Grant staging authority to uploads attached via a control-plane steer."""
+    run_key = str(run_id or "").strip()
+    if not run_key:
+        return
+    cleaned = {str(file_id or "").strip() for file_id in file_ids}
+    cleaned.discard("")
+    if not cleaned:
+        return
+    _STEER_AUTHORIZED_FILE_IDS.setdefault(run_key, set()).update(cleaned)
+
+
+def steer_authorized_file_ids(run_id: str) -> frozenset[str]:
+    return frozenset(_STEER_AUTHORIZED_FILE_IDS.get(str(run_id or "").strip(), ()))
+
+
+def clear_steer_file_authorizations(run_id: str) -> None:
+    _STEER_AUTHORIZED_FILE_IDS.pop(str(run_id or "").strip(), None)
+
 
 def build_prior_artifact_manifest(context: AgentRunContext) -> dict[str, Any]:
     artifacts = []
@@ -55,7 +83,10 @@ def stage_uploaded_files(
     upload_roots: Iterable[str | Path] = (),
     file_ids: Iterable[str] | str | None = None,
 ) -> dict[str, Any]:
-    selected = _unique_upload_file_ids(context.selected_file_ids)
+    steer_authorized = steer_authorized_file_ids(context.run_id)
+    selected = _unique_upload_file_ids(
+        tuple(context.selected_file_ids) + tuple(sorted(steer_authorized))
+    )
     requested = _unique_upload_file_ids(file_ids if file_ids is not None else selected)
     selected_set = set(selected)
     rejected = [file_id for file_id in requested if file_id not in selected_set]

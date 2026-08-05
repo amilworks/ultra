@@ -217,6 +217,77 @@ def steer_agent_content(text: str) -> str:
     return f"{STEER_CONTENT_PREFIX}\n{text}"
 
 
+def steer_file_ids(steer: dict[str, Any]) -> list[str]:
+    """Upload ids the control plane stamped on this steer (trusted channel)."""
+    raw = steer.get("file_ids")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    ids: list[str] = []
+    for item in raw:
+        file_id = str(item or "").strip()
+        if file_id and file_id not in ids:
+            ids.append(file_id)
+    return ids
+
+
+def steer_injection_content(
+    steer: dict[str, Any],
+    *,
+    context: Any = None,
+    upload_roots: tuple[str, ...] = (),
+) -> str:
+    """The framed steer text, with any attached uploads authorized and staged.
+
+    Attachments are staged HERE, host-side, at injection time: the /workspace
+    bind is live, so the files appear inside the running sandbox immediately,
+    and the model reads concrete paths instead of being told about ids it
+    would then have to stage. Every failure degrades to an explicit note —
+    an attachment problem must never suppress the steer text itself.
+    """
+    from ultra_deepagents.context_tools import authorize_steer_files, stage_uploaded_files
+
+    text = str(steer.get("content") or "")
+    file_ids = steer_file_ids(steer)
+    if not file_ids:
+        return steer_agent_content(text)
+    run_id = str(steer.get("run_id") or getattr(context, "run_id", "") or "")
+    authorize_steer_files(run_id, file_ids)
+    notes: list[str] = []
+    if context is None:
+        notes.append(
+            "[The user attached uploaded file ids "
+            + ", ".join(file_ids)
+            + " — stage them with stage_uploaded_files_for_analysis.]"
+        )
+    else:
+        try:
+            staged = stage_uploaded_files(context, upload_roots=upload_roots, file_ids=file_ids)
+            for entry in staged.get("staged_files") or []:
+                if isinstance(entry, dict):
+                    notes.append(
+                        f"[Attached upload staged at {entry.get('sandbox_path')} "
+                        f"(file_id {entry.get('file_id')}).]"
+                    )
+            for missing_id in staged.get("missing_file_ids") or []:
+                notes.append(
+                    f"[Attached upload {missing_id} has no stored data in the upload store — "
+                    "tell the user instead of guessing at its contents.]"
+                )
+        except Exception as exc:  # staging must never suppress the steer
+            logger.warning(
+                "Steer attachment staging failed; injecting steer with a fallback note.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+            notes.append(
+                "[Attached uploads "
+                + ", ".join(file_ids)
+                + f" could not be staged ({exc}) — retry with "
+                "stage_uploaded_files_for_analysis before using them.]"
+            )
+    return steer_agent_content(text if not notes else text + "\n" + "\n".join(notes))
+
+
 def steer_ids_in_messages(messages: Any) -> set[str]:
     """Every steer message id already represented in the state's messages.
 
@@ -252,9 +323,17 @@ class SteeringInboxMiddleware(AgentMiddleware):
     steer lands between coordinator steps, not inside a delegation.
     """
 
-    def __init__(self, inbox: SteeringInbox) -> None:
+    def __init__(
+        self,
+        inbox: SteeringInbox,
+        *,
+        context: Any = None,
+        upload_roots: tuple[str, ...] = (),
+    ) -> None:
         super().__init__()
         self._inbox = inbox
+        self._context = context
+        self._upload_roots = tuple(upload_roots)
 
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         try:
@@ -276,6 +355,14 @@ class SteeringInboxMiddleware(AgentMiddleware):
         present = steer_ids_in_messages((state or {}).get("messages"))
         to_inject: list[dict[str, Any]] = []
         for steer in steers:
+            # Authorization is per-steer, not per-injection: after a requeue
+            # the steer may already sit in rebuilt state (no re-injection),
+            # but its attachments must stay stageable on the fresh attempt.
+            attached = steer_file_ids(steer)
+            if attached:
+                from ultra_deepagents.context_tools import authorize_steer_files
+
+                authorize_steer_files(self._inbox.run_id, attached)
             message_id = steer_message_id(steer)
             if not message_id:
                 continue
@@ -287,11 +374,19 @@ class SteeringInboxMiddleware(AgentMiddleware):
             # keep seeing it.
             if not in_state and status != "missed":
                 content = str(steer.get("content") or "")
-                if content.strip():
+                if content.strip() or attached:
+                    # Staging copies files; run it off the event loop so a
+                    # large attachment cannot stall the coordinator.
+                    injected_content = await asyncio.to_thread(
+                        steer_injection_content,
+                        steer,
+                        context=self._context,
+                        upload_roots=self._upload_roots,
+                    )
                     to_inject.append(
                         {
                             "role": "user",
-                            "content": steer_agent_content(content),
+                            "content": injected_content,
                             "id": message_id,
                         }
                     )

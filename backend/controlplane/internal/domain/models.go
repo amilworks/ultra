@@ -1306,6 +1306,11 @@ type RunSteerMessageRecord struct {
 	UserID    string     `json:"user_id,omitempty"`
 	MessageID string     `json:"message_id"`
 	Content   string     `json:"content"`
+	// FileIDs are uploads attached to the steer. They ride the trusted
+	// control-plane channel because workers treat run-stamped file ids as the
+	// only filesystem authority — ids appearing merely in message text are
+	// rejected by the staging tools.
+	FileIDs   []string   `json:"file_ids,omitempty"`
 	Status    string     `json:"status"`
 	CreatedAt time.Time  `json:"created_at"`
 	AppliedAt *time.Time `json:"applied_at,omitempty"`
@@ -1319,6 +1324,7 @@ type CreateRunSteerMessageInput struct {
 	UserID    string
 	MessageID string
 	Content   string
+	FileIDs   []string
 	CreatedAt time.Time
 }
 

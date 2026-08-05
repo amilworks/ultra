@@ -60,7 +60,7 @@ describe("entering a steer", () => {
 
 describe("the optimistic steering message", () => {
   it("inserts BEFORE the streaming assistant row — Phase 0's settled detection needs the assistant last", () => {
-    const steer = blockFrom("const steerFollowup = useCallback", "void apiClient");
+    const steer = blockFrom("const steerFollowup = useCallback", "void (async () => {");
     const insert = steer.indexOf("messages.findIndex((item) => item.id === current.streamingMessageId)");
     const splice = steer.indexOf("messages.splice(insertAt, 0, message)");
     expect(insert).toBeGreaterThan(-1);
@@ -165,5 +165,39 @@ describe("the steering eyebrow", () => {
     expect(styles).toMatch(/\.chat-steering-eyebrow\[data-steering="missed"\]/);
     const reduced = styles.indexOf(".chat-steering-eyebrow", styles.indexOf("@media (prefers-reduced-motion: reduce)", styles.indexOf(".chat-steering-eyebrow")));
     expect(reduced).toBeGreaterThan(-1);
+  });
+});
+
+describe("steer attachments", () => {
+  it("uploads the pending files FIRST and stamps their ids onto the steer payload", () => {
+    const flow = blockFrom("const pendingFilesSnapshot = conversation.pendingFiles;", ".steerRun(runId, { steerId, text, fileIds })");
+    expect(flow).toContain("await uploadPendingFiles(");
+    expect(flow).toContain("uploadResult.newlyUploadedFiles.map((file) => file.file_id)");
+    // Upload strictly precedes the steer POST.
+    expect(flow.indexOf("await uploadPendingFiles(")).toBeLessThan(
+      flow.indexOf(".steerRun(runId, { steerId, text, fileIds })")
+    );
+  });
+
+  it("sends file_ids in the steer request body — text alone can never carry authority", () => {
+    const steerClient = apiSource.slice(
+      apiSource.indexOf("async steerRun("),
+      apiSource.indexOf("listRunSteerMessages")
+    );
+    expect(steerClient).toContain("file_ids: input.fileIds ?? []");
+  });
+
+  it("withdraws the optimistic row and returns the draft when the upload fails — no partial steer", () => {
+    const failure = blockFrom("// Never send a partial steer", "return;");
+    expect(failure).toContain("current.messages.filter((item) => item.steerId !== steerId)");
+    expect(failure).toContain("setActivePromptValue");
+    expect(failure).toContain("Attachment upload failed");
+  });
+
+  it("shows the attached file names on the optimistic steering message", () => {
+    const optimistic = blockFrom("id: `steer-local-${steerId}`", "steerId,");
+    const message = blockFrom("id: `steer-local-${steerId}`", "uploadedFileNames.length > 0");
+    expect(optimistic).toBeTruthy();
+    expect(message).toContain("uploadedFileNames:");
   });
 });

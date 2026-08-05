@@ -2113,27 +2113,28 @@ type uploadHistogramPayload struct {
 }
 
 type resourceRecord struct {
-	FileID             string                      `json:"file_id"`
-	OriginalName       string                      `json:"original_name"`
-	ContentType        string                      `json:"content_type,omitempty"`
-	SizeBytes          int64                       `json:"size_bytes"`
-	SHA256             string                      `json:"sha256"`
-	CreatedAt          string                      `json:"created_at"`
-	Status             string                      `json:"status"`
-	SourceType         string                      `json:"source_type"`
-	ResourceKind       string                      `json:"resource_kind"`
-	SourceURI          string                      `json:"source_uri,omitempty"`
-	ProjectID          string                      `json:"project_id,omitempty"`
-	HasThumbnail       bool                        `json:"has_thumbnail"`
-	ThumbnailURL       string                      `json:"thumbnail_url,omitempty"`
-	PreviewURL         string                      `json:"preview_url,omitempty"`
-	CacheReady         bool                        `json:"cache_ready"`
-	StagedLocally      bool                        `json:"staged_locally"`
-	Principal          principalRecord             `json:"principal,omitempty"`
-	Tags               []string                    `json:"tags,omitempty"`
-	Metadata           domain.JSONMap              `json:"metadata,omitempty"`
-	ShareSummary       domain.ResourceShareSummary `json:"share_summary,omitempty"`
-	TrustedSourceRunID string                      `json:"-"`
+	FileID               string                      `json:"file_id"`
+	OriginalName         string                      `json:"original_name"`
+	ContentType          string                      `json:"content_type,omitempty"`
+	SizeBytes            int64                       `json:"size_bytes"`
+	SHA256               string                      `json:"sha256"`
+	CreatedAt            string                      `json:"created_at"`
+	Status               string                      `json:"status"`
+	SourceType           string                      `json:"source_type"`
+	ResourceKind         string                      `json:"resource_kind"`
+	SourceURI            string                      `json:"source_uri,omitempty"`
+	ProjectID            string                      `json:"project_id,omitempty"`
+	HasThumbnail         bool                        `json:"has_thumbnail"`
+	ThumbnailURL         string                      `json:"thumbnail_url,omitempty"`
+	ThumbnailInteraction string                      `json:"thumbnail_interaction,omitempty"`
+	PreviewURL           string                      `json:"preview_url,omitempty"`
+	CacheReady           bool                        `json:"cache_ready"`
+	StagedLocally        bool                        `json:"staged_locally"`
+	Principal            principalRecord             `json:"principal,omitempty"`
+	Tags                 []string                    `json:"tags,omitempty"`
+	Metadata             domain.JSONMap              `json:"metadata,omitempty"`
+	ShareSummary         domain.ResourceShareSummary `json:"share_summary,omitempty"`
+	TrustedSourceRunID   string                      `json:"-"`
 }
 
 type principalRecord struct {
@@ -5002,7 +5003,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, resourcesResponse{Count: 0, Resources: []resourceRecord{}})
 		return
 	}
-	resources, err := listUploadResources(root)
+	resources, err := listUploadResourcesWithDeps(deps, root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -8520,7 +8521,7 @@ func (deps ServerDeps) handleAdminReconcileResources(w http.ResponseWriter, r *h
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	uploads, err := listUploadResourceEntries(root)
+	uploads, err := listUploadResourceEntriesWithDeps(deps, root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -10303,7 +10304,7 @@ func (deps ServerDeps) uploadStats() (int, int64) {
 	if err != nil {
 		return 0, 0
 	}
-	resources, err := listUploadResources(root)
+	resources, err := listUploadResourcesWithDeps(deps, root)
 	if err != nil {
 		return 0, 0
 	}
@@ -11737,7 +11738,7 @@ func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) er
 				}
 			}
 		}
-		record, err := uploadResourceFromPath(root, candidate.path)
+		record, err := uploadResourceFromPathWithDeps(deps, root, candidate.path)
 		if err != nil {
 			continue
 		}
@@ -11753,7 +11754,7 @@ func (deps ServerDeps) catalogUploadedFile(ctx context.Context, root string, rec
 }
 
 func (deps ServerDeps) catalogUploadedFileWithEventMetadata(ctx context.Context, root string, record uploadedFileRecord, eventType string, eventMetadata domain.JSONMap) error {
-	resource, _, err := findUploadResource(root, record.FileID)
+	resource, _, err := findUploadResourceWithDeps(deps, root, record.FileID)
 	if err != nil {
 		return err
 	}
@@ -11801,7 +11802,7 @@ func (deps ServerDeps) catalogResourceRecordWithEventMetadata(ctx context.Contex
 		return nil
 	}
 	record.Principal = normalizedResourcePrincipal(record.Principal)
-	_, path, err := findUploadResource(root, record.FileID)
+	_, path, err := findUploadResourceWithDeps(deps, root, record.FileID)
 	if err != nil {
 		return err
 	}
@@ -12311,7 +12312,11 @@ type uploadResourceEntry struct {
 }
 
 func listUploadResources(root string) ([]resourceRecord, error) {
-	entries, err := listUploadResourceEntries(root)
+	return listUploadResourcesWithDeps(ServerDeps{}, root)
+}
+
+func listUploadResourcesWithDeps(deps ServerDeps, root string) ([]resourceRecord, error) {
+	entries, err := listUploadResourceEntriesWithDeps(deps, root)
 	if err != nil {
 		return nil, err
 	}
@@ -12323,6 +12328,10 @@ func listUploadResources(root string) ([]resourceRecord, error) {
 }
 
 func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
+	return listUploadResourceEntriesWithDeps(ServerDeps{}, root)
+}
+
+func listUploadResourceEntriesWithDeps(deps ServerDeps, root string) ([]uploadResourceEntry, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -12336,7 +12345,7 @@ func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		record, err := uploadResourceFromPath(root, path)
+		record, err := uploadResourceFromPathWithDeps(deps, root, path)
 		if err != nil {
 			continue
 		}
@@ -12355,6 +12364,10 @@ func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
 }
 
 func findUploadResource(root string, fileID string) (resourceRecord, string, error) {
+	return findUploadResourceWithDeps(ServerDeps{}, root, fileID)
+}
+
+func findUploadResourceWithDeps(deps ServerDeps, root string, fileID string) (resourceRecord, string, error) {
 	fileID = strings.TrimSpace(fileID)
 	if !safeUploadID(fileID) {
 		return resourceRecord{}, "", store.ErrNotFound
@@ -12375,7 +12388,7 @@ func findUploadResource(root string, fileID string) (resourceRecord, string, err
 			if !pathIsUnderRoot(root, resolved) {
 				continue
 			}
-			record, err := uploadResourceFromPath(root, resolved)
+			record, err := uploadResourceFromPathWithDeps(deps, root, resolved)
 			if err != nil {
 				continue
 			}
@@ -12406,7 +12419,7 @@ func (deps ServerDeps) findUploadResourceForRequest(ctx context.Context, root st
 		}
 		return record, path, nil
 	}
-	record, path, err := findUploadResource(root, fileID)
+	record, path, err := findUploadResourceWithDeps(deps, root, fileID)
 	if err != nil {
 		return resourceRecord{}, "", err
 	}
@@ -12420,8 +12433,8 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 	path, pathErr := resolveCatalogResourcePath(root, resource)
 	stagedLocally := false
 	if pathErr == nil {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			stagedLocally = true
+		if info, err := os.Stat(path); err == nil {
+			stagedLocally = !info.IsDir() || detectSpecialFormatByDir(path) != nil
 		}
 	}
 	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
@@ -12446,7 +12459,7 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 	if status == "" {
 		status = "active"
 	}
-	return resourceRecord{
+	record := resourceRecord{
 		FileID:        resource.ResourceID,
 		OriginalName:  resource.OriginalName,
 		ContentType:   contentType,
@@ -12458,8 +12471,6 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		ResourceKind:  resourceKind,
 		SourceURI:     resource.SourceURI,
 		ProjectID:     resource.ProjectID,
-		HasThumbnail:  stagedLocally && strings.HasPrefix(contentType, "image/"),
-		ThumbnailURL:  previewURL,
 		PreviewURL:    previewURL,
 		CacheReady:    stagedLocally,
 		StagedLocally: stagedLocally,
@@ -12472,6 +12483,54 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		Metadata:     resource.Metadata,
 		ShareSummary: resource.ShareSummary,
 	}
+	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, path, stagedLocally)
+	if record.HasThumbnail {
+		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(resource.ResourceID) + "/thumbnail"
+	}
+	return record
+}
+
+func (deps ServerDeps) resourceThumbnailCapability(root string, record resourceRecord, path string, stagedLocally bool) (bool, string) {
+	if !stagedLocally || strings.TrimSpace(path) == "" {
+		return false, ""
+	}
+	if resourceIsCifti(record, path) {
+		if _, err := ciftiThumbnailPreflight(path); err != nil {
+			return false, ""
+		}
+		return true, "static"
+	}
+	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		if _, err := niftiThumbnailPreflight(path); err != nil {
+			return false, ""
+		}
+		return true, "static"
+	}
+	if goNativeThumbnailable(record) {
+		if err := boundedRasterThumbnailPreflight(path); err == nil {
+			return true, "static"
+		}
+		if deps.imageServiceConfigured() && derivedPyramidPath(root, record.FileID) != "" {
+			return true, "static"
+		}
+		return false, ""
+	}
+	if format := specialFormatForResource(record, path); format != nil && format.Serve == "ngff" {
+		if strings.TrimSpace(deps.NgffServiceURL) != "" {
+			return true, "z_scrub"
+		}
+		return false, ""
+	}
+	if isVideoUpload(record.OriginalName, record.ContentType) {
+		if deps.imageServiceConfigured() {
+			return true, "video_hover"
+		}
+		return false, ""
+	}
+	if isScientificThumbnailCandidate(record) && deps.imageServiceConfigured() && derivedPyramidPath(root, record.FileID) != "" {
+		return true, "z_scrub"
+	}
+	return false, ""
 }
 
 func (deps ServerDeps) uploadedFileRecordFromCatalog(root string, resource domain.ResourceRecord) uploadedFileRecord {
@@ -12548,6 +12607,10 @@ func validatePreviewSource(path string) error {
 }
 
 func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
+	return uploadResourceFromPathWithDeps(ServerDeps{}, root, path)
+}
+
+func uploadResourceFromPathWithDeps(deps ServerDeps, root string, path string) (resourceRecord, error) {
 	resolved := filepath.Clean(path)
 	if !pathIsUnderRoot(root, resolved) {
 		return resourceRecord{}, errUnsafeArtifactPath
@@ -12574,7 +12637,7 @@ func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
 	if sourceType == "" {
 		sourceType = "upload"
 	}
-	return resourceRecord{
+	record := resourceRecord{
 		FileID:        fileID,
 		OriginalName:  originalName,
 		ContentType:   contentType,
@@ -12585,13 +12648,16 @@ func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
 		ResourceKind:  resourceKindForContent(originalName, contentType),
 		SourceURI:     strings.TrimSpace(metadata.SourceURI),
 		ProjectID:     strings.TrimSpace(metadata.ProjectID),
-		HasThumbnail:  strings.HasPrefix(contentType, "image/"),
-		ThumbnailURL:  previewURL,
 		PreviewURL:    previewURL,
 		CacheReady:    true,
 		StagedLocally: true,
 		Principal:     metadata.Principal,
-	}, nil
+	}
+	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, resolved, true)
+	if record.HasThumbnail {
+		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(fileID) + "/thumbnail"
+	}
+	return record, nil
 }
 
 type uploadImageDescriptor struct {
@@ -13842,6 +13908,9 @@ func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string
 func niftiScalarRangeLooksCTLike(volume niftiScalarVolume) bool {
 	physMin := volume.physical(volume.RawMin)
 	physMax := volume.physical(volume.RawMax)
+	if physMax < physMin {
+		physMin, physMax = physMax, physMin
+	}
 	return physMin <= -300 && physMin >= -1100 && physMax >= 300
 }
 
@@ -15442,11 +15511,30 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "video"
 	case isTabularUpload(originalName, contentType):
 		return "table"
+	case isBinaryDocumentUpload(originalName, contentType):
+		return "document"
 	case isTextDocumentUpload(originalName, contentType):
 		return "document"
 	default:
 		return "file"
 	}
+}
+
+func isBinaryDocumentUpload(originalName string, contentType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch normalizedType {
+	case "application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.ms-powerpoint",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(originalName))) {
+	case ".pdf", ".ppt", ".pptx", ".doc", ".docx":
+		return true
+	}
+	return false
 }
 
 // isTabularUpload reports whether the file is a delimited table (CSV/TSV) that

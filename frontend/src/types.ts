@@ -694,6 +694,7 @@ export type ResourceRecord = {
   image_service_url?: string | null;
   has_thumbnail: boolean;
   thumbnail_url?: string | null;
+  thumbnail_interaction?: "static" | "z_scrub" | "video_hover" | null;
   preview_url?: string | null;
   sync_status?: string | null;
   sync_error?: string | null;

@@ -2,8 +2,8 @@ import type { ResourceTextFormat } from "../types";
 
 // Detection + display helpers for the text/data resource viewer. Format is
 // inferred from the filename extension first (the content type is unreliable —
-// chunked/bundle uploads persist "application/octet-stream"), then the
-// resource_kind hint, then the content type, then a content sniff.
+// chunked/bundle uploads persist "application/octet-stream"), then explicit
+// table and textual MIME hints. Generic document kind is not evidence of text.
 
 export type TextResourceKind = ResourceTextFormat;
 
@@ -100,9 +100,6 @@ export function classifyTextResource(file: ClassifiableResource | null | undefin
     }
   }
 
-  if (kind === "document") {
-    return "text";
-  }
   return null;
 }
 

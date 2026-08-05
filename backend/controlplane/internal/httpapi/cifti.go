@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"math"
 	"net/http"
@@ -41,6 +45,17 @@ const (
 	ciftiGzipDecompCap  = int64(3) << 30
 	ciftiCarpetClipZ    = 3.0
 	ciftiMaxParcelNames = 512
+
+	ciftiThumbnailWidth       = 512
+	ciftiThumbnailHeight      = 288
+	ciftiThumbnailMaxRows     = 192
+	ciftiThumbnailMaxValues   = 256
+	ciftiThumbnailWindowCount = 8
+	ciftiThumbnailWindowWidth = 32
+
+	ciftiExtensionScanMaxBytes = int64(64 << 20)
+	ciftiXMLMaxBytes           = int64(8 << 20)
+	ciftiExtensionMaxCount     = 64
 )
 
 var (
@@ -62,59 +77,88 @@ type ciftiBrainModel struct {
 }
 
 type ciftiAxis struct {
-	role       string // "series" | "brain_models" | "parcels" | "scalars" | "labels" | "unknown"
-	size       int
-	step       float64 // SERIES step (seconds); 0 otherwise
-	structures []ciftiBrainModel
-	names      []string
+	role         string // "series" | "brain_models" | "parcels" | "scalars" | "labels" | "unknown"
+	size         int
+	declaredSize int
+	step         float64 // SERIES step (seconds); 0 otherwise
+	structures   []ciftiBrainModel
+	names        []string
 }
 
 type ciftiMeta struct {
-	kind      string // "timeseries" | "connectivity" | "scalar" | "matrix"
-	label     string // human, e.g. "dense timeseries"
-	rows      ciftiAxis
-	cols      ciftiAxis
-	voxOffset int64
-	order     binary.ByteOrder
-	dtype     string
-	bytesPer  int
-	slope     float64
-	inter     float64
+	kind         string // "timeseries" | "connectivity" | "scalar" | "matrix"
+	label        string // human, e.g. "dense timeseries"
+	rows         ciftiAxis
+	cols         ciftiAxis
+	voxOffset    int64
+	order        binary.ByteOrder
+	dtype        string
+	bytesPer     int
+	slope        float64
+	inter        float64
+	physRows     int
+	physCols     int
+	physRowsAxis ciftiAxis
+	physColsAxis ciftiAxis
+	dimCount     int
+	prefixDims   [4]int
+	extraDim7    int
+	hasXML       bool
 }
 
 // niftiCiftiExtension pulls the CIFTI XML out of the NIfTI-2 extension list.
-func niftiCiftiExtension(f io.ReadSeeker) (string, error) {
+func niftiCiftiExtension(f io.ReadSeeker, order binary.ByteOrder, voxOffset int64) (string, error) {
+	if voxOffset < nifti2HeaderReadSize {
+		return "", errors.New("CIFTI voxel offset precedes the extension area")
+	}
 	if _, err := f.Seek(nifti2HeaderSize, io.SeekStart); err != nil {
 		return "", err
 	}
-	flag := make([]byte, 4)
-	if _, err := io.ReadFull(f, flag); err != nil {
+	var flag [4]byte
+	if _, err := io.ReadFull(f, flag[:]); err != nil {
 		return "", err
 	}
 	if flag[0] == 0 {
 		return "", errors.New("no NIfTI extension present")
 	}
 	// Walk extensions: [int32 esize][int32 ecode][esize-8 bytes]; CIFTI ecode = 32.
-	for i := 0; i < 32; i++ {
-		hdr := make([]byte, 8)
-		if _, err := io.ReadFull(f, hdr); err != nil {
+	position := int64(nifti2HeaderReadSize)
+	scanned := int64(0)
+	for i := 0; i < ciftiExtensionMaxCount; i++ {
+		if position+8 > voxOffset {
+			break
+		}
+		var hdr [8]byte
+		if _, err := io.ReadFull(f, hdr[:]); err != nil {
 			return "", err
 		}
-		esize := int64(int32(binary.LittleEndian.Uint32(hdr[0:4])))
-		ecode := int32(binary.LittleEndian.Uint32(hdr[4:8]))
-		if esize < 8 || esize > (16<<20) {
+		esize := int64(int32(order.Uint32(hdr[0:4])))
+		ecode := int32(order.Uint32(hdr[4:8]))
+		if esize < 16 || esize%16 != 0 || esize > voxOffset-position {
 			return "", errors.New("invalid NIfTI extension size")
 		}
-		body := make([]byte, esize-8)
-		if _, err := io.ReadFull(f, body); err != nil {
-			return "", err
+		if esize > ciftiExtensionScanMaxBytes-scanned {
+			return "", errors.New("CIFTI extension scan exceeds the aggregate limit")
 		}
+		scanned += esize
+		bodyBytes := esize - 8
 		if ecode == 32 {
+			if bodyBytes > ciftiXMLMaxBytes {
+				return "", errors.New("CIFTI XML extension exceeds the size limit")
+			}
+			body := make([]byte, int(bodyBytes))
+			if _, err := io.ReadFull(f, body); err != nil {
+				return "", err
+			}
 			if idx := indexOfZero(body); idx >= 0 {
 				body = body[:idx]
 			}
 			return string(body), nil
 		}
+		if _, err := f.Seek(bodyBytes, io.SeekCurrent); err != nil {
+			return "", err
+		}
+		position += esize
 	}
 	return "", errors.New("no CIFTI extension found")
 }
@@ -149,6 +193,12 @@ func parseCiftiAxes(xml string, dim5, dim6 int) (rows, cols ciftiAxis) {
 		axis := ciftiAxis{role: role}
 		switch role {
 		case "series":
+			if m := reSeriesPoints.FindStringSubmatch(mm); m != nil {
+				points, err := strconv.Atoi(m[1])
+				if err == nil && points > 0 {
+					axis.declaredSize = points
+				}
+			}
 			if m := reSeriesStep.FindStringSubmatch(mm); m != nil {
 				step, _ := strconv.ParseFloat(m[1], 64)
 				axis.step = step
@@ -258,8 +308,14 @@ func parseCiftiMeta(path string) (ciftiMeta, error) {
 	if err != nil || version != 2 {
 		return ciftiMeta{}, errors.New("not a NIfTI-2/CIFTI file")
 	}
+	dimCount := nifti2Dimension(order, header, 0)
+	var prefixDims [4]int
+	for index := range prefixDims {
+		prefixDims[index] = nifti2Dimension(order, header, index+1)
+	}
 	dim5 := nifti2Dimension(order, header, 5)
 	dim6 := nifti2Dimension(order, header, 6)
+	dim7 := nifti2Dimension(order, header, 7)
 	if dim5 <= 0 || dim6 <= 0 {
 		return ciftiMeta{}, fmt.Errorf("CIFTI has no 2-D matrix (dims %d × %d)", dim6, dim5)
 	}
@@ -270,15 +326,16 @@ func parseCiftiMeta(path string) (ciftiMeta, error) {
 	}
 	voxOffset := niftiInt64(order, header[168:176])
 	if voxOffset < nifti2HeaderReadSize {
-		voxOffset = nifti2HeaderReadSize
+		return ciftiMeta{}, errors.New("CIFTI voxel offset precedes the extension area")
 	}
 	slope, inter := nifti2RescaleFromHeader(order, header)
-	xml, xerr := niftiCiftiExtension(f)
-	rows, cols := ciftiAxis{role: "unknown", size: dim6}, ciftiAxis{role: "unknown", size: dim5}
+	xml, xerr := niftiCiftiExtension(f, order, voxOffset)
+	physicalRows, physicalCols := ciftiAxis{role: "unknown", size: dim6}, ciftiAxis{role: "unknown", size: dim5}
 	if xerr == nil {
-		rows, cols = parseCiftiAxes(xml, dim5, dim6)
+		physicalRows, physicalCols = parseCiftiAxes(xml, dim5, dim6)
 	}
-	kind, label := classifyCifti(rows, cols)
+	kind, label := classifyCifti(physicalRows, physicalCols)
+	rows, cols := physicalRows, physicalCols
 	// Carpet convention: brain locations on rows. If the XML put the location
 	// axis on columns (scalars/series on rows), swap so the reader is uniform.
 	if isLocationRole(cols.role) && !isLocationRole(rows.role) {
@@ -290,7 +347,10 @@ func parseCiftiMeta(path string) (ciftiMeta, error) {
 	return ciftiMeta{
 		kind: kind, label: label, rows: rows, cols: cols,
 		voxOffset: voxOffset, order: order, dtype: dtype, bytesPer: bytesPer,
-		slope: slope, inter: inter,
+		slope: slope, inter: inter, physRows: dim6, physCols: dim5,
+		physRowsAxis: physicalRows, physColsAxis: physicalCols,
+		dimCount: dimCount, prefixDims: prefixDims, extraDim7: dim7,
+		hasXML: xerr == nil,
 	}, nil
 }
 
@@ -334,8 +394,8 @@ func openCiftiMatrix(path string, m ciftiMeta) (*ciftiMatrix, error) {
 	// display "rows/cols" in meta may be swapped for scalar files, but the
 	// endpoints below only serve timeseries (location-on-rows) and symmetric
 	// connectivity, where physical rows == display rows.
-	physCols := m.cols.size
-	physRows := m.rows.size
+	physCols := m.physCols
+	physRows := m.physRows
 	mat := &ciftiMatrix{
 		base: m.voxOffset, physRows: physRows, physCols: physCols,
 		bytesPer: m.bytesPer, dtype: m.dtype, order: m.order, slope: m.slope, inter: m.inter,
@@ -410,6 +470,248 @@ func (m *ciftiMatrix) decode(b []byte) float64 {
 		return float64(math.Float32frombits(m.order.Uint32(b)))
 	}
 }
+
+type ciftiThumbnailWindow struct {
+	start int
+	count int
+}
+
+func ciftiThumbnailWindows(cols int) []ciftiThumbnailWindow {
+	if cols <= ciftiThumbnailMaxValues {
+		return []ciftiThumbnailWindow{{count: cols}}
+	}
+	windows := make([]ciftiThumbnailWindow, ciftiThumbnailWindowCount)
+	span := cols - ciftiThumbnailWindowWidth
+	for i := range windows {
+		windows[i] = ciftiThumbnailWindow{
+			start: i * span / (ciftiThumbnailWindowCount - 1),
+			count: ciftiThumbnailWindowWidth,
+		}
+	}
+	return windows
+}
+
+func checkedNonNegativeProduct(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > math.MaxInt64/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func validateCiftiThumbnailMeta(meta ciftiMeta) error {
+	if !meta.hasXML || meta.kind != "timeseries" {
+		return errors.New("CIFTI thumbnail requires a time-series matrix")
+	}
+	if meta.dimCount != 6 {
+		return errors.New("CIFTI thumbnail requires a six-dimensional NIfTI payload")
+	}
+	for _, dimension := range meta.prefixDims {
+		if dimension != 1 {
+			return errors.New("CIFTI thumbnail requires singleton NIfTI dimensions 1 through 4")
+		}
+	}
+	if !isLocationRole(meta.physRowsAxis.role) || meta.physColsAxis.role != "series" {
+		return errors.New("CIFTI thumbnail requires physical location rows and series columns")
+	}
+	if meta.physColsAxis.declaredSize != meta.physCols {
+		return errors.New("CIFTI series point count does not match the physical series dimension")
+	}
+	if meta.physRowsAxis.role == "brain_models" {
+		brainModelCount := int64(0)
+		for _, structure := range meta.physRowsAxis.structures {
+			if structure.Count <= 0 || brainModelCount > math.MaxInt64-int64(structure.Count) {
+				return errors.New("invalid CIFTI brain-model index count")
+			}
+			brainModelCount += int64(structure.Count)
+		}
+		if brainModelCount != int64(meta.physRows) {
+			return errors.New("CIFTI brain-model index counts do not match the physical location dimension")
+		}
+	}
+	if meta.extraDim7 > 1 {
+		return errors.New("CIFTI thumbnail does not support an extra payload axis")
+	}
+	if meta.extraDim7 <= 0 || meta.physRows <= 0 || meta.physCols <= 0 || meta.bytesPer <= 0 {
+		return errors.New("invalid CIFTI matrix geometry")
+	}
+	return nil
+}
+
+func ciftiThumbnailPreflight(path string) (ciftiMeta, error) {
+	if isGzipPath(path) {
+		return ciftiMeta{}, errors.New("gzipped CIFTI thumbnails are unsupported")
+	}
+	meta, err := parseCiftiMeta(path)
+	if err != nil {
+		return ciftiMeta{}, err
+	}
+	if err := validateCiftiThumbnailMeta(meta); err != nil {
+		return ciftiMeta{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ciftiMeta{}, err
+	}
+	if !info.Mode().IsRegular() || meta.voxOffset < nifti2HeaderReadSize || meta.voxOffset > info.Size() {
+		return ciftiMeta{}, errors.New("invalid CIFTI matrix offset")
+	}
+	values, ok := checkedNonNegativeProduct(int64(meta.physRows), int64(meta.physCols))
+	if !ok {
+		return ciftiMeta{}, errors.New("CIFTI matrix dimensions overflow")
+	}
+	matrixBytes, ok := checkedNonNegativeProduct(values, int64(meta.bytesPer))
+	if !ok || matrixBytes > info.Size()-meta.voxOffset {
+		return ciftiMeta{}, errors.New("CIFTI matrix is truncated")
+	}
+	return meta, nil
+}
+
+// renderCiftiThumbnailPNG renders a deterministic, metadata-free carpet plot.
+// It never reads a full matrix row: at most 192 rows and 256 values per row are
+// fetched through small contiguous ReadAt windows, independent of declared size.
+func renderCiftiThumbnailPNG(path string) ([]byte, error) {
+	meta, err := ciftiThumbnailPreflight(path)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	rowIndices := evenIndices(meta.physRows, ciftiThumbnailMaxRows)
+	windows := ciftiThumbnailWindows(meta.physCols)
+	sampledCols := 0
+	for _, window := range windows {
+		if window.start < 0 || window.count <= 0 || window.start > meta.physCols-window.count {
+			return nil, errors.New("invalid CIFTI thumbnail sample window")
+		}
+		sampledCols += window.count
+	}
+	if sampledCols <= 0 || sampledCols > ciftiThumbnailMaxValues {
+		return nil, errors.New("invalid CIFTI thumbnail sample width")
+	}
+
+	sampled := image.NewRGBA(image.Rect(0, 0, sampledCols, len(rowIndices)))
+	neutral := color.RGBA{R: 0xf7, G: 0xf7, B: 0xf7, A: 0xff}
+	for sampledRow, physicalRow := range rowIndices {
+		rowValues := make([]float64, 0, sampledCols)
+		for _, window := range windows {
+			rowBase, ok := checkedNonNegativeProduct(int64(physicalRow), int64(meta.physCols))
+			if !ok {
+				return nil, errors.New("CIFTI row offset overflow")
+			}
+			valueIndex := rowBase + int64(window.start)
+			if valueIndex < rowBase {
+				return nil, errors.New("CIFTI sample offset overflow")
+			}
+			byteIndex, ok := checkedNonNegativeProduct(valueIndex, int64(meta.bytesPer))
+			if !ok {
+				return nil, errors.New("CIFTI sample offset overflow")
+			}
+			readBytes, ok := checkedNonNegativeProduct(int64(window.count), int64(meta.bytesPer))
+			if !ok || byteIndex > math.MaxInt64-meta.voxOffset {
+				return nil, errors.New("CIFTI sample bounds overflow")
+			}
+			offset := meta.voxOffset + byteIndex
+			if offset < meta.voxOffset || readBytes > info.Size()-offset {
+				return nil, errors.New("CIFTI sample exceeds file bounds")
+			}
+			raw := make([]byte, int(readBytes))
+			n, readErr := file.ReadAt(raw, offset)
+			if readErr != nil && readErr != io.EOF {
+				return nil, readErr
+			}
+			if n != len(raw) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			decoder := ciftiMatrix{
+				bytesPer: meta.bytesPer, dtype: meta.dtype, order: meta.order,
+				slope: meta.slope, inter: meta.inter,
+			}
+			for i := 0; i < window.count; i++ {
+				value := decoder.slope*decoder.decode(raw[i*meta.bytesPer:]) + decoder.inter
+				rowValues = append(rowValues, value)
+			}
+		}
+
+		mean, m2, finiteCount := 0.0, 0.0, 0
+		for _, value := range rowValues {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				continue
+			}
+			finiteCount++
+			delta := value - mean
+			mean += delta / float64(finiteCount)
+			m2 += delta * (value - mean)
+		}
+		std := 0.0
+		if finiteCount > 0 && !math.IsNaN(m2) && !math.IsInf(m2, 0) {
+			std = math.Sqrt(math.Max(m2/float64(finiteCount), 0))
+		}
+		for sampledCol, value := range rowValues {
+			pixel := neutral
+			if finiteCount > 0 && std > 1e-12 && !math.IsNaN(value) && !math.IsInf(value, 0) {
+				z := math.Max(-ciftiCarpetClipZ, math.Min(ciftiCarpetClipZ, (value-mean)/std))
+				index := int(math.Round((z + ciftiCarpetClipZ) * 255 / (2 * ciftiCarpetClipZ)))
+				pixel = ciftiThumbnailRdBuLUT[index]
+			}
+			sampled.SetRGBA(sampledCol, sampledRow, pixel)
+		}
+	}
+
+	output := image.NewRGBA(image.Rect(0, 0, ciftiThumbnailWidth, ciftiThumbnailHeight))
+	for y := 0; y < ciftiThumbnailHeight; y++ {
+		sourceY := y * len(rowIndices) / ciftiThumbnailHeight
+		for x := 0; x < ciftiThumbnailWidth; x++ {
+			sourceX := x * sampledCols / ciftiThumbnailWidth
+			output.SetRGBA(x, y, sampled.RGBAAt(sourceX, sourceY))
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, output); err != nil {
+		return nil, err
+	}
+	return encoded.Bytes(), nil
+}
+
+var ciftiThumbnailRdBuLUT = func() [256]color.RGBA {
+	stops := [...]color.RGBA{
+		{R: 0x05, G: 0x30, B: 0x61, A: 0xff}, {R: 0x21, G: 0x66, B: 0xac, A: 0xff},
+		{R: 0x43, G: 0x93, B: 0xc3, A: 0xff}, {R: 0x92, G: 0xc5, B: 0xde, A: 0xff},
+		{R: 0xd1, G: 0xe5, B: 0xf0, A: 0xff}, {R: 0xf7, G: 0xf7, B: 0xf7, A: 0xff},
+		{R: 0xfd, G: 0xdb, B: 0xc7, A: 0xff}, {R: 0xf4, G: 0xa5, B: 0x82, A: 0xff},
+		{R: 0xd6, G: 0x60, B: 0x4d, A: 0xff}, {R: 0xb2, G: 0x18, B: 0x2b, A: 0xff},
+		{R: 0x67, G: 0x00, B: 0x1f, A: 0xff},
+	}
+	var lut [256]color.RGBA
+	for i := range lut {
+		position := float64(i) * float64(len(stops)-1) / 255
+		left := int(math.Floor(position))
+		right := min(left+1, len(stops)-1)
+		fraction := position - float64(left)
+		blend := func(a, b uint8) uint8 {
+			return uint8(math.Round(float64(a) + (float64(b)-float64(a))*fraction))
+		}
+		lut[i] = color.RGBA{
+			R: blend(stops[left].R, stops[right].R),
+			G: blend(stops[left].G, stops[right].G),
+			B: blend(stops[left].B, stops[right].B), A: 0xff,
+		}
+	}
+	return lut
+}()
 
 // evenIndices returns up to `count` evenly spaced indices in [0, n).
 func evenIndices(n, count int) []int {

@@ -407,6 +407,185 @@ describe("ResourceBrowser", () => {
     );
   });
 
+  it("requires has_thumbnail instead of treating advertised URLs or image kind as readiness", () => {
+    const notReady: ResourceRecord = {
+      ...imageResource,
+      file_id: "file_not_ready",
+      original_name: "not-ready.png",
+      has_thumbnail: false,
+      thumbnail_url: "/v2/resources/file_not_ready/thumbnail",
+      preview_url: "/v2/uploads/file_not_ready/preview",
+      resource_kind: "image",
+    };
+    render(<ResourceBrowser {...baseProps} resources={[notReady]} totalCount={1} />);
+
+    expect(screen.getByLabelText("Resource not-ready.png")).toHaveAttribute("data-preview", "false");
+    expect(screen.queryByAltText("not-ready.png")).not.toBeInTheDocument();
+  });
+
+  it("follows a backend static interaction for a generic-name CIFTI thumbnail", () => {
+    const loadZCount = vi.fn(async () => 300);
+    const sliceUrlFor = vi.fn((fileId: string, z: number) => `/slice/${fileId}/${z}`);
+    const cifti: ResourceRecord = {
+      ...fileResource,
+      file_id: "file_cifti",
+      original_name: "connectome-output",
+      has_thumbnail: true,
+      thumbnail_url: "/v2/resources/file_cifti/thumbnail",
+      thumbnail_interaction: "static",
+    };
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[cifti]}
+        totalCount={1}
+        zScrubThumbnail={{ loadZCount, sliceUrlFor }}
+      />
+    );
+
+    const thumbnail = screen.getByAltText("connectome-output");
+    expect(thumbnail).toHaveAttribute("src", "/thumb/file_cifti");
+    fireEvent.mouseEnter(thumbnail);
+    expect(loadZCount).not.toHaveBeenCalled();
+    expect(sliceUrlFor).not.toHaveBeenCalled();
+  });
+
+  it("keeps NIfTI thumbnails static even when the source has multiple planes", () => {
+    const loadZCount = vi.fn(async () => 64);
+    const nifti: ResourceRecord = {
+      ...fileResource,
+      file_id: "file_nifti_static",
+      original_name: "brain.nii.gz",
+      content_type: "application/x-nifti",
+      has_thumbnail: true,
+      thumbnail_url: "/v2/resources/file_nifti_static/thumbnail",
+      thumbnail_interaction: "static",
+    };
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[nifti]}
+        totalCount={1}
+        zScrubThumbnail={{
+          loadZCount,
+          sliceUrlFor: (fileId, z) => `/slice/${fileId}/${z}`,
+        }}
+      />
+    );
+
+    fireEvent.mouseEnter(screen.getByAltText("brain.nii.gz"));
+    expect(loadZCount).not.toHaveBeenCalled();
+  });
+
+  it("retains z-scrub loading for supported scientific image thumbnails", async () => {
+    const loadZCount = vi.fn(async () => 12);
+    const scientificResource: ResourceRecord = {
+      ...imageResource,
+      original_name: "stack.ome.tiff",
+      thumbnail_interaction: "z_scrub",
+    };
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[scientificResource]}
+        totalCount={1}
+        zScrubThumbnail={{
+          loadZCount,
+          sliceUrlFor: (fileId, z) => `/slice/${fileId}/${z}`,
+        }}
+      />
+    );
+
+    fireEvent.mouseEnter(screen.getByAltText("stack.ome.tiff"));
+    await waitFor(() => expect(loadZCount).toHaveBeenCalledWith("file_image"));
+  });
+
+  it("never z-scrubs a future document thumbnail marked static by the backend", () => {
+    const loadZCount = vi.fn(async () => 30);
+    const documentResource: ResourceRecord = {
+      ...fileResource,
+      file_id: "file_future_document",
+      original_name: "paper.future",
+      resource_kind: "document",
+      has_thumbnail: true,
+      thumbnail_url: "/v2/resources/file_future_document/thumbnail",
+      thumbnail_interaction: "static",
+    };
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[documentResource]}
+        totalCount={1}
+        zScrubThumbnail={{ loadZCount, sliceUrlFor: (fileId, z) => `/slice/${fileId}/${z}` }}
+      />
+    );
+
+    fireEvent.mouseEnter(screen.getByAltText("paper.future"));
+    expect(loadZCount).not.toHaveBeenCalled();
+  });
+
+  it("retries immediately when thumbnail content identity or resolved URL changes", () => {
+    vi.useFakeTimers();
+    const first: ResourceRecord = {
+      ...imageResource,
+      sha256: "sha-v1",
+      thumbnail_url: "/thumb/v1",
+      thumbnail_interaction: "static",
+    };
+    const thumbnailUrlFor = (resource: ResourceRecord) => resource.thumbnail_url ?? "";
+    const view = render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[first]}
+        totalCount={1}
+        thumbnailUrlFor={thumbnailUrlFor}
+      />
+    );
+
+    fireEvent.error(screen.getByAltText(first.original_name));
+    expect(screen.queryByAltText(first.original_name)).not.toBeInTheDocument();
+
+    const changedSha = { ...first, sha256: "sha-v2" };
+    view.rerender(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[changedSha]}
+        totalCount={1}
+        thumbnailUrlFor={thumbnailUrlFor}
+      />
+    );
+    expect(screen.getByAltText(first.original_name)).toHaveAttribute("src", "/thumb/v1");
+
+    fireEvent.error(screen.getByAltText(first.original_name));
+    const changedUrl = { ...changedSha, thumbnail_url: "/thumb/v2" };
+    view.rerender(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[changedUrl]}
+        totalCount={1}
+        thumbnailUrlFor={thumbnailUrlFor}
+      />
+    );
+    expect(screen.getByAltText(first.original_name)).toHaveAttribute("src", "/thumb/v2");
+  });
+
+  it("clears transient static thumbnail failures on a bounded retry", () => {
+    vi.useFakeTimers();
+    const resource: ResourceRecord = {
+      ...imageResource,
+      thumbnail_interaction: "static",
+    };
+    render(<ResourceBrowser {...baseProps} resources={[resource]} totalCount={1} />);
+
+    fireEvent.error(screen.getByAltText(resource.original_name));
+    expect(screen.queryByAltText(resource.original_name)).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(screen.getByAltText(resource.original_name)).toBeInTheDocument();
+  });
+
   it("opens resources from a plain card click while preserving explicit selection controls", () => {
     const onOpenResource = vi.fn();
     const onDeleteSelectedResources = vi.fn();

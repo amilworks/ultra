@@ -2941,7 +2941,7 @@ paths:
         "200":
           description: Resource thumbnail bytes
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
@@ -5587,6 +5587,10 @@ components:
         project_id: { type: string, nullable: true }
         has_thumbnail: { type: boolean }
         thumbnail_url: { type: string, nullable: true }
+        thumbnail_interaction:
+          type: string
+          nullable: true
+          enum: [static, z_scrub, video_hover]
         preview_url: { type: string, nullable: true }
         cache_ready: { type: boolean, nullable: true }
         staged_locally: { type: boolean, nullable: true }

@@ -63,6 +63,43 @@ describe("ApiClient browser auth hardening", () => {
     );
   });
 
+  it("honors same-origin advertised thumbnail URLs only when capability is ready", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org/control" });
+
+    expect(
+      client.resourceThumbnailUrl({
+        file_id: "file-123",
+        has_thumbnail: true,
+        thumbnail_url: "/v2/resources/file-123/thumbnail?variant=carpet",
+      })
+    ).toBe("https://ultra.example.org/v2/resources/file-123/thumbnail?variant=carpet");
+    expect(
+      client.resourceThumbnailUrl({
+        file_id: "file-123",
+        has_thumbnail: false,
+        thumbnail_url: "/advertised-but-not-ready",
+      })
+    ).toBe("https://ultra.example.org/v2/resources/file-123/thumbnail");
+  });
+
+  it("rejects unsafe advertised thumbnail URLs without appending credentials", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org", apiKey: "dev-secret" });
+    const canonical = "https://ultra.example.org/v2/resources/file-123/thumbnail";
+
+    for (const thumbnail_url of [
+      "https://attacker.example/thumbnail.png",
+      "//attacker.example/thumbnail.png",
+      "javascript:alert(1)",
+      "ftp://ultra.example.org/thumbnail.png",
+      "https://user:password@ultra.example.org/thumbnail.png",
+    ]) {
+      expect(
+        client.resourceThumbnailUrl({ file_id: "file-123", has_thumbnail: true, thumbnail_url })
+      ).toBe(canonical);
+    }
+    expect(new URL(canonical).searchParams.has("api_key")).toBe(false);
+  });
+
   it("builds uploaded image slice URLs through the V2 upload API", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
 

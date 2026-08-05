@@ -4675,9 +4675,34 @@ export class ApiClient {
     return (await response.json()) as { deleted: boolean; file_id: string };
   }
 
-  resourceThumbnailUrl(fileId: string): string {
+  resourceThumbnailUrl(
+    resourceOrFileId: string | Pick<ResourceRecord, "file_id" | "has_thumbnail" | "thumbnail_url">
+  ): string {
+    const fileId = typeof resourceOrFileId === "string" ? resourceOrFileId : resourceOrFileId.file_id;
     const safeFileId = encodeURIComponent(fileId);
-    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
+    const canonical = buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
+    if (typeof resourceOrFileId === "string" || resourceOrFileId.has_thumbnail !== true) {
+      return canonical;
+    }
+    const advertised = String(resourceOrFileId.thumbnail_url ?? "").trim();
+    if (!advertised) {
+      return canonical;
+    }
+    try {
+      const base = new URL(this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`);
+      const candidate = new URL(advertised, base);
+      if (
+        (candidate.protocol !== "http:" && candidate.protocol !== "https:") ||
+        candidate.origin !== base.origin ||
+        candidate.username !== "" ||
+        candidate.password !== ""
+      ) {
+        return canonical;
+      }
+      return candidate.toString();
+    } catch {
+      return canonical;
+    }
   }
 
   resourceDownloadUrl(fileId: string): string {

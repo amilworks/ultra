@@ -3,6 +3,7 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type UIEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -601,16 +602,21 @@ const isVideoResource = (resource: ResourceRecord): boolean =>
   String(resource.resource_kind || "").toLowerCase() === "video" ||
   String(resource.content_type || "").toLowerCase().startsWith("video/");
 
-const shouldRequestThumbnail = (resource: ResourceRecord, failedThumbnailIds: Record<string, true>): boolean => {
-  if (failedThumbnailIds[resource.file_id]) {
+const THUMBNAIL_FAILURE_RETRY_DELAY_MS = 1_000;
+const THUMBNAIL_FAILURE_RETRY_LIMIT = 2;
+
+const thumbnailFailureKey = (resource: ResourceRecord, resolvedThumbnailUrl: string): string =>
+  `${String(resource.sha256 || "").trim()}\u0000${resolvedThumbnailUrl}`;
+
+const shouldRequestThumbnail = (
+  resource: ResourceRecord,
+  resolvedThumbnailUrl: string,
+  failedThumbnailKeys: Record<string, true>
+): boolean => {
+  if (failedThumbnailKeys[thumbnailFailureKey(resource, resolvedThumbnailUrl)]) {
     return false;
   }
-  return Boolean(
-    resource.has_thumbnail ||
-      resource.thumbnail_url ||
-      resource.preview_url ||
-      String(resource.resource_kind || "").toLowerCase() === "image"
-  );
+  return resource.has_thumbnail === true && resolvedThumbnailUrl !== "";
 };
 
 // Share-target picker: grantees are chosen from real principals (same-org
@@ -882,7 +888,38 @@ export function ResourceBrowser({
   const [resourceViewMode, setResourceViewMode] = useState<ResourceViewMode>(
     readStoredResourceViewMode
   );
-  const [failedThumbnailIds, setFailedThumbnailIds] = useState<Record<string, true>>({});
+  const [failedThumbnailKeys, setFailedThumbnailKeys] = useState<Record<string, true>>({});
+  const thumbnailRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+  const thumbnailRetryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const markThumbnailFailed = useCallback((failureKey: string) => {
+    setFailedThumbnailKeys((previous) => ({ ...previous, [failureKey]: true }));
+    const attempts = thumbnailRetryAttemptsRef.current.get(failureKey) ?? 0;
+    if (attempts >= THUMBNAIL_FAILURE_RETRY_LIMIT || thumbnailRetryTimersRef.current.has(failureKey)) {
+      return;
+    }
+    thumbnailRetryAttemptsRef.current.set(failureKey, attempts + 1);
+    const timer = setTimeout(() => {
+      thumbnailRetryTimersRef.current.delete(failureKey);
+      setFailedThumbnailKeys((previous) => {
+        if (!previous[failureKey]) {
+          return previous;
+        }
+        const next = { ...previous };
+        delete next[failureKey];
+        return next;
+      });
+    }, THUMBNAIL_FAILURE_RETRY_DELAY_MS);
+    thumbnailRetryTimersRef.current.set(failureKey, timer);
+  }, []);
+  useEffect(() => {
+    const timers = thumbnailRetryTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
   const [selectedResourceIds, setSelectedResourceIds] = useState<Record<string, true>>({});
   const [selectionAnchorResourceId, setSelectionAnchorResourceId] = useState("");
   const [newFolderDialogOpen, setNewFolderDialogOpen] = useState(false);
@@ -3024,7 +3061,14 @@ export function ResourceBrowser({
                   {cardResources.map((resource) => {
                     const KindIcon = iconForKind(resource.resource_kind);
                     const displayName = resourceDisplayName(resource);
-                    const thumbnailReady = shouldRequestThumbnail(resource, failedThumbnailIds);
+                    const resolvedThumbnailUrl =
+                      resource.has_thumbnail === true ? thumbnailUrlFor(resource) : "";
+                    const failureKey = thumbnailFailureKey(resource, resolvedThumbnailUrl);
+                    const thumbnailReady = shouldRequestThumbnail(
+                      resource,
+                      resolvedThumbnailUrl,
+                      failedThumbnailKeys
+                    );
                     // Text/data resources get a content-preview thumbnail (filling the
                     // full preview area like image cards) instead of a tiny icon chip.
                     const textPreviewKind =
@@ -3128,48 +3172,35 @@ export function ResourceBrowser({
                               }
                             />
                           ) : null}
-                          {isVideoResource(resource) &&
+                          {thumbnailReady &&
+                          resource.thumbnail_interaction === "video_hover" &&
+                          isVideoResource(resource) &&
                           downloadUrlFor &&
-                          !failedThumbnailIds[resource.file_id] ? (
+                          !failedThumbnailKeys[failureKey] ? (
                             // Server ffmpeg poster by default; previews on hover.
                             <VideoThumbnail
-                              posterUrl={thumbnailUrlFor(resource)}
+                              posterUrl={resolvedThumbnailUrl}
                               videoUrl={downloadUrlFor(resource)}
                               alt={displayName}
                               className="resource-browser-video-thumb"
-                              onError={() =>
-                                setFailedThumbnailIds((previous) => ({
-                                  ...previous,
-                                  [resource.file_id]: true,
-                                }))
-                              }
+                              onError={() => markThumbnailFailed(failureKey)}
                             />
                           ) : thumbnailReady ? (
-                            zScrubThumbnail ? (
+                            zScrubThumbnail && resource.thumbnail_interaction === "z_scrub" ? (
                               <ZScrubThumbnail
                                 fileId={resource.file_id}
                                 alt={displayName}
-                                staticThumbnailUrl={thumbnailUrlFor(resource)}
+                                staticThumbnailUrl={resolvedThumbnailUrl}
                                 sliceUrlFor={(z) => zScrubThumbnail!.sliceUrlFor(resource.file_id, z)}
                                 loadZCount={zScrubThumbnail.loadZCount}
-                                onError={() =>
-                                  setFailedThumbnailIds((previous) => ({
-                                    ...previous,
-                                    [resource.file_id]: true,
-                                  }))
-                                }
+                                onError={() => markThumbnailFailed(failureKey)}
                               />
                             ) : (
                               <img
-                                src={thumbnailUrlFor(resource)}
+                                src={resolvedThumbnailUrl}
                                 alt={displayName}
                                 loading="lazy"
-                                onError={() =>
-                                  setFailedThumbnailIds((previous) => ({
-                                    ...previous,
-                                    [resource.file_id]: true,
-                                  }))
-                                }
+                                onError={() => markThumbnailFailed(failureKey)}
                               />
                             )
                           ) : textPreviewKind && quickPeekFetch ? (

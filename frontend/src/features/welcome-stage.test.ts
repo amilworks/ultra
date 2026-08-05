@@ -112,3 +112,30 @@ describe("starter chips", () => {
     expect(draft).not.toContain("handleSubmit");
   });
 });
+
+describe("the quiet-usage contract", () => {
+  it("shows no statistics in the resting welcome — usage is one whisper below the chips", () => {
+    // The old stats strip (230M tokens · 3-day streak) and its hairline are
+    // gone from the greeting; the desktop welcome block is greeting-only.
+    const welcome = blockFrom('<div className="blank-chat-welcome">', "\n          </div>");
+    expect(welcome).not.toContain("blank-chat-usage-strip");
+    expect(welcome).not.toContain("lifetime_total_tokens");
+    expect(welcome).not.toContain("<details");
+    // The whisper lives in the starters cluster and opens the SAME full panel.
+    const starters = blockFrom(
+      "{welcomeStageActive ? (\n            <div className=\"welcome-starters\">",
+      "\n          ) : null}"
+    );
+    expect(starters).toContain('className="welcome-usage-link"');
+    expect(starters).toContain("<UserTokenUsagePanel");
+    expect(starters).not.toMatch(/tokens\b.*streak/s);
+  });
+
+  it("keeps the legacy global details hairline off the whisper", () => {
+    const disclosure = styles.match(/\.welcome-usage-disclosure\s*\{[^}]*\}/s)?.[0];
+    expect(disclosure).toContain("border-top: 0;");
+    // And the dead strip styles are actually dead.
+    expect(styles).not.toContain(".blank-chat-usage-strip");
+    expect(styles).not.toContain(".blank-chat-usage-disclosure ");
+  });
+});

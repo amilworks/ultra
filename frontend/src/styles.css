@@ -2648,20 +2648,27 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
 }
 
-.blank-chat-usage-disclosure {
-  width: 100%;
+/* One whisper below the starter chips: "View usage" opens the full panel on
+   demand. The resting welcome shows NO numbers — a lifetime token count with
+   no denominator reads as noise, and the chips already answer "what now".
+   border-top:0 fends off the legacy global `details` hairline rule. */
+.welcome-usage-disclosure {
+  width: min(100%, var(--user-chat-width));
+  margin-inline: auto;
+  border-top: 0;
+  padding-top: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
 
-.blank-chat-usage-strip {
+.welcome-usage-link {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.5rem 0.95rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.75rem;
   border-radius: 999px;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
   cursor: pointer;
   list-style: none;
@@ -2670,52 +2677,32 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-strip::-webkit-details-marker {
+.welcome-usage-link::-webkit-details-marker {
   display: none;
 }
 
-.blank-chat-usage-strip:hover,
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip {
+.welcome-usage-link:hover,
+.welcome-usage-disclosure[open] .welcome-usage-link {
   background: color-mix(in oklab, var(--text-main) 6%, transparent);
   color: var(--text-main);
 }
 
-.blank-chat-usage-strip-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-}
-
-.blank-chat-usage-strip-stats strong {
-  font-weight: var(--font-weight-data);
-  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
-}
-
-.blank-chat-usage-strip-dot {
-  opacity: 0.45;
-}
-
-.blank-chat-usage-strip-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.28rem;
-}
-
-.blank-chat-usage-strip-chevron {
+.welcome-usage-chevron {
   transition: transform 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
+.welcome-usage-disclosure[open] .welcome-usage-chevron {
   transform: rotate(180deg);
 }
 
-.blank-chat-usage-disclosure-body {
-  margin-top: 1.35rem;
-  width: min(100%, var(--user-chat-width));
+.welcome-usage-body {
+  margin-top: 1.1rem;
+  width: 100%;
+  text-align: left;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .blank-chat-usage-strip-chevron {
+  .welcome-usage-chevron {
     transition: none;
   }
 }
@@ -13370,7 +13357,7 @@ summary:hover,
 .token-heatmap-mode:hover,
 .figure-lightbox-thumb:hover,
 .viewer-channel-chip:hover,
-.blank-chat-usage-strip:hover,
+.welcome-usage-link:hover,
 .resource-quick-peek-trigger:hover,
 .viewer-chrome-fade:hover {
   transition-duration: 60ms;

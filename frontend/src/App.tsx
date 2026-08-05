@@ -2588,50 +2588,6 @@ const ConversationTranscript = memo(
                   ) : null}
                   <h2 className="blank-chat-welcome-hero">{welcomePrompt}</h2>
                 </div>
-                <details className="blank-chat-usage-disclosure">
-                  <summary className="blank-chat-usage-strip">
-                    {blankChatTokenUsage?.summary ? (
-                      <span className="blank-chat-usage-strip-stats">
-                        <span>
-                          <strong>
-                            {formatTokens(
-                              blankChatTokenUsage.summary.lifetime_total_tokens
-                            )}
-                          </strong>{" "}
-                          tokens
-                        </span>
-                        <span className="blank-chat-usage-strip-dot" aria-hidden>
-                          ·
-                        </span>
-                        <span>
-                          <strong>
-                            {blankChatTokenUsage.summary.current_streak_days}-day
-                          </strong>{" "}
-                          streak
-                        </span>
-                        <span className="blank-chat-usage-strip-dot" aria-hidden>
-                          ·
-                        </span>
-                      </span>
-                    ) : null}
-                    <span className="blank-chat-usage-strip-toggle">
-                      View usage
-                      <ChevronDown
-                        className="blank-chat-usage-strip-chevron size-4"
-                        aria-hidden
-                      />
-                    </span>
-                  </summary>
-                  <div className="blank-chat-usage-disclosure-body">
-                    <UserTokenUsagePanel
-                      tokenUsage={blankChatTokenUsage}
-                      loading={blankChatUsageLoading}
-                      error={blankChatUsageError}
-                      className="blank-chat-usage-panel"
-                      density="compact"
-                    />
-                  </div>
-                </details>
               </div>
             )}
           </div>
@@ -14495,6 +14451,21 @@ export function App() {
                 <Layers aria-hidden="true" />
                 <span className="welcome-starter-label">Open an image in Lens</span>
               </button>
+              <details className="welcome-usage-disclosure">
+                <summary className="welcome-usage-link">
+                  View usage
+                  <ChevronDown className="welcome-usage-chevron size-4" aria-hidden />
+                </summary>
+                <div className="welcome-usage-body">
+                  <UserTokenUsagePanel
+                    tokenUsage={blankChatTokenUsage}
+                    loading={blankChatUsageLoading}
+                    error={blankChatUsageError}
+                    className="blank-chat-usage-panel"
+                    density="compact"
+                  />
+                </div>
+              </details>
             </div>
           ) : null}
           {reportCanvasVisible && activeReportCanvasVersions ? (

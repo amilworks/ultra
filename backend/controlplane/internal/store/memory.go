@@ -30,6 +30,7 @@ type uploadSessionStats struct {
 }
 
 type MemoryStore struct {
+	googleCredentials map[string]domain.GoogleCredentialRecord
 	mu                     sync.RWMutex
 	threads                map[string]domain.ThreadRecord
 	messages               map[string][]domain.ThreadMessage
@@ -287,6 +288,30 @@ func (s *MemoryStore) DeleteBisqueCredentialBySessionID(ctx context.Context, ses
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.bisque, sessionID)
+	return nil
+}
+
+func (s *MemoryStore) UpsertGoogleCredential(_ context.Context, record domain.GoogleCredentialRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.googleCredentials == nil {
+		s.googleCredentials = map[string]domain.GoogleCredentialRecord{}
+	}
+	s.googleCredentials[record.UserID] = record
+	return nil
+}
+
+func (s *MemoryStore) GetGoogleCredentialForUser(_ context.Context, userID string) (domain.GoogleCredentialRecord, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.googleCredentials[userID]
+	return record, ok, nil
+}
+
+func (s *MemoryStore) DeleteGoogleCredentialForUser(_ context.Context, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.googleCredentials, userID)
 	return nil
 }
 

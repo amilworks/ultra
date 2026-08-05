@@ -1272,6 +1272,29 @@ type BisqueCredentialRecord struct {
 	Metadata           JSONMap   `json:"metadata"`
 }
 
+const (
+	GoogleCredentialStatusActive = "active"
+	GoogleCredentialStatusBroken = "broken"
+)
+
+// GoogleCredentialRecord is one user's Google Drive connection: the OAuth
+// refresh token at rest (AES-256-GCM, same discipline as BisQue passwords)
+// plus display metadata. One row per user.
+type GoogleCredentialRecord struct {
+	UserID                 string    `json:"user_id"`
+	OrgID                  string    `json:"org_id,omitempty"`
+	AccountEmail           string    `json:"account_email,omitempty"`
+	RefreshTokenCiphertext string    `json:"refresh_token_ciphertext"`
+	RefreshTokenNonce      string    `json:"refresh_token_nonce"`
+	RefreshTokenKeyID      string    `json:"refresh_token_key_id"`
+	RefreshTokenAlgorithm  string    `json:"refresh_token_algorithm"`
+	Scopes                 string    `json:"scopes"`
+	Status                 string    `json:"status"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+	Metadata               JSONMap   `json:"metadata"`
+}
+
 type Organization struct {
 	OrgID     string    `json:"org_id"`
 	Name      string    `json:"name"`

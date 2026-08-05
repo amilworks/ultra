@@ -51,6 +51,7 @@ var requiredPostgresControlTables = []string{
 	"control_upload_session_events",
 	"control_upload_chunks",
 	"control_bisque_credentials",
+	"control_google_credentials",
 	"control_training_models",
 	"control_training_domains",
 	"control_training_lineages",

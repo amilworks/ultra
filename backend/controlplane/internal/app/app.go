@@ -229,6 +229,30 @@ func New(cfg config.Config) (*App, error) {
 		}
 		bisqueCredentialStore = httpapi.NewPersistentBisqueCredentialStore(persistentCredentials, cipher, cfg.BisqueRootURL)
 	}
+	var googleDrive *httpapi.GoogleDriveService
+	if strings.TrimSpace(cfg.GoogleClientID) != "" && strings.TrimSpace(cfg.SecretEncryptionKey) != "" {
+		googleCipher, err := httpapi.NewBisqueCredentialCipherFromString(cfg.SecretEncryptionKey, cfg.SecretEncryptionKeyID)
+		if err != nil {
+			for _, closeFn := range closeFns {
+				closeFn()
+			}
+			return nil, err
+		}
+		googleStore, ok := controlStore.(httpapi.GooglePersistentCredentialStore)
+		if !ok {
+			for _, closeFn := range closeFns {
+				closeFn()
+			}
+			return nil, fmt.Errorf("control store does not support persistent Google credentials")
+		}
+		googleDrive = httpapi.NewGoogleDriveService(httpapi.GoogleDriveConfig{
+			ClientID:       cfg.GoogleClientID,
+			ClientSecret:   cfg.GoogleClientSecret,
+			RedirectURL:    cfg.GoogleRedirectURL,
+			PickerAPIKey:   cfg.GooglePickerAPIKey,
+			MaxImportBytes: cfg.GoogleMaxImportBytes,
+		}, googleStore, googleCipher)
+	}
 	var workOSAuth *httpapi.WorkOSAuth
 	if strings.EqualFold(strings.TrimSpace(cfg.AuthProvider), "workos") {
 		auth, err := httpapi.NewWorkOSAuth(httpapi.WorkOSAuthConfig{
@@ -278,6 +302,7 @@ func New(cfg config.Config) (*App, error) {
 		TrainingJobs:        trainingJobs,
 		Bisque:              bisqueService,
 		BisqueCredentials:   bisqueCredentialStore,
+		GoogleDrive:        googleDrive,
 		WorkOS:              workOSAuth,
 		WorkerToken:         cfg.WorkerToken,
 		DatabaseDiagnostics: databaseDiagnostics,

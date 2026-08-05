@@ -831,6 +831,59 @@ WHERE session_id = $1`,
 	return err
 }
 
+func (s *PostgresStore) UpsertGoogleCredential(ctx context.Context, record domain.GoogleCredentialRecord) error {
+	_, err := s.pool.Exec(ctx, `
+INSERT INTO control_google_credentials (
+  user_id, org_id, account_email,
+  refresh_token_ciphertext, refresh_token_nonce, refresh_token_key_id, refresh_token_algorithm,
+  scopes, status, created_at, updated_at, metadata
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+ON CONFLICT (user_id) DO UPDATE SET
+  org_id = EXCLUDED.org_id,
+  account_email = EXCLUDED.account_email,
+  refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+  refresh_token_nonce = EXCLUDED.refresh_token_nonce,
+  refresh_token_key_id = EXCLUDED.refresh_token_key_id,
+  refresh_token_algorithm = EXCLUDED.refresh_token_algorithm,
+  scopes = EXCLUDED.scopes,
+  status = EXCLUDED.status,
+  updated_at = EXCLUDED.updated_at,
+  metadata = EXCLUDED.metadata`,
+		record.UserID, record.OrgID, record.AccountEmail,
+		record.RefreshTokenCiphertext, record.RefreshTokenNonce, record.RefreshTokenKeyID, record.RefreshTokenAlgorithm,
+		record.Scopes, record.Status, record.CreatedAt, record.UpdatedAt, jsonBytes(record.Metadata),
+	)
+	return err
+}
+
+func (s *PostgresStore) GetGoogleCredentialForUser(ctx context.Context, userID string) (domain.GoogleCredentialRecord, bool, error) {
+	row := s.pool.QueryRow(ctx, `
+SELECT user_id, COALESCE(org_id, ''), COALESCE(account_email, ''),
+       refresh_token_ciphertext, refresh_token_nonce, refresh_token_key_id, refresh_token_algorithm,
+       scopes, status, created_at, updated_at, metadata
+FROM control_google_credentials WHERE user_id = $1`, userID)
+	var record domain.GoogleCredentialRecord
+	var metadata []byte
+	err := row.Scan(
+		&record.UserID, &record.OrgID, &record.AccountEmail,
+		&record.RefreshTokenCiphertext, &record.RefreshTokenNonce, &record.RefreshTokenKeyID, &record.RefreshTokenAlgorithm,
+		&record.Scopes, &record.Status, &record.CreatedAt, &record.UpdatedAt, &metadata,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.GoogleCredentialRecord{}, false, nil
+		}
+		return domain.GoogleCredentialRecord{}, false, mapPgError(err)
+	}
+	record.Metadata = jsonMap(metadata)
+	return record, true, nil
+}
+
+func (s *PostgresStore) DeleteGoogleCredentialForUser(ctx context.Context, userID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM control_google_credentials WHERE user_id = $1`, userID)
+	return err
+}
+
 // GetActiveBisqueCredentialForUser resolves a user's linked BisQue credential by
 // account identity so linked detection no longer depends on the session cookie.
 // Backed by the control_bisque_credentials_user_status_idx index.

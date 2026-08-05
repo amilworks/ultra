@@ -579,6 +579,21 @@ CREATE TABLE IF NOT EXISTS control_bisque_credentials (
   UNIQUE(user_id, org_id, root_url)
 );
 
+CREATE TABLE IF NOT EXISTS control_google_credentials (
+  user_id text PRIMARY KEY,
+  org_id text,
+  account_email text,
+  refresh_token_ciphertext text NOT NULL,
+  refresh_token_nonce text NOT NULL,
+  refresh_token_key_id text NOT NULL,
+  refresh_token_algorithm text NOT NULL,
+  scopes text NOT NULL,
+  status text NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  metadata jsonb NOT NULL DEFAULT '{}'
+);
+
 DROP INDEX IF EXISTS control_run_events_run_sequence_idx;
 DROP INDEX IF EXISTS control_run_events_run_event_idx;
 DROP INDEX IF EXISTS control_data_agent_job_events_job_sequence_idx;

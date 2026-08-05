@@ -158,6 +158,21 @@ type ControlDatasetSnapshotShareGrant struct {
 	Metadata        []byte             `json:"metadata"`
 }
 
+type ControlGoogleCredential struct {
+	UserID                 string             `json:"user_id"`
+	OrgID                  pgtype.Text        `json:"org_id"`
+	AccountEmail           pgtype.Text        `json:"account_email"`
+	RefreshTokenCiphertext string             `json:"refresh_token_ciphertext"`
+	RefreshTokenNonce      string             `json:"refresh_token_nonce"`
+	RefreshTokenKeyID      string             `json:"refresh_token_key_id"`
+	RefreshTokenAlgorithm  string             `json:"refresh_token_algorithm"`
+	Scopes                 string             `json:"scopes"`
+	Status                 string             `json:"status"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	Metadata               []byte             `json:"metadata"`
+}
+
 type ControlOrganization struct {
 	OrgID     string             `json:"org_id"`
 	Name      string             `json:"name"`
@@ -339,6 +354,24 @@ type ControlRunLease struct {
 	LeaseExpiresAt pgtype.Timestamptz `json:"lease_expires_at"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlRunSteerBarrier struct {
+	RunID    string             `json:"run_id"`
+	ClosedAt pgtype.Timestamptz `json:"closed_at"`
+}
+
+type ControlRunSteerMessage struct {
+	SteerID   string             `json:"steer_id"`
+	RunID     string             `json:"run_id"`
+	ThreadID  string             `json:"thread_id"`
+	UserID    string             `json:"user_id"`
+	MessageID string             `json:"message_id"`
+	Content   string             `json:"content"`
+	Status    string             `json:"status"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	AppliedAt pgtype.Timestamptz `json:"applied_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ControlRunTokenUsage struct {

@@ -60,6 +60,7 @@ type ServerDeps struct {
 	TrainingJobs      eventbus.TrainingJobPublisher
 	Bisque            *BisqueService
 	BisqueCredentials *BisqueCredentialStore
+	GoogleDrive       *GoogleDriveService
 	WorkOS            *WorkOSAuth
 	// WorkerToken authenticates trusted workers (Deep Agents, RareSpot) on the
 	// run-status, run-events, run-lease, and worker-heartbeat endpoints. Empty
@@ -633,6 +634,12 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/hdf5/preview/table", deps.handleGetUploadHdf5Table)
 			r.Get("/uploads/{file_id}/hdf5/materials/dashboard", deps.handleGetUploadHdf5MaterialsDashboard)
 			r.Post("/uploads/from-bisque", deps.handleImportBisqueResources)
+		r.Get("/integrations/google/status", deps.handleGoogleDriveStatus)
+		r.Post("/integrations/google/authorize", deps.handleGoogleDriveAuthorize)
+		r.Get("/integrations/google/callback", deps.handleGoogleDriveCallback)
+		r.Post("/integrations/google/picker-token", deps.handleGoogleDrivePickerToken)
+		r.Post("/integrations/google/import", deps.handleGoogleDriveImport)
+		r.Delete("/integrations/google", deps.handleGoogleDriveDisconnect)
 			r.Post("/bisque/search", deps.handleBisqueSearch)
 			r.Post("/bisque/dataset-members", deps.handleBisqueDatasetMembers)
 			r.Post("/bisque/image-annotations", deps.handleBisqueImageAnnotations)
@@ -856,6 +863,7 @@ func handlePublicConfig(deps ServerDeps) http.HandlerFunc {
 			payload["bisque_browser_url"] = links["home"]
 			payload["bisque_urls"] = links
 		}
+		payload["google_drive_enabled"] = deps.GoogleDrive.Enabled()
 		writeJSON(w, http.StatusOK, payload)
 	}
 }

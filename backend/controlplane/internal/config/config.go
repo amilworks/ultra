@@ -46,6 +46,11 @@ type Config struct {
 	BisqueUsername             string
 	BisquePassword             string
 	BisqueMaxImportBytes       int64
+	GoogleClientID             string
+	GoogleClientSecret         string
+	GoogleRedirectURL          string
+	GooglePickerAPIKey         string
+	GoogleMaxImportBytes       int64
 	SecretEncryptionKey        string
 	SecretEncryptionKeyID      string
 	AuthProvider               string
@@ -130,6 +135,11 @@ func Load() Config {
 		BisqueUsername:             envString("ULTRA_CONTROL_BISQUE_USERNAME", envString("BISQUE_USERNAME", envString("BISQUE_USER", ""))),
 		BisquePassword:             envString("ULTRA_CONTROL_BISQUE_PASSWORD", envString("BISQUE_PASSWORD", "")),
 		BisqueMaxImportBytes:       int64(envInt("ULTRA_CONTROL_BISQUE_MAX_IMPORT_BYTES", 512<<20)),
+		GoogleClientID:             envString("ULTRA_CONTROL_GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:         envString("ULTRA_CONTROL_GOOGLE_CLIENT_SECRET", ""),
+		GoogleRedirectURL:          envString("ULTRA_CONTROL_GOOGLE_REDIRECT_URL", ""),
+		GooglePickerAPIKey:         envString("ULTRA_CONTROL_GOOGLE_PICKER_API_KEY", ""),
+		GoogleMaxImportBytes:       int64(envInt("ULTRA_CONTROL_GOOGLE_MAX_IMPORT_BYTES", 10<<30)),
 		SecretEncryptionKey:        envString("ULTRA_CONTROL_SECRET_ENCRYPTION_KEY", envString("ULTRA_SECRET_ENCRYPTION_KEY", "")),
 		SecretEncryptionKeyID:      envString("ULTRA_CONTROL_SECRET_ENCRYPTION_KEY_ID", "local-dev-key"),
 		AuthProvider:               strings.ToLower(envString("ULTRA_CONTROL_AUTH_PROVIDER", "dev")),

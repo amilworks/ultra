@@ -2053,6 +2053,98 @@ paths:
                   source:
                     type: string
                     enum: [fallback, llm, cache]
+  /v2/integrations/google/status:
+    get:
+      operationId: getV2GoogleDriveStatus
+      responses:
+        "200":
+          description: Whether Google Drive is configured and connected for this user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled: { type: boolean }
+                  connected: { type: boolean }
+                  account_email: { type: string }
+                  status: { type: string }
+                  connected_at: { type: string, format: date-time }
+  /v2/integrations/google/authorize:
+    post:
+      operationId: authorizeV2GoogleDrive
+      responses:
+        "200":
+          description: Google OAuth consent URL for the connect popup
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authorize_url: { type: string }
+  /v2/integrations/google/callback:
+    get:
+      operationId: completeV2GoogleDriveConnect
+      parameters:
+        - name: code
+          in: query
+          schema: { type: string }
+        - name: state
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: HTML page that reports the outcome to the opener and closes
+          content:
+            text/html:
+              schema: { type: string }
+  /v2/integrations/google/picker-token:
+    post:
+      operationId: mintV2GoogleDrivePickerToken
+      responses:
+        "200":
+          description: Short-lived access token and picker key for the Google Picker
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+                  picker_api_key: { type: string }
+                  app_id: { type: string }
+        "409":
+          description: Google access revoked; the account must be reconnected
+  /v2/integrations/google/import:
+    post:
+      operationId: importV2GoogleDriveFile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [file_id]
+              properties:
+                file_id: { type: string }
+      responses:
+        "200":
+          description: One picked Drive file imported, verified, and cataloged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploaded: { $ref: "#/components/schemas/V2UploadedFileRecord" }
+        "409":
+          description: Google access revoked; the account must be reconnected
+        "502":
+          description: Drive rejected the transfer after retries; the file is retryable
+  /v2/integrations/google:
+    delete:
+      operationId: disconnectV2GoogleDrive
+      responses:
+        "200":
+          description: Integration removed and the grant revoked best-effort
   /v2/uploads/from-bisque:
     post:
       operationId: importV2BisqueResources

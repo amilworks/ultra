@@ -1905,7 +1905,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.875rem;
   line-height: 1.35;
   font-weight: 400;
-  color: var(--sidebar-foreground);
+  /* Every sidebar label rests at full ink — the same voice as the nav items —
+     and the pill background alone carries hover/selection (the macOS-sidebar
+     model). Resting recents a shade lighter read as disabled next to the nav
+     and cost contrast for no hierarchy the eyebrows don't already provide. */
+  color: var(--sidebar-nav-foreground);
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
@@ -2329,14 +2333,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
+/* Rows rest at full ink, so a hover color step (#191919 -> #0a0a0a, 1.13:1)
+   would be invisible — the background shift alone carries hover and
+   selection, matching the structural nav's affordance model. */
 .app-history-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent);
-  color: var(--sidebar-ink-hover);
 }
 
 .app-history-button[data-active="true"] {
   background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
-  color: var(--sidebar-ink-hover);
   box-shadow: none;
 }
 

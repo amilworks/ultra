@@ -2261,8 +2261,15 @@ def build_research_agent(
         # Mid-run steering (Phase 1): a checkpointed before_model node that
         # folds user steers into COORDINATOR state between steps. Deliberately
         # absent from every subagent middleware stack — a steer lands between
-        # coordinator steps, never inside a delegation.
-        middleware.append(SteeringInboxMiddleware(steering_inbox))
+        # coordinator steps, never inside a delegation. Context + upload roots
+        # let the middleware stage steer-attached uploads at injection time.
+        middleware.append(
+            SteeringInboxMiddleware(
+                steering_inbox,
+                context=context,
+                upload_roots=settings.rarespot_upload_roots,
+            )
+        )
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 

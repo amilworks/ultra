@@ -5069,6 +5069,11 @@ components:
       properties:
         steer_id: { type: string, nullable: true }
         text: { type: string }
+        file_ids:
+          type: array
+          nullable: true
+          maxItems: 16
+          items: { type: string }
     V2RunSteerMessageRecord:
       type: object
       required: [steer_id, run_id, thread_id, message_id, content, status, created_at, updated_at]
@@ -5079,6 +5084,10 @@ components:
         user_id: { type: string, nullable: true }
         message_id: { type: string }
         content: { type: string }
+        file_ids:
+          type: array
+          nullable: true
+          items: { type: string }
         status: { type: string, enum: [pending, applied, missed] }
         created_at: { type: string, format: date-time }
         applied_at: { type: string, format: date-time, nullable: true }

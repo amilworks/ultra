@@ -207,6 +207,7 @@ export type RunSteerMessageRecord = {
   thread_id: string;
   message_id: string;
   content: string;
+  file_ids?: string[];
   status: "pending" | "applied" | "missed";
   created_at: string;
   applied_at?: string;
@@ -2227,14 +2228,21 @@ export class ApiClient {
    */
   async steerRun(
     runId: string,
-    input: { steerId: string; text: string }
+    input: { steerId: string; text: string; fileIds?: string[] }
   ): Promise<RunSteerMessageRecord> {
     return await this.fetchJson<RunSteerMessageRecord>(
       `/v2/runs/${encodeURIComponent(runId)}/steer`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ steer_id: input.steerId, text: input.text }),
+        body: JSON.stringify({
+          steer_id: input.steerId,
+          text: input.text,
+          // Attachments must ride the steer itself: the worker only grants
+          // staging authority to control-plane-stamped ids, never to ids
+          // that merely appear in the text.
+          file_ids: input.fileIds ?? [],
+        }),
       }
     );
   }

@@ -10360,7 +10360,7 @@ export function App() {
     setPendingBulkResourceDelete(resourcesToDelete);
   };
 
-  const uploadPendingFiles = async (
+  const uploadPendingFiles = useCallback(async (
     conversationId: string,
     pendingFilesSnapshot: File[],
     existingUploadedFiles: UploadedFileRecord[]
@@ -10426,7 +10426,7 @@ export function App() {
       allUploadedFiles: merged,
       newlyUploadedFiles: response.uploaded,
     };
-  };
+  }, [apiClient, updateConversation]);
 
   const handleCopy = useCallback(async (value: string, feedbackKey?: string): Promise<void> => {
     if (!navigator.clipboard) {
@@ -12611,6 +12611,13 @@ export function App() {
     }
     const steerId = `steer_${makeId()}`;
     const conversationId = conversation.id;
+    // Attachments steer WITH the text: snapshot the pending files now, upload
+    // them first, and stamp their ids onto the steer itself — a steer that
+    // says "use this image" while the image stays behind in the composer was
+    // the exact live failure this flow replaces.
+    const pendingFilesSnapshot = conversation.pendingFiles;
+    const uploadedFilesSnapshot = conversation.uploadedFiles;
+    const uploadedFileNames = pendingFilesSnapshot.map((file) => file.name);
     setActivePromptValue("");
     updateConversation(conversationId, (current) => {
       const message: UiMessage = {
@@ -12620,6 +12627,7 @@ export function App() {
         createdAt: Date.now(),
         steering: "pending",
         steerId,
+        uploadedFileNames: uploadedFileNames.length > 0 ? uploadedFileNames : undefined,
       };
       const messages = [...current.messages];
       const insertAt = current.streamingMessageId
@@ -12632,8 +12640,37 @@ export function App() {
       }
       return { ...current, updatedAt: Date.now(), messages };
     });
-    void apiClient
-      .steerRun(runId, { steerId, text })
+    void (async () => {
+      let fileIds: string[] = [];
+      if (pendingFilesSnapshot.length > 0) {
+        try {
+          const uploadResult = await uploadPendingFiles(
+            conversationId,
+            pendingFilesSnapshot,
+            uploadedFilesSnapshot
+          );
+          fileIds = uploadResult.newlyUploadedFiles.map((file) => file.file_id);
+        } catch (uploadError) {
+          // Never send a partial steer: with the upload failed, withdraw the
+          // optimistic row and hand the text back to the draft. The files are
+          // still selected, so the user's retry re-sends both together.
+          updateConversation(conversationId, (current) => ({
+            ...current,
+            updatedAt: Date.now(),
+            messages: current.messages.filter((item) => item.steerId !== steerId),
+            chatError:
+              uploadError instanceof Error
+                ? `Attachment upload failed — ${uploadError.message}`
+                : "Attachment upload failed.",
+          }));
+          setActivePromptValue((previous) =>
+            previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${text}` : text
+          );
+          return;
+        }
+      }
+      return apiClient
+      .steerRun(runId, { steerId, text, fileIds })
       .then((record) => {
         // Adopt the durable transcript row id so live steer.* events and the
         // next hydration converge on one message.
@@ -12699,6 +12736,7 @@ export function App() {
           );
         }
       });
+    })();
   }, [
     activeConversation,
     activePrompt,
@@ -12708,6 +12746,7 @@ export function App() {
     setActivePromptValue,
     slashMenuOpen,
     updateConversation,
+    uploadPendingFiles,
   ]);
 
   /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn

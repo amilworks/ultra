@@ -341,6 +341,25 @@ type ControlRunLease struct {
 	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
 }
 
+type ControlRunSteerBarrier struct {
+	RunID    string             `json:"run_id"`
+	ClosedAt pgtype.Timestamptz `json:"closed_at"`
+}
+
+type ControlRunSteerMessage struct {
+	SteerID   string             `json:"steer_id"`
+	RunID     string             `json:"run_id"`
+	ThreadID  string             `json:"thread_id"`
+	UserID    string             `json:"user_id"`
+	MessageID string             `json:"message_id"`
+	Content   string             `json:"content"`
+	FileIds   []byte             `json:"file_ids"`
+	Status    string             `json:"status"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	AppliedAt pgtype.Timestamptz `json:"applied_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ControlRunTokenUsage struct {
 	RunID        string             `json:"run_id"`
 	UsageEventID string             `json:"usage_event_id"`

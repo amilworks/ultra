@@ -10,6 +10,7 @@ add_messages upserts by id.
 from __future__ import annotations
 
 import asyncio
+import pathlib
 from typing import Any
 
 from langgraph.graph.message import add_messages
@@ -254,6 +255,10 @@ class TestBarrierContinuation:
         result = asyncio.run(
             _steer_barrier_continuation(
                 inbox,
+                settings=RuntimeSettings(
+                    openai_base_url="http://model.local/v1",
+                    openai_model="test-model",
+                ),
                 messages=messages,
                 attempt_result=AgentAttemptResult(
                     final_response_text="The answer.",
@@ -340,3 +345,191 @@ class TestInboxGating:
         )
         assert inbox is not None
         assert inbox.run_id == "run_1"
+
+
+class TestSteerAttachments:
+    """Uploads attached to a steer: authorized from the trusted channel,
+    staged at injection, and never able to suppress the steer text."""
+
+    def make_context(self, tmp_path: Any) -> Any:
+        from ultra_deepagents.context import AgentRunContext
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        return AgentRunContext(
+            assistant_id="a", org_id="o", user_id="u", project_id="p",
+            thread_id="t_1", run_id="run_test", goal="g",
+            workspace_root=str(workspace),
+        )
+
+    def seed_upload(self, tmp_path: Any, file_id: str, name: str) -> Any:
+        root = tmp_path / "uploads"
+        root.mkdir(parents=True, exist_ok=True)
+        blob = root / f"{file_id}__{name}"
+        blob.write_bytes(b"pixels")
+        return root
+
+    def test_injection_stages_attachment_and_reports_the_sandbox_path(self, tmp_path) -> None:
+        from ultra_deepagents.context_tools import (
+            clear_steer_file_authorizations,
+            steer_authorized_file_ids,
+        )
+
+        clear_steer_file_authorizations("run_test")
+        try:
+            root = self.seed_upload(tmp_path, "file_hero2", "hero2-ultra.png")
+            context = self.make_context(tmp_path)
+            row = steer("steer_a", "msg_a", "Use this image instead.")
+            row["file_ids"] = ["file_hero2"]
+            inbox = FakeInbox([row])
+            middleware = SteeringInboxMiddleware(
+                inbox,  # type: ignore[arg-type]
+                context=context,
+                upload_roots=(str(root),),
+            )
+            update = asyncio.run(middleware.abefore_model({"messages": []}, None))
+            assert update is not None
+            (injected,) = update["messages"]
+            assert injected["content"].startswith(STEER_CONTENT_PREFIX)
+            assert "Use this image instead." in injected["content"]
+            assert (
+                "/workspace/staged_uploads/file_hero2/hero2-ultra.png" in injected["content"]
+            )
+            staged = (
+                pathlib.Path(context.workspace_root)
+                / "staged_uploads" / "file_hero2" / "hero2-ultra.png"
+            )
+            assert staged.is_file()
+            assert steer_authorized_file_ids("run_test") == frozenset({"file_hero2"})
+            assert inbox.acked == ["steer_a"]
+        finally:
+            clear_steer_file_authorizations("run_test")
+
+    def test_present_steer_still_authorizes_attachments_after_requeue(self, tmp_path) -> None:
+        from ultra_deepagents.context_tools import (
+            clear_steer_file_authorizations,
+            steer_authorized_file_ids,
+        )
+
+        clear_steer_file_authorizations("run_test")
+        try:
+            root = self.seed_upload(tmp_path, "file_hero2", "hero2-ultra.png")
+            context = self.make_context(tmp_path)
+            row = steer("steer_a", "msg_a", "Use this image instead.")
+            row["file_ids"] = ["file_hero2"]
+            inbox = FakeInbox([row])
+            middleware = SteeringInboxMiddleware(
+                inbox,  # type: ignore[arg-type]
+                context=context,
+                upload_roots=(str(root),),
+            )
+            state = [{"role": "user", "content": "Use this image instead.", "id": "msg_a"}]
+            update = asyncio.run(middleware.abefore_model({"messages": state}, None))
+            assert update is None  # no re-injection...
+            # ...but the rebuilt attempt keeps staging authority for the file.
+            assert steer_authorized_file_ids("run_test") == frozenset({"file_hero2"})
+        finally:
+            clear_steer_file_authorizations("run_test")
+
+    def test_stage_tool_accepts_steer_authorized_ids_and_rejects_others(self, tmp_path) -> None:
+        from ultra_deepagents.context_tools import (
+            authorize_steer_files,
+            clear_steer_file_authorizations,
+            stage_uploaded_files,
+        )
+
+        clear_steer_file_authorizations("run_test")
+        try:
+            root = self.seed_upload(tmp_path, "file_hero2", "hero2-ultra.png")
+            context = self.make_context(tmp_path)
+            rejected = stage_uploaded_files(
+                context, upload_roots=(str(root),), file_ids=["file_hero2"]
+            )
+            assert rejected["ok"] is False
+            assert rejected["rejected_file_ids"] == ["file_hero2"]
+            authorize_steer_files("run_test", ["file_hero2"])
+            staged = stage_uploaded_files(
+                context, upload_roots=(str(root),), file_ids=["file_hero2"]
+            )
+            assert staged["ok"] is True
+            assert staged["staged_files"][0]["file_id"] == "file_hero2"
+            # Authority is per-id: an unstamped id stays rejected.
+            still_rejected = stage_uploaded_files(
+                context, upload_roots=(str(root),), file_ids=["file_other"]
+            )
+            assert still_rejected["rejected_file_ids"] == ["file_other"]
+        finally:
+            clear_steer_file_authorizations("run_test")
+
+    def test_missing_blob_becomes_an_honest_note_not_a_lost_steer(self, tmp_path) -> None:
+        from ultra_deepagents.context_tools import clear_steer_file_authorizations
+        from ultra_deepagents.steering import steer_injection_content
+
+        clear_steer_file_authorizations("run_test")
+        try:
+            context = self.make_context(tmp_path)
+            row = steer("steer_a", "msg_a", "Use this image instead.")
+            row["file_ids"] = ["file_gone"]
+            row["run_id"] = "run_test"
+            content = steer_injection_content(
+                row, context=context, upload_roots=(str(tmp_path / "uploads"),)
+            )
+            assert content.startswith(STEER_CONTENT_PREFIX)
+            assert "Use this image instead." in content
+            assert "file_gone" in content
+            assert "no stored data" in content
+        finally:
+            clear_steer_file_authorizations("run_test")
+
+    def test_contextless_injection_degrades_to_a_staging_instruction(self) -> None:
+        from ultra_deepagents.context_tools import clear_steer_file_authorizations
+        from ultra_deepagents.steering import steer_injection_content
+
+        clear_steer_file_authorizations("run_test")
+        try:
+            row = steer("steer_a", "msg_a", "Use this image instead.")
+            row["file_ids"] = ["file_hero2"]
+            row["run_id"] = "run_test"
+            content = steer_injection_content(row)
+            assert "stage_uploaded_files_for_analysis" in content
+            assert "file_hero2" in content
+        finally:
+            clear_steer_file_authorizations("run_test")
+
+    def test_requeue_seed_keeps_attachment_authority_and_points_at_the_tool(self) -> None:
+        from ultra_deepagents.context_tools import (
+            clear_steer_file_authorizations,
+            steer_authorized_file_ids,
+        )
+
+        clear_steer_file_authorizations("run_requeue")
+        try:
+            job = RunJobEnvelope(
+                run_id="run_requeue",
+                thread_id="t_1",
+                user_id="u",
+                goal="analyze",
+                messages=[
+                    {"role": "user", "content": "analyze"},
+                    {
+                        "role": "user",
+                        "content": "Use this image instead.",
+                        "run_id": "run_requeue",
+                        "message_id": "msg_a",
+                        "metadata": {
+                            "kind": "steering",
+                            "steer_id": "steer_a",
+                            "file_ids": ["file_hero2"],
+                        },
+                    },
+                ],
+            )
+            normalized = _effective_job_messages(job)
+            seeded = normalized[-1]
+            assert seeded["id"] == "msg_a"
+            assert seeded["content"].startswith(STEER_CONTENT_PREFIX)
+            assert "file_hero2" in seeded["content"]
+            assert "stage_uploaded_files_for_analysis" in seeded["content"]
+            assert steer_authorized_file_ids("run_requeue") == frozenset({"file_hero2"})
+        finally:
+            clear_steer_file_authorizations("run_requeue")

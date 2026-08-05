@@ -70,9 +70,20 @@ func (s *MemoryStore) CreateRunSteerMessage(
 		UserID:    input.UserID,
 		MessageID: input.MessageID,
 		Content:   input.Content,
+		FileIDs:   append([]string(nil), input.FileIDs...),
 		Status:    domain.RunSteerStatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if len(record.FileIDs) == 0 {
+		record.FileIDs = nil
+	}
+	transcriptMetadata := domain.JSONMap{
+		"kind":     "steering",
+		"steer_id": input.SteerID,
+	}
+	if len(input.FileIDs) > 0 {
+		transcriptMetadata["file_ids"] = append([]string(nil), input.FileIDs...)
 	}
 	s.steerMessages[input.RunID] = append(s.steerMessages[input.RunID], record)
 	s.messages[input.ThreadID] = append(s.messages[input.ThreadID], domain.ThreadMessage{
@@ -81,11 +92,8 @@ func (s *MemoryStore) CreateRunSteerMessage(
 		Role:      "user",
 		Content:   input.Content,
 		CreatedAt: now,
-		Metadata: domain.JSONMap{
-			"kind":     "steering",
-			"steer_id": input.SteerID,
-		},
-		RunID: input.RunID,
+		Metadata:  transcriptMetadata,
+		RunID:     input.RunID,
 	})
 	return record, nil
 }

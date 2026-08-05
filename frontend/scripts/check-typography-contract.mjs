@@ -293,7 +293,6 @@ for (const [selector, token] of [
   [".app-settings-panel-heading h2", "panel-heading"],
   [".resource-browser-title", "page-heading"],
   [".resource-browser-result-summary", "data"],
-  [".blank-chat-usage-strip-stats strong", "data"],
   [".resource-browser-rename-form label", "label"],
   [".viewer-sheet-title", "panel-heading"],
   [".viewer-volume-cutaway-depth strong", "data"],

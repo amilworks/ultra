@@ -2445,6 +2445,90 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   justify-content: center;
 }
 
+/* ============================ WELCOME STAGE ============================
+   An empty, hydrated desktop chat composes as ONE centered cluster:
+   eyebrow -> hero -> composer -> starter chips. The stage stops growing and
+   the shell centers the group, so the primary action sits where the eye
+   already is instead of docked a viewport away. The first send renders the
+   optimistic message, the flag drops, the stage grows back and the composer
+   re-docks — one composer instance, no remount, the draft survives. `safe`
+   keeps short viewports top-anchored instead of clipping both ends; the
+   :not() guard leaves the split report-canvas grid alone. */
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) {
+  justify-content: safe center;
+}
+
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) .chat-stage-scroller {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.app-main-shell[data-welcome-stage="true"] .blank-chat-usage-state {
+  padding-bottom: 0.5rem;
+}
+
+/* The welcome block's own 80vh min-height was the OLD centering mechanism —
+   inside the centered cluster it would just re-inflate the void the cluster
+   exists to remove. The shell centers now; the block is content-sized. */
+.app-main-shell[data-welcome-stage="true"] .blank-chat-welcome {
+  min-height: 0;
+  gap: 1.4rem;
+}
+
+.app-main-shell[data-welcome-stage="true"] .app-composer-shell {
+  padding-bottom: 0;
+}
+
+.welcome-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1.1rem 1.5rem 2.4rem;
+}
+
+/* Quiet ghost pills: hairline border, label at full ink, icon one voice
+   quieter — suggestions, not commands. Hover is a background whisper, the
+   same affordance model as the sidebar rows. */
+.welcome-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease);
+}
+
+.welcome-starter-chip svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-muted);
+  flex: none;
+}
+
+.welcome-starter-chip:hover {
+  background: color-mix(in oklab, var(--accent) 80%, transparent);
+}
+
+.welcome-starter-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.welcome-starter-label {
+  max-width: 26ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* Mobile composer-forward empty-chat hero: a calm greeting fills the space
    above the docked composer; usage analytics are tucked into a quiet,
    tap-to-expand disclosure below. Phone-only (rendered only when isPhoneView). */
@@ -2569,20 +2653,27 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
 }
 
-.blank-chat-usage-disclosure {
-  width: 100%;
+/* One whisper below the starter chips: "View usage" opens the full panel on
+   demand. The resting welcome shows NO numbers — a lifetime token count with
+   no denominator reads as noise, and the chips already answer "what now".
+   border-top:0 fends off the legacy global `details` hairline rule. */
+.welcome-usage-disclosure {
+  width: min(100%, var(--user-chat-width));
+  margin-inline: auto;
+  border-top: 0;
+  padding-top: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
 
-.blank-chat-usage-strip {
+.welcome-usage-link {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.5rem 0.95rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.75rem;
   border-radius: 999px;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
   cursor: pointer;
   list-style: none;
@@ -2591,52 +2682,32 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-strip::-webkit-details-marker {
+.welcome-usage-link::-webkit-details-marker {
   display: none;
 }
 
-.blank-chat-usage-strip:hover,
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip {
+.welcome-usage-link:hover,
+.welcome-usage-disclosure[open] .welcome-usage-link {
   background: color-mix(in oklab, var(--text-main) 6%, transparent);
   color: var(--text-main);
 }
 
-.blank-chat-usage-strip-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-}
-
-.blank-chat-usage-strip-stats strong {
-  font-weight: var(--font-weight-data);
-  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
-}
-
-.blank-chat-usage-strip-dot {
-  opacity: 0.45;
-}
-
-.blank-chat-usage-strip-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.28rem;
-}
-
-.blank-chat-usage-strip-chevron {
+.welcome-usage-chevron {
   transition: transform 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
+.welcome-usage-disclosure[open] .welcome-usage-chevron {
   transform: rotate(180deg);
 }
 
-.blank-chat-usage-disclosure-body {
-  margin-top: 1.35rem;
-  width: min(100%, var(--user-chat-width));
+.welcome-usage-body {
+  margin-top: 1.1rem;
+  width: 100%;
+  text-align: left;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .blank-chat-usage-strip-chevron {
+  .welcome-usage-chevron {
     transition: none;
   }
 }
@@ -13291,7 +13362,7 @@ summary:hover,
 .token-heatmap-mode:hover,
 .figure-lightbox-thumb:hover,
 .viewer-channel-chip:hover,
-.blank-chat-usage-strip:hover,
+.welcome-usage-link:hover,
 .resource-quick-peek-trigger:hover,
 .viewer-chrome-fade:hover {
   transition-duration: 60ms;

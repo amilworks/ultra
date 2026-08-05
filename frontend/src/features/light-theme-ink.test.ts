@@ -89,24 +89,34 @@ describe("light theme ink", () => {
     expect(stylesSource).toMatch(
       /\.app-sidebar-brand-button\[data-slot="button"\]\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
     );
-    // Recents keeps the quiet token.
+    // Recents rest at the SAME full ink as the structural nav (the
+    // macOS-sidebar model, adopted 2026-08-05): every label is one voice and
+    // the pill background alone carries hover/selection. The quiet token
+    // survives for genuine metadata (account line), never for row labels.
     expect(stylesSource).toMatch(
+      /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    expect(stylesSource).not.toMatch(
       /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-foreground\);/s
     );
   });
 
   it("puts the hover affordance where it can actually be seen", () => {
-    // Recents rows darken: from 6.41:1 to --sidebar-ink-hover's 18.15:1 is a
-    // legible 2.83:1 step. This must be a real declaration, not just the
-    // --sidebar-accent-foreground token: the rows pin `color:
-    // var(--sidebar-foreground)` in unlayered CSS, which beats Tailwind v4's
-    // LAYERED hover:text-sidebar-accent-foreground utility at any specificity.
-    expect(stylesSource).toMatch(
-      /\.app-history-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
-    );
-    expect(stylesSource).toMatch(
-      /\.app-history-button\[data-active="true"\]\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
-    );
+    // Lookbehind so `border-color`/`background-color` never count as text color.
+    const HOVER_TEXT_COLOR = /(?<![-\w])color\s*:/;
+    // Recents rest at full ink, so a hover ink step (#191919 -> #0a0a0a) is a
+    // 1.13:1 non-event — declaring it would be the exact "misleading to keep
+    // as if it worked" case the nav rule below documents. Background only.
+    const historyHover = stylesSource.match(/\.app-history-button:hover\s*\{[^}]*\}/s)?.[0];
+    expect(historyHover).toBeTruthy();
+    expect(historyHover).toMatch(/background:/);
+    expect(historyHover).not.toMatch(HOVER_TEXT_COLOR);
+    const historyActive = stylesSource.match(
+      /\.app-history-button\[data-active="true"\]\s*\{[^}]*\}/s
+    )?.[0];
+    expect(historyActive).toBeTruthy();
+    expect(historyActive).toMatch(/background:/);
+    expect(historyActive).not.toMatch(HOVER_TEXT_COLOR);
     // Structural nav must NOT darken on hover: already at full ink, so the step
     // to #0a0a0a is 1.13:1 — invisible, and misleading to keep as if it worked.
     // Its background shift carries the affordance instead.

@@ -158,6 +158,17 @@ type ControlDatasetSnapshotShareGrant struct {
 	Metadata        []byte             `json:"metadata"`
 }
 
+type ControlNote struct {
+	NoteID       string             `json:"note_id"`
+	UserID       string             `json:"user_id"`
+	OrgID        pgtype.Text        `json:"org_id"`
+	Title        string             `json:"title"`
+	BodyMarkdown string             `json:"body_markdown"`
+	Pinned       bool               `json:"pinned"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ControlOrganization struct {
 	OrgID     string             `json:"org_id"`
 	Name      string             `json:"name"`

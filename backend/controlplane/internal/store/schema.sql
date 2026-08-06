@@ -188,6 +188,22 @@ CREATE TABLE IF NOT EXISTS control_worker_heartbeats (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+-- Personal notes: markdown is the source of truth; owner-scoped reads
+-- everywhere; DELETE is hard deletion (erasure, not concealment).
+CREATE TABLE IF NOT EXISTS control_notes (
+  note_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  org_id text,
+  title text NOT NULL DEFAULT '',
+  body_markdown text NOT NULL DEFAULT '',
+  pinned boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
+  ON control_notes(user_id, pinned DESC, updated_at DESC);
+
 -- Mid-run steering (Phase 1). One row per accepted steering message. The
 -- message_id references the steer's control_thread_messages row AND doubles as
 -- the LangGraph message id, so every copy of the steer — middleware-injected,

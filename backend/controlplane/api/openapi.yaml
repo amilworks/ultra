@@ -2962,6 +2962,76 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2TokenUsageResponse"
+  /v2/notes:
+    get:
+      operationId: listNotes
+      parameters:
+        - in: query
+          name: query
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer }
+        - in: query
+          name: offset
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The caller's notes, pinned first then most recent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteListResponse"
+    post:
+      operationId: createNote
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteWriteRequest"
+      responses:
+        "201":
+          description: Created note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+  /v2/notes/{note_id}:
+    parameters:
+      - in: path
+        name: note_id
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: The note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+    patch:
+      operationId: updateNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteWriteRequest"
+      responses:
+        "200":
+          description: Updated note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+    delete:
+      operationId: deleteNote
+      responses:
+        "200":
+          description: Note hard-deleted
   /v2/resources:
     get:
       operationId: listResources
@@ -5335,6 +5405,42 @@ components:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
         run_id: { type: string, nullable: true }
+    V2NoteRecord:
+      type: object
+      required: [note_id, title, body_markdown, pinned, created_at, updated_at]
+      properties:
+        note_id: { type: string }
+        user_id: { type: string, nullable: true }
+        org_id: { type: string, nullable: true }
+        title: { type: string }
+        body_markdown: { type: string }
+        pinned: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    V2NoteListItem:
+      type: object
+      required: [note_id, title, snippet, pinned, updated_at]
+      properties:
+        note_id: { type: string }
+        title: { type: string }
+        snippet: { type: string }
+        pinned: { type: boolean }
+        updated_at: { type: string, format: date-time }
+    V2NoteListResponse:
+      type: object
+      required: [notes, total_count]
+      properties:
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2NoteListItem"
+        total_count: { type: integer }
+    V2NoteWriteRequest:
+      type: object
+      properties:
+        title: { type: string, nullable: true }
+        body_markdown: { type: string, nullable: true }
+        pinned: { type: boolean, nullable: true }
     V2ThreadRecord:
       type: object
       required: [thread_id, status, created_at, updated_at, metadata]

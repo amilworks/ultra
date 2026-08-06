@@ -1328,6 +1328,49 @@ type CreateRunSteerMessageInput struct {
 	CreatedAt time.Time
 }
 
+// NoteRecord is a user's personal note: markdown as the source of truth,
+// owner-scoped everywhere it is read. Deletion is HARD deletion — a note the
+// user deletes is erased, not concealed.
+type NoteRecord struct {
+	NoteID       string    `json:"note_id"`
+	UserID       string    `json:"user_id,omitempty"`
+	OrgID        string    `json:"org_id,omitempty"`
+	Title        string    `json:"title"`
+	BodyMarkdown string    `json:"body_markdown"`
+	Pinned       bool      `json:"pinned"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// NoteListItem is the list-pane projection: no full body, just enough to
+// render a row (the snippet is computed server-side from the body head).
+type NoteListItem struct {
+	NoteID    string    `json:"note_id"`
+	Title     string    `json:"title"`
+	Snippet   string    `json:"snippet"`
+	Pinned    bool      `json:"pinned"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type NoteListInput struct {
+	UserID string
+	Query  string
+	Limit  int
+	Offset int
+}
+
+type NoteListPage struct {
+	Notes      []NoteListItem
+	TotalCount int
+}
+
+// NoteUpdateInput carries a partial update; nil fields are left untouched.
+type NoteUpdateInput struct {
+	Title        *string
+	BodyMarkdown *string
+	Pinned       *bool
+}
+
 type WorkerHeartbeatRecord struct {
 	WorkerID        string    `json:"worker_id"`
 	WorkerKind      string    `json:"worker_kind"`

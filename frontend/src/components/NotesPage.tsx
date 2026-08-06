@@ -135,6 +135,7 @@ const RIBBON_IDLE: NotesActiveStates = {
   link: false,
   linkHref: null,
   block: "body",
+  inTable: false,
 };
 
 /* Captures the FileUpload context's picker opener for the slash menu, which
@@ -1165,6 +1166,61 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                   >
                     <TableIcon aria-hidden="true" />
                   </button>
+                  {editorActive.inTable ? (
+                    <>
+                      <span className="notes-ribbon-sep" aria-hidden="true" />
+                      <button
+                        type="button"
+                        className="notes-ribbon-btn notes-ribbon-text"
+                        aria-label="Add row below"
+                        title="Add row below"
+                        onMouseDown={keepEditorFocus}
+                        onClick={() => execRibbon("rowBelow")}
+                      >
+                        + Row
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-ribbon-btn notes-ribbon-text"
+                        aria-label="Delete row"
+                        title="Delete row"
+                        onMouseDown={keepEditorFocus}
+                        onClick={() => execRibbon("rowDelete")}
+                      >
+                        − Row
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-ribbon-btn notes-ribbon-text"
+                        aria-label="Add column right"
+                        title="Add column right"
+                        onMouseDown={keepEditorFocus}
+                        onClick={() => execRibbon("colRight")}
+                      >
+                        + Col
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-ribbon-btn notes-ribbon-text"
+                        aria-label="Delete column"
+                        title="Delete column"
+                        onMouseDown={keepEditorFocus}
+                        onClick={() => execRibbon("colDelete")}
+                      >
+                        − Col
+                      </button>
+                      <button
+                        type="button"
+                        className="notes-ribbon-btn"
+                        aria-label="Delete table"
+                        title="Delete table"
+                        onMouseDown={keepEditorFocus}
+                        onClick={() => execRibbon("tableDelete")}
+                      >
+                        <Trash aria-hidden="true" />
+                      </button>
+                    </>
+                  ) : null}
                   <span className="notes-ribbon-spacer" aria-hidden="true" />
                   <button
                     type="button"

@@ -185,6 +185,52 @@ describe("bundle discipline", () => {
   });
 });
 
+describe("editor polish — tables, exits, checkboxes, code chip (user findings)", () => {
+  it("the caret in a table reveals labeled row/column controls", () => {
+    for (const label of [
+      "Add row below",
+      "Delete row",
+      "Add column right",
+      "Delete column",
+      "Delete table",
+    ]) {
+      expect(pageSource).toContain(`aria-label="${label}"`);
+    }
+    expect(pageSource).toContain("editorActive.inTable ?");
+    for (const action of ["rowBelow", "rowDelete", "colRight", "colDelete", "tableDelete"]) {
+      expect(editorSource).toContain(`case "${action}"`);
+    }
+  });
+
+  it("there is always a way out of a code block — trailing paragraph, gap cursor, ⌘⏎", () => {
+    expect(editorSource).toContain(".use(cursor)");
+    expect(editorSource).toContain(".use(trailing)");
+    expect(editorSource).toMatch(/"Mod-Enter"[\s\S]{0,300}exitCode/);
+    expect(styles).toContain(".notes-md-prose .ProseMirror-gapcursor");
+  });
+
+  it("task checkboxes toggle on click and draw with crisp borders, not glyphs", () => {
+    expect(editorSource).toContain("handleClick");
+    expect(editorSource).toContain("checked: !item.attrs.checked");
+    // Gutter clicks resolve BETWEEN items — the clicked item is nodeAfter.
+    expect(editorSource).toContain("$pos.nodeAfter");
+    const tick = styles.match(/data-checked="true"\]::after\s*\{[^}]*\}/s)?.[0];
+    expect(tick).toContain("border-right");
+    expect(tick).toContain("rotate(");
+    expect(tick).not.toContain('content: "✓"');
+  });
+
+  it("inline code wears the violet chip in both voices, from one token pair", () => {
+    expect(styles).toMatch(/:root \{\s*--inline-code-bg/);
+    expect(styles).toMatch(/\.dark \{\s*--inline-code-bg/);
+    const pk = styles.match(/^\.pk-inline-code\s*\{[^}]*\}/ms)?.[0];
+    expect(pk).toContain("var(--inline-code-bg)");
+    expect(pk).toContain("var(--inline-code-ink)");
+    const notes = styles.match(/\.notes-md-prose :not\(pre\) > code\s*\{[^}]*\}/s)?.[0];
+    expect(notes).toContain("var(--inline-code-ink)");
+  });
+});
+
 describe("mobile is first-class", () => {
   it("the notes list stays reachable on phones via the back chip", () => {
     expect(pageSource).toContain('className="notes-mobile-back"');

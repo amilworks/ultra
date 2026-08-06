@@ -567,6 +567,19 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         }
         return;
       }
+      if (event.key === "Tab" && !event.shiftKey) {
+        // Sublime-grade plaintext: Tab indents, it never escapes the editor.
+        // (⌘E, Escape-then-Tab, and every toolbar button remain the exits.)
+        event.preventDefault();
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        const nextValue = textarea.value.slice(0, start) + "  " + textarea.value.slice(end);
+        textarea.value = nextValue;
+        textarea.setSelectionRange(start + 2, start + 2);
+        updateDraft({ body: nextValue });
+        setActiveNote((current) => (current ? { ...current, body_markdown: nextValue } : current));
+        return;
+      }
       if (event.key === "/") {
         const caret = textarea.selectionStart;
         const lineStart = textarea.value.lastIndexOf("\n", caret - 1) + 1;
@@ -576,7 +589,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         }
       }
     },
-    [insertSlashBlock, slashIndex, slashOpen]
+    [insertSlashBlock, slashIndex, slashOpen, updateDraft]
   );
 
   // ⌘E flips Write/Preview from anywhere on the page.

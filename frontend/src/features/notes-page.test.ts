@@ -170,3 +170,22 @@ describe("the ultra:// scheme in shared markdown", () => {
     expect(markdownSource).toContain("urlTransform={ultraUrlTransform}");
   });
 });
+
+describe("write mode is the raw source — and the type says so", () => {
+  it("body edits in the house mono; preview flips to the reading face", () => {
+    const body = styles.match(/\.notes-body-input\s*\{[^}]*\}/s)?.[0];
+    expect(body).toContain('"JetBrains Mono"');
+    expect(body).toContain("font-variant-ligatures: none;");
+    expect(body).toContain("tab-size: 2;");
+    // Preview keeps the chat reading voice — the mode contrast IS the signal.
+    expect(pageSource).toContain('className="pk-message-content notes-preview-markdown"');
+  });
+
+  it("Tab indents inside the body instead of escaping the editor", () => {
+    expect(pageSource).toMatch(/event\.key === "Tab" && !event\.shiftKey[\s\S]{0,600}setSelectionRange\(start \+ 2/);
+  });
+
+  it("text pastes pass straight through — only FILE pastes are intercepted", () => {
+    expect(pageSource).toMatch(/clipboardData\?\.files[\s\S]{0,120}files\.length > 0[\s\S]{0,60}preventDefault/);
+  });
+});

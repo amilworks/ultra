@@ -4874,6 +4874,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .notes-body-shell { position: relative; flex: 1; min-height: 0; display: flex; }
 
+/* Write mode IS the raw source, and the type says so: the house mono (same
+   stack as the code/data viewers) marks "this is plaintext you can dump into"
+   the way Sublime does — while Preview flips to the reading face. Ligatures
+   off on purpose: raw text must never render != as a single glyph. */
 .notes-body-input {
   flex: 1;
   min-height: 16rem;
@@ -4882,9 +4886,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   outline: none;
   background: transparent;
   resize: none;
-  font-family: var(--font-sans);
-  font-size: 0.95rem;
-  line-height: 1.6;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  font-variant-ligatures: none;
+  tab-size: 2;
   color: var(--text-main);
   padding-top: 6px;
 }

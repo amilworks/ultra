@@ -27,6 +27,7 @@ import { getMarkdown } from "@milkdown/kit/utils";
 import { HIGHLIGHT_PATTERN } from "@/lib/remarkHighlight";
 import { withNotesDialect } from "./notesDialect";
 import { ultraHighlight } from "./notesHighlight";
+import { notesMath } from "./notesMath";
 
 const roundTrip = async (markdown: string): Promise<string> => {
   const root = document.createElement("div");
@@ -40,6 +41,7 @@ const roundTrip = async (markdown: string): Promise<string> => {
     .use(commonmark)
     .use(gfm)
     .use(ultraHighlight)
+    .use(notesMath)
     .create();
   const serialized = editor.action(getMarkdown());
   await editor.destroy();
@@ -93,6 +95,30 @@ describe("markdown mode round-trips the house dialect byte-stable", () => {
     await expectStable(
       "![pooled_grid.png](ultra://resource/file_9f21ab04/pooled_grid.png)\n\n[survey notes](ultra://resource/file_c0b8/notes.txt)"
     );
+  });
+
+  it("inline LaTeX rides remark-math syntax, exactly like chat", async () => {
+    await expectStable(
+      "The pooled output is $y_{ij} = \\max(x_{2i,2j}, x_{2i,2j+1})$ per window, and $E=mc^2$ stays inline."
+    );
+  });
+
+  it("display math round-trips, including aligned environments", async () => {
+    await expectStable(
+      "$$\n\\hat{y} = \\operatorname{softmax}(Wx + b)\n$$\n\nand a multi-line derivation:\n\n$$\n\\begin{aligned}\n\\mathcal{L} &= -\\sum_i y_i \\log \\hat{y}_i \\\\\n&= \\text{cross-entropy}\n\\end{aligned}\n$$"
+    );
+  });
+
+  it("empty table cells stay emptiness, never an html <br /> sentinel", async () => {
+    const out = await roundTrip("| a | b |\n| -- | -- |\n| c |  |\n|  |  |");
+    expect(out).not.toContain("<br");
+    expect(out).toContain("| c |");
+  });
+
+  it("dollar amounts in prose stay prose when they are not math-shaped", async () => {
+    // remark-math only claims $…$ with non-space flanks; "$5 and $10" has a
+    // space after the opener, so it stays literal text.
+    await expectStable("The reagent costs $5 and $10 per plate at bulk pricing.");
   });
 });
 

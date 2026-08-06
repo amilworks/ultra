@@ -125,10 +125,31 @@ describe("the ribbon — pinned to the basics", () => {
     for (const shortcut of ["Mod-Shift-x", "Mod-Shift-7", "Mod-Shift-8", "Mod-Shift-9"]) {
       expect(editorSource).toContain(`"${shortcut}"`);
     }
-    // Tab walks table cells and nests list items, in one chained binding.
+    // Tab walks table cells, GROWS the table by a row from the last cell
+    // (Docs/Word basic), and nests list items — one chained binding.
     expect(editorSource).toMatch(
-      /goToNextTableCellCommand\.key\) \|\| commands\.call\(sinkListItemCommand\.key\)/
+      /goToNextTableCellCommand\.key\) \|\|[\s\S]{0,300}addRowAfterCommand\.key\)[\s\S]{0,200}sinkListItemCommand\.key\)/
     );
+  });
+
+  it("LaTeX is first-class: math plugin loaded, chat-dialect storage, KaTeX css in the chunk", () => {
+    expect(editorSource).toContain('.use(notesMath)');
+    expect(editorSource).toContain('import "katex/dist/katex.min.css"');
+    const mathSource = read("src/components/notes/notesMath.ts");
+    expect(mathSource).toContain('"inlineMath"');
+    expect(mathSource).toContain('=== "math"');
+    expect(mathSource).toContain("remarkMath");
+    // Click-to-edit: the atom flips to a raw-TeX field in place.
+    expect(mathSource).toContain("startEditing");
+  });
+
+  it("pastes are sanitized before ProseMirror parses them", () => {
+    expect(editorSource).toContain("transformPastedHTML: sanitizePastedHtml");
+    const pasteSource = read("src/components/notes/notesPaste.ts");
+    expect(pasteSource).toContain('annotation[encoding="application/x-tex"]');
+    expect(pasteSource).toContain("data-math-block");
+    expect(pasteSource).toContain('input[type="checkbox"]');
+    expect(pasteSource).toContain(".pk-code-render");
   });
 });
 

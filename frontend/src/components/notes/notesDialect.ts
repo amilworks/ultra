@@ -31,6 +31,18 @@ const textWithIntrawordUnderscores = (
     .safe(String(node.value ?? ""), info)
     .replace(INTRAWORD_ESCAPED_UNDERSCORE, "$1_");
 
+/* Milkdown preserves an empty paragraph (an empty table cell, an abandoned
+   list item) by serializing the html sentinel `<br />`. Notes are plain
+   markdown — an empty cell is written as emptiness, not as HTML. Only the
+   exact sentinel is blanked; any other raw html a note carries passes
+   through byte-for-byte. */
+const EMPTY_LINE_SENTINEL = "<br />";
+
+const plainEmptyHtml = (node: { value?: string }): string => {
+  const value = String(node.value ?? "");
+  return value === EMPTY_LINE_SENTINEL ? "" : value;
+};
+
 const verbatimImage = (node: {
   alt?: string | null;
   url?: string | null;
@@ -58,5 +70,6 @@ export const withNotesDialect = <T extends object>(options: T): T =>
       highlight: highlightToMarkdown,
       text: textWithIntrawordUnderscores,
       image: verbatimImage,
+      html: plainEmptyHtml,
     },
   }) as T;

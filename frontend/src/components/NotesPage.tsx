@@ -20,6 +20,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { LazyMarkdown } from "@/components/prompt-kit/lazy-markdown";
+import { FileUpload, useFileUploadContext } from "@/components/prompt-kit";
 import type { ApiClient, NoteListItem, NoteRecord } from "@/lib/api";
 import { Suspense } from "react";
 
@@ -76,7 +77,43 @@ const SLASH_BLOCKS: SlashBlock[] = [
   },
   { id: "divider", label: "Divider", hint: "---", insert: "---\n" },
   { id: "quote", label: "Quote", hint: "> ", insert: "> " },
+  // Sentinel: handled by the page (opens the file picker), not by insertion.
+  { id: "media", label: "Image or video", hint: "upload", insert: "" },
 ];
+
+/* Media references are stored as portable ultra:// URIs, never absolute
+   URLs: notes stay exportable, environments stay swappable, and Phase 2's
+   agent reads can resolve the same scheme server-side. The trailing segment
+   carries the original filename so the renderer can tell video from image
+   without a lookup. */
+const ULTRA_RESOURCE_PATTERN = /^ultra:\/\/resource\/([^/?#]+)(?:\/([^?#]*))?$/;
+const VIDEO_EXTENSION_PATTERN = /\.(mp4|mov|webm|m4v|avi|mkv)$/i;
+const IMAGE_EXTENSION_PATTERN = /\.(png|jpe?g|gif|webp|avif|svg|bmp|tiff?)$/i;
+
+const ultraResourceRef = (fileId: string, name: string): string =>
+  `ultra://resource/${fileId}/${encodeURIComponent(name)}`;
+
+const markdownForUpload = (record: { file_id: string; original_name: string; content_type?: string | null }): string => {
+  const name = record.original_name;
+  const ref = ultraResourceRef(record.file_id, name);
+  const type = record.content_type ?? "";
+  const isMedia =
+    type.startsWith("image/") ||
+    type.startsWith("video/") ||
+    IMAGE_EXTENSION_PATTERN.test(name) ||
+    VIDEO_EXTENSION_PATTERN.test(name);
+  return isMedia ? `![${name}](${ref})` : `[${name}](${ref})`;
+};
+
+/* Captures the FileUpload context's picker opener for the slash menu, which
+   renders outside the place the hook can be called. */
+function FilePickerBridge({ bind }: { bind: (open: () => void) => void }) {
+  const { openFilePicker } = useFileUploadContext();
+  useEffect(() => {
+    bind(openFilePicker);
+  }, [bind, openFilePicker]);
+  return null;
+}
 
 const relativeTime = (iso: string): string => {
   const then = new Date(iso).getTime();
@@ -367,6 +404,19 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       if (!textarea || !draft) {
         return;
       }
+      if (block.id === "media") {
+        // Remove the "/" that opened the menu, then hand off to the picker;
+        // the upload path inserts the reference at this caret.
+        const caret = textarea.selectionStart;
+        const value = textarea.value.slice(0, Math.max(0, caret - 1)) + textarea.value.slice(caret);
+        textarea.value = value;
+        textarea.setSelectionRange(Math.max(0, caret - 1), Math.max(0, caret - 1));
+        updateDraft({ body: value });
+        setActiveNote((current) => (current ? { ...current, body_markdown: value } : current));
+        setSlashOpen(false);
+        filePickerRef.current?.();
+        return;
+      }
       const start = textarea.selectionStart;
       // Replace the "/" that opened the menu.
       const before = textarea.value.slice(0, Math.max(0, start - 1));
@@ -381,6 +431,112 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       textarea.focus();
     },
     [updateDraft]
+  );
+
+  const [uploadingCount, setUploadingCount] = useState(0);
+  const filePickerRef = useRef<(() => void) | null>(null);
+
+  // Invoked from FilePickerBridge's effect (never during render), so the ref
+  // write is safe; hoisting it here keeps the render tree free of mutations.
+  const bindFilePicker = useCallback((open: () => void) => {
+    filePickerRef.current = open;
+  }, []);
+
+  const insertAtCaret = useCallback(
+    (text: string) => {
+      const draft = draftRef.current;
+      if (!draft) {
+        return;
+      }
+      const textarea = bodyRef.current;
+      let nextValue: string;
+      if (textarea && mode === "write") {
+        const start = textarea.selectionStart;
+        const end = textarea.selectionEnd;
+        nextValue = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+        const caret = start + text.length;
+        textarea.value = nextValue;
+        textarea.setSelectionRange(caret, caret);
+        textarea.focus();
+      } else {
+        // Preview mode (or textarea unmounted): append — nothing is lost.
+        const body = draft.body;
+        nextValue = body.length === 0 || body.endsWith("\n") ? body + text : body + "\n" + text;
+      }
+      updateDraft({ body: nextValue });
+      setActiveNote((current) => (current ? { ...current, body_markdown: nextValue } : current));
+    },
+    [mode, updateDraft]
+  );
+
+  /* Dropped/pasted/picked files ride the SAME upload pipeline as chat
+     attachments, so every file cataloged here appears in Resources — one
+     central place to find real data. The note stores only the reference. */
+  const handleNoteFilesAdded = useCallback(
+    async (files: File[]) => {
+      if (!draftRef.current || files.length === 0) {
+        return;
+      }
+      setUploadingCount((count) => count + files.length);
+      try {
+        const response = await apiClient.uploadFiles(files);
+        if (!draftRef.current || response.uploaded.length === 0) {
+          return;
+        }
+        const block = response.uploaded.map(markdownForUpload).join("\n");
+        insertAtCaret(`\n${block}\n`);
+      } catch (error) {
+        setListError(
+          error instanceof Error ? `Upload failed — ${error.message}` : "Upload failed."
+        );
+      } finally {
+        setUploadingCount((count) => Math.max(0, count - files.length));
+      }
+    },
+    [apiClient, insertAtCaret]
+  );
+
+  const handleBodyPaste = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length > 0) {
+        event.preventDefault();
+        void handleNoteFilesAdded(files);
+      }
+    },
+    [handleNoteFilesAdded]
+  );
+
+  /* ultra://resource references resolve at render time: images inline,
+     videos as a native player, other files as plain links — all through the
+     same download endpoint Resources uses. */
+  const previewComponents = useMemo(
+    () => ({
+      img: (props: { src?: string; alt?: string }) => {
+        const match = ULTRA_RESOURCE_PATTERN.exec(props.src ?? "");
+        if (!match) {
+          return <img className="notes-media-img" src={props.src} alt={props.alt ?? ""} loading="lazy" />;
+        }
+        const url = apiClient.resourceDownloadUrl(match[1]);
+        const name = decodeURIComponent(match[2] ?? "");
+        if (VIDEO_EXTENSION_PATTERN.test(name)) {
+          return (
+            <video className="notes-media-video" src={url} controls preload="metadata" aria-label={props.alt || name} />
+          );
+        }
+        return <img className="notes-media-img" src={url} alt={props.alt || name} loading="lazy" />;
+      },
+      a: (props: { href?: string; children?: React.ReactNode }) => {
+        const match = ULTRA_RESOURCE_PATTERN.exec(props.href ?? "");
+        const href = match ? apiClient.resourceDownloadUrl(match[1]) : props.href;
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener">
+            {props.children}
+          </a>
+        );
+      },
+    }),
+    [apiClient]
   );
 
   const handleBodyKeyDown = useCallback(
@@ -527,13 +683,28 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       </aside>
 
       <section className="notes-editor">
+        <FileUpload
+          onFilesAdded={(files) => void handleNoteFilesAdded(files)}
+          multiple
+          className="notes-editor-drop"
+        >
+          <FilePickerBridge bind={bindFilePicker} />
         {activeNote ? (
           <>
             <div className="notes-editor-bar">
               <span className="notes-save-state" data-state={saveState} role="status">
-                {saveState === "saving" ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
-                {saveState === "saved" || saveState === "idle" ? <Check aria-hidden="true" /> : null}
-                {saveLabel}
+                {uploadingCount > 0 ? (
+                  <>
+                    <Loader2 className="animate-spin" aria-hidden="true" />
+                    Uploading {uploadingCount} file{uploadingCount === 1 ? "" : "s"}…
+                  </>
+                ) : (
+                  <>
+                    {saveState === "saving" ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+                    {saveState === "saved" || saveState === "idle" ? <Check aria-hidden="true" /> : null}
+                    {saveLabel}
+                  </>
+                )}
               </span>
               <div className="notes-editor-actions">
                 <Button
@@ -597,8 +768,9 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                   ref={bodyRef}
                   className="notes-body-input"
                   value={activeNote.body_markdown}
-                  placeholder={'Write in markdown — press "/" on an empty line for blocks'}
+                  placeholder={'Write in markdown — "/" for blocks; drop or paste images and videos'}
                   aria-label="Note body"
+                  onPaste={handleBodyPaste}
                   onChange={(event) => {
                     const body = event.target.value;
                     setActiveNote((current) => (current ? { ...current, body_markdown: body } : current));
@@ -633,7 +805,10 @@ export function NotesPage({ apiClient }: NotesPageProps) {
             ) : (
               <div className="notes-preview" data-testid="notes-preview">
                 <Suspense fallback={null}>
-                  <LazyMarkdown className="notes-preview-markdown">
+                  <LazyMarkdown
+                    className="pk-message-content notes-preview-markdown"
+                    components={previewComponents}
+                  >
                     {activeNote.body_markdown.trim() || "*Nothing here yet.*"}
                   </LazyMarkdown>
                 </Suspense>
@@ -647,6 +822,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         ) : (
           <div className="notes-editor-empty">Select a note, or create one.</div>
         )}
+        </FileUpload>
       </section>
     </div>
   );

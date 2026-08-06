@@ -214,6 +214,34 @@ export type RunSteerMessageRecord = {
   updated_at: string;
 };
 
+export type NoteRecord = {
+  note_id: string;
+  title: string;
+  body_markdown: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NoteListItem = {
+  note_id: string;
+  title: string;
+  snippet: string;
+  pinned: boolean;
+  updated_at: string;
+};
+
+export type NoteListResponse = {
+  notes: NoteListItem[];
+  total_count: number;
+};
+
+export type NoteWritePayload = {
+  title?: string;
+  body_markdown?: string;
+  pinned?: boolean;
+};
+
 /** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
 export const isSteeringClosedError = (error: unknown): boolean =>
   error instanceof ApiError &&
@@ -2261,6 +2289,43 @@ export class ApiClient {
       `/v2/runs/${encodeURIComponent(runId)}/steer`
     );
     return response.steer_messages ?? [];
+  }
+
+  /* Notes — the personal layer. Markdown is the source of truth; every call
+     is owner-scoped by the session. */
+  async listNotes(options?: { query?: string; limit?: number; offset?: number }): Promise<NoteListResponse> {
+    const params = new URLSearchParams();
+    if (options?.query?.trim()) params.set("query", options.query.trim());
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.fetchJson<NoteListResponse>(`/v2/notes${suffix}`);
+  }
+
+  async createNote(payload: NoteWritePayload = {}): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getNote(noteId: string): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`);
+  }
+
+  async updateNote(noteId: string, payload: NoteWritePayload): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteNote(noteId: string): Promise<void> {
+    await this.fetchJson<{ status: string }>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+      method: "DELETE",
+    });
   }
 
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {

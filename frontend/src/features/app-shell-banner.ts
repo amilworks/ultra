@@ -1,4 +1,4 @@
-type ActivePanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
+type ActivePanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 
 export const MISSING_REQUESTED_CONVERSATION_MESSAGE =
   "Requested chat was not found. Opened the latest available conversation instead.";

@@ -299,6 +299,7 @@ import {
   Images,
   Layers,
   Link2,
+  NotebookPen,
   Pencil,
   Plus,
   PlusIcon,
@@ -353,7 +354,7 @@ type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
 type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
-type ActivePanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
+type ActivePanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 type ComposerIntelligenceMode = "high" | "pro";
 type BisqueResourceCounts = {
   image: number;
@@ -539,6 +540,7 @@ const LazyResourceBrowser = lazyNamed(
   loadResourceBrowserModule,
   "ResourceBrowser"
 );
+const LazyNotesPage = lazyNamed(() => import("./components/NotesPage"), "NotesPage");
 const LazyComposerSlashMenu = lazyNamed(
   loadComposerSlashMenuModule,
   "ComposerSlashMenu"
@@ -1041,6 +1043,7 @@ const browserPreviewExtensions = new Set([
 
 const NEW_CHAT_SHORTCUT_KEY = "k";
 const RESOURCES_SHORTCUT_KEY = "e";
+const NOTES_SHORTCUT_KEY = "u";
 const TRAINING_SHORTCUT_KEY = "t";
 const GO_TO_BISQUE_SHORTCUT_KEY = "o";
 
@@ -6837,6 +6840,13 @@ export function App() {
     setResourceRefreshToken((value) => value + 1);
   }, [rememberActiveConversationScrollPosition]);
 
+  const openNotesPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
+    setActivePanel("notes");
+    setViewerOpen(false);
+    setResourceViewerContext(null);
+  }, [rememberActiveConversationScrollPosition]);
+
   const openTrainingPanel = useCallback((): void => {
     rememberActiveConversationScrollPosition();
     setActivePanel("training");
@@ -6879,6 +6889,8 @@ export function App() {
           ? createNewConversation
           : key === RESOURCES_SHORTCUT_KEY
             ? openResourcesPanel
+            : key === NOTES_SHORTCUT_KEY
+              ? openNotesPanel
             : key === TRAINING_SHORTCUT_KEY
               ? openTrainingPanel
             : key === GO_TO_BISQUE_SHORTCUT_KEY
@@ -6899,6 +6911,7 @@ export function App() {
     authStatus,
     createNewConversation,
     openBisqueHome,
+    openNotesPanel,
     openResourcesPanel,
     openTrainingPanel,
   ]);
@@ -12866,6 +12879,8 @@ export function App() {
   const mobileShellTitle =
     activePanel === "resources"
       ? "Resources"
+      : activePanel === "notes"
+        ? "Notes"
       : activePanel === "training"
         ? "Training"
         : activePanel === "admin"
@@ -13001,6 +13016,30 @@ export function App() {
                   </kbd>
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     E
+                  </kbd>
+                </span>
+              </Button>
+              <Button
+                variant={activePanel === "notes" ? "secondary" : "ghost"}
+                className="app-resource-browser-button group/notes mb-1 flex w-full items-center justify-between gap-2"
+                onClick={openNotesPanel}
+                title="Notes (⌘+Shift+U)"
+                aria-keyshortcuts="Control+Shift+U Meta+Shift+U"
+                {...mobileSidebarCloseProps}
+              >
+                <span className="flex items-center gap-2">
+                  <NotebookPen className="size-4" />
+                  <span>Notes</span>
+                </span>
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/notes:opacity-100">
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    ⌘
+                  </kbd>
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    ⇧
+                  </kbd>
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    U
                   </kbd>
                 </span>
               </Button>
@@ -13561,6 +13600,17 @@ export function App() {
                 onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
                 onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
               />
+            </Suspense>
+          ) : activePanel === "notes" ? (
+            <Suspense
+              fallback={
+                <PanelLoadingState
+                  title="Loading notes..."
+                  subtitle="Your notes stay out of the main bundle until you open them."
+                />
+              }
+            >
+              <LazyNotesPage apiClient={apiClient} />
             </Suspense>
           ) : activePanel === "training" ? (
             <Suspense

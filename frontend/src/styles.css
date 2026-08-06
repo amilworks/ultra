@@ -5027,6 +5027,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .notes-ribbon {
   display: flex;
   align-items: center;
+  /* Wraps on narrow panes (the contextual table chips take a second quiet
+     row) — the phone regime overrides to one sideways-scrolling row. */
+  flex-wrap: wrap;
   gap: 2px;
   width: min(100%, 46rem);
   padding: 2px 0 8px;

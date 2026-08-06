@@ -13,6 +13,7 @@ const ultraUrlTransform = (url: string): string =>
   url.startsWith("ultra://") ? url : defaultUrlTransform(url);
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { remarkHighlight } from "@/lib/remarkHighlight";
 import { Button } from "@/components/ui/button";
 import {
   HoverCard,
@@ -717,8 +718,8 @@ function MarkdownComponent({
   const remarkPlugins = useMemo<Array<unknown>>(
     () =>
       mathPlugins
-        ? [remarkGfm, remarkNumericColumnAlign, remarkBreaks, mathPlugins.remarkMath]
-        : [remarkGfm, remarkNumericColumnAlign, remarkBreaks],
+        ? [remarkGfm, remarkHighlight, remarkNumericColumnAlign, remarkBreaks, mathPlugins.remarkMath]
+        : [remarkGfm, remarkHighlight, remarkNumericColumnAlign, remarkBreaks],
     [mathPlugins]
   );
   const rehypePlugins = useMemo<Array<unknown>>(

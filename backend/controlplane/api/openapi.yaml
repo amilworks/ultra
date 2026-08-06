@@ -5732,7 +5732,7 @@ components:
         run_id: { type: string, nullable: true }
     V2NoteRecord:
       type: object
-      required: [note_id, title, body_markdown, pinned, created_at, updated_at]
+      required: [note_id, title, body_markdown, pinned, editor_mode, created_at, updated_at]
       properties:
         note_id: { type: string }
         user_id: { type: string, nullable: true }
@@ -5740,6 +5740,7 @@ components:
         title: { type: string }
         body_markdown: { type: string }
         pinned: { type: boolean }
+        editor_mode: { type: string, enum: [markdown, plaintext] }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     V2NoteListItem:
@@ -5766,6 +5767,7 @@ components:
         title: { type: string, nullable: true }
         body_markdown: { type: string, nullable: true }
         pinned: { type: boolean, nullable: true }
+        editor_mode: { type: string, enum: [markdown, plaintext], nullable: true }
     V2ThreadRecord:
       type: object
       required: [thread_id, status, created_at, updated_at, metadata]

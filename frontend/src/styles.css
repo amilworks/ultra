@@ -5358,6 +5358,55 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    ring (rules live beside the frames). */
 .notes-md-media { display: inline-block; max-width: 100%; }
 
+/* LaTeX atoms: KaTeX renders the formula; click flips to a raw-TeX editor
+   in place. The affordance is a quiet hover pill — math is content, and its
+   chrome stays out of the way. */
+.notes-math-inline {
+  display: inline-block;
+  padding: 0 0.15em;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.notes-math-inline:hover { background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent); }
+
+.notes-math-block {
+  display: block;
+  margin: 0.5rem 0;
+  padding: 0.65rem 0.9rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.notes-math-block:hover { background: color-mix(in oklab, var(--sidebar-accent) 55%, transparent); }
+
+.notes-math-inline.is-selected,
+.notes-math-block.is-selected { box-shadow: 0 0 0 2px var(--ring); }
+
+.notes-math-editor {
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-size: 0.84rem;
+  color: var(--text-main);
+  background: var(--popover);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 7px;
+  padding: 0.25rem 0.5rem;
+  outline: none;
+  min-width: 12ch;
+}
+
+.notes-math-editor-block {
+  display: block;
+  width: 100%;
+  min-height: 3.2rem;
+  resize: vertical;
+  text-align: left;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
 /* Media blocks: quiet frames in the house geometry. The preview column, not
    the file, bounds them; video keeps a dark stage so letterboxing reads as
    intentional in both themes. */

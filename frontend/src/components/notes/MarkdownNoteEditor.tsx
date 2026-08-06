@@ -50,6 +50,7 @@ import {
   wrapInOrderedListCommand,
 } from "@milkdown/kit/preset/commonmark";
 import {
+  addRowAfterCommand,
   gfm,
   goToNextTableCellCommand,
   goToPrevTableCellCommand,
@@ -67,6 +68,11 @@ import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 
 import { parseUltraResourceRef, VIDEO_EXTENSION_PATTERN } from "@/lib/ultraResource";
 import { withNotesDialect } from "@/components/notes/notesDialect";
+import { notesMath } from "@/components/notes/notesMath";
+import { sanitizePastedHtml } from "@/components/notes/notesPaste";
+// KaTeX styles ride this lazy chunk — the same stylesheet the chat renderer
+// loads with its math enhancement.
+import "katex/dist/katex.min.css";
 import {
   highlightSchema,
   toggleHighlightCommand,
@@ -165,7 +171,12 @@ const notesKeymap = $useKeymap("ultraNotesKeymap", {
     command: (ctx) => {
       const commands = ctx.get(commandsCtx);
       return () =>
-        commands.call(goToNextTableCellCommand.key) || commands.call(sinkListItemCommand.key);
+        commands.call(goToNextTableCellCommand.key) ||
+        // Docs/Word basic: Tab in the LAST cell grows the table by a row.
+        // addRowAfter succeeds only inside a table, so prose is untouched.
+        (commands.call(addRowAfterCommand.key) &&
+          commands.call(goToNextTableCellCommand.key)) ||
+        commands.call(sinkListItemCommand.key);
     },
   },
   TableOrListShiftTab: {
@@ -284,6 +295,10 @@ function MarkdownNoteEditorCore({
           ctx.set(defaultValueCtx, initialMarkdownRef.current);
           ctx.update(editorViewOptionsCtx, (options) => ({
             ...options,
+            // Pasted chat answers and Word fragments get rewritten toward
+            // plainness (KaTeX → math atoms, code chrome shed, checkbox
+            // inputs → task items) before ProseMirror parses them.
+            transformPastedHTML: sanitizePastedHtml,
             attributes: {
               // House reading voice on the editable surface itself — the
               // styled note IS the editor. pk-markdown carries the list and
@@ -326,6 +341,7 @@ function MarkdownNoteEditorCore({
         .use(history)
         .use(clipboard)
         .use(ultraHighlight)
+        .use(notesMath)
         .use(notesKeymap)
         .use(mediaView),
     []
@@ -407,8 +423,18 @@ function MarkdownNoteEditorCore({
       },
     };
     bindApi(api);
+    if (import.meta.env.DEV) {
+      // Test hook for the stress harness: real-typing simulation must go
+      // through handleTextInput (the path input rules live on), which
+      // synthetic DOM events cannot reach. Dev builds only.
+      (window as unknown as { __notesEditorView?: unknown }).__notesEditorView = () =>
+        get()?.ctx.get(editorViewCtx);
+    }
     return () => {
       bindApi(null);
+      if (import.meta.env.DEV) {
+        delete (window as unknown as { __notesEditorView?: unknown }).__notesEditorView;
+      }
     };
   }, [bindApi, get]);
 

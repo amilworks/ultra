@@ -50,6 +50,7 @@ import {
   wrapInOrderedListCommand,
 } from "@milkdown/kit/preset/commonmark";
 import {
+  addColAfterCommand,
   addRowAfterCommand,
   gfm,
   goToNextTableCellCommand,
@@ -59,11 +60,16 @@ import {
   strikethroughSchema,
 } from "@milkdown/kit/preset/gfm";
 import { clipboard } from "@milkdown/kit/plugin/clipboard";
+import { cursor } from "@milkdown/kit/plugin/cursor";
 import { history } from "@milkdown/kit/plugin/history";
 import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
-import type { MarkType } from "@milkdown/kit/prose/model";
+import { trailing } from "@milkdown/kit/plugin/trailing";
+import { exitCode } from "@milkdown/kit/prose/commands";
+import type { MarkType, Node as ProseNode } from "@milkdown/kit/prose/model";
+import { Plugin } from "@milkdown/kit/prose/state";
+import { deleteColumn, deleteRow, deleteTable } from "@milkdown/kit/prose/tables";
 import type { NodeViewConstructor } from "@milkdown/kit/prose/view";
-import { $useKeymap, $view, callCommand, insert } from "@milkdown/kit/utils";
+import { $prose, $useKeymap, $view, callCommand, insert } from "@milkdown/kit/utils";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 
 import { parseUltraResourceRef, VIDEO_EXTENSION_PATTERN } from "@/lib/ultraResource";
@@ -91,7 +97,12 @@ export type NotesEditorAction =
   | "h2"
   | "h3"
   | "body"
-  | "table";
+  | "table"
+  | "rowBelow"
+  | "rowDelete"
+  | "colRight"
+  | "colDelete"
+  | "tableDelete";
 
 export type NotesActiveStates = {
   bold: boolean;
@@ -102,6 +113,8 @@ export type NotesActiveStates = {
   link: boolean;
   linkHref: string | null;
   block: "h2" | "h3" | "body" | "other";
+  /** Caret inside a table — the ribbon shows the row/column controls. */
+  inTable: boolean;
 };
 
 export const IDLE_ACTIVE_STATES: NotesActiveStates = {
@@ -113,6 +126,7 @@ export const IDLE_ACTIVE_STATES: NotesActiveStates = {
   link: false,
   linkHref: null,
   block: "body",
+  inTable: false,
 };
 
 export type NotesEditorHandle = {
@@ -187,6 +201,18 @@ const notesKeymap = $useKeymap("ultraNotesKeymap", {
         commands.call(goToPrevTableCellCommand.key) || commands.call(liftListItemCommand.key);
     },
   },
+  /* ⌘⏎ steps out of a code block (or any block that eats Enter) into a fresh
+     paragraph below — the deliberate exit; ArrowDown works too because the
+     trailing plugin keeps a paragraph after every last block. */
+  ExitCodeBlock: {
+    shortcuts: "Mod-Enter",
+    command: (ctx) => {
+      return () => {
+        const view = ctx.get(editorViewCtx);
+        return exitCode(view.state, view.dispatch);
+      };
+    },
+  },
 });
 
 const markIsActive = (ctx: Ctx, type: MarkType | undefined): boolean => {
@@ -205,12 +231,15 @@ const readActiveStates = (ctx: Ctx): NotesActiveStates => {
   const state = ctx.get(editorStateCtx);
   const { $from } = state.selection;
   let block: NotesActiveStates["block"] = "body";
+  let inTable = false;
   for (let depth = $from.depth; depth >= 0; depth -= 1) {
     const node = $from.node(depth);
-    if (node.type === headingSchema.type(ctx)) {
+    if (node.type.name === "table") {
+      inTable = true;
+    }
+    if (block === "body" && node.type === headingSchema.type(ctx)) {
       const level = Number(node.attrs.level ?? 0);
       block = level === 2 ? "h2" : level === 3 ? "h3" : "other";
-      break;
     }
   }
   const linkType = linkSchema.type(ctx);
@@ -229,8 +258,59 @@ const readActiveStates = (ctx: Ctx): NotesActiveStates => {
     link: linkActive,
     linkHref,
     block,
+    inTable,
   };
 };
+
+/* Clicking a task checkbox toggles it. The box renders in the list gutter —
+   OUTSIDE the item's content box — so the click arrives as a position, not
+   a node: handleClick (not handleClickOn) is the hook that always fires.
+   Any click left of the item's content edge is the checkbox, unambiguously.
+   Serialization is just [x] ⇄ [ ]. */
+const taskTogglePlugin = $prose(
+  () =>
+    new Plugin({
+      props: {
+        handleClick: (view, pos, event) => {
+          const $pos = view.state.doc.resolve(pos);
+          let item: ProseNode | null = null;
+          let itemPos: number | null = null;
+          // Clicks inside the item's text resolve deep — walk the ancestors.
+          for (let depth = $pos.depth; depth > 0; depth -= 1) {
+            const node = $pos.node(depth);
+            if (node.type.name === "list_item" && node.attrs.checked != null) {
+              item = node;
+              itemPos = $pos.before(depth);
+              break;
+            }
+          }
+          // Gutter clicks (where the box actually lives) resolve BETWEEN
+          // items, at bullet_list depth — the clicked item is nodeAfter.
+          if (!item && $pos.nodeAfter?.type.name === "list_item" && $pos.nodeAfter.attrs.checked != null) {
+            item = $pos.nodeAfter;
+            itemPos = pos;
+          }
+          if (!item || itemPos == null) {
+            return false;
+          }
+          const dom = view.nodeDOM(itemPos);
+          if (
+            !(dom instanceof HTMLElement) ||
+            event.clientX > dom.getBoundingClientRect().left - 2
+          ) {
+            return false;
+          }
+          view.dispatch(
+            view.state.tr.setNodeMarkup(itemPos, undefined, {
+              ...item.attrs,
+              checked: !item.attrs.checked,
+            })
+          );
+          return true;
+        },
+      },
+    })
+);
 
 function MarkdownNoteEditorCore({
   defaultMarkdown,
@@ -329,10 +409,18 @@ function MarkdownNoteEditorCore({
               if (activeFrameRef.current !== null) {
                 return;
               }
-              activeFrameRef.current = window.requestAnimationFrame(() => {
+              // A short timeout, not requestAnimationFrame: rAF freezes in
+              // hidden tabs, which would stall ribbon state until the next
+              // visible frame. A timer coalesces bursts just as well.
+              activeFrameRef.current = window.setTimeout(() => {
                 activeFrameRef.current = null;
-                callbacksRef.current.onActiveStatesChange(readActiveStates(listenerInnerCtx));
-              });
+                const states = readActiveStates(listenerInnerCtx);
+                if (import.meta.env.DEV) {
+                  // Stress-harness breadcrumb, dev builds only.
+                  (window as unknown as { __notesLastStates?: unknown }).__notesLastStates = states;
+                }
+                callbacksRef.current.onActiveStatesChange(states);
+              }, 32);
             });
         })
         .use(commonmark)
@@ -340,9 +428,14 @@ function MarkdownNoteEditorCore({
         .use(listener)
         .use(history)
         .use(clipboard)
+        // Drop/gap cursors + a guaranteed trailing paragraph: there is always
+        // a place to arrow-down to after a code block, table, or formula.
+        .use(cursor)
+        .use(trailing)
         .use(ultraHighlight)
         .use(notesMath)
         .use(notesKeymap)
+        .use(taskTogglePlugin)
         .use(mediaView),
     []
   );
@@ -390,6 +483,30 @@ function MarkdownNoteEditorCore({
             break;
           case "table":
             editor.action(callCommand(insertTableCommand.key, { row: 3, col: 3 }));
+            break;
+          case "rowBelow":
+            editor.action(callCommand(addRowAfterCommand.key));
+            break;
+          case "colRight":
+            editor.action(callCommand(addColAfterCommand.key));
+            break;
+          case "rowDelete":
+            editor.action((ctx) => {
+              const view = ctx.get(editorViewCtx);
+              deleteRow(view.state, view.dispatch);
+            });
+            break;
+          case "colDelete":
+            editor.action((ctx) => {
+              const view = ctx.get(editorViewCtx);
+              deleteColumn(view.state, view.dispatch);
+            });
+            break;
+          case "tableDelete":
+            editor.action((ctx) => {
+              const view = ctx.get(editorViewCtx);
+              deleteTable(view.state, view.dispatch);
+            });
             break;
         }
         api.focus();
@@ -441,7 +558,7 @@ function MarkdownNoteEditorCore({
   useEffect(() => {
     return () => {
       if (activeFrameRef.current !== null) {
-        window.cancelAnimationFrame(activeFrameRef.current);
+        window.clearTimeout(activeFrameRef.current);
       }
     };
   }, []);

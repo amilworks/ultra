@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>scene3d wire-format harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b0f12; color: #cbd8dd;
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+      #stage { position: absolute; inset: 0; }
+      #hud { position: absolute; left: 10px; top: 10px; z-index: 5; line-height: 1.7;
+        text-shadow: 0 1px 2px #000; white-space: pre; pointer-events: none; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
+    <div id="hud">booting…</div>
+    <script type="module" src="/src/dev/scene3dHarness.ts"></script>
+  </body>
+</html>

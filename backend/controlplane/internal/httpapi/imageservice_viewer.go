@@ -599,6 +599,15 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		deps.writeNiftiUploadViewer(w, root, record, path)
 		return
 	}
+	// 3D scenes (Gaussian splats / point clouds) are served from a derived, chunked
+	// stream and must be routed BEFORE the libbioimage probe below: a .ply has no
+	// pixel geometry, so the engine can only 415 it and the undecodable path would
+	// then enqueue a pointless imgcnv transcode of a multi-gigabyte scene. See scene3d.go.
+	if info, isScene := scene3dPeek(record, path); isScene {
+		deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		deps.writeScene3dViewer(w, record, info, path)
+		return
+	}
 	// OME-Zarr (and other ngff-served special formats) is served natively by the
 	// ngff-service — its viewer-info comes from the zarr store, and the Lens viewer
 	// consumes it identically to a libbioimage image. Routed via an ngffDeps copy so the

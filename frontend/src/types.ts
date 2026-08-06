@@ -1838,8 +1838,107 @@ export type CiftiViewerData = {
   service_urls: { carpet?: string; connectivity?: string; download?: string };
 };
 
+/** One derived chunk of a scene3d layer, as declared by the manifest (contract §6). */
+export type Scene3dChunkInfo = {
+  index: number;
+  count: number;
+  bytes: number;
+  /** Chunk origin in world coordinates; coordinates inside the chunk are chunk-local. */
+  origin: [number, number, number];
+  /** [minx, miny, minz, maxx, maxy, maxz], chunk-local. */
+  bbox: number[];
+};
+
+/** What the derive gave up to fit the wire format. Rendered verbatim in provenance. */
+export type Scene3dQuantization = {
+  center?: string;
+  scale?: string;
+  rotation?: string;
+  color?: string;
+  /** Fraction of colours clamped into [0,1] when linearising the DC term. */
+  clamped_color_fraction?: number;
+};
+
+export type Scene3dLayer = {
+  type: "splats" | "points" | "cameras" | string;
+  encoding: "usx-v1" | "upc-v1" | "json" | string;
+  /** Elements in the SOURCE, not in the chunks — the denominator of every honesty line. */
+  total: number;
+  chunks: Scene3dChunkInfo[];
+  /** tiers[k] lists the chunk indices needed for level k; tier 0 is full spatial coverage. */
+  tiers: number[][];
+  activation_domain: string;
+  source_frame: "rdf" | "rub" | "source" | string;
+  quantization: Scene3dQuantization;
+};
+
+export type Scene3dWorld = {
+  /** Never "meters" without a user reference — the scale bar says "unit" otherwise. */
+  units: "arbitrary" | "meters" | string;
+  up_axis: "unknown" | "y" | "z" | string;
+  up_axis_basis: "unknown" | "heuristic" | "declared" | "user" | string;
+  frame: string;
+  /** [minx, miny, minz, maxx, maxy, maxz] in the source world frame. */
+  bbox: number[];
+  /**
+   * The derive's 1st..99th percentile box — what the camera frames on. Dense
+   * reconstructions carry far-field outliers that make `bbox` orders of magnitude larger
+   * than the scene worth showing (measured: 0.9% of the bbox diagonal on the COLMAP
+   * corridor fixture). Absent on manifests written before this field existed.
+   */
+  bbox_robust?: number[];
+};
+
+export type Scene3dSource = {
+  format: string;
+  writer?: string | null;
+  vertex_count: number;
+  bytes: number;
+  declared_sh_degree: number;
+  /** MEASURED by scanning the data, never the declared value. */
+  measured_sh_degree: number;
+  stride_bytes: number;
+};
+
+/** A resolved, ready-to-render scene3d manifest (contract §6). */
+export type Scene3dManifest = {
+  schema: string;
+  scene_kind: "splat" | "pointcloud" | "colmap" | string;
+  source: Scene3dSource;
+  world: Scene3dWorld;
+  layers: Scene3dLayer[];
+  /** The CIFTI honesty field: plain sentences saying what the viewer is NOT doing. */
+  limitations: string[];
+  service_urls: { chunk?: string; download?: string };
+};
+
+/**
+ * What `GET /v2/uploads/{id}/scene3d/manifest` actually returns. A ready derive
+ * returns the full contract §6 body; while the derive job is still running (or has
+ * written its `.failed` marker) the control plane answers with the same envelope
+ * carrying only `status`, so every field below is optional and the shell resolves it.
+ */
+export type Scene3dManifestResponse = Partial<Scene3dManifest> & {
+  status?: "ready" | "deriving" | "failed" | string;
+  /** 0..1 when the derive worker reports progress; absent otherwise. */
+  progress?: number | null;
+  /** Why the derive failed — shown beside the download card. */
+  error?: string | null;
+};
+
+/** Present for kind:"scene3d" — the slot the viewer ladder stamps on the /viewer response. */
+export type Scene3dViewerData = {
+  /** Derive-job state at the moment /viewer was served; the shell re-checks by polling. */
+  status: "ready" | "deriving" | "failed" | string;
+  scene_kind: "splat" | "pointcloud" | "colmap" | string;
+  /** Source element count if the header sniff found one; 0 when unknown. */
+  element_count: number;
+  message?: string | null;
+  service_urls: { manifest?: string; chunk?: string; download?: string };
+};
+
 export type UploadViewerInfo = {
-  kind?: "image" | "hdf5" | "cifti" | "unsupported" | string;
+  kind?: "image" | "hdf5" | "cifti" | "scene3d" | "unsupported" | string;
   file_id: string;
   original_name: string;
   /**
@@ -2260,6 +2359,8 @@ export type UploadViewerInfo = {
   } | null;
   /** Present for kind:"cifti" — drives the grayordinate carpet + connectivity views. */
   cifti?: CiftiViewerData | null;
+  /** Present for kind:"scene3d" — splats / point maps / posed cameras. */
+  scene3d?: Scene3dViewerData | null;
 };
 
 export type CiftiCarpetResponse = {

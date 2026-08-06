@@ -22,6 +22,9 @@ func (s *MemoryStore) CreateNote(ctx context.Context, record domain.NoteRecord) 
 	if _, exists := s.notes[record.NoteID]; exists {
 		return domain.NoteRecord{}, ErrConflict
 	}
+	if record.EditorMode == "" {
+		record.EditorMode = domain.NoteEditorModeMarkdown
+	}
 	record.UpdatedAt = record.CreatedAt
 	s.notes[record.NoteID] = record
 	return record, nil
@@ -54,6 +57,9 @@ func (s *MemoryStore) UpdateNoteForUser(ctx context.Context, noteID string, user
 	}
 	if input.Pinned != nil {
 		record.Pinned = *input.Pinned
+	}
+	if input.EditorMode != nil {
+		record.EditorMode = *input.EditorMode
 	}
 	record.UpdatedAt = domain.Now()
 	s.notes[noteID] = record

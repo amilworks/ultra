@@ -214,11 +214,15 @@ export type RunSteerMessageRecord = {
   updated_at: string;
 };
 
+export type NoteEditorMode = "markdown" | "plaintext";
+
 export type NoteRecord = {
   note_id: string;
   title: string;
   body_markdown: string;
   pinned: boolean;
+  /** Sticky per-note editing surface; the body is markdown in either mode. */
+  editor_mode: NoteEditorMode;
   created_at: string;
   updated_at: string;
 };
@@ -240,6 +244,7 @@ export type NoteWritePayload = {
   title?: string;
   body_markdown?: string;
   pinned?: boolean;
+  editor_mode?: NoteEditorMode;
 };
 
 /** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
@@ -2298,8 +2303,11 @@ export class ApiClient {
     if (options?.query?.trim()) params.set("query", options.query.trim());
     if (options?.limit) params.set("limit", String(options.limit));
     if (options?.offset) params.set("offset", String(options.offset));
+    // Plain concatenation on purpose: the openapi route-documentation test
+    // scans string literals, and `/v2/notes${…}` reads as an undocumented
+    // route pattern instead of /v2/notes plus a query string.
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.fetchJson<NoteListResponse>(`/v2/notes${suffix}`);
+    return await this.fetchJson<NoteListResponse>("/v2/notes" + suffix);
   }
 
   async createNote(payload: NoteWritePayload = {}): Promise<NoteRecord> {

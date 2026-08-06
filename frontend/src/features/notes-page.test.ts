@@ -25,6 +25,14 @@ const markdownSource = readFileSync(
   path.join(process.cwd(), "src/components/prompt-kit/markdown.tsx"),
   "utf8"
 );
+const editorSource = readFileSync(
+  path.join(process.cwd(), "src/components/notes/MarkdownNoteEditor.tsx"),
+  "utf8"
+);
+const ultraLibSource = readFileSync(
+  path.join(process.cwd(), "src/lib/ultraResource.ts"),
+  "utf8"
+);
 
 describe("navigation", () => {
   it("sits directly below Resources in the sidebar with its own shortcut", () => {
@@ -61,9 +69,12 @@ describe("frictionless editing", () => {
     expect(pageSource).toMatch(/items\.length === 0[\s\S]{0,120}void createNote\(\)/);
   });
 
-  it("title Enter/Tab drops straight into the body", () => {
+  it("title Enter/Tab drops straight into the body — whichever surface is active", () => {
     expect(pageSource).toMatch(
-      /event\.key === "Enter" \|\| event\.key === "Tab"[\s\S]{0,120}bodyRef\.current\?\.focus\(\)/
+      /event\.key === "Enter" \|\| event\.key === "Tab"[\s\S]{0,320}bodyRef\.current\?\.focus\(\)/
+    );
+    expect(pageSource).toMatch(
+      /event\.key === "Enter" \|\| event\.key === "Tab"[\s\S]{0,320}editorApiRef\.current\?\.focus\(\)/
     );
   });
 
@@ -82,10 +93,14 @@ describe("frictionless editing", () => {
     expect(pageSource).not.toMatch(/>\s*Save\s*</);
   });
 
-  it("previews through the SAME markdown pipeline as chat answers", () => {
-    expect(pageSource).toContain(
-      'import { LazyMarkdown } from "@/components/prompt-kit/lazy-markdown"'
-    );
+  it("the Markdown surface wears the chat reading voice — no separate preview exists", () => {
+    // The editable ProseMirror root carries pk-message-content, so a note's
+    // tables and code read exactly like an answer's while being edited.
+    expect(editorSource).toContain('class: "pk-message-content pk-markdown notes-md-prose"');
+    // Preview retired: the page no longer renders through the react-markdown
+    // preview path. (LazyMarkdownNoteEditor is the editor, not a preview.)
+    expect(pageSource).not.toContain('from "@/components/prompt-kit/lazy-markdown"');
+    expect(pageSource).not.toContain("notes-preview");
   });
 
   it("opens the slash menu only at line starts and inserts markdown blocks", () => {
@@ -132,21 +147,16 @@ describe("media in notes — one pipeline, one catalog", () => {
   });
 
   it("stores portable ultra:// references, never absolute URLs", () => {
-    expect(pageSource).toContain("ultra://resource/");
+    expect(ultraLibSource).toContain("ultra://resource/");
     expect(pageSource).toMatch(/markdownForUpload/);
     expect(pageSource).not.toMatch(/insertAtCaret\(`\\n!\[.*http/);
   });
 
   it("renders video references as a native player and images inline, resolved through the Resources download URL", () => {
-    expect(pageSource).toContain("VIDEO_EXTENSION_PATTERN.test(name)");
-    expect(pageSource).toContain('className="notes-media-video"');
-    expect(pageSource).toContain("controls");
-    expect(pageSource).toContain("resourceDownloadUrl(match[1])");
-  });
-
-  it("previews in the house markdown voice — pk-message-content, no private dialect", () => {
-    expect(pageSource).toContain('className="pk-message-content notes-preview-markdown"');
-    expect(pageSource).toContain("components={previewComponents}");
+    expect(editorSource).toContain("VIDEO_EXTENSION_PATTERN.test(name)");
+    expect(editorSource).toContain('"notes-media-video"');
+    expect(editorSource).toContain("video.controls = true");
+    expect(pageSource).toContain("apiClient.resourceDownloadUrl(fileId)");
   });
 
   it("whispers upload progress in the same voice as autosave", () => {
@@ -171,14 +181,15 @@ describe("the ultra:// scheme in shared markdown", () => {
   });
 });
 
-describe("write mode is the raw source — and the type says so", () => {
-  it("body edits in the house mono; preview flips to the reading face", () => {
+describe("plaintext mode is the raw source — and the type says so", () => {
+  it("body edits in the house mono; Markdown mode flips to the reading face", () => {
     const body = styles.match(/\.notes-body-input\s*\{[^}]*\}/s)?.[0];
     expect(body).toContain('"JetBrains Mono"');
     expect(body).toContain("font-variant-ligatures: none;");
     expect(body).toContain("tab-size: 2;");
-    // Preview keeps the chat reading voice — the mode contrast IS the signal.
-    expect(pageSource).toContain('className="pk-message-content notes-preview-markdown"');
+    // The typographic flip IS the mode signal: the other surface reads like
+    // a chat answer.
+    expect(editorSource).toContain('class: "pk-message-content pk-markdown notes-md-prose"');
   });
 
   it("Tab indents inside the body instead of escaping the editor", () => {

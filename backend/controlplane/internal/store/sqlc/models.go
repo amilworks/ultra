@@ -165,6 +165,7 @@ type ControlNote struct {
 	Title        string             `json:"title"`
 	BodyMarkdown string             `json:"body_markdown"`
 	Pinned       bool               `json:"pinned"`
+	EditorMode   string             `json:"editor_mode"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }

@@ -224,6 +224,36 @@ describe("de-boxed chrome — depth by value, edges only where real", () => {
   });
 });
 
+describe("the composer — calm focus, and a baseline that records", () => {
+  it("reserves the 2px focus line for the keyboard", () => {
+    // Clicking the product's most-used text control is self-announcing (the
+    // caret); the old :focus-within rule fired a 2px ink line across it on
+    // every click. Pointer focus now lights nothing; :has(:focus-visible)
+    // scopes the WCAG 2.4.11 indicator to keyboard users.
+    expect(stylesSource).not.toMatch(
+      /\.app-composer-card:focus-within\s*\{[^}]*box-shadow:\s*inset/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-composer-card:has\(\.app-composer-textarea:focus-visible\)\s*\{[^}]*box-shadow:\s*inset 0 1px 0 var\(--text-muted\);/s
+    );
+  });
+
+  it("writes the recorder trace on the baseline only while running", () => {
+    // A line earns its place by recording something: while a run is live the
+    // brass trace lies ON the composer's top hairline. Brass touches this
+    // control at no other time.
+    expect(stylesSource).toMatch(
+      /\.app-composer-recorder\s*\{[^}]*color:\s*var\(--accent-live\);/s
+    );
+    expect(stylesSource).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.app-composer-recorder path\s*\{\s*animation:\s*none;\s*stroke-dashoffset:\s*0;/s
+    );
+    expect(appSource).toMatch(
+      /\{activeSending \? \(\s*<TraceIcon className="app-composer-recorder" aria-hidden="true" \/>\s*\) : null\}/
+    );
+  });
+});
+
 describe("the field — one impossibility, welcome stage only", () => {
   it("mounts MeridianField on the blank welcome and nowhere else", () => {
     expect(appSource).toMatch(/blank-chat-welcome">\s*<MeridianField \/>/);

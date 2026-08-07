@@ -249,6 +249,8 @@ import type {
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
+import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
+import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -2583,6 +2585,7 @@ const ConversationTranscript = memo(
               </div>
             ) : (
               <div className="blank-chat-welcome">
+                <MeridianField />
                 <div className="blank-chat-welcome-greeting">
                   {welcomeName ? (
                     <p className="blank-chat-welcome-eyebrow">
@@ -13788,6 +13791,15 @@ export function App() {
                 multiple
                 allowDirectories
               >
+                {/* The recorder: while the instrument runs, the composer's
+                    baseline carries the trace — the one moment brass may touch
+                    this control. It lives on the FileUpload wrapper, NOT inside
+                    the card: the card clips (overflow: hidden), and a trace
+                    centred on the border loses every upward peak to that clip —
+                    it shipped once as a flat line with a single dip. */}
+                {activeSending ? (
+                  <RecorderTraceIcon className="app-composer-recorder" />
+                ) : null}
                 <PromptInput
                   /* Hydration is the ONLY thing that disables typing. Folding
                      activeSending in here disabled the textarea for the whole

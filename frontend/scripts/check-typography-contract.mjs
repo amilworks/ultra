@@ -246,11 +246,15 @@ check(
   "Wordmark must expose one accessible name and hide its split visual spans"
 );
 
+// Meridian ladder rungs (emphasis = m0, context = m1), measured against the
+// SIDEBAR ground the wordmark sits on in each theme — not white/black, which
+// no Meridian surface is. Keep in sync with src/typography.css and the ladder
+// pins in src/features/light-theme-ink.test.ts.
 for (const [token, expected, background] of [
-  ["context-light", "#52525b", "#ffffff"],
-  ["emphasis-light", "#171717", "#ffffff"],
-  ["context-dark", "#a1a1aa", "#111113"],
-  ["emphasis-dark", "#f5f5f5", "#111113"],
+  ["context-light", "#424547", "#e9ebeb"],
+  ["emphasis-light", "#171b1d", "#e9ebeb"],
+  ["context-dark", "#a5abb0", "#0f1214"],
+  ["emphasis-dark", "#dce3ea", "#0f1214"],
 ]) {
   const value = typographyCss.match(
     new RegExp(`--brand-wordmark-${token}:\\s*(#[0-9a-f]{6})`, "i")

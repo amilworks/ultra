@@ -82,27 +82,54 @@
      Two things this does NOT govern: uppercase/label tracking (positive values
      of 0.02–0.08em, a different job entirely) and monospace, which has its own
      spacing design — the Inter curve does not apply to either. */
-  --bg-page: #f5f5f4;
-  --bg-panel: rgba(255, 255, 255, 0.9);
-  --bg-panel-strong: #ffffff;
-  --bg-main: #f8f8f7;
-  /* Body ink. 16.12:1 on --bg-page — deliberately near-black: this is the
-     reading surface for scientific answers, and the earlier lift to #3b383c
-     (10.59:1) traded more legibility than the airiness was worth. Airiness is
-     bought elsewhere now — a quieter sidebar and a real reading measure — so
-     the text itself does not have to give any up. */
-  --text-main: #191919;
-  /* Secondary text people actually READ (timestamps, counts, meta lines, the
-     sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
-     clears AA for large text and sits just under it for small — a deliberate
-     step down from the old neutral #737373 (4.35:1) toward the sage family,
-     without dropping to the ghost weight that genuinely-inactive chrome uses.
-     Things that are inactive rather than secondary go to --composer-placeholder
-     territory instead; see the note there. */
-  --text-muted: #787f78;
-  --line: rgba(23, 23, 23, 0.08);
-  /* The hover/active step up from --line — exactly double the rest weight, so
-     the darkening reads as the affordance without approaching text ink.
+  /* ══ MERIDIAN DRIFT · DAY ══════════════════════════════════════════════
+     The plate. Every neutral below is near-achromatic on purpose — channel
+     spread 1–2 — because the identity's crispness comes from value, not from
+     a tint. Emphasis is bought with luminance; colour is left free to carry
+     data.
+
+     THE MAGNITUDE LADDER. Hierarchy is a geometric series in CONTRAST RATIO,
+     one step = 1.80x, solved numerically against the ground the text sits on:
+
+       m0  #171B1D  15.60:1  body ink
+       m1  #424547   8.69:1  secondary / navigation
+       m2  #696B6D   4.81:1  tertiary — the LAST legible step
+       m3  #939697   2.68:1  large text and UI edges only
+       m4  #C8C9CA   1.49:1  hairlines, never text
+
+     In contrast space, NOT luminance space, and that distinction is load-
+     bearing. The ladder was first solved as a luminance series, which works on
+     a dark ground because contrast is (L_hi + 0.05)/(L_lo + 0.05) and the 0.05
+     floor dominates when L_lo is near zero. Mirrored onto this light ground it
+     collapses — m1 lands at #ACADAE, 2.02:1, unusable, and slackening the
+     ratio to 2.30x does not rescue it. Contrast-space is ground-independent,
+     so ONE step governs Day and Night. The widest step that keeps m2 at AA on
+     both grounds is 1.815x; 1.80 sits just inside that on purpose.
+     Re-derive with scripts/, do not eyeball a new grey. ══════════════════ */
+  --bg-page: #edeeee;
+  --bg-panel: rgba(248, 249, 249, 0.9);
+  --bg-panel-strong: #f8f9f9;
+  --bg-main: #f2f3f3;
+  /* m0. 15.60:1 on --bg-main. Not #000000, for the same reason Night's ink is
+     not #ffffff: pure black on a light ground reads as a display rather than
+     as carbon, and the ladder wants a material top end, not a clipped one. */
+  --text-main: #171b1d;
+  /* m1, formalized as a named rung. It already backs the quiet sidebar and
+     the wordmark context; naming it lets interaction states step text one
+     magnitude brighter (m2 -> m1) without minting a new grey — the search
+     well's focus treatment is the first consumer. 8.69:1 on this ground. */
+  --text-secondary: #424547;
+  /* m2 — the last rung that can legally hold text. Secondary content people
+     actually READ (timestamps, counts, meta lines, the sidebar eyebrows via
+     --sidebar-eyebrow-color). 4.81:1, so unlike the grey it replaces (3.87:1,
+     which sat just UNDER AA for small text) this now clears AA outright.
+     Things that are inactive rather than secondary drop to m3/m4; see
+     --composer-placeholder. */
+  --text-muted: #696b6d;
+  --line: rgba(23, 27, 29, 0.12);
+  /* The hover/active step up from --line. Resolves to #c2c3c4 over --bg-main,
+     which lands on m4 — hairlines are a ladder rung, not a free-floating
+     alpha.
      This token was consumed by three hover rules (artifact cards, document
      chips, the report download button) for months while never being DEFINED:
      border-color is non-inherited, so the invalid var() resolved to
@@ -111,24 +138,55 @@
      now (the ultra-light-theme-ink lesson: an undefined var() fails silently,
      and any token consumed by theme-agnostic rules must exist in every
      theme). light-theme-ink.test.ts pins both definitions. */
-  --line-strong: rgba(23, 23, 23, 0.16);
-  --brand: #171717;
-  --brand-strong: #0a0a0a;
+  --line-strong: rgba(23, 27, 29, 0.22);
+  --brand: #171b1d;
+  --brand-strong: #0b0e0f;
   /* Future launch-only, non-text signal; intentionally has no var() consumers. */
   --ultra-launch-signal: #1994ff;
-  --account-avatar-fill: #171717;
-  --account-avatar-foreground: #ffffff;
-  --activity-heatmap-1: #d4d4d8;
-  --activity-heatmap-2: #a1a1aa;
-  --activity-heatmap-3: #71717a;
-  --activity-heatmap-4: #3f3f46;
+  --account-avatar-fill: #171b1d;
+  --account-avatar-foreground: #f2f3f3;
+  /* The heatmap is a sequential ramp, so it runs the ladder in reverse:
+     m4 -> m1, quiet to loud. It stops at m1, not m0 — the densest cell is a
+     fill, and a fill at body-ink strength would compete with text. */
+  --activity-heatmap-1: #c8c9ca;
+  --activity-heatmap-2: #939697;
+  --activity-heatmap-3: #696b6d;
+  --activity-heatmap-4: #424547;
   --status-success: #047857;
+  /* Semantic warning — pending, held-out, missed. ORANGE, deliberately, and
+     never gold: brass is reserved for "running", and a warning that leaned
+     yellow would counterfeit it. 4.52:1 here; the dark block re-fires it. */
+  --status-warn: #b45309;
   --danger: #c62828;
-  --selection-bg: #d4d4d8;
-  --selection-fg: #171717;
-  --shadow: 0 10px 26px rgba(12, 12, 12, 0.08);
+  /* THE POINT OF LIGHT — Meridian's single reserved accent. Brass carries
+     exactly one meaning, product-wide: the instrument is RUNNING (a live
+     conversation, a streaming answer, a job in flight). It is the only warm
+     colour in the system, which is what makes a running thing findable from
+     across the room — and it stays findable only while nothing else is
+     allowed to borrow it. Never a text-semantic, never decoration.
+     meridian-identity.test.ts counts the literals to hold the reservation.
+     Day fires the pigment darker (4.55:1 on this ground) because night's
+     brass measures 1.66:1 on paper — same material, different exposure. */
+  --accent-live: #8a6a12;
+  /* Halation is a dark-ground phenomenon: glow on paper reads as a smudge.
+     Day's halo is transparent, so every box-shadow drawn with it is a no-op
+     and the night-only glow needs no per-theme component rules. */
+  --accent-live-halo: transparent;
+  /* The recessed surface. Inputs and wells sit one value step BELOW the
+     canvas instead of declaring their boundary with a border — the de-boxing
+     rule: depth by value, edges only where a real edge exists. */
+  --bg-sunk: #e4e6e6;
+  --selection-bg: #c8c9ca;
+  --selection-fg: #171b1d;
+  --shadow: 0 10px 26px rgba(11, 14, 15, 0.10);
+  /* HELD NEUTRAL, and held deliberately. This is the one surface the language
+     does not get to touch: a surround measurably biases how a reader judges
+     the value of adjacent greyscale tissue, and this is the screen people make
+     diagnostic calls on. Day keeps the neutral carve-out; Night does not need
+     one, because a dark surround is the radiology convention for the same
+     reason. See the .dark block. */
   --viewer-bg: #e5e5e5;
-  --viewer-panel-bg: rgba(255, 255, 255, 0.9);
+  --viewer-panel-bg: rgba(248, 249, 249, 0.9);
   --radius-xl: 20px;
   --radius-lg: 16px;
   --radius-md: 12px;
@@ -164,24 +222,26 @@
      because this pass is a light-theme change and re-pointing dark's tokens
      would shift dark colours nobody asked to move. If dark is ever retuned,
      wire it the same way rather than editing two palettes. */
-  --background: oklch(1 0 0);
+  --background: var(--bg-main);
   --foreground: var(--text-main);
-  --card: oklch(1 0 0);
+  --card: var(--bg-panel-strong);
   --card-foreground: var(--text-main);
-  --popover: oklch(1 0 0);
+  --popover: var(--bg-panel-strong);
   --popover-foreground: var(--text-main);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
+  --primary: var(--brand);
+  --primary-foreground: var(--bg-main);
+  --secondary: #e9ebeb;
   --secondary-foreground: var(--text-main);
-  --muted: oklch(0.97 0 0);
+  --muted: #e9ebeb;
   --muted-foreground: var(--text-muted);
-  --accent: oklch(0.97 0 0);
+  --accent: #e9ebeb;
   --accent-foreground: var(--text-main);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: #dcdede;
+  --input: #dcdede;
+  /* m2, not m3. A focus ring is a UI component and owes 3:1; m3 measures
+     2.68:1 and would miss it, so the ring takes the last legible rung. */
+  --ring: #696b6d;
   /* Ultra brand data palette — vibrant, one hue per index across light/dark,
      leads with blue (graphite is the neutral/context tail, slot 8).
      Colorblind-validated (dataviz Machado-2009 + WCAG). Keep in sync with
@@ -194,11 +254,14 @@
   --chart-6: oklch(0.456 0.169 305.3); /* violet      #6e34a0 */
   --chart-7: oklch(0.601 0.150 145.3); /* green       #399743 */
   --chart-8: oklch(0.375 0.018 264.3); /* graphite    #3c414b */
-  /* chart chrome — quiet neutrals, never a hue */
-  --chart-grid: rgba(23, 23, 23, 0.08);
-  --chart-axis: rgba(23, 23, 23, 0.22);
-  --chart-label: #737373;
-  --chart-title: #171717;
+  /* chart chrome — quiet neutrals, never a hue. Labels and titles ride the
+     ladder (m2/m0) so a chart's hierarchy matches the prose around it. The
+     categorical scale above is UNCHANGED: it is colourblind-validated against
+     light grounds, and Day inherits it exactly. */
+  --chart-grid: rgba(23, 27, 29, 0.10);
+  --chart-axis: rgba(23, 27, 29, 0.24);
+  --chart-label: #696b6d;
+  --chart-title: #171b1d;
   /* sequential (single-hue slate, low->high) */
   --chart-seq-1: #e4eefb; --chart-seq-2: #c1d6f2; --chart-seq-3: #96b7e2;
   --chart-seq-4: #6791ca; --chart-seq-5: #3a6aa8; --chart-seq-6: #1f4577;
@@ -207,23 +270,24 @@
   --chart-div-1: #275591; --chart-div-2: #6488b9; --chart-div-3: #b0c3db;
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
-  --sidebar: oklch(0.985 0 0);
-  /* Navigation is not content, and it no longer follows --text-main. Body ink is
-     near-black (16.12:1) because answers are for reading; a sidebar at that same
-     weight competes with them for attention, and every row shouting at full
-     strength is what makes a chrome-heavy app feel busy. This sits at 6.6:1 —
-     unmistakably quieter than the transcript, still comfortably past AA's 4.5:1
-     for the 14px/500 row labels, which are essential navigation and must not be
-     decorative.
-     It also gives hover somewhere to go: rest 6.6:1 -> --sidebar-ink-hover
-     18.15:1 is a large, obvious step, so the darkening reads as the affordance.
-     Pinned to --text-main it would have been a 1.13:1 no-op.
-     Faintly sage rather than pure grey so it shares a family with --text-muted
-     (#787f78), which the section eyebrows already use.
+  /* The sidebar RECEDES from the canvas rather than floating above it, which is
+     the falloff model applied to chrome: what is further from the work is
+     further from the ground's opposite. It also makes the sidebar its own
+     ground, which matters for the rung below. */
+  --sidebar: #e9ebeb;
+  /* m1, and the ladder had to be re-solved here rather than borrowed. Body ink
+     measures 14.49:1 against this ground (not --bg-main's 15.60:1), so m2 lands
+     at 4.47:1 — a hair UNDER AA for the 14px/500 row labels, which are
+     essential navigation and must not be decorative. m1 is the honest rung:
+     8.07:1 on this ground, exactly one magnitude below the nav ink above it,
+     and comfortably past AA.
+     It also gives hover somewhere to go: rest 8.07:1 -> --sidebar-ink-hover
+     16.19:1 is a 2x step, so the darkening reads as the affordance. Pinned to
+     --text-main it would have been a 1.12:1 no-op.
      This is the QUIET half of the sidebar: the Recents list, which is long,
      repetitive and the actual source of sidebar noise. The fixed structural nav
      opts back up to full ink via --sidebar-nav-foreground below. */
-  --sidebar-foreground: #575a57;
+  --sidebar-foreground: #424547;
   /* Structural navigation — brand, New chat, Resources/Training/Admin/Lens, the
      BisQue links — at body ink. There are only ever a handful of these, they do
      not scroll, and they are the app's spine: making them recede treats
@@ -234,12 +298,13 @@
      background carries the affordance here; the quiet Recents rows still darken,
      because from 6.41:1 that step is worth 2.83:1 and reads clearly. */
   --sidebar-nav-foreground: var(--text-main);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  /* True black, and one step past --text-main on purpose. Drives BOTH hover and
-     data-[active=true], so the current page reads at full strength too. */
-  --sidebar-ink-hover: #0a0a0a;
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--bg-main);
+  --sidebar-accent: #e3e5e5;
+  /* One step past --text-main on purpose — in Day, "nearer" means darker.
+     Drives BOTH hover and data-[active=true], so the current page reads at full
+     strength too. */
+  --sidebar-ink-hover: #0b0e0f;
   --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-item-hover-bg: color-mix(in oklab, var(--sidebar-accent) 92%, var(--text-main) 8%);
   --sidebar-item-active-bg: color-mix(in oklab, var(--sidebar-accent) 88%, var(--text-main) 12%);
@@ -280,21 +345,23 @@
   /* Alias kept for existing sidebar consumers — there is only one curve. */
   --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
-  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
+  /* Mixes toward INK, not toward white. In Day, nearer means darker, so a hover
+     that brightened would push the control away from the pointer. */
+  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 92%, var(--text-main) 8%);
   /* True ghost weight, and NO LONGER derived from --text-muted. That derivation
      assumed one grey served both roles; it doesn't. Secondary text is read, so
-     it went to a deeper sage (3.77:1); a placeholder is genuinely inactive, and
-     low contrast is the correct signal there rather than a compromise. Splitting
+     it sits at m2 (4.81:1); a placeholder is genuinely inactive, and low
+     contrast is the correct signal there rather than a compromise. Splitting
      them is the point — pinning this value is what keeps a future --text-muted
      change from dragging the ghost weight along with it.
-     1.57:1 on --bg-page. Deliberately below 3:1, on the same reasoning the old
-     #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so nothing
-     about the control's name or operability depends on how faint this hint is
-     drawn — it is decoration over an input that is obvious on its own. */
-  --composer-placeholder: #c3c7c3;
-  --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+     m4, 1.49:1 on --bg-main. Deliberately below 3:1, on the same reasoning the
+     old #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so
+     nothing about the control's name or operability depends on how faint this
+     hint is drawn — it is decoration over an input that is obvious on its own. */
+  --composer-placeholder: #c8c9ca;
+  --composer-submit-shadow: 0 12px 24px rgba(11, 14, 15, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --sidebar-border: #dcdede;
+  --sidebar-ring: #696b6d;
 }
 
 *,
@@ -383,15 +450,15 @@ body {
   border-radius: calc(var(--radius) + 0.7rem);
   border: 1px solid color-mix(in oklab, white 20%, transparent);
   padding: clamp(1.6rem, 2.8vw, 2.4rem);
-  color: #f8fafc;
+  color: #dce3ea;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 1rem;
-  background: linear-gradient(145deg, #1f2937 0%, #334155 55%, #0f172a 100%);
+  background: linear-gradient(145deg, #171b20 0%, #232930 55%, #0b0d10 100%);
   box-shadow:
-    0 22px 56px rgba(2, 6, 23, 0.34),
-    0 8px 22px rgba(2, 6, 23, 0.22),
+    0 22px 56px rgba(6, 8, 10, 0.34),
+    0 8px 22px rgba(6, 8, 10, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
@@ -413,21 +480,21 @@ body {
   background:
     radial-gradient(
       120% 120% at 8% 92%,
-      rgba(250, 250, 249, 0.12) 0%,
-      rgba(250, 250, 249, 0.04) 18%,
+      rgba(242, 243, 243, 0.12) 0%,
+      rgba(242, 243, 243, 0.04) 18%,
       transparent 46%
     ),
     repeating-linear-gradient(
       325deg,
-      rgba(245, 245, 244, 0) 0px,
-      rgba(245, 245, 244, 0) 18px,
-      rgba(245, 245, 244, 0.03) 18px,
-      rgba(245, 245, 244, 0.03) 19px,
-      rgba(245, 245, 244, 0) 19px,
-      rgba(245, 245, 244, 0) 46px
+      rgba(242, 243, 243, 0) 0px,
+      rgba(242, 243, 243, 0) 18px,
+      rgba(242, 243, 243, 0.03) 18px,
+      rgba(242, 243, 243, 0.03) 19px,
+      rgba(242, 243, 243, 0) 19px,
+      rgba(242, 243, 243, 0) 46px
     ),
     radial-gradient(circle at 78% 78%, rgba(255, 255, 255, 0.1), transparent 40%),
-    linear-gradient(160deg, rgba(2, 6, 23, 0.62) 0%, rgba(15, 23, 42, 0.82) 100%);
+    linear-gradient(160deg, rgba(6, 8, 10, 0.62) 0%, rgba(10, 12, 15, 0.82) 100%);
   background-size: 145% 145%, 220% 220%, auto, auto;
   animation: auth-space-drift 15s linear infinite;
   will-change: background-position;
@@ -523,7 +590,7 @@ body {
   margin: 0;
   font-size: 0.95rem;
   line-height: 1.6;
-  color: rgba(241, 245, 249, 0.92);
+  color: rgba(220, 227, 234, 0.92);
   max-width: 34ch;
 }
 
@@ -531,7 +598,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  color: #f8fafc;
+  color: #dce3ea;
   text-decoration: none;
   width: fit-content;
   font-weight: 500;
@@ -698,8 +765,8 @@ body {
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-main) 93%, #ffffff 7%) 0%,
-      color-mix(in oklab, var(--bg-main) 88%, #ffffff 12%) 100%
+      color-mix(in oklab, var(--bg-main) 93%, var(--bg-panel-strong) 7%) 0%,
+      color-mix(in oklab, var(--bg-main) 88%, var(--bg-panel-strong) 12%) 100%
     );
   box-shadow: inset -1px 0 0 color-mix(in oklab, var(--line) 88%, transparent);
 }
@@ -2333,15 +2400,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
-/* Rows rest at full ink, so a hover color step (#191919 -> #0a0a0a, 1.13:1)
-   would be invisible — the background shift alone carries hover and
-   selection, matching the structural nav's affordance model. */
 .app-history-button:hover {
   background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent);
+  color: var(--sidebar-ink-hover);
 }
 
 .app-history-button[data-active="true"] {
   background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
+  color: var(--sidebar-ink-hover);
   box-shadow: none;
 }
 
@@ -2423,7 +2489,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .dark .hero-title {
-  color: #ffffff;
+  color: var(--text-main);
 }
 
 .hero-subtitle {
@@ -2435,7 +2501,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .dark .hero-subtitle {
-  color: color-mix(in oklab, #ffffff 68%, transparent);
+  color: color-mix(in oklab, var(--text-main) 68%, transparent);
 }
 
 .blank-chat-usage-state {
@@ -2623,6 +2689,23 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 1rem 1rem 0;
 }
 
+/* The field above the prompt — the only surface where the language's one
+   impossibility lives (MeridianField.tsx draws it from the live tokens).
+   Height is deliberately modest: the welcome stage's calm is its emptiness,
+   and the sky must never crowd the greeting on a phone. */
+.meridian-field {
+  /* Fluid, not fixed: the sky takes a wide share of the column and settles
+     between phone and cinema widths; the drawing scales its star DENSITY by
+     area (MeridianField.tsx), so wide never reads sparse and narrow never
+     reads crowded. Height leans on viewport height so short laptop windows
+     give the sky back to the greeting. */
+  width: min(46rem, 100%);
+  height: clamp(96px, 16vh, 172px);
+  color: var(--text-main);
+  display: block;
+  pointer-events: none;
+}
+
 .blank-chat-welcome-greeting {
   display: flex;
   flex-direction: column;
@@ -2769,10 +2852,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-height: 0;
 }
 
+/* DE-BOXED: the back card is gone. A browser inside a panel inside a page is
+   exactly the box-in-box-in-box the language deletes — the mockup's Resources
+   frame put the toolbar and cards directly on the canvas, and the chrome that
+   needs a surface (cards, the search well) already carries its own value
+   step. The shell keeps only its layout duties. */
 .resource-browser-shell {
-  border-radius: calc(var(--radius) + 0.85rem);
-  border-color: var(--line);
-  background: color-mix(in oklab, var(--bg-panel-strong) 92%, transparent);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   min-width: 0;
   min-height: min(100%, calc(100svh - 7.2rem));
 }
@@ -2830,26 +2919,47 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.65rem;
 }
 
+/* De-boxed: the search well is SUNK — one value step below the canvas — and
+   rises to panel level when focused. The focus ring stays: focus is a real
+   edge, the one boundary the de-boxing rule never deletes. */
 .resource-browser-search-field {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
   height: 2.55rem;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 0.95rem;
-  background: color-mix(in oklab, var(--bg-panel-strong) 82%, var(--bg-main) 18%);
+  background: var(--bg-sunk);
   padding-inline: 0.78rem 0.2rem;
-  box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
   transition:
     border-color 150ms var(--motion-ease),
     box-shadow 150ms var(--motion-ease),
     background-color 150ms var(--motion-ease);
 }
 
+/* Pointer focus stays CALM: the well does not light up, rise, or grow a ring
+   — the type inside simply steps one magnitude brighter (m2 -> m1) and the
+   caret does the rest. A text input's activation is self-evident to the
+   person who just clicked it; announcing it with a glow was chrome shouting
+   about the obvious. */
 .resource-browser-search-field:focus-within {
+  background: var(--bg-sunk);
+}
+
+.resource-browser-search-field:focus-within svg {
+  color: var(--text-secondary);
+}
+
+.resource-browser-search-field:focus-within .resource-browser-search::placeholder {
+  color: var(--text-secondary);
+}
+
+/* Keyboard focus keeps the full ring. WCAG 2.4.11 is about operability
+   without a pointer, and :has(:focus-visible) scopes the ring to exactly the
+   users who need it — tabbing lights the well, clicking never does. */
+.resource-browser-search-field:has(.resource-browser-search:focus-visible) {
   border-color: color-mix(in oklab, var(--ring) 38%, var(--line) 62%);
-  background: var(--bg-panel-strong);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 12%, transparent);
 }
 
@@ -2883,12 +2993,26 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.4;
 }
 
+/* De-boxed secondary control: same sunk well as the search field beside it —
+   the toolbar reads as one family of recesses in the canvas. Hover steps the
+   surface toward ink, which is "nearer" in both themes (darker on the plate,
+   brighter in the field). Borders on buttons are reserved for the primary
+   action's solid fill and for focus; a hairline on a secondary control was
+   declaring an edge nothing needed. */
 .resource-browser-filter-trigger {
   flex: 0 0 auto;
   min-height: 2.55rem;
   border-radius: 0.95rem;
   padding-inline: 0.9rem;
   white-space: nowrap;
+  border-color: transparent;
+  background: var(--bg-sunk);
+  box-shadow: none;
+}
+
+.resource-browser-filter-trigger:hover {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
 }
 
 .resource-browser-filter-count {
@@ -3923,11 +4047,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.24rem;
 }
 
+/* DE-BOXED (the Meridian structural rule): the card separates from the canvas
+   by one value step — panel-strong on main — not by an enclosure. The border
+   is kept at 1px TRANSPARENT so layout is byte-identical and the selected
+   state below can still paint a real edge into the same box. Hover is lift
+   and shadow only; a border appearing on hover would reintroduce the box the
+   rule deletes. Selection keeps its edge on purpose: a selection boundary is
+   a real edge, like an ink contour on a silhouette. */
 .resource-browser-card {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--bg-panel);
+  background: var(--bg-panel-strong);
   overflow: hidden;
   height: 17.75rem;
   display: grid;
@@ -3937,7 +4068,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .resource-browser-card:hover,
 .resource-browser-card:focus-visible {
-  border-color: color-mix(in oklab, var(--foreground) 18%, var(--border) 82%);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.1);
   transform: translateY(-1px);
 }
@@ -3968,7 +4098,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   position: relative;
   width: 100%;
   height: 10.75rem;
-  border-bottom: 1px solid var(--line);
+  /* No rule between image and caption — the preview well sits one value step
+     below the card and the step IS the boundary. */
   background: color-mix(in oklab, var(--bg-main) 92%, var(--bg-panel-strong) 8%);
 }
 
@@ -4353,12 +4484,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .figure-lightbox-thumb[data-active="true"] {
-  border-color: #6aa9ff;
+  border-color: #f2f3f5;
   opacity: 1;
 }
 
 .figure-lightbox-thumb[data-pinned="true"] {
-  border-color: rgba(120, 170, 255, 0.45);
+  border-color: rgba(242, 243, 245, 0.45);
   opacity: 0.9;
 }
 
@@ -5099,7 +5230,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     min-width: 0;
     height: 2.75rem;
     border-radius: 1rem;
-    background: color-mix(in oklab, var(--bg-main) 86%, #ffffff 14%);
+    background: color-mix(in oklab, var(--bg-main) 86%, var(--bg-panel-strong) 14%);
     padding-inline: 0.78rem 0.15rem;
   }
 
@@ -6297,11 +6428,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .chat-tool-card--prairie {
   background:
-    radial-gradient(circle at top right, color-mix(in oklab, #d7c7a0 24%, transparent), transparent 34%),
+    radial-gradient(circle at top right, color-mix(in oklab, var(--bg-sunk) 24%, transparent), transparent 34%),
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-panel) 88%, #efe4c9 12%),
-      color-mix(in oklab, var(--bg-panel) 94%, #9eb08a 6%)
+      color-mix(in oklab, var(--bg-panel) 88%, var(--bg-sunk) 12%),
+      color-mix(in oklab, var(--bg-panel) 94%, var(--bg-sunk) 6%)
     );
 }
 
@@ -6706,13 +6837,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .chat-tool-figure-media-wrap {
   overflow: hidden;
   border-radius: var(--radius-lg);
-  border: 1px solid color-mix(in oklab, var(--line) 84%, #9b8867 16%);
-  background: color-mix(in oklab, var(--bg-main) 92%, white 8%);
+  border: 1px solid color-mix(in oklab, var(--line) 84%, var(--text-muted) 16%);
+  background: color-mix(in oklab, var(--bg-main) 92%, var(--bg-panel-strong) 8%);
 }
 
 .chat-tool-figure-card--prairie .chat-tool-figure-media-wrap {
-  border-color: color-mix(in oklab, var(--line) 74%, #a78d63 26%);
-  background: color-mix(in oklab, var(--bg-main) 90%, #efe2c0 10%);
+  border-color: color-mix(in oklab, var(--line) 74%, var(--text-muted) 26%);
+  background: color-mix(in oklab, var(--bg-main) 90%, var(--bg-sunk) 10%);
 }
 
 .chat-tool-figure-image {
@@ -6720,7 +6851,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   width: 100%;
   max-height: min(72vh, 42rem);
   object-fit: contain;
-  background: color-mix(in oklab, var(--bg-main) 90%, white 10%);
+  background: color-mix(in oklab, var(--bg-main) 90%, var(--bg-panel-strong) 10%);
 }
 
 .chat-tool-figure-placeholder {
@@ -6776,16 +6907,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   padding: 0.8rem 0.9rem;
   border-radius: 14px;
-  border: 1px solid color-mix(in oklab, var(--line) 84%, #9b8867 16%);
-  background: color-mix(in oklab, var(--bg-panel-strong) 95%, #f6efe0 5%);
+  border: 1px solid color-mix(in oklab, var(--line) 84%, var(--text-muted) 16%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 95%, var(--bg-sunk) 5%);
   font-size: 0.76rem;
   line-height: 1.5;
   color: color-mix(in oklab, var(--text-main) 82%, var(--text-muted) 18%);
 }
 
 .chat-tool-figure-unavailable--prairie {
-  border-color: color-mix(in oklab, var(--line) 78%, #a78d63 22%);
-  background: color-mix(in oklab, var(--bg-panel-strong) 95%, #efe2c0 5%);
+  border-color: color-mix(in oklab, var(--line) 78%, var(--text-muted) 22%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 95%, var(--bg-sunk) 5%);
 }
 
 .chat-tool-carousel {
@@ -6802,12 +6933,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .chat-tool-carousel-stage--prairie {
-  border-color: color-mix(in oklab, var(--line) 68%, #a78d63 32%);
+  border-color: color-mix(in oklab, var(--line) 68%, var(--text-muted) 32%);
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-panel-strong) 90%, #efe2c0 10%),
-      color-mix(in oklab, var(--bg-panel-strong) 94%, #8b9a6d 6%)
+      color-mix(in oklab, var(--bg-panel-strong) 90%, var(--bg-sunk) 10%),
+      color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-sunk) 6%)
     );
 }
 
@@ -6876,7 +7007,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: white;
   white-space: nowrap;
   background: color-mix(in oklab, var(--bg-panel-strong) 22%, black 78%);
-  border: 1px solid color-mix(in oklab, white 22%, transparent);
+  border: 1px solid color-mix(in oklab, var(--bg-panel-strong) 22%, transparent);
   max-width: min(180px, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6955,9 +7086,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   display: grid;
   gap: 0.18rem;
   padding: 0.58rem 0.68rem;
-  border: 1px solid color-mix(in oklab, var(--line) 82%, #a78d63 18%);
+  border: 1px solid color-mix(in oklab, var(--line) 82%, var(--text-muted) 18%);
   border-radius: 14px;
-  background: color-mix(in oklab, var(--bg-panel-strong) 94%, #f1e4c8 6%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-sunk) 6%);
 }
 
 .chat-tool-prairie-stat-label {
@@ -6965,13 +7096,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: color-mix(in oklab, var(--text-muted) 80%, #715638 20%);
+  color: color-mix(in oklab, var(--text-muted) 80%, var(--text-main) 20%);
 }
 
 .chat-tool-prairie-stat-value {
   font-size: 0.96rem;
   line-height: 1.2;
-  color: color-mix(in oklab, var(--text-main) 90%, #4d3a2a 10%);
+  color: var(--text-main);
 }
 
 .chat-tool-carousel-thumbs {
@@ -7170,7 +7301,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .chat-document-report-error {
-  color: color-mix(in oklab, #d4503b 70%, var(--foreground));
+  color: color-mix(in oklab, var(--danger) 70%, var(--foreground));
 }
 
 .chat-document-report-inline-link {
@@ -7657,17 +7788,60 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     box-shadow 160ms var(--motion-ease);
 }
 
-/* Losing the border and shadow took the focus state with them, and the textarea's
-   own outline is none — so the rule itself has to carry it. The inset line doubles
-   the hairline to a visible 2px WITHOUT widening the border, which would shove the
-   whole row down 1px on every focus. --text-muted (#787f78 since the ink pass)
-   measures 4.11:1 on the composer's white ground, clearing the 3:1 and 2px WCAG
-   2.4.11 asks of a focus indicator with margin. Re-measure this if --text-muted
-   moves again: the indicator borrows the token, so a colour decision made for
-   body text silently sets the focus contrast too. */
-.app-composer-shell .app-composer-card:focus-within {
+/* CALM POINTER FOCUS — the search-well rule, applied to the control that
+   needs it most. Clicking a text field is self-announcing (the caret), and
+   the old :focus-within treatment fired a 2px ink line across the page's
+   most-used control on every click — the loudest focus in the product for
+   the most obvious activation in it. Pointer focus now lights nothing.
+
+   Keyboard keeps the full indicator: the inset line doubles the hairline to
+   a visible 2px WITHOUT widening the border (which would shove the row down
+   1px), at --text-muted — m2, 5.07:1 on the composer's ground — clearing the
+   3:1 and 2px WCAG 2.4.11 asks of a focus indicator with margin.
+   :has(:focus-visible) scopes it to exactly the users who need it. Re-measure
+   if --text-muted moves: the indicator borrows the token. */
+.app-composer-shell .app-composer-card:has(.app-composer-textarea:focus-visible) {
   border-top-color: var(--text-muted);
   box-shadow: inset 0 1px 0 var(--text-muted);
+}
+
+/* THE RECORDER — while the instrument runs, the baseline records. The brass
+   trace lies ON the composer's top hairline, writing from the left: the most
+   seen line in the product, finally earning its place by recording something.
+   Gated in App.tsx by activeSending, so brass touches the composer only while
+   a run is genuinely live; the mid-run steer/queue/stop controls carry the
+   rest of the running state. */
+/* The recorder's anchor. The card itself clips (overflow: hidden), so the
+   trace hangs off the FileUpload wrapper, which shares the card's exact box
+   and clips nothing. Scoped to the composer: pk-file-upload is a shared
+   primitive and other uses must not gain a positioning context. */
+.app-composer-shell .pk-file-upload {
+  position: relative;
+}
+
+.app-composer-recorder {
+  position: absolute;
+  left: 1.35rem;
+  top: 0;
+  width: 6rem;
+  height: 10px;
+  transform: translateY(-50%);
+  color: var(--accent-live);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.app-composer-recorder path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-write 3.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-composer-recorder path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
 }
 
 .app-composer-card-body {
@@ -8048,8 +8222,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-submit-button {
   border: 0;
-  background: #050505;
-  color: #ffffff;
+  background: var(--primary);
+  color: var(--primary-foreground);
   box-shadow: var(--composer-submit-shadow);
 }
 
@@ -8062,7 +8236,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-submit-button:not(:disabled):hover,
 .app-composer-submit-button:not(:disabled):focus-visible {
-  background: #000000;
+  background: var(--brand-strong);
 }
 
 .app-composer-submit-button:disabled {
@@ -8120,17 +8294,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: 0 10px 22px rgba(146, 37, 37, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
+/* The point of light. Brass themes itself through --accent-live, so the old
+   per-theme ink overrides are gone; the halo token is transparent in Day, so
+   the glow declaration below is a no-op on paper and real at night — glow on
+   a dark ground is the one bloom Meridian permits, because it is the signal,
+   not a surface. Supersedes the CircularLoader spinner (and the rejected
+   "beacon"): a running instrument is marked by light, not by motion. */
 .running-status-pill {
-  --running-status-ink: #111111;
+  --running-status-ink: var(--accent-live);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   color: var(--running-status-ink);
-}
-
-.dark .running-status-pill {
-  --running-status-ink: #ffffff;
 }
 
 .running-status-pill[data-size="default"] {
@@ -8143,12 +8319,70 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 1rem;
 }
 
-.running-status-pill-loader {
-  color: var(--running-status-ink);
+.running-status-point {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0.5rem var(--accent-live-halo);
+  /* A breath, not a blink: the point never disappears, it dims. ease-in-out
+     is deliberate — this is a continuous indicator (the motion law's spinner
+     exemption), not a surface transition on the house curve. */
+  animation: running-point-breathe 2.8s ease-in-out infinite;
+}
+
+.running-status-pill[data-size="compact"] .running-status-point {
+  width: 0.4rem;
+  height: 0.4rem;
+}
+
+/* The trace — a record being written. It accumulates left to right, holds a
+   beat, and starts a new line; it never loops, because a reasoning trace is a
+   record, not a spinner passing time. pathLength=1 on the SVG normalises the
+   dash math. Brass: thinking is the instrument running. */
+.thinking-bar-trace {
+  width: 1.6rem;
+  height: 0.6rem;
+  flex: 0 0 auto;
+  color: var(--accent-live);
+  overflow: visible;
+}
+
+.thinking-bar-trace path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-write 3.4s ease-in-out infinite;
+}
+
+@keyframes trace-write {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  72%,
+  100% {
+    stroke-dashoffset: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .running-status-pill-loader {
+  .thinking-bar-trace path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes running-point-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-status-point {
     animation: none;
   }
 }
@@ -8163,7 +8397,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 summary {
   cursor: pointer;
   font-weight: 600;
-  color: #1d2f57;
+  color: var(--text-main);
 }
 
 details {
@@ -8462,7 +8696,7 @@ details {
 }
 
 .viewer-workspace-document {
-  background: color-mix(in oklab, var(--bg-main) 97%, #6f8f85 3%);
+  background: color-mix(in oklab, var(--bg-main) 97%, var(--text-muted) 3%);
 }
 
 .viewer-pdf-reader {
@@ -8488,7 +8722,7 @@ details {
   width: 1rem;
   height: 1rem;
   flex: 0 0 auto;
-  color: color-mix(in oklab, var(--text-muted) 78%, #4f8073 22%);
+  color: var(--text-muted);
 }
 
 .viewer-pdf-title {
@@ -8496,9 +8730,9 @@ details {
 }
 
 .viewer-pdf-badge {
-  border-color: color-mix(in oklab, var(--line) 82%, #4f8073 18%);
-  background: color-mix(in oklab, var(--surface-panel) 88%, #4f8073 12%);
-  color: color-mix(in oklab, var(--text-main) 84%, #28594e 16%);
+  border-color: color-mix(in oklab, var(--line) 82%, var(--text-muted) 18%);
+  background: color-mix(in oklab, var(--surface-panel) 88%, var(--text-muted) 12%);
+  color: color-mix(in oklab, var(--text-main) 84%, var(--text-muted) 16%);
 }
 
 .viewer-pdf-actions {
@@ -8511,14 +8745,14 @@ details {
 .viewer-pdf-shell {
   min-height: clamp(520px, 68vh, 920px);
   flex: 1;
-  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, #4f8073 16%);
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, var(--text-muted) 16%);
   border-radius: 8px;
   overflow: hidden;
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--surface-panel) 96%, #4f8073 4%),
-      color-mix(in oklab, var(--bg-main) 98%, #536b8f 2%)
+      color-mix(in oklab, var(--surface-panel) 96%, var(--text-muted) 4%),
+      color-mix(in oklab, var(--bg-main) 98%, var(--text-muted) 2%)
     );
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.7),
@@ -8531,7 +8765,7 @@ details {
   height: 100%;
   min-height: clamp(520px, 68vh, 920px);
   border: 0;
-  background: #f8faf9;
+  background: var(--bg-panel-strong);
 }
 
 /* Text / data resource viewer — a calm sibling of the PDF/image viewers.
@@ -9062,7 +9296,7 @@ details {
 .viewer-video-shell {
   min-height: clamp(420px, 60vh, 860px);
   flex: 1;
-  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, #4f8073 16%);
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, var(--text-muted) 16%);
   border-radius: 8px;
   overflow: hidden;
   background: #05070a;
@@ -9736,7 +9970,11 @@ details {
 }
 
 .viewer-direct-image-error {
-  color: color-mix(in oklab, var(--accent-strong) 84%, white 16%);
+  /* Glass island (always-dark, sits on imagery), so the danger tint is a
+     literal like its siblings. The previous --accent-strong reference had no
+     fallback and no definition anywhere — an invalid colour silently
+     inheriting currentColor, the same failure --line-strong once shipped. */
+  color: color-mix(in oklab, #d45e5e 70%, white 30%);
   background: rgba(28, 15, 17, 0.78);
   border: 1px solid rgba(255, 120, 120, 0.24);
 }
@@ -9758,7 +9996,7 @@ details {
   height: 100%;
   width: 0;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--accent-strong, #6aa9ff) 80%, white 20%);
+  background: var(--accent-live);
   transition: width 120ms ease-out;
 }
 
@@ -10506,10 +10744,10 @@ details {
   display: inline-flex;
   align-items: center;
   padding: 0.05rem 0.42rem;
-  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border: 1px solid color-mix(in oklab, var(--status-warn) 38%, var(--line));
   border-radius: 999px;
-  background: color-mix(in oklab, #b45309 16%, transparent);
-  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  background: color-mix(in oklab, var(--status-warn) 16%, transparent);
+  color: color-mix(in oklab, var(--status-warn) 72%, var(--text-main));
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -11779,7 +12017,7 @@ details {
 }
 
 .dark .chat-message-action:hover:not(:disabled) {
-  /* rgba(12,12,12,0.1) is invisible on a #1b1b1d panel. */
+  /* rgba(12,12,12,0.1) is invisible on a #151719 panel. */
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
 }
 
@@ -11975,7 +12213,7 @@ details {
 }
 
 .chat-steering-eyebrow[data-steering="missed"] {
-  color: color-mix(in oklab, var(--warning, #a16207) 70%, var(--text-main) 30%);
+  color: color-mix(in oklab, var(--status-warn) 70%, var(--text-main) 30%);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -12637,7 +12875,10 @@ details {
    the reduced-motion variant is a static frame (handled in-component). */
 .thinking-constellation {
   display: block;
-  color: var(--text-muted);
+  /* Brass, not muted ink: live thinking IS the reserved meaning of
+     --accent-live, and the constellation only renders while the instrument
+     is working. The canvas reads currentColor, so the token themes it. */
+  color: var(--accent-live);
 }
 
 @media (max-width: 640px) {
@@ -12985,33 +13226,80 @@ details {
 }
 
 .dark {
-  --bg-page: #0f0f10;
-  --bg-panel: rgba(30, 30, 32, 0.88);
-  --bg-panel-strong: #1b1b1d;
-  --bg-main: #111113;
-  --text-main: #f5f5f5;
-  --text-muted: #a1a1aa;
-  --line: rgba(255, 255, 255, 0.14);
-  /* Hover/active hairline step (see the light-block note). Not a straight
-     doubling here: light-on-dark strokes read brighter than dark-on-light at
-     equal offset (the composer-placeholder lesson below), so 0.14 → 0.24
-     lands the same perceived step as light's 0.08 → 0.16. */
-  --line-strong: rgba(255, 255, 255, 0.24);
-  --brand: #f5f5f5;
-  --brand-strong: #ffffff;
-  --account-avatar-fill: #f5f5f5;
-  --account-avatar-foreground: #111113;
-  --activity-heatmap-1: #3f3f46;
-  --activity-heatmap-2: #71717a;
-  --activity-heatmap-3: #a1a1aa;
-  --activity-heatmap-4: #d4d4d8;
+  /* ══ MERIDIAN DRIFT · NIGHT ════════════════════════════════════════════
+     The deep field. Same language as Day, same derivation, opposite
+     direction: signal falls off toward the ground instead of toward paper.
+
+     THE MAGNITUDE LADDER — the SAME 1.80x contrast step as Day, re-solved
+     against this ground rather than inverted from it:
+
+       m0  #DCE3EA  14.95:1  body ink
+       m1  #A5ABB0   8.34:1  secondary / navigation
+       m2  #777C82   4.60:1  tertiary — the LAST legible step
+       m3  #505559   2.57:1  large text and UI edges only
+       m4  #2B2E32   1.42:1  hairlines and graticule, never text
+
+     Baffle black, not black: the ground keeps a channel spread of 6 because
+     optical flock genuinely is slightly cool, but the chrome above it is held
+     to 4–5. An earlier cut ran spread 12–16 and the sidebar read as a blue
+     PANEL rather than as black. The one thing still strongly chromatic is the
+     data palette, which is the only thing allowed to be. ════════════════ */
+  --bg-page: #090b0d;
+  --bg-panel: rgba(21, 23, 25, 0.88);
+  --bg-panel-strong: #151719;
+  --bg-main: #0b0e11;
+  /* m0. Plate silver, not #ffffff: pure white on a dark ground blooms, the
+     halation is worse on OLED, and it makes a long read tiring. 14.95:1 is
+     already more contrast than the reading surface needs. */
+  --text-main: #dce3ea;
+  /* m1, the named rung — see the light block. 8.34:1 on this ground. */
+  --text-secondary: #a5abb0;
+  /* m2 — the last rung that can legally hold text. 4.60:1. */
+  --text-muted: #777c82;
+  --line: rgba(220, 227, 234, 0.12);
+  /* Hover/active hairline step (see the light-block note). Resolves to #393d41
+     over --bg-main, one rung past m4 — the same ladder relationship Day has,
+     which is why both blocks can now carry the same alpha pair instead of the
+     hand-tuned offsets this token used to need. */
+  --line-strong: rgba(220, 227, 234, 0.22);
+  --brand: #dce3ea;
+  --brand-strong: #eef3f8;
+  --account-avatar-fill: #dce3ea;
+  --account-avatar-foreground: #0b0e11;
+  /* Sequential ramp, running the ladder m4 -> m1 (see the light block). */
+  --activity-heatmap-1: #2b2e32;
+  --activity-heatmap-2: #505559;
+  --activity-heatmap-3: #777c82;
+  --activity-heatmap-4: #a5abb0;
   --status-success: #6ee7b7;
-  --selection-bg: #3f3f46;
-  --selection-fg: #f5f5f5;
-  --shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  --viewer-bg: #2a2a2f;
-  --viewer-panel-bg: rgba(30, 30, 34, 0.92);
-  --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
+  /* Warning at night: lifted orange, 6.50:1 on this ground — and measurably
+     DARKER than brass (luminance 0.30 vs 0.52), so a pending badge can never
+     be mistaken for a running instrument at a glance. */
+  --status-warn: #d97f3e;
+  /* Dark never defined its own danger — it inherited light's #c62828, which
+     measures 3.44:1 on this ground: sub-AA error text for the theme's whole
+     life. Lifted along the #c62828 -> white line to the first stop clearing
+     AA on BOTH surfaces it sits on: 5.13:1 on --bg-main, 4.76:1 on
+     --bg-panel-strong. */
+  --danger: #d45e5e;
+  /* The point of light, at full brass — see the light block for the
+     reservation. 10.50:1 on this ground. */
+  --accent-live: #e8b84b;
+  /* Night is where halation is real: the glow around a running marker is the
+     one bloom the theme permits, because it is the signal, not a surface. */
+  --accent-live-halo: color-mix(in srgb, var(--accent-live) 45%, transparent);
+  --bg-sunk: #0d1012;
+  --selection-bg: #2b2e32;
+  --selection-fg: #dce3ea;
+  --shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  /* NATIVE here, and this is the one place the two grounds genuinely diverge.
+     Day has to carve the viewer out and hold it neutral because a light
+     surround biases greyscale judgement; Night does not, because a dark
+     surround is the radiology and microscopy convention for exactly that
+     reason. The screen that fights the language in Day is at home in Night. */
+  --viewer-bg: #08090b;
+  --viewer-panel-bg: rgba(21, 23, 25, 0.92);
+  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 92%, var(--text-main) 8%);
   /* Fades toward the panel it sits on, NOT toward white — mixing with white on
      a dark surface brightens a hint rather than dimming it (this token once
      measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was
@@ -13022,25 +13310,30 @@ details {
      Matching raw contrast ratio instead would have made this look dimmer than
      its light counterpart. */
   --composer-placeholder: color-mix(in oklab, var(--text-muted) 50%, var(--bg-panel-strong) 50%);
-  --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(220, 227, 234, 0.06);
+  /* Wired to the house tokens, the way light already was. The light block's
+     note asked for exactly this if dark were ever retuned — two palettes for
+     one job is how a theme drifts, and this pass retunes dark, so the second
+     palette goes away rather than being edited alongside. */
+  --background: var(--bg-main);
+  --foreground: var(--text-main);
+  --card: var(--bg-panel-strong);
+  --card-foreground: var(--text-main);
+  --popover: var(--bg-panel-strong);
+  --popover-foreground: var(--text-main);
+  --primary: var(--brand);
+  --primary-foreground: var(--bg-main);
+  --secondary: #1a1d20;
+  --secondary-foreground: var(--text-main);
+  --muted: #1a1d20;
+  --muted-foreground: var(--text-muted);
+  --accent: #1a1d20;
+  --accent-foreground: var(--text-main);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: #1b1e22;
+  --input: #24282b;
+  /* m2, matching Day: a focus ring owes 3:1 and m3 measures 2.57:1. */
+  --ring: #777c82;
   /* Ultra brand data palette (dark) — same hue per index as light; only L/C shift. */
   --chart-1: oklch(0.660 0.161 256.5); /* blue        #4a92f2 */
   --chart-2: oklch(0.665 0.169 42.0);  /* terracotta  #e66933 */
@@ -13050,30 +13343,37 @@ details {
   --chart-6: oklch(0.585 0.169 304.6); /* violet      #935ccb */
   --chart-7: oklch(0.662 0.150 145.1); /* green       #4eaa55 */
   --chart-8: oklch(0.800 0.016 260.7); /* graphite    #b8bec8 */
-  --chart-grid: rgba(255, 255, 255, 0.10);
-  --chart-axis: rgba(255, 255, 255, 0.24);
-  --chart-label: #a1a1aa;
-  --chart-title: #f5f5f5;
+  --chart-grid: rgba(220, 227, 234, 0.10);
+  --chart-axis: rgba(220, 227, 234, 0.24);
+  --chart-label: #777c82;
+  --chart-title: #dce3ea;
   --chart-seq-1: #16223b; --chart-seq-2: #1f3a63; --chart-seq-3: #2f5991;
   --chart-seq-4: #4f7cbb; --chart-seq-5: #7ba0da; --chart-seq-6: #a8c4ec;
   --chart-seq-7: #d3e2f8;
   --chart-div-1: #6294d8; --chart-div-2: #47709f; --chart-div-3: #3a5069;
   --chart-div-mid: #3a3936; --chart-div-5: #7a4f3e; --chart-div-6: #b06f52;
   --chart-div-7: #d17956;
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  /* Recedes from the canvas, same as Day — in Night that means one step
+     BRIGHTER than the ground, since the ground is the dark end here. */
+  --sidebar: #0f1214;
+  /* m1, re-solved against the sidebar's own ground: 8.04:1. Dark previously
+     ran its Recents at full white, i.e. it never got the quiet-sidebar split
+     that light shipped — so this both applies the ladder and closes that
+     asymmetry. m2 was rejected for the same reason as in Day: 4.46:1 on this
+     ground is a hair under AA for the 14px/500 row labels. */
+  --sidebar-foreground: #a5abb0;
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--bg-main);
+  --sidebar-accent: #1a1d20;
   /* Dark's half of the ink-goes-crisp promise. The rules that darken a hovered
-     sidebar row in light theme brighten it here, so this MUST be defined for
-     both themes — an undefined var() makes `color` invalid at computed-value
-     time and the row silently inherits instead. One step past dark's
-     --text-main (#f5f5f5), the same way #0a0a0a sits past light's. */
-  --sidebar-ink-hover: #ffffff;
+     sidebar row in Day brighten it here, so this MUST be defined for both
+     themes — an undefined var() makes `color` invalid at computed-value time
+     and the row silently inherits instead. One step past --text-main, and not
+     #ffffff: the ink avoids pure white to stop bloom, so its hover must too. */
+  --sidebar-ink-hover: #eef3f8;
   --sidebar-accent-foreground: var(--sidebar-ink-hover);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-border: #1b1e22;
+  --sidebar-ring: #777c82;
   --collapsed-sidebar-bg: color-mix(in oklab, var(--sidebar) 94%, var(--background) 6%);
   --collapsed-sidebar-popover-bg: color-mix(in oklab, var(--popover) 92%, var(--background) 8%);
   --collapsed-sidebar-popover-shadow: 0 28px 70px rgba(0, 0, 0, 0.42), 0 8px 24px rgba(0, 0, 0, 0.24);
@@ -13703,10 +14003,10 @@ details {
   display: inline-flex;
   align-items: center;
   padding: 0.05rem 0.42rem;
-  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border: 1px solid color-mix(in oklab, var(--status-warn) 38%, var(--line));
   border-radius: 999px;
-  background: color-mix(in oklab, #b45309 16%, transparent);
-  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  background: color-mix(in oklab, var(--status-warn) 16%, transparent);
+  color: color-mix(in oklab, var(--status-warn) 72%, var(--text-main));
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;

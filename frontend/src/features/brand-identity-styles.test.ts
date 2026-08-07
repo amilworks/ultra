@@ -84,23 +84,27 @@ const typographyDarkTokens = new Map([
 
 describe("Ultra monochrome identity contract", () => {
   it("defines exact monochrome identity tokens and leaves launch blue unused", () => {
+    // Meridian Drift. Identity is still monochrome — the heatmap is now the
+    // magnitude ladder run in reverse (m4 -> m1, quiet to loud), so density
+    // reads as brightness on the same scale the rest of the hierarchy uses,
+    // rather than as a second set of greys.
     expect(Object.fromEntries(lightTokens)).toMatchObject({
       "--ultra-launch-signal": "#1994ff",
-      "--account-avatar-fill": "#171717",
-      "--account-avatar-foreground": "#ffffff",
-      "--activity-heatmap-1": "#d4d4d8",
-      "--activity-heatmap-2": "#a1a1aa",
-      "--activity-heatmap-3": "#71717a",
-      "--activity-heatmap-4": "#3f3f46",
+      "--account-avatar-fill": "#171b1d",
+      "--account-avatar-foreground": "#f2f3f3",
+      "--activity-heatmap-1": "#c8c9ca",
+      "--activity-heatmap-2": "#939697",
+      "--activity-heatmap-3": "#696b6d",
+      "--activity-heatmap-4": "#424547",
       "--status-success": "#047857",
     });
     expect(Object.fromEntries(darkTokenOverrides)).toMatchObject({
-      "--account-avatar-fill": "#f5f5f5",
-      "--account-avatar-foreground": "#111113",
-      "--activity-heatmap-1": "#3f3f46",
-      "--activity-heatmap-2": "#71717a",
-      "--activity-heatmap-3": "#a1a1aa",
-      "--activity-heatmap-4": "#d4d4d8",
+      "--account-avatar-fill": "#dce3ea",
+      "--account-avatar-foreground": "#0b0e11",
+      "--activity-heatmap-1": "#2b2e32",
+      "--activity-heatmap-2": "#505559",
+      "--activity-heatmap-3": "#777c82",
+      "--activity-heatmap-4": "#a5abb0",
       "--status-success": "#6ee7b7",
     });
     expect(darkTokenOverrides.has("--ultra-launch-signal")).toBe(false);
@@ -228,11 +232,14 @@ describe("Ultra monochrome identity contract", () => {
   });
 
   it("uses accessible monochrome context and emphasis in every wordmark theme", () => {
+    // Meridian ladder rungs, solved against the sidebar ground the wordmark
+    // sits on: emphasis = m0, context = m1. Dark emphasis must never exceed
+    // body ink — the old #f5f5f5 was the brightest text in Night.
     expect(Object.fromEntries(typographyLightTokens)).toMatchObject({
-      "--brand-wordmark-context-light": "#52525b",
-      "--brand-wordmark-emphasis-light": "#171717",
-      "--brand-wordmark-context-dark": "#a1a1aa",
-      "--brand-wordmark-emphasis-dark": "#f5f5f5",
+      "--brand-wordmark-context-light": "#424547",
+      "--brand-wordmark-emphasis-light": "#171b1d",
+      "--brand-wordmark-context-dark": "#a5abb0",
+      "--brand-wordmark-emphasis-dark": "#dce3ea",
       "--brand-wordmark-context": "var(--brand-wordmark-context-light)",
       "--brand-wordmark-emphasis": "var(--brand-wordmark-emphasis-light)",
     });
@@ -243,11 +250,13 @@ describe("Ultra monochrome identity contract", () => {
       "var(--brand-wordmark-emphasis-dark)"
     );
 
-    for (const color of ["#52525b", "#171717"]) {
-      expect(contrastRatio(color, "#ffffff")).toBeGreaterThanOrEqual(4.5);
+    // Measured on the grounds the wordmark actually sits on — the sidebar in
+    // each theme — not on pure white/black, which no Meridian surface is.
+    for (const color of ["#424547", "#171b1d"]) {
+      expect(contrastRatio(color, "#e9ebeb")).toBeGreaterThanOrEqual(4.5);
     }
-    for (const color of ["#a1a1aa", "#f5f5f5"]) {
-      expect(contrastRatio(color, "#111113")).toBeGreaterThanOrEqual(4.5);
+    for (const color of ["#a5abb0", "#dce3ea"]) {
+      expect(contrastRatio(color, "#0f1214")).toBeGreaterThanOrEqual(4.5);
     }
     expect(typographyLightTokens.get("--brand-wordmark-context-light")).not.toBe(
       typographyLightTokens.get("--brand-wordmark-emphasis-light")

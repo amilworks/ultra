@@ -9,7 +9,11 @@
       name="description"
       content="An AI research workspace for scientific imaging — explore, analyze, and orchestrate large image datasets."
     />
-    <meta name="theme-color" content="#0a0a0b" />
+    <!-- Meridian grounds. Media-scoped so browser chrome matches the app
+         before any JS runs; useThemePreference re-points both when the in-app
+         preference overrides the OS scheme. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f2f3f3" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e11" />
 
     <!-- Open Graph — Slack, LinkedIn, Facebook, iMessage, Discord, ... -->
     <meta property="og:type" content="website" />

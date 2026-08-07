@@ -1,5 +1,4 @@
 import { cn } from "@/lib/utils";
-import { CircularLoader } from "@/components/prompt-kit";
 
 type RunningStatusPillProps = {
   className?: string;
@@ -7,6 +6,10 @@ type RunningStatusPillProps = {
   size?: "default" | "compact";
 };
 
+/* The point of light — Meridian's reserved brass, carrying its one meaning:
+   this conversation's instrument is running right now. A still, breathing
+   point rather than a spinner: the language replaces motion-as-busyness with
+   light, and reserves the product's only warm colour for exactly this. */
 export function RunningStatusPill({
   className,
   label = "Running",
@@ -21,11 +24,7 @@ export function RunningStatusPill({
       aria-label={label}
       title={label}
     >
-      <CircularLoader
-        decorative
-        size={size === "compact" ? "sm" : "md"}
-        className="running-status-pill-loader"
-      />
+      <span className="running-status-point" aria-hidden="true" />
       <span className="sr-only">{label}</span>
     </span>
   );

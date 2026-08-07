@@ -4,15 +4,21 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 // writeUint16Nifti writes a NIfTI-1 file with the given dimension counts. ndim
@@ -53,6 +59,16 @@ func writeUint16Nifti(t *testing.T, path string, ndim, w, h, d, timeCount, chann
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatalf("write nifti: %v", err)
 	}
+}
+
+func testFileSHA256(t *testing.T, path string) string {
+	t.Helper()
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 func sliceUint16(b []byte) []uint16 {
@@ -184,6 +200,9 @@ func TestLoadNiftiScalarVolumeAtRejectsOversizeVolume(t *testing.T) {
 func TestNiftiDecompressSidecarServesRandomAccess(t *testing.T) {
 	dir := t.TempDir()
 	gz := filepath.Join(dir, "series.nii.gz")
+	identity := niftiDecompressedSidecarIdentity{
+		root: dir, resourceID: "file_series", sourceSHA256: strings.Repeat("a", 64),
+	}
 	values := make([]uint16, 2*2*2*4) // 4 timepoints
 	for i := range values {
 		values[i] = uint16(i + 1)
@@ -191,15 +210,18 @@ func TestNiftiDecompressSidecarServesRandomAccess(t *testing.T) {
 	writeUint16Nifti(t, gz, 4, 2, 2, 2, 4, 1, values, true)
 
 	// No sidecar yet: streaming path still serves correctly.
-	if readyDecompressedNiftiSidecar(gz) != "" {
+	if readyDecompressedNiftiSidecar(identity) != "" {
 		t.Fatalf("unexpected pre-existing sidecar")
 	}
 
-	dst := niftiDecompressedSidecarPath(gz)
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
 	if err := buildDecompressedNiftiSidecar(context.Background(), gz, dst); err != nil {
 		t.Fatalf("build sidecar: %v", err)
 	}
-	ready := readyDecompressedNiftiSidecar(gz)
+	ready := readyDecompressedNiftiSidecar(identity)
 	if ready != dst {
 		t.Fatalf("sidecar not ready: %q", ready)
 	}
@@ -214,7 +236,7 @@ func TestNiftiDecompressSidecarServesRandomAccess(t *testing.T) {
 	// With the sidecar present, every timepoint serves via ReadAt and matches the
 	// source data exactly.
 	for ti := 0; ti < 4; ti++ {
-		vol, err := loadNiftiScalarVolumeAt(gz, ti, 0)
+		vol, err := loadNiftiScalarVolumeAt(gz, ti, 0, identity)
 		if err != nil {
 			t.Fatalf("t=%d: %v", ti, err)
 		}
@@ -222,6 +244,389 @@ func TestNiftiDecompressSidecarServesRandomAccess(t *testing.T) {
 		if got := sliceUint16(vol.Data); !equalUint16(got, want) {
 			t.Fatalf("t=%d via sidecar = %v, want %v", ti, got, want)
 		}
+	}
+}
+
+func TestNiftiDecompressSidecarRejectsSymlinkPublicationPaths(t *testing.T) {
+	dir := t.TempDir()
+	gz := filepath.Join(dir, "series.nii.gz")
+	identity := niftiDecompressedSidecarIdentity{
+		root: dir, resourceID: "file_series_symlink", sourceSHA256: strings.Repeat("d", 64),
+	}
+	writeUint16Nifti(t, gz, 3, 2, 2, 2, 1, 1, []uint16{1, 2, 3, 4, 5, 6, 7, 8}, true)
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(dir, "external.nii")
+	if err := os.WriteFile(external, []byte("do not replace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, dst); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if ready := readyDecompressedNiftiSidecar(identity); ready != "" {
+		t.Fatalf("symlink sidecar was treated as ready: %q", ready)
+	}
+	if err := buildDecompressedNiftiSidecar(context.Background(), gz, dst); err == nil {
+		t.Fatal("expected symlink sidecar destination to be rejected")
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != "do not replace" {
+		t.Fatalf("external destination changed: %q, err=%v", got, err)
+	}
+
+	if err := os.Remove(dst); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, dst+".tmp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := buildDecompressedNiftiSidecar(context.Background(), gz, dst); err == nil {
+		t.Fatal("expected symlink sidecar temporary path to be rejected")
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != "do not replace" {
+		t.Fatalf("external temporary destination changed: %q, err=%v", got, err)
+	}
+}
+
+func TestNiftiDecompressSidecarRejectsSymlinkedDerivedAncestor(t *testing.T) {
+	root := t.TempDir()
+	external := t.TempDir()
+	gz := filepath.Join(root, "series.nii.gz")
+	identity := niftiDecompressedSidecarIdentity{
+		root: root, resourceID: "file_series_ancestor", sourceSHA256: strings.Repeat("e", 64),
+	}
+	writeUint16Nifti(t, gz, 3, 2, 2, 2, 1, 1, []uint16{1, 2, 3, 4, 5, 6, 7, 8}, true)
+	if err := os.Symlink(external, filepath.Join(root, resourceDerivedDir)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	if ready := readyDecompressedNiftiSidecar(identity); ready != "" {
+		t.Fatalf("symlinked derived ancestor was treated as ready: %q", ready)
+	}
+	if err := buildDecompressedNiftiSidecar(context.Background(), gz, dst); err == nil {
+		t.Fatal("expected symlinked derived ancestor to be rejected")
+	}
+	entries, err := os.ReadDir(external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("external directory changed: %v", entries)
+	}
+}
+
+func TestNiftiDecompressCannotPublishAfterResourceDeletion(t *testing.T) {
+	root := t.TempDir()
+	const resourceID = "file_nifti_delete"
+	source := filepath.Join(root, resourceID+"__series.nii.gz")
+	values := make([]uint16, 2*2*2*3)
+	writeUint16Nifti(t, source, 4, 2, 2, 2, 3, 1, values, true)
+	identity := niftiDecompressedSidecarIdentity{
+		root: root, resourceID: resourceID, sourceSHA256: testFileSHA256(t, source),
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRoot.Close()
+	lock, err := acquireResourceLifecycleLock(context.Background(), uploadRoot, resourceID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	maybeDecompressNiftiSidecar(root, resourceID, identity.sourceSHA256, source, 3)
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	if err := uploadRoot.Remove(filepath.Base(source)); err != nil {
+		_ = lock.release()
+		t.Fatal(err)
+	}
+	if err := lock.removePath(); err != nil {
+		_ = lock.release()
+		t.Fatal(err)
+	}
+	if err := lock.release(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, inFlight := niftiDecompressInFlight.Load(dst)
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("decompression worker did not retire after source deletion")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, path := range []string{dst, dst + ".tmp"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("late NIfTI sidecar survived deletion: %s (err=%v)", path, err)
+		}
+	}
+}
+
+func TestNiftiDecompressionDoesNotBlockDeletionOrPublishLate(t *testing.T) {
+	rootPath := t.TempDir()
+	const resourceID = "file_nifti_race"
+	sourceName := resourceID + "__series.nii.gz"
+	source := filepath.Join(rootPath, sourceName)
+	values := make([]uint16, 2*2*2*3)
+	writeUint16Nifti(t, source, 4, 2, 2, 2, 3, 1, values, true)
+	digest := testFileSHA256(t, source)
+	dst, ok := niftiDecompressedSidecarPath(niftiDecompressedSidecarIdentity{
+		root: rootPath, resourceID: resourceID, sourceSHA256: digest,
+	})
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	copyStarted := make(chan struct{})
+	releaseCopy := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- buildAndPublishDecompressedNiftiSidecarWithCopy(
+			context.Background(),
+			rootPath,
+			resourceID,
+			digest,
+			source,
+			dst,
+			func(writer io.Writer, reader io.Reader) (int64, error) {
+				close(copyStarted)
+				<-releaseCopy
+				return io.Copy(writer, reader)
+			},
+		)
+	}()
+	select {
+	case <-copyStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("NIfTI decompression did not start")
+	}
+	uploadRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRoot.Close()
+	lifecycleLock, err := acquireResourceLifecycleCleanupLock(
+		context.Background(), uploadRoot, resourceID, "",
+	)
+	if err != nil {
+		t.Fatalf("deletion waited on NIfTI decompression: %v", err)
+	}
+	if err := ensureResourceFilesystemTombstone(uploadRoot, resourceID); err != nil {
+		_ = lifecycleLock.release()
+		t.Fatal(err)
+	}
+	if _, err := removeOwnedResourceNamespace(uploadRoot, resourceID, sourceName); err != nil {
+		_ = lifecycleLock.release()
+		t.Fatal(err)
+	}
+	if err := lifecycleLock.removePath(); err != nil {
+		_ = lifecycleLock.release()
+		t.Fatal(err)
+	}
+	if err := lifecycleLock.release(); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseCopy)
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("late NIfTI publisher unexpectedly succeeded")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("late NIfTI publisher did not retire")
+	}
+	entries, err := os.ReadDir(filepath.Join(rootPath, resourceDerivedDir))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("late NIfTI artifacts survived deletion: %v", entries)
+	}
+}
+
+func TestNiftiPublicationRejectsReplacedStageGeneration(t *testing.T) {
+	rootPath := t.TempDir()
+	const resourceID = "file_nifti_stage_swap"
+	sourceName := resourceID + "__series.nii.gz"
+	source := filepath.Join(rootPath, sourceName)
+	values := make([]uint16, 2*2*2*3)
+	writeUint16Nifti(t, source, 4, 2, 2, 2, 3, 1, values, true)
+	digest := testFileSHA256(t, source)
+	destinationName := resourceID + "__nifti.sha256-" + digest + ".nii"
+	uploadRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRoot.Close()
+	stage, err := buildDecompressedNiftiStage(
+		context.Background(), uploadRoot, resourceID, sourceName, digest, destinationName, io.Copy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(rootPath, resourceDerivedDir, stage.name)
+	stageInfo, err := os.Stat(stagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(rootPath, "unrelated-stage")
+	if err := os.WriteFile(replacement, make([]byte, stageInfo.Size()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, stagePath); err != nil {
+		t.Fatal(err)
+	}
+
+	err = publishDecompressedNiftiStage(
+		context.Background(), uploadRoot, resourceID, sourceName, stage,
+	)
+	if err == nil || !strings.Contains(err.Error(), "stage changed") {
+		t.Fatalf("publication error = %v, want replaced generation rejected", err)
+	}
+	for _, path := range []string{
+		stagePath,
+		filepath.Join(rootPath, resourceDerivedDir, destinationName),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replaced stage survived at %q: %v", path, err)
+		}
+	}
+}
+
+func TestNiftiPublicationAcceptsOwnedStageRename(t *testing.T) {
+	rootPath := t.TempDir()
+	const resourceID = "file_nifti_owned_stage"
+	sourceName := resourceID + "__series.nii.gz"
+	source := filepath.Join(rootPath, sourceName)
+	values := make([]uint16, 2*2*2*3)
+	writeUint16Nifti(t, source, 4, 2, 2, 2, 3, 1, values, true)
+	digest := testFileSHA256(t, source)
+	destinationName := resourceID + "__nifti.sha256-" + digest + ".nii"
+	uploadRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRoot.Close()
+	stage, err := buildDecompressedNiftiStage(
+		context.Background(), uploadRoot, resourceID, sourceName, digest, destinationName, io.Copy,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := publishDecompressedNiftiStage(
+		context.Background(), uploadRoot, resourceID, sourceName, stage,
+	); err != nil {
+		t.Fatalf("publish untampered NIfTI stage: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(rootPath, resourceDerivedDir, destinationName)); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("published NIfTI sidecar: info=%v err=%v", info, err)
+	}
+}
+
+func TestNiftiStageBuildRejectsPathReplacementBeforeAdoption(t *testing.T) {
+	rootPath := t.TempDir()
+	const resourceID = "file_nifti_stage_adoption_swap"
+	sourceName := resourceID + "__series.nii.gz"
+	source := filepath.Join(rootPath, sourceName)
+	values := make([]uint16, 2*2*2*3)
+	writeUint16Nifti(t, source, 4, 2, 2, 2, 3, 1, values, true)
+	digest := testFileSHA256(t, source)
+	destinationName := resourceID + "__nifti.sha256-" + digest + ".nii"
+	uploadRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRoot.Close()
+	stageName, err := niftiSidecarStageName(resourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagePath := filepath.Join(rootPath, resourceDerivedDir, stageName)
+
+	_, err = buildDecompressedNiftiStage(
+		context.Background(),
+		uploadRoot,
+		resourceID,
+		sourceName,
+		digest,
+		destinationName,
+		func(writer io.Writer, reader io.Reader) (int64, error) {
+			written, copyErr := io.Copy(writer, reader)
+			if copyErr != nil {
+				return written, copyErr
+			}
+			replacement := filepath.Join(rootPath, "replacement-before-adoption")
+			if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+				return written, err
+			}
+			return written, os.Rename(replacement, stagePath)
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "stage changed after writing") {
+		t.Fatalf("stage build error = %v, want path replacement rejected", err)
+	}
+	if _, err := os.Lstat(stagePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replaced stage survived failed adoption: %v", err)
+	}
+}
+
+func TestNiftiDecompressedSidecarDoesNotAliasNestedResource(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	nestedRoot := filepath.Join(root, "analysis", "job")
+	if err := os.MkdirAll(filepath.Join(nestedRoot, resourceDerivedDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gz := filepath.Join(nestedRoot, "foo.nii.gz")
+	legacyCollision := filepath.Join(nestedRoot, resourceDerivedDir, "foo.nii")
+	ownedValues := []uint16{1, 2, 3, 4, 5, 6, 7, 8}
+	otherValues := []uint16{900, 901, 902, 903, 904, 905, 906, 907}
+	writeUint16Nifti(t, gz, 3, 2, 2, 2, 1, 1, ownedValues, true)
+	writeUint16Nifti(t, legacyCollision, 3, 2, 2, 2, 1, 1, otherValues, false)
+	identity := niftiDecompressedSidecarIdentity{
+		root: root, resourceID: "file_nested_gzip", sourceSHA256: strings.Repeat("c", 64),
+	}
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	if dst == legacyCollision {
+		t.Fatal("resource-bound sidecar aliases the nested resource")
+	}
+	volume, err := loadNiftiScalarVolumeAt(gz, 0, 0, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sliceUint16(volume.Data); !equalUint16(got, ownedValues) {
+		t.Fatalf("gzip source rendered through unrelated resource: got %v want %v", got, ownedValues)
+	}
+	if err := buildDecompressedNiftiSidecar(context.Background(), gz, dst); err != nil {
+		t.Fatal(err)
+	}
+	volume, err = loadNiftiScalarVolumeAt(gz, 0, 0, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sliceUint16(volume.Data); !equalUint16(got, ownedValues) {
+		t.Fatalf("resource-bound sidecar = %v, want %v", got, ownedValues)
+	}
+	otherVolume, err := loadNiftiScalarVolumeAt(legacyCollision, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sliceUint16(otherVolume.Data); !equalUint16(got, otherValues) {
+		t.Fatalf("nested resource changed: got %v want %v", got, otherValues)
 	}
 }
 

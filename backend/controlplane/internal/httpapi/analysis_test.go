@@ -3,12 +3,16 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
@@ -160,13 +164,275 @@ func TestRegisterAnalysisOutputsRejectsUnsafePath(t *testing.T) {
 		t.Fatalf("decode submit: %v", err)
 	}
 
-	for _, bad := range []string{"../escape.tif", "/etc/passwd", "uploads/x.tif", "analysis/../../x.tif", ""} {
+	for _, bad := range []string{"../escape.tif", "/etc/passwd", "uploads/x.tif", "analysis/../../x.tif", "analysis/another-job/x.tif", ""} {
 		reg := analysisAuthedJSON(t, router, http.MethodPost, "/v2/data-agent/jobs/"+sr.Job.JobID+"/outputs", user, org, map[string]any{
 			"outputs": []map[string]any{{"storage_path": bad, "original_name": "x.tif"}},
 		})
 		if reg.Code != http.StatusBadRequest {
 			t.Fatalf("storage_path %q: status = %d, want 400 (body=%s)", bad, reg.Code, reg.Body.String())
 		}
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside-mask.tif")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkedRel := filepath.Join("analysis", sr.Job.JobID, "linked-mask.tif")
+	linkedAbs := filepath.Join(uploadRoot, linkedRel)
+	if err := os.MkdirAll(filepath.Dir(linkedAbs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, linkedAbs); err != nil {
+		t.Fatal(err)
+	}
+	reg := analysisAuthedJSON(t, router, http.MethodPost, "/v2/data-agent/jobs/"+sr.Job.JobID+"/outputs", user, org, map[string]any{
+		"outputs": []map[string]any{{"storage_path": filepath.ToSlash(linkedRel), "original_name": "linked-mask.tif"}},
+	})
+	if reg.Code != http.StatusBadRequest {
+		t.Fatalf("symlinked output status = %d, want 400 (body=%s)", reg.Code, reg.Body.String())
+	}
+	if payload, err := os.ReadFile(outside); err != nil || string(payload) != "outside" {
+		t.Fatalf("outside analysis target changed: %q err=%v", payload, err)
+	}
+}
+
+func TestRegisterAnalysisOutputsIgnoresWorkerResourceIDAndPreservesForeignResource(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test", Store: mem, UploadRoot: uploadRoot})
+	ctx := context.Background()
+	const user, org = "alice", "org-a"
+	const foreignID = "file_bob_active"
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: foreignID, OriginalName: "bob-source.tif", ContentType: "image/tiff",
+		StorageURI: "s3://bob/private.tif", SizeBytes: 99, SourceType: "upload", ResourceKind: "image",
+		OwnerUserID: "bob", OwnerOrgID: "org-b", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	grant, err := mem.CreateResourceShareGrant(ctx, domain.CreateResourceShareGrantInput{
+		ResourceID: foreignID, OwnerUserID: "bob", OwnerOrgID: "org-b",
+		GranteeUserID: user, GranteeOrgID: org, Role: "read", Status: "active", CreatedByUserID: "bob",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: "img-analysis", OriginalName: "input.tif", SourceType: "upload", ResourceKind: "image",
+		OwnerUserID: user, OwnerOrgID: org, Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	submit := analysisAuthedJSON(t, router, http.MethodPost, "/v2/analysis/batch", user, org, map[string]any{
+		"model": "megaseg", "resource_ids": []string{"img-analysis"},
+	})
+	if submit.Code != http.StatusAccepted {
+		t.Fatalf("submit = %d, %s", submit.Code, submit.Body.String())
+	}
+	var sr batchAnalysisJobResponse
+	if err := json.Unmarshal(submit.Body.Bytes(), &sr); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join("analysis", sr.Job.JobID, "mask.tif")
+	abs := filepath.Join(uploadRoot, rel)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("mask"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := analysisAuthedJSON(t, router, http.MethodPost, "/v2/data-agent/jobs/"+sr.Job.JobID+"/outputs", user, org, map[string]any{
+		"outputs": []map[string]any{{
+			"resource_id": foreignID, "storage_path": filepath.ToSlash(rel), "original_name": "mask.tif",
+		}},
+	})
+	if reg.Code != http.StatusCreated {
+		t.Fatalf("register = %d, %s", reg.Code, reg.Body.String())
+	}
+	var response registerAnalysisOutputsResponse
+	if err := json.Unmarshal(reg.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Registered) != 1 || response.Registered[0].FileID == foreignID {
+		t.Fatalf("registered resources = %+v, want one server-derived ID", response.Registered)
+	}
+	foreign, err := mem.GetResourceForUser(ctx, foreignID, "bob", "org-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foreign.OriginalName != "bob-source.tif" || foreign.StorageURI != "s3://bob/private.tif" || foreign.SizeBytes != 99 || foreign.OwnerUserID != "bob" {
+		t.Fatalf("foreign resource was changed: %+v", foreign)
+	}
+	grants, err := mem.ListResourceShareGrantsForResource(ctx, domain.ListResourceShareGrantsInput{
+		ResourceID: foreignID, OwnerUserID: "bob", OwnerOrgID: "org-b", Status: "active", Limit: 10,
+	})
+	if err != nil || len(grants) != 1 || grants[0].GrantID != grant.GrantID {
+		t.Fatalf("foreign grants = %+v err=%v, want original grant", grants, err)
+	}
+}
+
+func TestRegisterAnalysisOutputsCleansLateReplayAfterPermanentPurge(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test", Store: mem, UploadRoot: uploadRoot})
+	ctx := context.Background()
+	const user, org = "analysis-owner", "analysis-org"
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: "analysis-input", OriginalName: "input.tif", SourceType: "upload", ResourceKind: "image",
+		OwnerUserID: user, OwnerOrgID: org, Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	submit := analysisAuthedJSON(t, router, http.MethodPost, "/v2/analysis/batch", user, org, map[string]any{
+		"model": "megaseg", "resource_ids": []string{"analysis-input"},
+	})
+	if submit.Code != http.StatusAccepted {
+		t.Fatalf("submit = %d, %s", submit.Code, submit.Body.String())
+	}
+	var submitted batchAnalysisJobResponse
+	if err := json.Unmarshal(submit.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Join("analysis", submitted.Job.JobID, "late-mask.tif")
+	absolute := filepath.Join(uploadRoot, relative)
+	if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absolute, []byte("mask-generation"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	register := func() *httptest.ResponseRecorder {
+		return analysisAuthedJSON(t, router, http.MethodPost, "/v2/data-agent/jobs/"+submitted.Job.JobID+"/outputs", user, org, map[string]any{
+			"outputs": []map[string]any{{
+				"storage_path": filepath.ToSlash(relative), "original_name": "late-mask.tif",
+				"content_type": "image/tiff", "artifact_kind": "mask",
+			}},
+		})
+	}
+	first := register()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("initial register = %d, %s", first.Code, first.Body.String())
+	}
+	resourceID := analysisOutputResourceID(submitted.Job.JobID, relative)
+	if _, err := mem.SoftDeleteResourceForUser(ctx, resourceID, user, org, time.Now().Add(-31*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed, _, err := ReclaimExpiredResources(ctx, mem, uploadRoot, 10); err != nil || reclaimed != 1 {
+		t.Fatalf("reclaim analysis output = %d err=%v, want one", reclaimed, err)
+	}
+	if err := os.WriteFile(absolute, []byte("stale-replay"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	derived := filepath.Join(uploadRoot, resourceDerivedDir)
+	if err := os.MkdirAll(derived, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{derivedPyramidName(resourceID), derivedPyramidManifestName(resourceID)} {
+		if err := os.WriteFile(filepath.Join(derived, name), []byte("stale"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	late := register()
+	if late.Code != http.StatusConflict {
+		t.Fatalf("late register = %d, %s; want lifecycle conflict", late.Code, late.Body.String())
+	}
+	for _, path := range []string{
+		absolute,
+		filepath.Join(derived, derivedPyramidName(resourceID)),
+		filepath.Join(derived, derivedPyramidManifestName(resourceID)),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("late analysis generation survived at %q: %v", path, err)
+		}
+	}
+	uploadRootHandle, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uploadRootHandle.Close()
+	if _, err := acquireResourceLifecycleLock(ctx, uploadRootHandle, resourceID, ""); !errors.Is(err, errResourceLifecycleTombstoned) {
+		t.Fatalf("publication lock after purge = %v, want filesystem tombstone rejection", err)
+	}
+}
+
+func TestRegisterAnalysisOutputsPreservesSoftDeletedGenerationOnReplay(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test", Store: mem, UploadRoot: uploadRoot})
+	ctx := context.Background()
+	const user, org = "analysis-restore-owner", "analysis-restore-org"
+	if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: "analysis-restore-input", OriginalName: "input.tif", SourceType: "upload", ResourceKind: "image",
+		OwnerUserID: user, OwnerOrgID: org, Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	submit := analysisAuthedJSON(t, router, http.MethodPost, "/v2/analysis/batch", user, org, map[string]any{
+		"model": "megaseg", "resource_ids": []string{"analysis-restore-input"},
+	})
+	if submit.Code != http.StatusAccepted {
+		t.Fatalf("submit = %d, %s", submit.Code, submit.Body.String())
+	}
+	var submitted batchAnalysisJobResponse
+	if err := json.Unmarshal(submit.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Join("analysis", submitted.Job.JobID, "restorable-mask.tif")
+	absolute := filepath.Join(uploadRoot, relative)
+	if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("retained-analysis-generation")
+	if err := os.WriteFile(absolute, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(original)
+	digestHex := hex.EncodeToString(digest[:])
+	register := func() *httptest.ResponseRecorder {
+		return analysisAuthedJSON(t, router, http.MethodPost, "/v2/data-agent/jobs/"+submitted.Job.JobID+"/outputs", user, org, map[string]any{
+			"outputs": []map[string]any{{
+				"storage_path": filepath.ToSlash(relative), "original_name": "restorable-mask.tif",
+				"content_type": "image/tiff", "artifact_kind": "mask", "sha256": digestHex,
+			}},
+		})
+	}
+	first := register()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("initial register = %d, %s", first.Code, first.Body.String())
+	}
+	resourceID := analysisOutputResourceID(submitted.Job.JobID, relative)
+	deleted := analysisAuthedJSON(t, router, http.MethodDelete, "/v2/resources/"+resourceID, user, org, nil)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("soft delete = %d, %s", deleted.Code, deleted.Body.String())
+	}
+	replayed := register()
+	if replayed.Code != http.StatusConflict {
+		t.Fatalf("soft-deleted replay = %d, %s; want lifecycle conflict", replayed.Code, replayed.Body.String())
+	}
+	retained, err := os.ReadFile(absolute)
+	if err != nil {
+		t.Fatalf("read retained analysis generation: %v", err)
+	}
+	if retainedDigest := sha256.Sum256(retained); retainedDigest != digest {
+		t.Fatalf("soft-deleted analysis generation changed: got %x want %x", retainedDigest, digest)
+	}
+	restored := analysisAuthedJSON(t, router, http.MethodPost, "/v2/resources/"+resourceID+"/restore", user, org, nil)
+	if restored.Code != http.StatusOK {
+		t.Fatalf("restore = %d, %s", restored.Code, restored.Body.String())
+	}
+	record, err := mem.GetResourceForUser(ctx, resourceID, user, org)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != domain.ResourceStatusActive || record.SHA256 != digestHex || record.SizeBytes != int64(len(original)) {
+		t.Fatalf("restored catalog generation = %+v, want exact original sha/size", record)
+	}
+	download := analysisAuthedGet(t, router, "/v2/resources/"+resourceID+"/download", user, org)
+	if download.Code != http.StatusOK || !bytes.Equal(download.Body.Bytes(), original) {
+		t.Fatalf("restored download = %d %q, want exact original bytes", download.Code, download.Body.Bytes())
 	}
 }
 

@@ -21,6 +21,18 @@ type PostgresStore struct {
 	queries *sqlc.Queries
 }
 
+const resourceLifecycleAdvisorySeed int64 = 0x554c545241
+
+func lockResourceLifecycleTx(ctx context.Context, tx pgx.Tx, resourceID string) error {
+	_, err := tx.Exec(
+		ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`,
+		resourceID,
+		resourceLifecycleAdvisorySeed,
+	)
+	return err
+}
+
 func upsertResourceSearchDocumentTx(ctx context.Context, tx pgx.Tx, resource domain.ResourceRecord) error {
 	searchText := resourceSearchDocument(resource)
 	updatedAt := resource.UpdatedAt
@@ -3168,15 +3180,36 @@ func (s *PostgresStore) GetUploadSessionByIdempotencyKeyForUser(ctx context.Cont
 	return uploadSessionFromRow(row), nil
 }
 
-// RetentionBacklog aggregates soft-deleted resources past their undelete window — the
-// storage a retention GC can reclaim. Read-only.
+// RetentionBacklog reports reclaimable and operator-blocked retention storage.
 func (s *PostgresStore) RetentionBacklog(ctx context.Context, now time.Time) (domain.ResourceRetentionBacklog, error) {
 	var backlog domain.ResourceRetentionBacklog
 	err := s.pool.QueryRow(ctx,
-		`SELECT count(*), COALESCE(sum(size_bytes), 0) FROM control_resources
-		 WHERE status = 'deleted' AND retention_expires_at IS NOT NULL AND retention_expires_at < $1`,
+		`SELECT
+		   sum(expired_resources), sum(reclaimable_bytes),
+		   sum(blocked_resources), sum(blocked_bytes),
+		   sum(purging_resources), sum(purging_bytes)
+		 FROM (
+		   SELECT count(*) AS expired_resources, COALESCE(sum(size_bytes), 0) AS reclaimable_bytes,
+		     0::bigint AS blocked_resources, 0::bigint AS blocked_bytes,
+		     0::bigint AS purging_resources, 0::bigint AS purging_bytes
+		   FROM control_resources
+		   WHERE status = 'deleted' AND retention_expires_at IS NOT NULL AND retention_expires_at < $1
+		   UNION ALL
+		   SELECT 0, 0, count(*), COALESCE(sum(size_bytes), 0), 0, 0
+		   FROM control_resources WHERE status = 'retention_blocked'
+		   UNION ALL
+		   SELECT 0, 0, 0, 0, count(*), COALESCE(sum(size_bytes), 0)
+		   FROM control_resources WHERE status = 'purging'
+		 ) AS retention_states`,
 		now.UTC(),
-	).Scan(&backlog.Count, &backlog.Bytes)
+	).Scan(
+		&backlog.Count,
+		&backlog.Bytes,
+		&backlog.BlockedCount,
+		&backlog.BlockedBytes,
+		&backlog.PurgingCount,
+		&backlog.PurgingBytes,
+	)
 	if err != nil {
 		return domain.ResourceRetentionBacklog{}, mapPgError(err)
 	}
@@ -3215,14 +3248,211 @@ func (s *PostgresStore) ListResourcesPastRetention(ctx context.Context, now time
 	return out, nil
 }
 
-// PurgeResource permanently deletes a resource row; FK cascades drop its search docs,
-// collection memberships, share grants, events, and job links. Caller deletes the files.
-func (s *PostgresStore) PurgeResource(ctx context.Context, resourceID string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM control_resources WHERE resource_id = $1`, strings.TrimSpace(resourceID))
-	if err != nil {
-		return mapPgError(err)
+// ClaimResourcesPastRetention atomically leases eligible rows to one GC
+// replica. PostgreSQL's clock is authoritative for both retention expiry and
+// stale-lease recovery, avoiding application-host clock skew.
+func (s *PostgresStore) ClaimResourcesPastRetention(ctx context.Context, lease time.Duration, limit int) ([]domain.ResourceRecord, error) {
+	if lease <= 0 {
+		lease = 15 * time.Minute
 	}
-	return nil
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx, `
+		WITH deleted_candidates AS MATERIALIZED (
+			SELECT resource_id,
+				COALESCE(storage_uri, '') AS storage_uri,
+				COALESCE(storage_path, '') AS storage_path,
+				status,
+				retention_expires_at,
+				updated_at
+			FROM control_resources
+			WHERE status = 'deleted'
+				AND retention_expires_at IS NOT NULL
+				AND retention_expires_at < statement_timestamp()
+			ORDER BY CASE
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND btrim(COALESCE(storage_uri, '')) = ''
+						AND btrim(COALESCE(storage_path, '')) <> '' THEN 0
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND lower(btrim(COALESCE(storage_uri, ''))) LIKE 'file://%' THEN 1
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..') THEN 2
+					ELSE 3
+				END,
+				retention_expires_at ASC,
+				resource_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		), stale_purging_candidates AS MATERIALIZED (
+			SELECT resource_id,
+				COALESCE(storage_uri, '') AS storage_uri,
+				COALESCE(storage_path, '') AS storage_path,
+				status,
+				retention_expires_at,
+				updated_at
+			FROM control_resources
+			WHERE status = 'purging'
+				AND updated_at < statement_timestamp() - make_interval(secs => $1::double precision)
+			ORDER BY CASE
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND btrim(COALESCE(storage_uri, '')) = ''
+						AND btrim(COALESCE(storage_path, '')) <> '' THEN 0
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND lower(btrim(COALESCE(storage_uri, ''))) LIKE 'file://%' THEN 1
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..') THEN 2
+					ELSE 3
+				END,
+				updated_at ASC,
+				resource_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		), bounded_candidates AS (
+			SELECT * FROM deleted_candidates
+			UNION ALL
+			SELECT * FROM stale_purging_candidates
+		), candidates AS (
+			SELECT resource_id
+			FROM bounded_candidates
+			ORDER BY CASE
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND btrim(storage_uri) = ''
+						AND btrim(storage_path) <> '' THEN 0
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..')
+						AND lower(btrim(storage_uri)) LIKE 'file://%' THEN 1
+					WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$'
+						AND resource_id NOT IN ('.', '..') THEN 2
+					ELSE 3
+				END,
+				CASE WHEN status = 'deleted' THEN 0 ELSE 1 END,
+				retention_expires_at ASC NULLS LAST,
+				updated_at ASC,
+				resource_id ASC
+			LIMIT $2
+		)
+		UPDATE control_resources AS resource
+		SET status = 'purging', updated_at = clock_timestamp()
+		FROM candidates
+		WHERE resource.resource_id = candidates.resource_id
+		RETURNING resource.resource_id,
+			COALESCE(resource.storage_uri, ''),
+			COALESCE(resource.storage_path, ''),
+			COALESCE(resource.original_name, ''),
+			resource.size_bytes,
+			resource.updated_at`, lease.Seconds(), limit)
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	defer rows.Close()
+	claimed := make([]domain.ResourceRecord, 0, limit)
+	for rows.Next() {
+		var resource domain.ResourceRecord
+		if err := rows.Scan(
+			&resource.ResourceID,
+			&resource.StorageURI,
+			&resource.StoragePath,
+			&resource.OriginalName,
+			&resource.SizeBytes,
+			&resource.UpdatedAt,
+		); err != nil {
+			return nil, mapPgError(err)
+		}
+		resource.Status = "purging"
+		claimed = append(claimed, resource)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgError(err)
+	}
+	return claimed, nil
+}
+
+// RenewResourceRetentionClaim extends an exact live claim and returns its new
+// timestamp token. A worker must use the returned token for every later
+// renewal, release, block, or purge operation.
+func (s *PostgresStore) RenewResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (time.Time, bool, error) {
+	var renewedAt time.Time
+	err := s.pool.QueryRow(ctx, `
+		UPDATE control_resources
+		SET updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
+		WHERE resource_id = $1 AND status = 'purging' AND updated_at = $2
+		RETURNING updated_at`, resourceID, claimedAt.UTC()).Scan(&renewedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, mapPgError(err)
+	}
+	return renewedAt, true, nil
+}
+
+// ReleaseResourceRetentionClaim makes an exact failed claim immediately
+// reclaimable while preserving the terminal purging state. A stale takeover
+// must never regress a resource to deleted after another replica may already
+// have removed bytes or published the permanent filesystem tombstone.
+func (s *PostgresStore) ReleaseResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE control_resources
+		SET updated_at = to_timestamp(0)
+		WHERE resource_id = $1 AND status = 'purging' AND updated_at = $2`,
+		resourceID, claimedAt.UTC())
+	if err != nil {
+		return false, mapPgError(err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+// BlockResourceRetentionClaim removes an exact terminal claim from automatic
+// retry while preserving an operator-visible, non-reactivatable tombstone.
+func (s *PostgresStore) BlockResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE control_resources
+		SET status = 'retention_blocked', updated_at = clock_timestamp()
+		WHERE resource_id = $1 AND status = 'purging' AND updated_at = $2`,
+		resourceID, claimedAt.UTC())
+	if err != nil {
+		return false, mapPgError(err)
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+// PurgeClaimedResource permanently deletes only the exact claim held by the
+// caller. Filesystem cleanup must finish before this method is called.
+func (s *PostgresStore) PurgeClaimedResource(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockResourceLifecycleTx(ctx, tx, resourceID); err != nil {
+		return false, mapPgError(err)
+	}
+	var purged bool
+	err = tx.QueryRow(ctx, `
+WITH deleted AS (
+  DELETE FROM control_resources
+  WHERE resource_id = $1 AND status = 'purging' AND updated_at = $2
+  RETURNING resource_id
+), tombstoned AS (
+  INSERT INTO control_resource_purge_tombstones (resource_id, purged_at)
+  SELECT resource_id, clock_timestamp() FROM deleted
+  ON CONFLICT (resource_id) DO UPDATE SET purged_at = EXCLUDED.purged_at
+  RETURNING resource_id
+)
+SELECT EXISTS (SELECT 1 FROM tombstoned)`, resourceID, claimedAt.UTC()).Scan(&purged)
+	if err != nil {
+		return false, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return purged, nil
 }
 
 // resourceUsageWhere aggregates active-resource count + bytes for one ownership column.
@@ -3685,9 +3915,15 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertR
 		return domain.ResourceRecord{}, err
 	}
 	defer tx.Rollback(ctx)
-	resourceID := strings.TrimSpace(input.ResourceID)
+	resourceID := input.ResourceID
 	if resourceID == "" {
 		resourceID = domain.NewID("file")
+	}
+	if !domain.IsCanonicalResourceID(resourceID) {
+		return domain.ResourceRecord{}, ErrConflict
+	}
+	if err := lockResourceLifecycleTx(ctx, tx, resourceID); err != nil {
+		return domain.ResourceRecord{}, mapPgError(err)
 	}
 	ownerUserID := strings.TrimSpace(input.OwnerUserID)
 	if ownerUserID == "" {
@@ -3743,6 +3979,9 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, input domain.UpsertR
 		Metadata:           jsonBytes(metadata),
 	})
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.ResourceRecord{}, ErrConflict
+		}
 		return domain.ResourceRecord{}, mapPgError(err)
 	}
 	resource := resourceFromRow(row)
@@ -4253,6 +4492,35 @@ func (s *PostgresStore) ListResources(ctx context.Context, limit int, offset int
 		resources = append(resources, resourceFromRow(row))
 	}
 	return resources, nil
+}
+
+// ListResourceLifecycleFenceCandidates returns deletion states in stable ID
+// order so startup reconciliation cannot skip rows when unrelated resources
+// are concurrently inserted or updated.
+func (s *PostgresStore) ListResourceLifecycleFenceCandidates(ctx context.Context, afterResourceID string, limit int) ([]domain.ResourceRecord, error) {
+	rows, err := s.queries.ListResourceLifecycleFenceCandidates(ctx, sqlc.ListResourceLifecycleFenceCandidatesParams{
+		AfterResourceID: afterResourceID,
+		PageLimit:       limit32(limit, 100),
+	})
+	if err != nil {
+		return nil, mapPgError(err)
+	}
+	resources := make([]domain.ResourceRecord, 0, len(rows))
+	for _, row := range rows {
+		resources = append(resources, resourceFromRow(row))
+	}
+	return resources, nil
+}
+
+func (s *PostgresStore) GetResourceLifecycleStatus(ctx context.Context, resourceID string) (string, bool, error) {
+	status, err := s.queries.GetResourceLifecycleStatus(ctx, resourceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, mapPgError(err)
+	}
+	return strings.TrimSpace(status), true, nil
 }
 
 func (s *PostgresStore) CreateResourceCollection(ctx context.Context, input domain.CreateResourceCollectionInput) (domain.ResourceCollectionRecord, error) {
@@ -7395,6 +7663,113 @@ func (s *PostgresStore) RestoreResourceForUser(ctx context.Context, resourceID s
 		return domain.ResourceRecord{}, mapPgError(err)
 	}
 	return resourceFromRow(row), nil
+}
+
+func (s *PostgresStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	ts = ts.UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if err := lockResourceLifecycleTx(ctx, tx, resourceID); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	queries := s.queries.WithTx(tx)
+	row, err := queries.SoftDeleteResourceForUser(ctx, sqlc.SoftDeleteResourceForUserParams{
+		ResourceID:         resourceID,
+		OwnerUserID:        strings.TrimSpace(input.OwnerUserID),
+		OwnerOrgID:         nullableText(input.OwnerOrgID),
+		DeletedAt:          timestamptz(ts),
+		RetentionExpiresAt: timestamptz(ts.Add(defaultResourceRetention)),
+	})
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, mapPgError(err)
+	}
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	eventRow, err := queries.CreateResourceEvent(ctx, sqlc.CreateResourceEventParams{
+		EventID:     eventID,
+		ResourceID:  resourceID,
+		ActorUserID: nullableText(input.ActorUserID),
+		ActorOrgID:  nullableText(input.ActorOrgID),
+		EventType:   "resource.deleted",
+		Ts:          timestamptz(ts),
+		Metadata:    jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	return domain.ResourceLifecycleMutationResult{
+		Resource: resourceFromRow(row),
+		Event:    resourceEventFromRow(eventRow),
+	}, nil
+}
+
+func (s *PostgresStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	ts = ts.UTC()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	resourceID := strings.TrimSpace(input.ResourceID)
+	if err := lockResourceLifecycleTx(ctx, tx, resourceID); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	queries := s.queries.WithTx(tx)
+	row, err := queries.RestoreResourceForUser(ctx, sqlc.RestoreResourceForUserParams{
+		ResourceID:  resourceID,
+		OwnerUserID: strings.TrimSpace(input.OwnerUserID),
+		OwnerOrgID:  nullableText(input.OwnerOrgID),
+		UpdatedAt:   timestamptz(ts),
+	})
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, mapPgError(err)
+	}
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	eventRow, err := queries.CreateResourceEvent(ctx, sqlc.CreateResourceEventParams{
+		EventID:     eventID,
+		ResourceID:  resourceID,
+		ActorUserID: nullableText(input.ActorUserID),
+		ActorOrgID:  nullableText(input.ActorOrgID),
+		EventType:   "resource.restored",
+		Ts:          timestamptz(ts),
+		Metadata:    jsonBytes(input.Metadata),
+	})
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, mapPgError(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	return domain.ResourceLifecycleMutationResult{
+		Resource: resourceFromRow(row),
+		Event:    resourceEventFromRow(eventRow),
+	}, nil
 }
 
 func (s *PostgresStore) ResourceStorageStats(ctx context.Context) (domain.ResourceStorageStats, error) {

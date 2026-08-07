@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 )
 
 // Batch model inference (MegaSeg / RareSpot) rides the Data-Agent job backbone:
@@ -265,6 +267,12 @@ func (deps ServerDeps) handleRegisterAnalysisOutputs(w http.ResponseWriter, r *h
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer uploadRoot.Close()
 	var req registerAnalysisOutputsRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -289,16 +297,29 @@ func (deps ServerDeps) handleRegisterAnalysisOutputs(w http.ResponseWriter, r *h
 
 	registered := make([]resourceRecord, 0, len(req.Outputs))
 	for index, item := range req.Outputs {
-		resolved, ok := analysisOutputStoragePath(root, item.StoragePath)
+		storageRelative, ok := analysisOutputStoragePath(job.JobID, item.StoragePath)
 		if !ok {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("output %d: storage_path %q must be a relative path under %s/", index, item.StoragePath, analysisOutputPrefix))
+			writeError(w, http.StatusBadRequest, fmt.Errorf("output %d: storage_path %q must be under %s/%s/", index, item.StoragePath, analysisOutputPrefix, job.JobID))
 			return
 		}
-		info, statErr := os.Stat(resolved)
-		if statErr != nil || info.IsDir() {
+		if pathErr := validateManagedSourcePath(uploadRoot, storageRelative, false); pathErr != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("output %d: file %q is not an owned regular file", index, item.StoragePath))
+			return
+		}
+		file, openErr := uploadRoot.Open(storageRelative)
+		if openErr != nil {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("output %d: file %q is not readable", index, item.StoragePath))
 			return
 		}
+		info, statErr := file.Stat()
+		pathInfo, pathStatErr := uploadRoot.Lstat(storageRelative)
+		closeErr := file.Close()
+		if statErr != nil || pathStatErr != nil || closeErr != nil || !info.Mode().IsRegular() ||
+			!pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("output %d: file %q is not readable", index, item.StoragePath))
+			return
+		}
+		resolved := filepath.Join(root, storageRelative)
 		size := item.SizeBytes
 		if size <= 0 {
 			size = info.Size()
@@ -311,10 +332,7 @@ func (deps ServerDeps) handleRegisterAnalysisOutputs(w http.ResponseWriter, r *h
 		if contentType == "" {
 			contentType = contentTypeForUpload(originalName, "")
 		}
-		resourceID := strings.TrimSpace(item.ResourceID)
-		if resourceID == "" {
-			resourceID = domain.NewID("file")
-		}
+		resourceID := analysisOutputResourceID(job.JobID, storageRelative)
 		artifactKind := strings.TrimSpace(item.ArtifactKind)
 		provenance := domain.JSONMap{
 			"source":        "analysis_output",
@@ -349,6 +367,16 @@ func (deps ServerDeps) handleRegisterAnalysisOutputs(w http.ResponseWriter, r *h
 			Metadata:     domain.JSONMap{"analysis": provenance},
 		})
 		if err != nil {
+			if errors.Is(err, store.ErrConflict) {
+				if cleanupErr := cleanupRejectedAnalysisOutput(r.Context(), uploadRoot, resourceID, storageRelative); cleanupErr != nil {
+					writeError(w, http.StatusInternalServerError, fmt.Errorf(
+						"output %d: resource lifecycle rejected registration and cleanup failed: %w", index, cleanupErr,
+					))
+					return
+				}
+				writeStoreError(w, err)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("output %d: register resource: %w", index, err))
 			return
 		}
@@ -393,7 +421,11 @@ func (deps ServerDeps) handleRegisterAnalysisOutputs(w http.ResponseWriter, r *h
 // analysisOutputStoragePath validates a worker-supplied upload-root-relative path: it must
 // be relative, stay under the upload root after cleaning, and live under the analysis/
 // prefix (so a worker token can only register files the analysis worker wrote there).
-func analysisOutputStoragePath(root string, storagePath string) (string, bool) {
+func analysisOutputStoragePath(jobID string, storagePath string) (string, bool) {
+	jobID = strings.TrimSpace(jobID)
+	if !domain.IsCanonicalResourceID(jobID) {
+		return "", false
+	}
 	storagePath = strings.TrimSpace(storagePath)
 	if storagePath == "" || filepath.IsAbs(storagePath) {
 		return "", false
@@ -402,15 +434,57 @@ func analysisOutputStoragePath(root string, storagePath string) (string, bool) {
 	if cleanedRel == "." || strings.HasPrefix(cleanedRel, "..") {
 		return "", false
 	}
-	parts := strings.SplitN(filepath.ToSlash(cleanedRel), "/", 2)
-	if len(parts) == 0 || parts[0] != analysisOutputPrefix {
+	parts := strings.Split(filepath.ToSlash(cleanedRel), "/")
+	if len(parts) < 3 || parts[0] != analysisOutputPrefix || parts[1] != jobID {
 		return "", false
 	}
-	resolved := filepath.Clean(filepath.Join(root, cleanedRel))
-	if !pathIsUnderRoot(root, resolved) {
-		return "", false
+	return cleanedRel, true
+}
+
+func analysisOutputResourceID(jobID string, storageRelative string) string {
+	digest := sha256.Sum256([]byte(jobID + "\x00" + filepath.ToSlash(storageRelative)))
+	return fmt.Sprintf("file_an_%x", digest[:])
+}
+
+func cleanupRejectedAnalysisOutput(
+	ctx context.Context,
+	root *os.Root,
+	resourceID string,
+	storageRelative string,
+) error {
+	// A lifecycle conflict does not necessarily mean the bytes are disposable.
+	// During the restore window the reversible delete fence protects the exact
+	// retained generation, and an identical worker replay must not remove it.
+	// Cleanup is safe only after GC has published the permanent purge tombstone.
+	permanentlyTombstoned, err := resourceFilesystemPermanentlyTombstoned(root, resourceID)
+	if err != nil {
+		return err
 	}
-	return resolved, true
+	if !permanentlyTombstoned {
+		return nil
+	}
+	if err := validateManagedSourcePath(root, storageRelative, true); err != nil {
+		return err
+	}
+	lock, err := acquireResourceLifecycleCleanupLock(ctx, root, resourceID, "")
+	if err != nil {
+		return err
+	}
+	defer lock.release()
+	permanentlyTombstoned, err = resourceFilesystemPermanentlyTombstoned(root, resourceID)
+	if err != nil {
+		return err
+	}
+	if !permanentlyTombstoned {
+		return nil
+	}
+	if err := validateManagedSourcePath(root, storageRelative, true); err != nil {
+		return err
+	}
+	if _, err := removeOwnedResourceNamespace(root, resourceID, storageRelative); err != nil {
+		return err
+	}
+	return lock.removePath()
 }
 
 func relativeUploadPath(root string, resolved string) string {

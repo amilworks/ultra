@@ -32,6 +32,7 @@ var requiredPostgresControlTables = []string{
 	"control_worker_heartbeats",
 	"control_artifacts",
 	"control_resources",
+	"control_resource_purge_tombstones",
 	"control_resource_search_documents",
 	"control_resource_search_facts",
 	"control_resource_events",

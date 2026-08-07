@@ -11,18 +11,29 @@ honored between images.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import logging
+import os
+import secrets
 import shutil
+import stat
 import tempfile
+import threading
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from ..data_agent.worker import DataAgentJobEnvelope, DefaultDataAgentProcessor
+from ..data_agent.worker import (
+    DataAgentJobEnvelope,
+    DefaultDataAgentProcessor,
+    RetryableDataAgentProcessingError,
+)
 from ..rarespot.config import RareSpotConfig
 from ..rarespot.inference import run_rarespot_inference
 from ..rarespot.uploads import SAFE_FILE_ID_RE, unique_file_ids
+from ..safe_storage import open_directory_chain_no_follow
 from .client import fetch_job, register_outputs, run_megaseg_infer
 from .config import AnalysisSettings
 
@@ -55,7 +66,8 @@ def _resolve_source_path(file_id: str, upload_roots: tuple[Path, ...]) -> Path |
         matches = sorted(
             candidate
             for candidate in base.glob(f"{file_id}__*")
-            if candidate.is_file() and not any(marker in candidate.name for marker in _DERIVED_MARKERS)
+            if candidate.is_file()
+            and not any(marker in candidate.name for marker in _DERIVED_MARKERS)
         )
         if matches:
             return matches[0]
@@ -65,18 +77,213 @@ def _resolve_source_path(file_id: str, upload_roots: tuple[Path, ...]) -> Path |
     return None
 
 
-def _copy_with_sha(src: Path, dst: Path) -> tuple[int, str]:
+def _stage_copy_with_sha(src: Path, directory: int, resource_id: str) -> tuple[str, int, str]:
+    """Copy and fsync outside the lifecycle lock using an owner-identifiable temp."""
+
     hasher = hashlib.sha256()
     size = 0
-    with src.open("rb") as fin, dst.open("wb") as fout:
-        while True:
-            chunk = fin.read(1024 * 1024)
-            if not chunk:
-                break
-            fout.write(chunk)
-            hasher.update(chunk)
-            size += len(chunk)
-    return size, hasher.hexdigest()
+    descriptor = -1
+    temporary = ""
+    for _attempt in range(32):
+        candidate = f".{resource_id}__analysis.tmp-{secrets.token_hex(12)}"
+        try:
+            descriptor = os.open(
+                candidate,
+                os.O_CREAT
+                | os.O_EXCL
+                | os.O_WRONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory,
+            )
+            temporary = candidate
+            break
+        except FileExistsError:
+            continue
+    if descriptor < 0:
+        raise RetryableDataAgentProcessingError("analysis publication staging name unavailable")
+    staged = False
+    try:
+        with src.open("rb") as fin, os.fdopen(descriptor, "wb", closefd=True) as fout:
+            descriptor = -1
+            while True:
+                chunk = fin.read(1024 * 1024)
+                if not chunk:
+                    break
+                fout.write(chunk)
+                hasher.update(chunk)
+                size += len(chunk)
+            fout.flush()
+            os.fsync(fout.fileno())
+        staged = True
+        return temporary, size, hasher.hexdigest()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not staged and temporary:
+            with suppress(OSError):
+                os.unlink(temporary, dir_fd=directory)
+
+
+def _publish_staged_copy(temporary: str, destination: str, directory: int) -> None:
+    os.replace(temporary, destination, src_dir_fd=directory, dst_dir_fd=directory)
+    os.fsync(directory)
+
+
+class _AnalysisPublicationLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.references = 0
+
+
+_ANALYSIS_PUBLICATION_LOCKS_GUARD = threading.Lock()
+_ANALYSIS_PUBLICATION_LOCKS: dict[str, _AnalysisPublicationLockEntry] = {}
+
+
+def _analysis_output_resource_id(job_id: str, storage_path: str) -> str:
+    normalized = storage_path.replace(os.sep, "/")
+    digest = hashlib.sha256(f"{job_id}\0{normalized}".encode()).hexdigest()
+    return f"file_an_{digest}"
+
+
+def _analysis_output_tombstoned(upload_root: Path, resource_id: str) -> bool:
+    for marker_kind in ("permanent", "deleted"):
+        try:
+            with open_directory_chain_no_follow(
+                upload_root, (".tombstones", marker_kind)
+            ) as marker_directory:
+                info = os.stat(resource_id, dir_fd=marker_directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RetryableDataAgentProcessingError(
+                "analysis publication tombstone unavailable"
+            ) from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("analysis publication tombstone is invalid")
+        return True
+    return False
+
+
+@contextmanager
+def _analysis_publication_lock(upload_root: Path, resource_id: str):
+    """Share the control-plane lifecycle fence and fail closed after deletion."""
+
+    key = str((upload_root / resource_id).absolute())
+    with _ANALYSIS_PUBLICATION_LOCKS_GUARD:
+        entry = _ANALYSIS_PUBLICATION_LOCKS.setdefault(key, _AnalysisPublicationLockEntry())
+        entry.references += 1
+    entry.lock.acquire()
+    descriptor = -1
+    try:
+        if _analysis_output_tombstoned(upload_root, resource_id):
+            raise RuntimeError("analysis output resource was deleted")
+        try:
+            with open_directory_chain_no_follow(
+                upload_root, (".locks",), create=True
+            ) as lock_directory:
+                lock_name = f".{resource_id}__pyramid.lock"
+                while True:
+                    if _analysis_output_tombstoned(upload_root, resource_id):
+                        raise RuntimeError("analysis output resource was deleted")
+                    try:
+                        descriptor = os.open(
+                            lock_name,
+                            os.O_CREAT
+                            | os.O_RDWR
+                            | getattr(os, "O_CLOEXEC", 0)
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o600,
+                            dir_fd=lock_directory,
+                        )
+                        fcntl.flock(descriptor, fcntl.LOCK_EX)
+                        opened = os.fstat(descriptor)
+                        visible = os.stat(lock_name, dir_fd=lock_directory, follow_symlinks=False)
+                    except FileNotFoundError:
+                        if descriptor >= 0:
+                            with suppress(OSError):
+                                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                            os.close(descriptor)
+                            descriptor = -1
+                        continue
+                    except OSError as exc:
+                        if descriptor >= 0:
+                            with suppress(OSError):
+                                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                            os.close(descriptor)
+                            descriptor = -1
+                        raise RetryableDataAgentProcessingError(
+                            "analysis publication lock unavailable"
+                        ) from exc
+                    if (
+                        stat.S_ISREG(opened.st_mode)
+                        and stat.S_ISREG(visible.st_mode)
+                        and (opened.st_dev, opened.st_ino) == (visible.st_dev, visible.st_ino)
+                    ):
+                        break
+                    with suppress(OSError):
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    os.close(descriptor)
+                    descriptor = -1
+                if _analysis_output_tombstoned(upload_root, resource_id):
+                    raise RuntimeError("analysis output resource was deleted")
+                yield
+        except (OSError, ValueError) as exc:
+            raise RetryableDataAgentProcessingError(
+                "analysis publication lock directory unavailable"
+            ) from exc
+    finally:
+        if descriptor >= 0:
+            with suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        entry.lock.release()
+        with _ANALYSIS_PUBLICATION_LOCKS_GUARD:
+            entry.references -= 1
+            if entry.references == 0 and _ANALYSIS_PUBLICATION_LOCKS.get(key) is entry:
+                del _ANALYSIS_PUBLICATION_LOCKS[key]
+
+
+def _publish_analysis_output(
+    src: Path,
+    dst: Path,
+    upload_root: Path,
+    job_id: str,
+) -> tuple[str, str, int, str]:
+    relative_destination = dst.relative_to(upload_root)
+    storage_path = relative_destination.as_posix()
+    resource_id = _analysis_output_resource_id(job_id, storage_path)
+    try:
+        with open_directory_chain_no_follow(
+            upload_root,
+            relative_destination.parent.parts,
+            create=True,
+            mode=0o755,
+        ) as destination_directory:
+            temporary: str | None = None
+            try:
+                temporary, size, sha = _stage_copy_with_sha(src, destination_directory, resource_id)
+                with _analysis_publication_lock(upload_root, resource_id):
+                    _publish_staged_copy(
+                        temporary, relative_destination.name, destination_directory
+                    )
+                    temporary = None
+            finally:
+                if temporary is not None:
+                    with suppress(OSError):
+                        os.unlink(temporary, dir_fd=destination_directory)
+    except FileNotFoundError as exc:
+        if not src.exists():
+            raise
+        raise RetryableDataAgentProcessingError(
+            "analysis output publication path unavailable"
+        ) from exc
+    except OSError as exc:
+        raise RetryableDataAgentProcessingError(
+            "analysis output publication storage unavailable"
+        ) from exc
+    return resource_id, storage_path, size, sha
 
 
 def _megaseg_params(job: DataAgentJobEnvelope) -> dict[str, Any]:
@@ -131,13 +338,10 @@ def _float_param(value: Any, default: float) -> float:
         return default
 
 
-def _id_part(value: Any) -> str:
-    cleaned = "".join(ch if ch.isalnum() else "_" for ch in str(value or ""))
-    return cleaned.strip("_") or "artifact"
-
-
 def _path_part(value: Any) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in str(value or ""))
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in str(value or "")
+    )
     return cleaned.strip("._") or "artifact"
 
 
@@ -163,12 +367,14 @@ class AnalysisProcessor:
             return await self._process_megaseg(job, progress)
         if job_type == "analysis.rarespot":
             return await self._process_rarespot(job, progress)
-        return await self._fallback(job, progress)
+        return cast(dict[str, Any], await self._fallback(job, progress))
 
     async def _process_megaseg(self, job: DataAgentJobEnvelope, progress: Any) -> dict[str, Any]:
         settings = self.settings
         if not settings.megaseg_service_url or not settings.megaseg_service_api_key:
-            raise RuntimeError("MEGASEG_SERVICE_URL and MEGASEG_SERVICE_API_KEY are required for analysis.megaseg")
+            raise RuntimeError(
+                "MEGASEG_SERVICE_URL and MEGASEG_SERVICE_API_KEY are required for analysis.megaseg"
+            )
         principal = job.principal_headers(settings)
         params = _megaseg_params(job)
         # The envelope carries the create-time metadata, so we always have the results
@@ -177,7 +383,9 @@ class AnalysisProcessor:
         requested = unique_file_ids(job.resource_ids)
         total = len(requested)
 
-        items: dict[str, dict[str, Any]] = await asyncio.to_thread(self._prior_items, job, principal)
+        items: dict[str, dict[str, Any]] = await asyncio.to_thread(
+            self._prior_items, job, principal
+        )
 
         path_by_id: dict[str, Path] = {}
         for rid in requested:
@@ -199,7 +407,9 @@ class AnalysisProcessor:
                 await self._report(progress, items, total, job, f"Input {rid} not found.")
                 continue
             try:
-                outputs = await asyncio.to_thread(self._infer_and_stage_megaseg, job, rid, path, params)
+                outputs = await asyncio.to_thread(
+                    self._infer_and_stage_megaseg, job, rid, path, params
+                )
                 if outputs:
                     await asyncio.to_thread(
                         register_outputs,
@@ -211,6 +421,8 @@ class AnalysisProcessor:
                         collection_id=collection_id,
                     )
                 items[rid] = {"status": "done", "outputs": len(outputs)}
+            except RetryableDataAgentProcessingError:
+                raise
             except Exception as exc:  # noqa: BLE001 - isolate one image's failure
                 logger.exception("megaseg batch: resource %s failed", rid)
                 items[rid] = {"status": "failed", "error": str(exc)[:500]}
@@ -218,6 +430,8 @@ class AnalysisProcessor:
 
         summary = self._summary(items, total, job)
         summary["canceled"] = canceled
+        if canceled:
+            summary["terminal_status"] = "canceled"
         return summary
 
     async def _process_rarespot(self, job: DataAgentJobEnvelope, progress: Any) -> dict[str, Any]:
@@ -226,7 +440,9 @@ class AnalysisProcessor:
         collection_id = str((job.metadata or {}).get("results_collection_id") or "")
         requested = unique_file_ids(job.resource_ids)
         total = len(requested)
-        items: dict[str, dict[str, Any]] = await asyncio.to_thread(self._prior_items, job, principal)
+        items: dict[str, dict[str, Any]] = await asyncio.to_thread(
+            self._prior_items, job, principal
+        )
 
         path_by_id: dict[str, Path] = {}
         for rid in requested:
@@ -243,7 +459,9 @@ class AnalysisProcessor:
             summary = self._rarespot_summary(items, total, job)
             summary["canceled"] = True
             summary["terminal_status"] = "canceled"
-            await self._report(progress, items, total, job, "RareSpot job canceled.", model="rarespot")
+            await self._report(
+                progress, items, total, job, "RareSpot job canceled.", model="rarespot"
+            )
             return summary
 
         runnable_ids = [rid for rid in requested if rid in path_by_id]
@@ -251,7 +469,9 @@ class AnalysisProcessor:
             summary = self._rarespot_summary(items, total, job)
             summary["canceled"] = False
             self._apply_rarespot_terminal_status(summary)
-            await self._report(progress, items, total, job, "RareSpot found no runnable inputs.", model="rarespot")
+            await self._report(
+                progress, items, total, job, "RareSpot found no runnable inputs.", model="rarespot"
+            )
             return summary
 
         try:
@@ -301,6 +521,8 @@ class AnalysisProcessor:
             )
         except _AnalysisJobCanceledError:
             canceled = True
+        except RetryableDataAgentProcessingError:
+            raise
         except Exception as exc:  # noqa: BLE001 - isolate the batch failure into per-item rows
             logger.exception("rarespot batch failed")
             for rid in runnable_ids:
@@ -340,14 +562,25 @@ class AnalysisProcessor:
             outputs: list[dict[str, Any]] = []
             mask_rel = first.get("mask_path")
             if isinstance(mask_rel, str) and mask_rel:
-                staged = self._stage(job, rid, dest, mask_rel, out_dir, "mask", "image/tiff", model_version)
+                staged = self._stage(
+                    job, rid, dest, mask_rel, out_dir, "mask", "image/tiff", model_version
+                )
                 if staged is not None:
                     staged["metadata"]["segmentation"] = first.get("segmentation")
                     staged["metadata"]["intensity_context"] = first.get("intensity_context")
                     outputs.append(staged)
             summary_rel = first.get("summary_json_path")
             if isinstance(summary_rel, str) and summary_rel:
-                staged = self._stage(job, rid, dest, summary_rel, out_dir, "metrics", "application/json", model_version)
+                staged = self._stage(
+                    job,
+                    rid,
+                    dest,
+                    summary_rel,
+                    out_dir,
+                    "metrics",
+                    "application/json",
+                    model_version,
+                )
                 if staged is not None:
                     outputs.append(staged)
             return outputs
@@ -382,12 +615,16 @@ class AnalysisProcessor:
                 progress_callback=progress_callback,
             )
             self._raise_if_canceled_sync(job, principal)
-            source_rows, artifact_source_ids, artifact_index_source_ids = self._rarespot_source_maps(
-                result,
-                path_by_id,
-                runnable_ids,
+            source_rows, artifact_source_ids, artifact_index_source_ids = (
+                self._rarespot_source_maps(
+                    result,
+                    path_by_id,
+                    runnable_ids,
+                )
             )
-            stage_dir = self.settings.upload_root / self.settings.output_prefix / safe_job_id / "rarespot"
+            stage_dir = (
+                self.settings.upload_root / self.settings.output_prefix / safe_job_id / "rarespot"
+            )
             outputs: list[dict[str, Any]] = []
             requested = set(runnable_ids)
             for index, artifact in enumerate(result.get("artifacts") or []):
@@ -410,7 +647,9 @@ class AnalysisProcessor:
                 )
                 if staged is not None:
                     outputs.append(staged)
-            counts_by_class = {str(k): int(v) for k, v in (result.get("counts_by_class") or {}).items()}
+            counts_by_class = {
+                str(k): int(v) for k, v in (result.get("counts_by_class") or {}).items()
+            }
             detections_count = sum(counts_by_class.values())
             return outputs, source_rows, counts_by_class, detections_count
         finally:
@@ -421,13 +660,19 @@ class AnalysisProcessor:
         params = _job_params(job)
         updates: dict[str, Any] = {}
         if "tile_size" in params or "imgsz" in params:
-            updates["tile_size"] = _int_param(params.get("tile_size", params.get("imgsz")), config.tile_size)
+            updates["tile_size"] = _int_param(
+                params.get("tile_size", params.get("imgsz")), config.tile_size
+            )
         if "tile_overlap" in params:
             updates["tile_overlap"] = _float_param(params.get("tile_overlap"), config.tile_overlap)
         if "conf" in params or "conf_threshold" in params:
-            updates["conf"] = _float_param(params.get("conf", params.get("conf_threshold")), config.conf)
+            updates["conf"] = _float_param(
+                params.get("conf", params.get("conf_threshold")), config.conf
+            )
         if "iou" in params or "iou_threshold" in params:
-            updates["iou"] = _float_param(params.get("iou", params.get("iou_threshold")), config.iou)
+            updates["iou"] = _float_param(
+                params.get("iou", params.get("iou_threshold")), config.iou
+            )
         if "spectral" in params:
             updates["spectral"] = _bool_param(params.get("spectral"), config.spectral)
         if "stability" in params:
@@ -445,25 +690,21 @@ class AnalysisProcessor:
         path_by_id: dict[str, Path],
         runnable_ids: list[str],
     ) -> tuple[dict[str, dict[str, Any]], dict[Path, str], dict[int, str]]:
-        source_by_path = {
-            path.resolve(strict=False): rid
-            for rid, path in path_by_id.items()
-        }
+        source_by_path = {path.resolve(strict=False): rid for rid, path in path_by_id.items()}
         rows_by_id: dict[str, dict[str, Any]] = {}
         artifact_source_ids: dict[Path, str] = {}
         artifact_index_source_ids = {index: rid for index, rid in enumerate(runnable_ids)}
         for index, prediction in enumerate(result.get("predictions") or []):
             if not isinstance(prediction, dict):
                 continue
-            input_path = Path(str(prediction.get("input_path") or "")).expanduser().resolve(strict=False)
+            input_path = (
+                Path(str(prediction.get("input_path") or "")).expanduser().resolve(strict=False)
+            )
             rid = source_by_path.get(input_path)
             if not rid:
                 continue
             artifact_index_source_ids[index] = rid
-            counts = {
-                str(k): int(v)
-                for k, v in (prediction.get("class_counts") or {}).items()
-            }
+            counts = {str(k): int(v) for k, v in (prediction.get("class_counts") or {}).items()}
             detections = sum(counts.values())
             if not counts:
                 detections = len(list(prediction.get("boxes") or []))
@@ -534,14 +775,18 @@ class AnalysisProcessor:
         except ValueError:
             return None
         dst = stage_dir.joinpath(*(_path_part(part) for part in rel.parts))
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        size, sha = _copy_with_sha(src, dst)
-        storage_path = dst.relative_to(self.settings.upload_root).as_posix()
-        kind = str(artifact.get("kind") or artifact.get("category") or "artifact").strip() or "artifact"
+        resource_id, storage_path, size, sha = _publish_analysis_output(
+            src,
+            dst,
+            self.settings.upload_root,
+            job.job_id,
+        )
+        kind = (
+            str(artifact.get("kind") or artifact.get("category") or "artifact").strip()
+            or "artifact"
+        )
         content_type = str(
-            artifact.get("mime_type")
-            or artifact.get("content_type")
-            or "application/octet-stream"
+            artifact.get("mime_type") or artifact.get("content_type") or "application/octet-stream"
         )
         metadata = {
             "title": str(artifact.get("title") or src.name),
@@ -553,7 +798,7 @@ class AnalysisProcessor:
             "sha256": sha,
         }
         output = {
-            "resource_id": f"file_an_{_id_part(job.job_id)}_rarespot_{index:04d}_{_id_part(kind)}",
+            "resource_id": resource_id,
             "storage_path": storage_path,
             "original_name": src.name,
             "content_type": content_type,
@@ -567,7 +812,9 @@ class AnalysisProcessor:
             output["source_resource_id"] = source_rid
         return output
 
-    def _rarespot_artifact_source_path(self, run_dir: Path, artifact: dict[str, Any]) -> Path | None:
+    def _rarespot_artifact_source_path(
+        self, run_dir: Path, artifact: dict[str, Any]
+    ) -> Path | None:
         raw = str(artifact.get("path") or artifact.get("source_path") or "").strip()
         if not raw:
             return None
@@ -598,10 +845,14 @@ class AnalysisProcessor:
         base = Path(rel_path).name
         storage_filename = f"{artifact_kind}__{base}"
         dst = out_dir / storage_filename
-        size, sha = _copy_with_sha(src, dst)
-        storage_path = dst.relative_to(self.settings.upload_root).as_posix()
+        resource_id, storage_path, size, sha = _publish_analysis_output(
+            src,
+            dst,
+            self.settings.upload_root,
+            job.job_id,
+        )
         return {
-            "resource_id": f"file_an_{job.job_id}_{rid}_{artifact_kind}",
+            "resource_id": resource_id,
             "storage_path": storage_path,
             "original_name": base,
             "content_type": content_type,
@@ -613,7 +864,9 @@ class AnalysisProcessor:
             "metadata": {"model_version": model_version},
         }
 
-    def _prior_items(self, job: DataAgentJobEnvelope, principal: dict[str, str]) -> dict[str, dict[str, Any]]:
+    def _prior_items(
+        self, job: DataAgentJobEnvelope, principal: dict[str, str]
+    ) -> dict[str, dict[str, Any]]:
         record = fetch_job(
             control_base_url=self.settings.control_base_url,
             job_id=job.job_id,
@@ -700,10 +953,16 @@ class AnalysisProcessor:
             "items": items,
         }
         if model == "rarespot":
-            resolved_counts = counts_by_class if counts_by_class is not None else self._counts_by_class(items)
-            resolved_detections = detections_count if detections_count is not None else sum(resolved_counts.values())
+            resolved_counts = (
+                counts_by_class if counts_by_class is not None else self._counts_by_class(items)
+            )
+            resolved_detections = (
+                detections_count if detections_count is not None else sum(resolved_counts.values())
+            )
             summary["counts_by_class"] = resolved_counts
             summary["detections_count"] = int(resolved_detections)
+        if done == 0 and failed > 0:
+            summary["terminal_status"] = "failed"
         return summary
 
     def _rarespot_summary(

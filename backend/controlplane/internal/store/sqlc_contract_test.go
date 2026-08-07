@@ -76,6 +76,16 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 			gen:    "func (q *Queries) ListResourcesForUser",
 		},
 		{
+			name:   "resource lifecycle fence query",
+			source: "-- name: ListResourceLifecycleFenceCandidates :many",
+			gen:    "func (q *Queries) ListResourceLifecycleFenceCandidates",
+		},
+		{
+			name:   "resource lifecycle status query",
+			source: "-- name: GetResourceLifecycleStatus :one",
+			gen:    "func (q *Queries) GetResourceLifecycleStatus",
+		},
+		{
 			name:   "resource soft delete query",
 			source: "-- name: SoftDeleteResourceForUser :one",
 			gen:    "func (q *Queries) SoftDeleteResourceForUser",
@@ -96,6 +106,52 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 	}
 	if !strings.Contains(string(schema), "control_resources_project_status_idx") {
 		t.Fatalf("schema.sql missing resource project/status index")
+	}
+}
+
+func TestResourceRetentionClaimIndexesAreMirrored(t *testing.T) {
+	t.Parallel()
+
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000013_resource_retention_claim_indexes.up.sql")
+	if err != nil {
+		t.Fatalf("read retention claim migration: %v", err)
+	}
+	for _, ddl := range []struct {
+		name string
+		text string
+	}{
+		{name: "schema.sql", text: string(schema)},
+		{name: "retention migration", text: string(migration)},
+	} {
+		for _, object := range []string{
+			"control_resources_retention_expiry_idx",
+			"control_resources_purging_lease_idx",
+			"control_resources_retention_claim_idx",
+			"control_resources_purging_claim_idx",
+			"control_resources_retention_blocked_idx",
+			"control_resources_lifecycle_fence_idx",
+			"control_resource_purge_tombstones",
+		} {
+			if !strings.Contains(ddl.text, object) {
+				t.Fatalf("%s missing retention schema object %q", ddl.name, object)
+			}
+		}
+	}
+}
+
+func TestResourceRetentionDownMigrationPreservesPurgeTombstones(t *testing.T) {
+	t.Parallel()
+
+	down, err := os.ReadFile("../../migrations/000013_resource_retention_claim_indexes.down.sql")
+	if err != nil {
+		t.Fatalf("read retention down migration: %v", err)
+	}
+	if strings.Contains(strings.ToUpper(string(down)), "DROP TABLE IF EXISTS CONTROL_RESOURCE_PURGE_TOMBSTONES") {
+		t.Fatal("retention down migration destroys globally-single-use resource tombstones")
 	}
 }
 

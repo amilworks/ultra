@@ -28,6 +28,7 @@ from ultra_deepagents.imaging.convert import (
 from ultra_deepagents.imaging.derivative_manifest import (
     DerivativeJobError,
     DeterministicDerivativeError,
+    StaleDerivativeJobError,
     TransientDerivativeError,
     ViewerInfoFn,
     run_strict_publication,
@@ -62,6 +63,7 @@ class DerivePyramidJob:
     source_sha256: str | None = None
     source_size_bytes: int | None = None
     force: bool = False
+    force_id: str | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> DerivePyramidJob:
@@ -82,6 +84,7 @@ class DerivePyramidJob:
                 else None
             ),
             force=payload.get("force", False) is True,
+            force_id=(str(payload["force_id"]) if payload.get("force_id") is not None else None),
         )
 
     def spec(self) -> PyramidSpec:
@@ -357,6 +360,8 @@ def run_derive_pyramid_job(
         return _run_derive_pyramid_job_legacy(
             spec_job, convert_fn=convert_fn, meta_fn=meta_fn, transcode_fn=transcode_fn
         )
+    if require_manifest and spec_job.force and spec_job.force_id is None:
+        raise StaleDerivativeJobError("invalid_force_request")
     if viewer_info_fn is None:
         raise TransientDerivativeError("viewer_info_unavailable")
     prefer_bioio = _extension_of(spec_job.src_path) in _prefer_bioio_extensions()
@@ -373,6 +378,7 @@ def run_derive_pyramid_job(
             source_sha256=spec_job.source_sha256,
             source_size_bytes=spec_job.source_size_bytes,
             force=spec_job.force,
+            force_id=spec_job.force_id,
         )
         return _run_derive_pyramid_job_legacy(
             temp_job,
@@ -399,4 +405,5 @@ def run_derive_pyramid_job(
         },
         produce_fn=produce,
         force=spec_job.force,
+        force_id=spec_job.force_id,
     )

@@ -24,7 +24,8 @@ import (
 )
 
 const (
-	derivedPyramidManifestSchema    = "ultra.image-derived-pyramid-manifest.v1"
+	derivedPyramidManifestSchemaV1  = "ultra.image-derived-pyramid-manifest.v1"
+	derivedPyramidManifestSchema    = "ultra.image-derived-pyramid-manifest.v2"
 	derivedPyramidConversionSchema  = "ultra.image-pyramid.v1"
 	derivedPyramidProducerRevision  = "ultra-deepagents.image-pyramid-publisher.v1"
 	derivedPyramidConverterRevision = "libbioimage.imgcnv-pyramid.v1"
@@ -33,16 +34,22 @@ const (
 )
 
 var lowercaseSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var derivativeForceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type derivativeManifest struct {
-	Schema             string                    `json:"schema"`
-	ConversionContract string                    `json:"conversion_contract"`
-	ConversionSpec     derivativePublicationSpec `json:"conversion_spec"`
-	Producer           derivativeProducer        `json:"producer"`
-	Source             derivativeManifestSource  `json:"source"`
-	Semantics          derivativeSemantics       `json:"semantics"`
-	Artifact           derivativeArtifact        `json:"artifact"`
-	Capabilities       derivativeCapabilities    `json:"capabilities"`
+	Schema             string                     `json:"schema"`
+	ConversionContract string                     `json:"conversion_contract"`
+	Request            *derivativeManifestRequest `json:"request,omitempty"`
+	ConversionSpec     derivativePublicationSpec  `json:"conversion_spec"`
+	Producer           derivativeProducer         `json:"producer"`
+	Source             derivativeManifestSource   `json:"source"`
+	Semantics          derivativeSemantics        `json:"semantics"`
+	Artifact           derivativeArtifact         `json:"artifact"`
+	Capabilities       derivativeCapabilities     `json:"capabilities"`
+}
+
+type derivativeManifestRequest struct {
+	ForceID string `json:"force_id"`
 }
 
 type derivativeManifestSource struct {
@@ -264,8 +271,28 @@ func validateDerivativeManifestJSON(data []byte) error {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	if err := exactJSONKeys(raw, "schema", "conversion_contract", "conversion_spec", "producer", "source", "semantics", "artifact", "capabilities"); err != nil {
+	schema, ok := raw["schema"].(string)
+	if !ok {
+		return errors.New("manifest schema is invalid")
+	}
+	rootKeys := []string{"schema", "conversion_contract", "conversion_spec", "producer", "source", "semantics", "artifact", "capabilities"}
+	if schema == derivedPyramidManifestSchema {
+		rootKeys = append(rootKeys, "request")
+	} else if schema != derivedPyramidManifestSchemaV1 {
+		return errors.New("manifest schema is unsupported")
+	}
+	if err := exactJSONKeys(raw, rootKeys...); err != nil {
 		return err
+	}
+	if schema == derivedPyramidManifestSchema {
+		if err := exactJSONKeys(raw["request"], "force_id"); err != nil {
+			return err
+		}
+		request := raw["request"].(map[string]any)
+		forceID, forceIDOK := request["force_id"].(string)
+		if !forceIDOK || forceID != "" && !derivativeForceIDPattern.MatchString(forceID) {
+			return errors.New("manifest force request id is invalid")
+		}
 	}
 	if err := exactJSONKeys(raw["conversion_spec"], "requested", "effective", "producer_revision", "converter_revision"); err != nil {
 		return err
@@ -364,6 +391,13 @@ func validateDerivativeSemantics(semantics derivativeSemantics) error {
 }
 
 func validateDerivativeProduction(manifest derivativeManifest) error {
+	if manifest.Schema == derivedPyramidManifestSchema {
+		if manifest.Request == nil || manifest.Request.ForceID != "" && !derivativeForceIDPattern.MatchString(manifest.Request.ForceID) {
+			return errors.New("manifest force request identity is invalid")
+		}
+	} else if manifest.Schema != derivedPyramidManifestSchemaV1 || manifest.Request != nil {
+		return errors.New("manifest request contract is invalid")
+	}
 	if manifest.ConversionSpec.Requested != (derivativeConversionSpec{
 		TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "auto",
 	}) {
@@ -667,7 +701,9 @@ func readDerivativeManifest(root string, record resourceRecord, sourcePath strin
 	var manifest derivativeManifest
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil || manifest.Schema != derivedPyramidManifestSchema || manifest.ConversionContract != derivedPyramidConversionSchema {
+	if err := decoder.Decode(&manifest); err != nil ||
+		(manifest.Schema != derivedPyramidManifestSchema && manifest.Schema != derivedPyramidManifestSchemaV1) ||
+		manifest.ConversionContract != derivedPyramidConversionSchema {
 		return derivativeManifest{}, "", false
 	}
 	if validateDerivativeSemantics(manifest.Semantics) != nil || validateDerivativeProduction(manifest) != nil || !lowercaseSHA256Pattern.MatchString(manifest.Source.SHA256) || manifest.Source.SizeBytes < 0 {

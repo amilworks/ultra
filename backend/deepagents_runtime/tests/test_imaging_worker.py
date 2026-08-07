@@ -13,6 +13,8 @@ import json
 import os
 import stat
 import sys
+import threading
+import time
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -38,15 +40,21 @@ class FakeMsg:
         self.acked = False
         self.naked = False
         self.termed = False
+        self.nak_delays: list[float | None] = []
+        self.in_progress_calls = 0
 
     async def ack(self) -> None:
         self.acked = True
 
-    async def nak(self) -> None:
+    async def nak(self, delay: float | None = None) -> None:
         self.naked = True
+        self.nak_delays.append(delay)
 
     async def term(self) -> None:
         self.termed = True
+
+    async def in_progress(self) -> None:
+        self.in_progress_calls += 1
 
 
 _JOB = {
@@ -208,6 +216,7 @@ def _run(
     *,
     max_deliver: int = worker.DEFAULT_MAX_DELIVER,
     viewer_info_fn=None,
+    ack_progress_interval_seconds: float = worker.DEFAULT_ACK_PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     asyncio.run(
         worker._handle_message(
@@ -215,6 +224,7 @@ def _run(
             meta_fn=None,
             viewer_info_fn=viewer_info_fn,
             max_deliver=max_deliver,
+            ack_progress_interval_seconds=ack_progress_interval_seconds,
         )
     )
 
@@ -228,6 +238,40 @@ def test_successful_job_is_acked(monkeypatch):
     msg = FakeMsg(_JOB)
     _run(msg)
     assert msg.acked and not msg.naked and not msg.termed
+
+
+def test_long_conversion_extends_jetstream_ack_deadline(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_job(job, **kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return {"resource_id": job["resource_id"], "levels": 4}
+
+    monkeypatch.setattr(worker, "run_derive_pyramid_job", blocking_job)
+    msg = FakeMsg(_JOB)
+    finished = threading.Event()
+
+    def handle() -> None:
+        try:
+            _run(msg, ack_progress_interval_seconds=0.005)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=handle)
+    thread.start()
+    assert started.wait(timeout=5)
+    deadline = time.monotonic() + 2
+    while msg.in_progress_calls == 0 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert msg.in_progress_calls > 0
+    release.set()
+    thread.join(timeout=5)
+    assert finished.is_set() and msg.acked
+    progress_after_ack = msg.in_progress_calls
+    time.sleep(0.02)
+    assert msg.in_progress_calls == progress_after_ack
 
 
 def test_foreign_job_type_is_acked_not_redelivered(monkeypatch):
@@ -260,6 +304,7 @@ def test_transient_failure_below_cap_is_naked_for_retry(monkeypatch):
     msg = FakeMsg(_JOB, num_delivered=1)
     _run(msg, max_deliver=5)
     assert msg.naked and not msg.termed and not msg.acked
+    assert msg.nak_delays == [worker.DEFAULT_RETRY_DELAY_SECONDS]
 
 
 def test_poison_job_at_cap_is_terminated_not_redelivered(monkeypatch):
@@ -277,9 +322,11 @@ def test_poison_job_at_cap_is_terminated_not_redelivered(monkeypatch):
 def test_poison_job_writes_failure_marker(monkeypatch, tmp_path):
     # On permanent failure, the worker drops a <fileID>__pyramid.failed sidecar so the
     # control plane can back off re-enqueuing a doomed convert (the 707k-redelivery fix).
+    src = tmp_path / "source.tif"
+    src.write_bytes(b"source")
     dst = tmp_path / "derived" / "res_1__pyramid.tif"
     job = {
-        "src_path": "/in.tif",
+        "src_path": str(src),
         "dst_path": str(dst),
         "resource_id": "res_1",
         "source_sha256": "a" * 64,
@@ -307,6 +354,124 @@ def test_poison_job_writes_failure_marker(monkeypatch, tmp_path):
     assert payload["source_sha256"] == "a" * 64
     assert payload["conversion_spec"]["tile_size"] == 512
     assert stat.S_IMODE(marker.stat().st_mode) == 0o644
+
+
+def test_failure_marker_cannot_publish_after_source_deletion(monkeypatch, tmp_path):
+    import fcntl
+
+    src = tmp_path / "source.tif"
+    src.write_bytes(b"source")
+    dst = tmp_path / "derived" / "res_1__pyramid.tif"
+    job = {**_JOB, "src_path": str(src), "dst_path": str(dst)}
+    lock_path = tmp_path / ".locks" / ".res_1__pyramid.lock"
+    lock_path.parent.mkdir()
+    lock_descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+    monkeypatch.setattr(
+        worker,
+        "run_derive_pyramid_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DeterministicDerivativeError("unsupported_source")
+        ),
+    )
+    msg = FakeMsg(job, num_delivered=5)
+    finished = threading.Event()
+
+    def handle_message() -> None:
+        try:
+            _run(msg, max_deliver=5, ack_progress_interval_seconds=0.005)
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=handle_message)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 2
+        while msg.in_progress_calls == 0 and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert not finished.is_set(), "failure marker ignored the lifecycle lock"
+        assert msg.in_progress_calls > 0, "failure-marker publication stopped AckWait heartbeats"
+        src.unlink()
+        lock_path.unlink()
+    finally:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        os.close(lock_descriptor)
+        thread.join(timeout=5)
+
+    assert finished.is_set()
+    assert msg.acked and not msg.termed and not dst.with_suffix(".failed").exists()
+    progress_after_ack = msg.in_progress_calls
+    time.sleep(0.02)
+    assert msg.in_progress_calls == progress_after_ack
+
+
+def test_fetch_failures_use_capped_backoff_and_timeout_resets_streak(monkeypatch):
+    class FailingSubscription:
+        def __init__(self):
+            self.calls = 0
+
+        async def fetch(self, _batch, *, timeout):
+            assert timeout == 5
+            self.calls += 1
+            raise RuntimeError("transport unavailable")
+
+    delays = []
+
+    async def record_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(worker.random, "uniform", lambda _low, _high: 1.0)
+    monkeypatch.setattr(worker.asyncio, "sleep", record_sleep)
+    subscription = FailingSubscription()
+
+    async def exercise_failures():
+        failures = 0
+        for _ in range(7):
+            messages, failures = await worker._fetch_one(
+                subscription, consecutive_failures=failures
+            )
+            assert messages == []
+        return failures
+
+    failures = asyncio.run(exercise_failures())
+    assert failures == 7
+    assert subscription.calls == 7
+    assert delays == [0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 5.0]
+
+    class TimeoutSubscription:
+        async def fetch(self, _batch, *, timeout):
+            raise TimeoutError
+
+    messages, reset = asyncio.run(
+        worker._fetch_one(TimeoutSubscription(), consecutive_failures=failures)
+    )
+    assert messages == [] and reset == 0
+    assert len(delays) == 7
+
+
+def test_failure_marker_io_failure_is_naked_not_terminated(monkeypatch, tmp_path):
+    src = tmp_path / "source.tif"
+    src.write_bytes(b"source")
+    dst = tmp_path / "derived" / "res_1__pyramid.tif"
+    job = {**_JOB, "src_path": str(src), "dst_path": str(dst)}
+    monkeypatch.setattr(
+        worker,
+        "run_derive_pyramid_job",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            DeterministicDerivativeError("unsupported_source")
+        ),
+    )
+    monkeypatch.setattr(
+        worker.tempfile,
+        "mkstemp",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("disk temporarily unavailable")),
+    )
+
+    msg = FakeMsg(job, num_delivered=5)
+    _run(msg, max_deliver=5)
+
+    assert msg.naked and not msg.termed and not msg.acked
+    assert msg.nak_delays == [worker.DEFAULT_RETRY_DELAY_SECONDS]
 
 
 def test_transient_failure_does_not_write_failure_marker(monkeypatch, tmp_path):

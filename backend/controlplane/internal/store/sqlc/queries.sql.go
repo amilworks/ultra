@@ -1008,6 +1008,19 @@ func (q *Queries) GetResourceForUser(ctx context.Context, arg GetResourceForUser
 	return i, err
 }
 
+const getResourceLifecycleStatus = `-- name: GetResourceLifecycleStatus :one
+SELECT status
+FROM control_resources
+WHERE resource_id = $1
+`
+
+func (q *Queries) GetResourceLifecycleStatus(ctx context.Context, resourceID string) (string, error) {
+	row := q.db.QueryRow(ctx, getResourceLifecycleStatus, resourceID)
+	var status string
+	err := row.Scan(&status)
+	return status, err
+}
+
 const getRun = `-- name: GetRun :one
 SELECT run_id, thread_id, user_id, goal, status, workflow_kind, mode, current_node, parent_run_id, planner_version, agent_role, trace_group_id, checkpoint_id, checkpoint_state, budget_state, response_text, error, created_at, updated_at, started_at, completed_at, metadata FROM control_runs WHERE run_id = $1
 `
@@ -1504,6 +1517,61 @@ func (q *Queries) ListResourceEventsForUser(ctx context.Context, arg ListResourc
 			&i.ActorOrgID,
 			&i.EventType,
 			&i.Ts,
+			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResourceLifecycleFenceCandidates = `-- name: ListResourceLifecycleFenceCandidates :many
+SELECT resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
+FROM control_resources
+WHERE status IN ('deleted', 'purging', 'retention_blocked')
+  AND resource_id COLLATE "C" > ($1::text COLLATE "C")
+ORDER BY resource_id COLLATE "C" ASC
+LIMIT $2
+`
+
+type ListResourceLifecycleFenceCandidatesParams struct {
+	AfterResourceID string `json:"after_resource_id"`
+	PageLimit       int32  `json:"page_limit"`
+}
+
+func (q *Queries) ListResourceLifecycleFenceCandidates(ctx context.Context, arg ListResourceLifecycleFenceCandidatesParams) ([]ControlResource, error) {
+	rows, err := q.db.Query(ctx, listResourceLifecycleFenceCandidates, arg.AfterResourceID, arg.PageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ControlResource
+	for rows.Next() {
+		var i ControlResource
+		if err := rows.Scan(
+			&i.ResourceID,
+			&i.OwnerUserID,
+			&i.OwnerOrgID,
+			&i.OwnerRole,
+			&i.OriginalName,
+			&i.ContentType,
+			&i.SizeBytes,
+			&i.Sha256,
+			&i.StorageUri,
+			&i.StoragePath,
+			&i.SourceType,
+			&i.ResourceKind,
+			&i.SourceUri,
+			&i.ProjectID,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.RetentionExpiresAt,
 			&i.Metadata,
 		); err != nil {
 			return nil, err
@@ -2746,6 +2814,9 @@ SET status = 'active',
 WHERE resource_id = $1
   AND owner_user_id = $2
   AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'deleted'
+  AND retention_expires_at IS NOT NULL
+  AND retention_expires_at > clock_timestamp()
 RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 `
 
@@ -2813,7 +2884,7 @@ SET status = 'deleted',
 WHERE resource_id = $1
   AND owner_user_id = $2
   AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
-  AND status <> 'deleted'
+  AND status = 'active'
 RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 `
 
@@ -3041,10 +3112,12 @@ INSERT INTO control_resources (
   size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind,
   source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 )
-VALUES (
+SELECT
   $1, $2, $3, $4, $5, $6,
   $7, $8, $9, $10, $11, $12,
   $13, $14, $15, $16, $17, $18, $19, $20
+WHERE NOT EXISTS (
+  SELECT 1 FROM control_resource_purge_tombstones WHERE resource_id = $1
 )
 ON CONFLICT (resource_id) DO UPDATE SET
   owner_user_id = EXCLUDED.owner_user_id,
@@ -3065,6 +3138,10 @@ ON CONFLICT (resource_id) DO UPDATE SET
   deleted_at = EXCLUDED.deleted_at,
   retention_expires_at = EXCLUDED.retention_expires_at,
   metadata = EXCLUDED.metadata
+WHERE control_resources.status = 'active'
+  AND EXCLUDED.status = 'active'
+  AND control_resources.owner_user_id = EXCLUDED.owner_user_id
+  AND control_resources.owner_org_id IS NOT DISTINCT FROM EXCLUDED.owner_org_id
 RETURNING resource_id, owner_user_id, owner_org_id, owner_role, original_name, content_type, size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind, source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 `
 

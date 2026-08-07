@@ -3177,6 +3177,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
+        "503":
+          description: A publication currently owns one of the requested resource lifecycle locks; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/restore/bulk:
     post:
       operationId: bulkRestoreResources
@@ -3193,6 +3201,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
+        "503":
+          description: A publication currently owns one of the requested resource lifecycle locks; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}:
     get:
       operationId: getResource
@@ -3237,6 +3253,14 @@ paths:
                 properties:
                   deleted: { type: boolean }
                   file_id: { type: string }
+        "503":
+          description: A publication currently owns the resource lifecycle lock; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}/download:
     get:
       operationId: downloadResource
@@ -3310,6 +3334,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceResponse"
+        "503":
+          description: A publication currently owns the resource lifecycle lock; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}/events:
     get:
       operationId: listResourceEvents
@@ -5098,13 +5130,15 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2AdminOverviewResponse:
       type: object
-      required: [generated_at, runtime, queue, kpis, upload_sessions, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
+      required: [generated_at, runtime, queue, retention_backlog, kpis, upload_sessions, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
       properties:
         generated_at: { type: string }
         runtime:
           $ref: "#/components/schemas/V2AdminRuntimeSummary"
         queue:
           $ref: "#/components/schemas/V2AdminQueueDiagnostics"
+        retention_backlog:
+          $ref: "#/components/schemas/V2AdminRetentionBacklog"
         kpis:
           $ref: "#/components/schemas/V2AdminPlatformKpis"
         upload_sessions:
@@ -5137,6 +5171,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminRetentionBacklog:
+      type: object
+      required: [expired_resources, reclaimable_bytes, blocked_resources, blocked_bytes, purging_resources, purging_bytes]
+      properties:
+        expired_resources: { type: integer, format: int64 }
+        reclaimable_bytes: { type: integer, format: int64 }
+        blocked_resources: { type: integer, format: int64 }
+        blocked_bytes: { type: integer, format: int64 }
+        purging_resources: { type: integer, format: int64 }
+        purging_bytes: { type: integer, format: int64 }
     V2AdminUploadSessionMetrics:
       type: object
       required: [total, active, paused, completed, failed, canceled, other, bytes_total, bytes_received, bytes_verified, bytes_committed]

@@ -428,8 +428,28 @@ func normalizePathPattern(path string) string {
 	if queryIdx := strings.IndexByte(path, '?'); queryIdx >= 0 {
 		path = path[:queryIdx]
 	}
+	// Frontend callers commonly append an already-encoded query suffix as
+	// `/v2/route${suffix}`. A terminal template expression without a separating
+	// slash is query construction, not an OpenAPI path parameter.
+	if match := templateExprPattern.FindStringIndex(path); match != nil && match[1] == len(path) &&
+		match[0] > 0 && path[match[0]-1] != '/' {
+		path = path[:match[0]]
+	}
 	path = templateExprPattern.ReplaceAllString(path, "{param}")
 	path = pathParamPattern.ReplaceAllString(path, "{param}")
 	path = strings.TrimRight(path, "/")
 	return path
+}
+
+func TestNormalizePathPatternDistinguishesPathParametersFromQuerySuffixes(t *testing.T) {
+	t.Parallel()
+	for input, want := range map[string]string{
+		"/v2/notes${suffix}":                        "/v2/notes",
+		"/v2/notes/${encodeURIComponent(noteID)}":   "/v2/notes/{param}",
+		"/v2/resources/{resource_id}?include=owner": "/v2/resources/{param}",
+	} {
+		if got := normalizePathPattern(input); got != want {
+			t.Errorf("normalizePathPattern(%q) = %q, want %q", input, got, want)
+		}
+	}
 }

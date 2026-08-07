@@ -1,12 +1,15 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// scene3d: Gaussian-splat and point-cloud scenes (kind:"scene3d").
+// scene3d: Gaussian-splat, point-cloud and COLMAP scenes (kind:"scene3d").
 //
 // A splat/point .ply is not an image — it has no pixel geometry, so the
 // libbioimage ladder can only 415 it, and an imgcnv transcode would burn the
@@ -40,12 +43,33 @@ import (
 // reference files disagree with the canonical layout — Postshot omits nx/ny/nz
 // and writes a 236-byte stride where INRIA's writer writes 248 — so a hardcoded
 // layout silently misreads every field.
+//
+// A COLMAP reconstruction is the third species and it is not a file at all: it
+// is a DIRECTORY (or a zip of one) holding cameras/images/points3D. Recognition
+// is structural — the model's member NAMES, at the four roots COLMAP itself
+// writes — and never parses a record. It cannot: an images.bin record carries a
+// NUL-terminated name of arbitrary length followed by a variable number of
+// 24-byte 2D observations, so there is no stride and no way to reach image N
+// without walking 0..N-1 (1000 images x 8000 keypoints is ~192 MB of
+// observations we would read only to throw away). The derive job does that work
+// once, off the request path.
 
 const (
 	// plyHeaderPeekMaxBytes bounds the header sniff. A PLY header is ASCII and
 	// ends at "end_header"; the largest real one (degree-3 SH, 62 properties) is
 	// ~1.5 KiB, so 64 KiB is generous and still O(1) against a 3.4 GB source.
 	plyHeaderPeekMaxBytes = int64(64 << 10)
+
+	// colmapZipMaxEntries and colmapZipMaxCentralDirectoryBytes bound the archive
+	// probe. archive/zip parses the WHOLE central directory eagerly, and this probe
+	// runs on every viewer, manifest and chunk request for the resource, so an
+	// archive with a hostile — or merely enormous — member count has to be refused
+	// BEFORE that parse rather than re-paid on every request. 20k members covers a
+	// sparse model plus a few thousand source photographs; a larger archive is not
+	// recognized here at all (it stays an ordinary file resource) rather than
+	// turning the request path into an unbounded directory walk.
+	colmapZipMaxEntries               = 20_000
+	colmapZipMaxCentralDirectoryBytes = int64(8 << 20)
 
 	scene3dManifestName    = "manifest.json"
 	scene3dChunkNameFormat = "chunk_%05d.bin"
@@ -114,14 +138,17 @@ type plyInfo struct {
 }
 
 // scene3dInfo is the viewer-facing summary of a scene resource: the container
-// format plus, for PLY, the header facts. The compact splat containers
-// (.spz/.splat/.ksplat/.sog) carry no ASCII header we can sniff cheaply, so they
-// are classified by extension and inspected only by the derive job.
+// format plus, for PLY, the header facts and, for COLMAP, the model layout. The
+// compact splat containers (.spz/.splat/.ksplat/.sog) carry no ASCII header we
+// can sniff cheaply, so they are classified by extension and inspected only by
+// the derive job.
 type scene3dInfo struct {
-	format    string // "ply" | "splat" | "spz" | "ksplat" | "sog"
-	sceneKind string // "splat" | "pointcloud"
+	format    string // "ply" | "splat" | "spz" | "ksplat" | "sog" | "colmap"
+	sceneKind string // "splat" | "pointcloud" | "colmap"
 	ply       plyInfo
 	hasPly    bool
+	colmap    colmapInfo
+	hasColmap bool
 }
 
 // plyScalarSizes is the PLY scalar type table (both the modern and legacy names).
@@ -335,9 +362,365 @@ func plyPeek(path string) (plyInfo, bool) {
 	return info, true
 }
 
+// --- COLMAP model recognition ------------------------------------------------
+
+// colmapInfo is everything the bounded probe can PROVE about a COLMAP
+// reconstruction: which container it arrived in, where inside it the model root
+// sits, whether the records are binary or text, and which optional products are
+// present. Nothing here is parsed from a record — see the file header for why.
+type colmapInfo struct {
+	variant      string // "directory" | "zip"
+	modelPath    string // slash-separated model root relative to the resource ("" = at the root)
+	recordFormat string // "bin" | "txt" | "mixed"
+	camerasName  string // the member name as it actually appears
+	imagesName   string
+	points3DName string
+	hasPoints3D  bool
+	hasRigs      bool // modern COLMAP writes rigs/frames; a legacy model has neither
+	hasFrames    bool
+}
+
+// colmapModelRoots are the four places COLMAP itself puts a model, in the order
+// a reconstruction is most likely to be laid out. A model is recognized ONLY at
+// one of these roots (for a directory), which is what keeps an unrelated tree
+// that merely happens to contain a file called images.txt from being mistaken
+// for a reconstruction.
+var colmapModelRoots = []string{"", "sparse/0", "sparse", "dense/sparse"}
+
+var (
+	colmapCamerasCandidates = []string{"cameras.bin", "cameras.txt"}
+	colmapImagesCandidates  = []string{"images.bin", "images.txt"}
+	// COLMAP capitalizes the D in points3D; some exporters do not, and the
+	// difference decides nothing, so both spellings are probed.
+	colmapPoints3DCandidates = []string{"points3D.bin", "points3D.txt", "points3d.bin", "points3d.txt"}
+	colmapRigsCandidates     = []string{"rigs.bin", "rigs.txt"}
+	colmapFramesCandidates   = []string{"frames.bin", "frames.txt"}
+)
+
+// colmapMemberNames is the lowercased union of every member the probe cares
+// about. Zip entries outside this set are skipped by NAME, so an archive of any
+// shape costs one map lookup per central-directory entry and nothing else.
+var colmapMemberNames = func() map[string]bool {
+	names := map[string]bool{}
+	for _, group := range [][]string{
+		colmapCamerasCandidates, colmapImagesCandidates,
+		colmapPoints3DCandidates, colmapRigsCandidates, colmapFramesCandidates,
+	} {
+		for _, name := range group {
+			names[strings.ToLower(name)] = true
+		}
+	}
+	return names
+}()
+
+// colmapMemberLookup resolves one candidate member inside a model root and
+// returns the name AS IT ACTUALLY APPEARS plus whether it is there.
+type colmapMemberLookup func(candidate string) (string, bool)
+
+func firstColmapMember(lookup colmapMemberLookup, candidates []string) string {
+	for _, candidate := range candidates {
+		if actual, present := lookup(candidate); present {
+			return actual
+		}
+	}
+	return ""
+}
+
+// colmapModelFromMembers decides whether one model root holds a reconstruction.
+// cameras + images are REQUIRED (they are what makes it a posed reconstruction);
+// points3D is optional, and so are the rigs/frames a modern COLMAP writes —
+// their presence must never turn a model into a non-model.
+func colmapModelFromMembers(modelPath string, lookup colmapMemberLookup) (colmapInfo, bool) {
+	cameras := firstColmapMember(lookup, colmapCamerasCandidates)
+	images := firstColmapMember(lookup, colmapImagesCandidates)
+	if cameras == "" || images == "" {
+		return colmapInfo{}, false
+	}
+	info := colmapInfo{
+		modelPath:    modelPath,
+		recordFormat: colmapRecordFormat(cameras, images),
+		camerasName:  cameras,
+		imagesName:   images,
+		points3DName: firstColmapMember(lookup, colmapPoints3DCandidates),
+		hasRigs:      firstColmapMember(lookup, colmapRigsCandidates) != "",
+		hasFrames:    firstColmapMember(lookup, colmapFramesCandidates) != "",
+	}
+	info.hasPoints3D = info.points3DName != ""
+	return info, true
+}
+
+// colmapRecordFormat reports the encoding of the two required members. A model
+// half-converted between the binary and text serializations is still a model, so
+// it is reported as "mixed" rather than rejected.
+func colmapRecordFormat(cameras, images string) string {
+	camerasBinary := strings.HasSuffix(strings.ToLower(cameras), ".bin")
+	imagesBinary := strings.HasSuffix(strings.ToLower(images), ".bin")
+	switch {
+	case camerasBinary && imagesBinary:
+		return "bin"
+	case !camerasBinary && !imagesBinary:
+		return "txt"
+	default:
+		return "mixed"
+	}
+}
+
+// colmapPeek recognizes a COLMAP reconstruction with a bounded probe: at most a
+// handful of os.Stat calls for a directory, or a 4-byte magic read plus the
+// archive's central directory for a zip. It NEVER opens a model member and never
+// inflates an archive member.
+func colmapPeek(path string) (colmapInfo, bool) {
+	stat, err := os.Stat(path)
+	if err != nil {
+		return colmapInfo{}, false
+	}
+	if stat.IsDir() {
+		return colmapDirectoryPeek(path)
+	}
+	if !stat.Mode().IsRegular() {
+		return colmapInfo{}, false
+	}
+	return colmapZipPeek(path, stat.Size())
+}
+
+// colmapDirectoryPeek probes the four known model roots. Worst case is 4 roots x
+// 13 stats, and a root that is not a model costs 2 (cameras.bin, cameras.txt) —
+// which is what makes this affordable in the request path.
+func colmapDirectoryPeek(root string) (colmapInfo, bool) {
+	for _, modelPath := range colmapModelRoots {
+		directory := root
+		if modelPath != "" {
+			directory = filepath.Join(root, filepath.FromSlash(modelPath))
+		}
+		// Only a REGULAR file counts. Following a symlink is safe here because no
+		// byte of the target is read — the probe decides on names alone, and the
+		// derive job, not this path, is what later opens the model.
+		lookup := func(candidate string) (string, bool) {
+			stat, err := os.Stat(filepath.Join(directory, candidate))
+			return candidate, err == nil && stat.Mode().IsRegular()
+		}
+		if info, ok := colmapModelFromMembers(modelPath, lookup); ok {
+			info.variant = "directory"
+			return info, true
+		}
+	}
+	return colmapInfo{}, false
+}
+
+// colmapZipPeek recognizes a zipped model from the archive's CENTRAL DIRECTORY
+// ALONE. zip.File.Open is never called, so no member is ever inflated: a 4 GB
+// bomb declared inside a 40 KB archive costs exactly the same as an empty one.
+// The two required members must live in the SAME directory — a cameras.txt in
+// one branch of the tree and an images.txt in another is not a model.
+func colmapZipPeek(path string, size int64) (colmapInfo, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return colmapInfo{}, false
+	}
+	defer func() { _ = file.Close() }()
+	if !hasZipMagic(file) {
+		return colmapInfo{}, false // cheap rejection: 4 bytes, and every non-archive stops here
+	}
+	entries, centralDirectoryBytes, ok := zipCentralDirectoryExtent(file, size)
+	if !ok || entries <= 0 || entries > colmapZipMaxEntries || centralDirectoryBytes > colmapZipMaxCentralDirectoryBytes {
+		return colmapInfo{}, false
+	}
+	reader, err := zip.NewReader(file, size)
+	if err != nil {
+		return colmapInfo{}, false
+	}
+	// Names only. Nothing below reads, decompresses or even opens a member.
+	members := map[string]map[string]string{}
+	for _, entry := range reader.File {
+		directory, base, valid := colmapZipEntryPath(entry.Name)
+		if !valid {
+			continue
+		}
+		lower := strings.ToLower(base)
+		if !colmapMemberNames[lower] {
+			continue
+		}
+		if members[directory] == nil {
+			members[directory] = map[string]string{}
+		}
+		if _, duplicate := members[directory][lower]; !duplicate {
+			members[directory][lower] = base
+		}
+	}
+	best, found := colmapInfo{}, false
+	for directory, names := range members {
+		lookup := func(candidate string) (string, bool) {
+			actual, present := names[strings.ToLower(candidate)]
+			return actual, present
+		}
+		info, ok := colmapModelFromMembers(directory, lookup)
+		if !ok {
+			continue
+		}
+		// Deterministic choice: the shallowest model wins (an archive that wraps a
+		// model in one folder is the common case), ties broken lexicographically, so
+		// the same archive always reports the same model root.
+		if !found || colmapModelRootPrecedes(info.modelPath, best.modelPath) {
+			best, found = info, true
+		}
+	}
+	if !found {
+		return colmapInfo{}, false
+	}
+	best.variant = "zip"
+	return best, true
+}
+
+// colmapModelRootPrecedes orders candidate model roots: shallower first, then
+// lexicographically.
+func colmapModelRootPrecedes(candidate, incumbent string) bool {
+	candidateDepth, incumbentDepth := colmapPathDepth(candidate), colmapPathDepth(incumbent)
+	if candidateDepth != incumbentDepth {
+		return candidateDepth < incumbentDepth
+	}
+	return candidate < incumbent
+}
+
+func colmapPathDepth(value string) int {
+	if value == "" {
+		return 0
+	}
+	return strings.Count(value, "/") + 1
+}
+
+// colmapZipEntryPath splits a zip entry name into its directory and base name,
+// rejecting anything that is not a plain relative file path. A traversal or
+// absolute member is refused outright: the model path it produced would be
+// handed to the derive job, and a "../.." there is a path the worker should
+// never be told to join.
+func colmapZipEntryPath(name string) (directory, base string, ok bool) {
+	if name == "" || strings.HasSuffix(name, "/") || strings.HasPrefix(name, "/") {
+		return "", "", false
+	}
+	if strings.ContainsAny(name, "\\\x00") {
+		return "", "", false
+	}
+	if cut := strings.LastIndexByte(name, '/'); cut >= 0 {
+		directory, base = name[:cut], name[cut+1:]
+	} else {
+		base = name
+	}
+	if base == "" {
+		return "", "", false
+	}
+	for _, segment := range strings.Split(directory, "/") {
+		if segment == ".." || segment == "." {
+			return "", "", false
+		}
+	}
+	return directory, base, true
+}
+
+// zip end-of-central-directory constants (APPNOTE 4.3.16 / 4.3.14 / 4.3.15).
+const (
+	zipEOCDSignature       = uint32(0x06054b50)
+	zip64LocatorSignature  = uint32(0x07064b50)
+	zip64EOCDSignature     = uint32(0x06064b50)
+	zipEOCDMinBytes        = 22
+	zipEOCDMaxCommentBytes = 0xFFFF
+	zip64LocatorBytes      = 20
+	zip64EOCDBytes         = 56
+)
+
+// hasZipMagic reads the 4-byte local-file-header signature. This is the gate that
+// keeps the archive path off every non-archive resource: a TIFF or a NIfTI pays
+// one 4-byte read and stops.
+func hasZipMagic(file *os.File) bool {
+	magic := make([]byte, 4)
+	if _, err := file.ReadAt(magic, 0); err != nil {
+		return false
+	}
+	switch binary.LittleEndian.Uint32(magic) {
+	case 0x04034b50, // PK\x03\x04 local file header
+		0x06054b50, // PK\x05\x06 empty archive (EOCD only)
+		0x08074b50: // PK\x07\x08 spanned marker
+		return true
+	}
+	return false
+}
+
+// zipCentralDirectoryExtent reads the end-of-central-directory record from a
+// BOUNDED tail read and reports how many entries the central directory holds and
+// how many bytes it occupies — before archive/zip is asked to parse any of it.
+// Without this, "cheap probe" would mean "parse an attacker-chosen number of
+// central-directory records on every request".
+func zipCentralDirectoryExtent(file *os.File, size int64) (entries, centralDirectoryBytes int64, ok bool) {
+	if size < zipEOCDMinBytes {
+		return 0, 0, false
+	}
+	window := int64(zipEOCDMinBytes + zipEOCDMaxCommentBytes)
+	if window > size {
+		window = size
+	}
+	tail := make([]byte, window)
+	if _, err := file.ReadAt(tail, size-window); err != nil {
+		return 0, 0, false
+	}
+	index := -1
+	for offset := len(tail) - zipEOCDMinBytes; offset >= 0; offset-- {
+		if binary.LittleEndian.Uint32(tail[offset:]) != zipEOCDSignature {
+			continue
+		}
+		// The declared comment length must consume exactly the rest of the file, or
+		// this is archive bytes that merely look like a signature.
+		if int(binary.LittleEndian.Uint16(tail[offset+20:]))+offset+zipEOCDMinBytes != len(tail) {
+			continue
+		}
+		index = offset
+		break
+	}
+	if index < 0 {
+		return 0, 0, false
+	}
+	entries = int64(binary.LittleEndian.Uint16(tail[index+10:]))
+	centralDirectoryBytes = int64(binary.LittleEndian.Uint32(tail[index+12:]))
+	centralDirectoryOffset := int64(binary.LittleEndian.Uint32(tail[index+16:]))
+	if entries != 0xFFFF && centralDirectoryBytes != 0xFFFFFFFF && centralDirectoryOffset != 0xFFFFFFFF {
+		return entries, centralDirectoryBytes, true
+	}
+	// A zip64 sentinel: the real counts live in the zip64 EOCD record, reached via
+	// the 20-byte locator immediately before the EOCD.
+	locatorAt := size - window + int64(index) - zip64LocatorBytes
+	if locatorAt < 0 {
+		return 0, 0, false
+	}
+	locator := make([]byte, zip64LocatorBytes)
+	if _, err := file.ReadAt(locator, locatorAt); err != nil {
+		return 0, 0, false
+	}
+	if binary.LittleEndian.Uint32(locator) != zip64LocatorSignature {
+		return 0, 0, false
+	}
+	recordAt := binary.LittleEndian.Uint64(locator[8:])
+	if recordAt > math.MaxInt64 || int64(recordAt)+zip64EOCDBytes > size {
+		return 0, 0, false
+	}
+	record := make([]byte, zip64EOCDBytes)
+	if _, err := file.ReadAt(record, int64(recordAt)); err != nil {
+		return 0, 0, false
+	}
+	if binary.LittleEndian.Uint32(record) != zip64EOCDSignature {
+		return 0, 0, false
+	}
+	entries64 := binary.LittleEndian.Uint64(record[32:])
+	bytes64 := binary.LittleEndian.Uint64(record[40:])
+	if entries64 > math.MaxInt64 || bytes64 > math.MaxInt64 {
+		return 0, 0, false
+	}
+	return int64(entries64), int64(bytes64), true
+}
+
 // isScene3dName reports whether a resource name is one of the 3D scene
 // containers. Extension is the only signal for the compact formats; PLY is
-// additionally header-verified by scene3dPeek.
+// additionally header-verified by scene3dPeek. COLMAP is deliberately absent: a
+// reconstruction has no distinguishing name at all (it is a folder, often just
+// "sparse" or the dataset's own name), so it is recognized STRUCTURALLY by
+// colmapPeek instead.
 func isScene3dName(name string) bool {
 	return scene3dFormatFromName(name) != ""
 }
@@ -355,9 +738,20 @@ func scene3dFormatFromName(name string) string {
 // scene3dPeek classifies a resource as a 3D scene. PLY must parse — a file named
 // .ply whose header we cannot describe falls through to the normal ladder and
 // ends up as an honest "unsupported" descriptor rather than an empty canvas.
+//
+// A COLMAP reconstruction carries no name signal, so it is probed structurally
+// once the name has proven to be none of the single-file containers. That order
+// matters twice over: it keeps the per-request cost of every ordinary resource
+// at one os.Stat plus (for a regular file) a 4-byte magic read, and it means a
+// COLMAP DIRECTORY is classified here — before the libbioimage probe and before
+// enqueuePyramidDerivation — so a directory of camera poses can never be handed
+// to an imaging engine or queued for an imgcnv pyramid transcode.
 func scene3dPeek(record resourceRecord, path string) (scene3dInfo, bool) {
 	format := scene3dFormatFromName(record.OriginalName)
 	if format == "" {
+		if colmap, isColmap := colmapPeek(path); isColmap {
+			return scene3dInfo{format: "colmap", sceneKind: "colmap", colmap: colmap, hasColmap: true}, true
+		}
 		return scene3dInfo{}, false
 	}
 	if format != "ply" {
@@ -632,6 +1026,23 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 			source["writer"] = info.ply.writer
 		}
 	}
+	if info.hasColmap {
+		// Layout facts only: which container, where the model root is, how its
+		// records are encoded, and which products exist. Camera and point COUNTS are
+		// absent on purpose — both require walking a variable-stride file, which is
+		// the derive job's work and never this path's.
+		source["variant"] = info.colmap.variant
+		source["model_path"] = info.colmap.modelPath
+		source["record_format"] = info.colmap.recordFormat
+		source["cameras_file"] = info.colmap.camerasName
+		source["images_file"] = info.colmap.imagesName
+		source["has_points3d"] = info.colmap.hasPoints3D
+		if info.colmap.hasPoints3D {
+			source["points3d_file"] = info.colmap.points3DName
+		}
+		source["has_rigs"] = info.colmap.hasRigs
+		source["has_frames"] = info.colmap.hasFrames
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind":          "scene3d",
 		"decodable":     true,
@@ -654,8 +1065,11 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 
 func scene3dMessage(info scene3dInfo, status string) string {
 	subject := "Point-cloud scene"
-	if info.sceneKind == "splat" {
+	switch info.sceneKind {
+	case "splat":
 		subject = "3D Gaussian-splat scene"
+	case "colmap":
+		subject = "COLMAP reconstruction"
 	}
 	switch status {
 	case "ready":
@@ -678,8 +1092,25 @@ func scene3dLimitations(info scene3dInfo, status string) []string {
 	case "failed":
 		limitations = append(limitations, "Deriving the streamable scene failed permanently for this file; nothing is rendered.")
 	}
-	if !info.hasPly {
+	if !info.hasPly && !info.hasColmap {
 		limitations = append(limitations, strings.ToUpper(info.format)+" is classified by file extension alone; its contents are inspected only by the derive job.")
+	}
+	if info.hasColmap {
+		limitations = append(limitations,
+			"The reconstruction is recognized from its layout alone; no camera, image or point record is read until the derive job runs.")
+		if info.colmap.variant == "zip" {
+			limitations = append(limitations,
+				"This model is a zip archive: only its central directory was read here, so nothing inside it has been decompressed or validated yet.")
+		}
+		limitations = append(limitations,
+			"Per-image 2D feature observations are skipped entirely; only camera poses and, where present, the 3D points are used.")
+		if info.colmap.hasPoints3D {
+			limitations = append(limitations,
+				"COLMAP points are drawn as points; no surface reconstruction, meshing or normal shading is performed.")
+		} else {
+			limitations = append(limitations,
+				"This model has no points3D file, so only the posed cameras are drawn — there is no scene geometry to render.")
+		}
 	}
 	if info.hasPly && info.ply.declaredSHDegree > 0 {
 		limitations = append(limitations, fmt.Sprintf(

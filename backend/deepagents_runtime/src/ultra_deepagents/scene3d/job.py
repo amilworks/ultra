@@ -16,6 +16,12 @@ Two passes over the source, deliberately:
 The alternative — one pass holding every property in memory — costs 812 MB for the
 measured 14.5M-splat file against 463 MB for the encoded output, and the second read is
 sequential.
+
+A COLMAP sparse model (a *directory*, not a file) derives through the same machinery: its
+``points3D`` feed the unchanged chunker and ``UPC1`` point path, and its posed cameras
+become one extra ``cameras`` layer carrying a single JSON chunk. That chunk is written
+**after** every point chunk so point chunk indices — and therefore every cached chunk URL
+— are identical whether or not the model has cameras.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ from ultra_deepagents.imaging.derivative_manifest import (
     DeterministicDerivativeError,
     TransientDerivativeError,
 )
-from ultra_deepagents.scene3d import chunker, manifest, ply, poster, spark_encode
+from ultra_deepagents.scene3d import chunker, colmap, manifest, ply, poster, spark_encode
 
 __all__ = [
     "CHUNK_NAME",
@@ -302,41 +308,35 @@ def _derive_splats(
     return plan, pack, facts, sample
 
 
-def _derive_points(
-    job: Scene3dDeriveJob,
-    header: ply.PlyHeader,
-    *,
-    iter_chunks_fn: IterChunksFn,
-) -> tuple[chunker.ChunkPlan, PackFn, dict[str, Any], dict[str, Any]]:
-    """Plan and encode every point (UPC1, source sRGB colours preserved)."""
-    _require(header, ("x", "y", "z"), "point_fields")
-    has_color = header.has("red", "green", "blue")
-    has_alpha = header.has("alpha")
-    columns = _read_columns(job, header, iter_chunks_fn, ("x", "y", "z"))
-    positions = _stack(columns, ("x", "y", "z"))
-    del columns
-    # Source order is the ordering key: a scan's own order carries structure, and no
-    # point is intrinsically more important than another.
-    plan = chunker.build_chunk_plan(
+def _plan_points(job: Scene3dDeriveJob, positions: np.ndarray) -> chunker.ChunkPlan:
+    """The octree partition for a point layer.
+
+    Source order is the ordering key: a scan's own order carries structure, and no point
+    is intrinsically more important than another.
+    """
+    return chunker.build_chunk_plan(
         positions,
         importance=None,
         max_per_chunk=job.max_splats_per_chunk,
         tier_count=job.tier_count,
     )
+
+
+def _point_layer_outputs(
+    job: Scene3dDeriveJob,
+    positions: np.ndarray,
+    plan: chunker.ChunkPlan,
+    rgba: np.ndarray,
+    *,
+    has_alpha: bool,
+) -> tuple[PackFn, dict[str, Any], dict[str, Any]]:
+    """Packer, manifest facts and poster sample for a planned point layer.
+
+    ``rgba`` is already in chunk-output-row order (scattered through ``plan.dest``), so
+    both the PLY and COLMAP point paths share this tail unchanged.
+    """
     total = int(positions.shape[0])
     local = _chunk_local(positions, plan)
-    rgba = np.full((total, 4), 255, dtype=np.uint8)
-    if has_color:
-        names = ("red", "green", "blue", "alpha") if has_alpha else ("red", "green", "blue")
-        offset = 0
-        for block in iter_chunks_fn(job.src_path, header, names=names):
-            size = int(block.shape[0])
-            rows = plan.dest[offset : offset + size]
-            for channel, name in enumerate(names):
-                rgba[rows, channel] = _to_byte(block[name])
-            offset += size
-        if offset != total:
-            raise DeterministicDerivativeError("truncated_scene_source")
 
     def pack(chunk: chunker.Chunk) -> bytes:
         rows = slice(int(plan.starts[chunk.index]), int(plan.starts[chunk.index + 1]))
@@ -363,6 +363,38 @@ def _derive_points(
         "clamped_color_fraction": 0.0,
         "bbox_robust": _robust_bbox(positions),
     }
+    return pack, facts, sample
+
+
+def _derive_points(
+    job: Scene3dDeriveJob,
+    header: ply.PlyHeader,
+    *,
+    iter_chunks_fn: IterChunksFn,
+) -> tuple[chunker.ChunkPlan, PackFn, dict[str, Any], dict[str, Any]]:
+    """Plan and encode every point (UPC1, source sRGB colours preserved)."""
+    _require(header, ("x", "y", "z"), "point_fields")
+    has_color = header.has("red", "green", "blue")
+    has_alpha = header.has("alpha")
+    columns = _read_columns(job, header, iter_chunks_fn, ("x", "y", "z"))
+    positions = _stack(columns, ("x", "y", "z"))
+    del columns
+    plan = _plan_points(job, positions)
+    total = int(positions.shape[0])
+    rgba = np.full((total, 4), 255, dtype=np.uint8)
+    if has_color:
+        names = ("red", "green", "blue", "alpha") if has_alpha else ("red", "green", "blue")
+        offset = 0
+        for block in iter_chunks_fn(job.src_path, header, names=names):
+            size = int(block.shape[0])
+            rows = plan.dest[offset : offset + size]
+            for channel, name in enumerate(names):
+                rgba[rows, channel] = _to_byte(block[name])
+            offset += size
+        if offset != total:
+            raise DeterministicDerivativeError("truncated_scene_source")
+
+    pack, facts, sample = _point_layer_outputs(job, positions, plan, rgba, has_alpha=has_alpha)
     return plan, pack, facts, sample
 
 
@@ -372,6 +404,334 @@ def _to_byte(values: np.ndarray) -> np.ndarray:
     if array.dtype.kind == "f":
         return np.asarray(np.clip(np.rint(array * 255.0), 0, 255), dtype=np.uint8)
     return np.clip(array, 0, 255).astype(np.uint8)
+
+
+@dataclass
+class _ColmapModel:
+    """What one COLMAP model directory yielded, before anything is written."""
+
+    model_dir: str
+    files: colmap.ColmapModelFiles
+    source_bytes: int
+    xyz: np.ndarray  # (n, 3) float64, world — finite rows only
+    rgb: np.ndarray  # (n, 3) uint8, sRGB
+    points_total: int  # points the file declared, before the finite filter
+    nonfinite_points: int  # rows dropped because a coordinate was NaN or infinite
+    images_total: int  # every registered image, including any we cannot draw
+    drawn: list[colmap.ColmapImage]  # images whose camera_id is calibrated
+    centers: np.ndarray  # (k, 3) float64 — bounds/poster only, never emitted
+    camera_payload: bytes  # the cameras layer chunk, UTF-8 JSON
+    distorted: tuple[str, ...]  # model names of drawn cameras with real distortion
+    distorted_count: int
+
+    @property
+    def point_count(self) -> int:
+        return int(self.xyz.shape[0])
+
+    @property
+    def camera_count(self) -> int:
+        return len(self.drawn)
+
+
+def _read_colmap_model(model_dir: str) -> _ColmapModel:
+    """Read the model into memory and pre-serialize its cameras layer.
+
+    The JSON is built here, inside the *parsing* phase, so a non-finite pose surfaces as
+    a deterministic parse failure rather than an ``OSError``-shaped one during the write.
+    """
+    files = colmap.model_files(model_dir)
+    cameras = colmap.read_cameras(model_dir) if files.cameras else {}
+    images = colmap.read_images(model_dir) if files.images else []
+    if files.points3d:
+        xyz, rgb = colmap.read_points3d(model_dir)
+    else:
+        xyz = np.zeros((0, 3), dtype=np.float64)
+        rgb = np.zeros((0, 3), dtype=np.uint8)
+    points_total = int(xyz.shape[0])
+
+    # A point with a NaN or infinite coordinate cannot be placed in space, and it is not
+    # merely useless: the octree splits on midpoints, every NaN comparison is False, so
+    # such a point lands in the same child forever and the subdivision never terminates.
+    # Dropped here, counted, and stated in `limitations` — never silently.
+    finite = np.isfinite(xyz).all(axis=1)
+    nonfinite_points = points_total - int(np.count_nonzero(finite))
+    if nonfinite_points:
+        xyz = np.ascontiguousarray(xyz[finite])
+        rgb = np.ascontiguousarray(rgb[finite])
+
+    drawn = [image for image in images if image.camera_id in cameras]
+    payload = colmap.camera_layer_json(cameras, drawn)
+    distorted = tuple(
+        sorted(
+            {
+                cameras[image.camera_id].model
+                for image in drawn
+                if colmap.has_distortion(cameras[image.camera_id])
+            }
+        )
+    )
+    distorted_count = sum(1 for image in drawn if colmap.has_distortion(cameras[image.camera_id]))
+    return _ColmapModel(
+        model_dir=model_dir,
+        files=files,
+        source_bytes=colmap.model_bytes(model_dir),
+        xyz=xyz,
+        rgb=rgb,
+        points_total=points_total,
+        nonfinite_points=nonfinite_points,
+        images_total=len(images),
+        drawn=drawn,
+        centers=colmap.camera_centers(drawn),
+        # Compact separators: this chunk is fetched over the same route as the binary
+        # ones and there is no reason to ship indentation. allow_nan=False turns a NaN
+        # pose into a deterministic failure instead of JSON no parser accepts.
+        camera_payload=json.dumps(payload, allow_nan=False, separators=(",", ":")).encode("utf-8"),
+        distorted=distorted,
+        distorted_count=distorted_count,
+    )
+
+
+def _bbox_of(points: np.ndarray) -> list[float]:
+    """Axis-aligned bounds of a point set, as the manifest's flat six-tuple."""
+    if points.size == 0:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    low = np.asarray(points, dtype=np.float64).min(axis=0)
+    high = np.asarray(points, dtype=np.float64).max(axis=0)
+    return [*(float(value) for value in low), *(float(value) for value in high)]
+
+
+def _union_bbox(first: list[float], second: list[float]) -> list[float]:
+    return [
+        *(min(first[axis], second[axis]) for axis in range(3)),
+        *(max(first[axis + 3], second[axis + 3]) for axis in range(3)),
+    ]
+
+
+def _camera_poster_sample(centers: np.ndarray) -> dict[str, Any]:
+    """Poster inputs for a scene whose only geometry is its cameras."""
+    return {
+        "positions": centers,
+        "colors": np.full((int(centers.shape[0]), 3), 0.72, dtype=np.float32),
+        "opacities": None,
+        "radii": None,
+    }
+
+
+def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -> dict[str, Any]:
+    """Derive a COLMAP sparse model: points through the normal path, cameras beside it."""
+    try:
+        model = _read_colmap_model(model_dir)
+    except DerivativeJobError:
+        raise
+    except ValueError as exc:  # ColmapFormatError and json's non-finite guard
+        raise DeterministicDerivativeError("unsupported_scene_source") from exc
+    except MemoryError as exc:
+        raise TransientDerivativeError("scene_derive_resources") from exc
+    except OSError as exc:
+        raise TransientDerivativeError("scene_source_unavailable") from exc
+    if model.point_count < 1 and model.camera_count < 1:
+        raise DeterministicDerivativeError("empty_scene_source")
+
+    plan: chunker.ChunkPlan | None = None
+    pack_fn: PackFn | None = None
+    facts: dict[str, Any] = {"measured_sh_degree": 0, "clamped_color_fraction": 0.0}
+    sample = _camera_poster_sample(model.centers)
+    if model.point_count:
+        try:
+            positions = np.ascontiguousarray(model.xyz, dtype=np.float32)
+            plan = _plan_points(job, positions)
+            rgba = np.full((model.point_count, 4), 255, dtype=np.uint8)
+            # Scatter source-order colours into chunk-output-row order, the same shape
+            # the PLY point path produces.
+            rgba[plan.dest, 0:3] = model.rgb
+            pack_fn, facts, sample = _point_layer_outputs(
+                job, positions, plan, rgba, has_alpha=False
+            )
+        except DerivativeJobError:
+            raise
+        except ValueError as exc:
+            raise DeterministicDerivativeError("unsupported_scene_source") from exc
+        except MemoryError as exc:
+            raise TransientDerivativeError("scene_derive_resources") from exc
+
+    try:
+        os.makedirs(job.dst_dir, exist_ok=True)
+        entries: list[dict[str, Any]] = []
+        if plan is not None and pack_fn is not None:
+            for chunk in plan.chunks:
+                payload = pack_fn(chunk)
+                _atomic_write(
+                    os.path.join(job.dst_dir, CHUNK_NAME.format(index=chunk.index)), payload
+                )
+                entries.append(_chunk_entry(chunk, len(payload)))
+        camera_entry: dict[str, Any] | None = None
+        if model.camera_count:
+            # After every point chunk, so a model's point chunk indices do not move when
+            # cameras are present. The renderer fetches this through the same
+            # /scene3d/chunk/{n} route and decodes it as UTF-8 JSON.
+            index = len(entries)
+            _atomic_write(
+                os.path.join(job.dst_dir, CHUNK_NAME.format(index=index)), model.camera_payload
+            )
+            camera_entry = {
+                "index": index,
+                "count": model.camera_count,
+                "bytes": len(model.camera_payload),
+                "origin": [0.0, 0.0, 0.0],
+                "bbox": _bbox_of(model.centers),
+            }
+        rendered = poster_fn(
+            os.path.join(job.dst_dir, POSTER_NAME),
+            positions=sample["positions"],
+            colors=sample["colors"],
+            opacities=sample["opacities"],
+            radii=sample["radii"],
+            total=model.point_count or model.camera_count,
+        )
+        document = _build_colmap_manifest(job, model, plan, entries, camera_entry, facts, rendered)
+        _atomic_write(
+            os.path.join(job.dst_dir, MANIFEST_NAME),
+            json.dumps(document, indent=2, allow_nan=False) + "\n",
+        )
+    except DerivativeJobError:
+        raise
+    except ValueError as exc:
+        # `allow_nan=False` refusing a non-finite number it was handed. Point coordinates
+        # and poses are filtered upstream, so reaching here means this source produced a
+        # bound we cannot describe — deterministic either way, and a failure marker beats
+        # an unhandled exception the queue would redeliver until `max_deliver`.
+        raise DeterministicDerivativeError("unsupported_scene_source") from exc
+    except OSError as exc:
+        raise TransientDerivativeError("scene_output_unavailable") from exc
+
+    with suppress(OSError):
+        os.remove(failure_marker_path(job.dst_dir))
+    return {
+        "resource_id": job.resource_id,
+        "dst_dir": job.dst_dir,
+        "status": "succeeded",
+        "scene_kind": "colmap",
+        "total": model.point_count,
+        "camera_count": model.camera_count,
+        "chunk_count": len(entries) + (1 if camera_entry else 0),
+        "tier_count": len(plan.tiers) if plan is not None else 0,
+        "declared_sh_degree": 0,
+        "measured_sh_degree": 0,
+        "stride_bytes": 0,
+        "source_bytes": model.source_bytes,
+        "model_dir": model.model_dir,
+        "manifest_path": os.path.join(job.dst_dir, MANIFEST_NAME),
+        "poster_path": rendered.path,
+    }
+
+
+def _build_colmap_manifest(
+    job: Scene3dDeriveJob,
+    model: _ColmapModel,
+    plan: chunker.ChunkPlan | None,
+    entries: list[dict[str, Any]],
+    camera_entry: dict[str, Any] | None,
+    facts: dict[str, Any],
+    rendered: poster.PosterResult,
+) -> dict[str, Any]:
+    """The §6 manifest for a COLMAP model: a point layer, a cameras layer, or both."""
+    point_bbox = _world_bbox(entries) if entries else None
+    camera_bbox = _bbox_of(model.centers) if model.camera_count else None
+    if point_bbox is None:
+        bbox = camera_bbox or [0.0] * 6
+    elif camera_bbox is None:
+        bbox = point_bbox
+    else:
+        # The frusta are part of the scene, so the reported box covers them. Framing
+        # still happens on bbox_robust, which stays the geometry's percentile box.
+        bbox = _union_bbox(point_bbox, camera_bbox)
+    bbox_robust = facts.get("bbox_robust") or _robust_bbox(model.centers)
+    up_axis, up_basis = manifest.infer_up_axis(bbox)
+
+    layers: list[dict[str, Any]] = []
+    limitations: list[str] = []
+    if plan is not None:
+        layers.append(
+            manifest.build_layer(
+                layer_type="points",
+                encoding="upc-v1",
+                total=plan.total,
+                chunks=entries,
+                tiers=[list(tier) for tier in plan.tiers],
+                activation_domain="post",
+                source_frame="source",
+                quantization={"center": "f32-exact", "color": "u8-srgb"},
+            )
+        )
+        limitations.append(
+            "Point colours are served exactly as the source stores them, in sRGB; the renderer "
+            "performs the single conversion to linear light."
+        )
+        limitations.append(
+            "COLMAP point positions are stored as float64 and are served as float32 relative to "
+            "each chunk's origin, which is the precision the GPU consumes."
+        )
+    if model.nonfinite_points:
+        limitations.append(
+            f"{model.nonfinite_points:,} of {model.points_total:,} points carried a non-finite "
+            "coordinate (NaN or infinity) and were dropped: they cannot be placed in space. "
+            "Every other point was kept."
+        )
+    if camera_entry is not None:
+        layers.append(
+            manifest.build_layer(
+                layer_type="cameras",
+                encoding="json",
+                total=model.images_total,
+                chunks=[camera_entry],
+                tiers=[[int(camera_entry["index"])]],
+                activation_domain="post",
+                # COLMAP's own convention: world-to-camera, right-down-forward. The
+                # renderer owns the inversion and the diag(1, -1, -1) flip (contract §2).
+                source_frame="rdf",
+                # Keyed to what the provenance panel can actually render. The `center`
+                # line is deliberately a denial: the panel labels that field "centre",
+                # and a reader must not come away thinking `tvec` is a camera position.
+                quantization={
+                    "rotation": "f64-exact quaternion, (w, x, y, z), world-to-camera",
+                    "center": "not transmitted — tvec is the world-to-camera translation",
+                },
+            )
+        )
+        limitations.extend(
+            manifest.camera_limitations(
+                camera_count=model.images_total,
+                drawn_count=model.camera_count,
+                distorted_count=model.distorted_count,
+                distorted_models=model.distorted,
+                has_points=model.point_count > 0,
+                has_rig_metadata=model.files.has_rig_metadata,
+            )
+        )
+    if plan is not None:
+        limitations.extend(_plan_limitations(job, plan))
+    limitations.extend(_view_limitations(rendered, up_axis, up_basis))
+    return manifest.build_manifest(
+        resource_id=job.resource_id,
+        scene_kind="colmap",
+        source_format="colmap",
+        writer=None,
+        # What the source declares, not what survived: the layer's `total` carries the
+        # kept count, and the difference is spelled out in `limitations`.
+        vertex_count=model.points_total,
+        source_bytes=model.source_bytes,
+        declared_sh_degree=0,
+        measured_sh_degree=0,
+        # COLMAP records are variable-width by construction — a name of arbitrary length
+        # and a track of arbitrary length — so there is no stride to report.
+        stride_bytes=0,
+        bbox=bbox,
+        bbox_robust=bbox_robust,
+        up_axis=up_axis,
+        up_axis_basis=up_basis,
+        layers=layers,
+        limitations=limitations,
+    )
 
 
 def _resolve_job(
@@ -436,6 +796,16 @@ def _run(
     measure_sh_fn: MeasureShFn,
     poster_fn: PosterFn,
 ) -> dict[str, Any]:
+    # A COLMAP model is a directory, so this has to be decided before anything opens the
+    # source as a file: `read_header` on a directory raises IsADirectoryError, which is an
+    # OSError, which the PLY path would (wrongly) classify as transient and retry forever.
+    try:
+        model_dir = colmap.detect_model_dir(job.src_path)
+    except OSError as exc:
+        raise TransientDerivativeError("scene_source_unavailable") from exc
+    if model_dir is not None:
+        return _run_colmap(job, model_dir, poster_fn=poster_fn)
+
     try:
         source_bytes = os.path.getsize(job.src_path)
         header = read_header_fn(job.src_path)
@@ -522,6 +892,55 @@ def _run(
     }
 
 
+def _world_bbox(entries: list[dict[str, Any]]) -> list[float]:
+    """World bounds of a set of chunk entries, whose own bboxes are chunk-local."""
+    corners_min = [
+        np.asarray(entry["bbox"][0:3]) + np.asarray(entry["origin"]) for entry in entries
+    ]
+    corners_max = [
+        np.asarray(entry["bbox"][3:6]) + np.asarray(entry["origin"]) for entry in entries
+    ]
+    world_min = np.minimum.reduce(corners_min)
+    world_max = np.maximum.reduce(corners_max)
+    return [*(float(value) for value in world_min), *(float(value) for value in world_max)]
+
+
+def _plan_limitations(job: Scene3dDeriveJob, plan: chunker.ChunkPlan) -> list[str]:
+    """What the chunk plan itself owes the reader: tiering, and where it overshot."""
+    sentences = [
+        f"Tier 0 loads 1 chunk in {len(plan.tiers)}, interleaved through a spatially sorted "
+        f"order, so it spans the whole scene at reduced density rather than showing one corner "
+        f"of it. All {plan.total:,} elements are present across the full tier set; nothing was "
+        "dropped."
+    ]
+    if plan.oversized_cells:
+        sentences.append(
+            f"{plan.oversized_cells} octree cell(s) reached the minimum cell size while still "
+            f"holding more than {job.max_splats_per_chunk:,} elements, so their chunks exceed the "
+            "target size. Every element was kept."
+        )
+    if plan.zero_origin_chunks:
+        sentences.append(
+            f"{plan.zero_origin_chunks} of {len(plan.chunks)} chunk(s) pin at least one axis to a "
+            "zero origin, because a chunk-local offset could not reproduce coordinates near zero "
+            "on that axis exactly in float32. Those axes keep world coordinates, so they keep the "
+            "source's precision and no more."
+        )
+    return sentences
+
+
+def _view_limitations(rendered: poster.PosterResult, up_axis: str, up_basis: str) -> list[str]:
+    """What the poster and the up-axis hint are, and are not."""
+    return [
+        f"The poster image is a CPU orthographic approximation along the {'xyz'[rendered.axis]} "
+        f"axis, drawn from {rendered.rendered:,} of {rendered.total:,} elements one layer deep, "
+        "with no blending between overlapping elements and framed on the middle 98% of the "
+        "scene so outliers do not shrink it. It is not the WebGL render.",
+        f"'{up_axis}' is a view hint for the camera controls ({up_basis}); the geometry is never "
+        "rotated and stays in the source world frame.",
+    ]
+
+
 def _build_manifest(
     job: Scene3dDeriveJob,
     header: ply.PlyHeader,
@@ -532,15 +951,7 @@ def _build_manifest(
     rendered: poster.PosterResult,
     source_bytes: int,
 ) -> dict[str, Any]:
-    corners_min = [
-        np.asarray(entry["bbox"][0:3]) + np.asarray(entry["origin"]) for entry in entries
-    ]
-    corners_max = [
-        np.asarray(entry["bbox"][3:6]) + np.asarray(entry["origin"]) for entry in entries
-    ]
-    world_min = np.minimum.reduce(corners_min)
-    world_max = np.maximum.reduce(corners_max)
-    bbox = [*(float(value) for value in world_min), *(float(value) for value in world_max)]
+    bbox = _world_bbox(entries)
     up_axis, up_basis = manifest.infer_up_axis(bbox)
     declared = ply.declared_sh_degree(header)
     is_splat = scene_kind == "splat"
@@ -582,35 +993,8 @@ def _build_manifest(
             "Point colours are served exactly as the source stores them, in sRGB; the renderer "
             "performs the single conversion to linear light."
         )
-    limitations.append(
-        f"Tier 0 loads 1 chunk in {len(plan.tiers)}, interleaved through a spatially sorted "
-        f"order, so it spans the whole scene at reduced density rather than showing one corner "
-        f"of it. All {plan.total:,} elements are present across the full tier set; nothing was "
-        "dropped."
-    )
-    if plan.oversized_cells:
-        limitations.append(
-            f"{plan.oversized_cells} octree cell(s) reached the minimum cell size while still "
-            f"holding more than {job.max_splats_per_chunk:,} elements, so their chunks exceed the "
-            "target size. Every element was kept."
-        )
-    if plan.zero_origin_chunks:
-        limitations.append(
-            f"{plan.zero_origin_chunks} of {len(plan.chunks)} chunk(s) pin at least one axis to a "
-            "zero origin, because a chunk-local offset could not reproduce coordinates near zero "
-            "on that axis exactly in float32. Those axes keep world coordinates, so they keep the "
-            "source's precision and no more."
-        )
-    limitations.append(
-        f"The poster image is a CPU orthographic approximation along the {'xyz'[rendered.axis]} "
-        f"axis, drawn from {rendered.rendered:,} of {rendered.total:,} elements one layer deep, "
-        "with no blending between overlapping elements and framed on the middle 98% of the "
-        "scene so outliers do not shrink it. It is not the WebGL render."
-    )
-    limitations.append(
-        f"'{up_axis}' is a view hint for the camera controls ({up_basis}); the geometry is never "
-        "rotated and stays in the source world frame."
-    )
+    limitations.extend(_plan_limitations(job, plan))
+    limitations.extend(_view_limitations(rendered, up_axis, up_basis))
     return manifest.build_manifest(
         resource_id=job.resource_id,
         scene_kind=scene_kind,

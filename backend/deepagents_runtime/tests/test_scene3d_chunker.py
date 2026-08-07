@@ -198,3 +198,26 @@ def test_empty_and_malformed_input_is_rejected():
         chunker.build_chunk_plan(np.zeros((4, 2), dtype=np.float32))
     with pytest.raises(ValueError, match="tier_count"):
         chunker.build_chunk_plan(np.zeros((4, 3), dtype=np.float32), tier_count=0)
+
+
+def test_non_finite_coordinates_raise_instead_of_hanging():
+    """A NaN coordinate must fail fast, not spin the octree forever.
+
+    Every comparison against NaN is False, so NaN points all land in the same octant and
+    that cell's edge never shrinks below the size floor — `_subdivide` recurses without
+    bound. Before this guard, a single NaN in a source file wedged a derive worker with
+    no timeout and no error, which on the real queue means a redelivery loop.
+    """
+    positions = np.zeros((50, 3), dtype=np.float32)
+    positions[1:, :] = np.nan
+
+    with pytest.raises(ValueError, match="non-finite"):
+        chunker.build_chunk_plan(positions, max_per_chunk=4, tier_count=2)
+
+
+def test_infinite_coordinates_are_rejected_too():
+    positions = np.zeros((16, 3), dtype=np.float32)
+    positions[3, 1] = np.inf
+
+    with pytest.raises(ValueError, match="1 of 16"):
+        chunker.build_chunk_plan(positions, max_per_chunk=4, tier_count=2)

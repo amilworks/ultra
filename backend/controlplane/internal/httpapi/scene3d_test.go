@@ -1,8 +1,12 @@
 package httpapi
 
 import (
+	"archive/zip"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
@@ -358,6 +363,444 @@ func TestScene3dNameClassification(t *testing.T) {
 	}
 }
 
+// --- COLMAP fixtures ---------------------------------------------------------
+
+// writeColmapModel materializes a reconstruction as a directory tree. Member
+// CONTENT is deliberately meaningless: recognition is structural, and a probe
+// that needed real records would have to walk a variable-stride images.bin.
+func writeColmapModel(t *testing.T, root string, relatives ...string) string {
+	t.Helper()
+	for _, relative := range relatives {
+		path := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", relative, err)
+		}
+		if err := os.WriteFile(path, []byte("colmap"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", relative, err)
+		}
+	}
+	return root
+}
+
+func newColmapModelDir(t *testing.T, relatives ...string) string {
+	t.Helper()
+	return writeColmapModel(t, t.TempDir(), relatives...)
+}
+
+func colmapZipBytes(t *testing.T, names ...string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	for _, name := range names {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := entry.Write([]byte("colmap")); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func writeFixture(t *testing.T, name string, content []byte) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write fixture %s: %v", name, err)
+	}
+	return path
+}
+
+// colmapZipBombDeclaredBytes is what the bomb member CLAIMS to hold. Inflating it
+// costs this much memory; reading the central directory costs nothing.
+const colmapZipBombDeclaredBytes = int64(64 << 20)
+
+// colmapZipBombBytes builds a real model archive whose first member declares 64
+// MiB of zeroes (stored in ~64 KB) and whose compressed stream is then SHREDDED.
+// Every header and the whole central directory stay intact, so a probe that reads
+// only names is unaffected — while any implementation that inflates a member to
+// decide what the archive is both burns 64 MiB and fails outright. The corruption
+// is what turns "we do not inflate" from a claim into an assertion.
+func colmapZipBombBytes(t *testing.T) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := zip.NewWriter(&buffer)
+	bomb, err := writer.Create("bomb.bin")
+	if err != nil {
+		t.Fatalf("zip create bomb: %v", err)
+	}
+	zeros := make([]byte, 1<<20)
+	for written := int64(0); written < colmapZipBombDeclaredBytes; written += int64(len(zeros)) {
+		if _, err := bomb.Write(zeros); err != nil {
+			t.Fatalf("zip write bomb: %v", err)
+		}
+	}
+	for _, name := range []string{"sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin"} {
+		entry, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("zip create %s: %v", name, err)
+		}
+		if _, err := entry.Write([]byte("colmap")); err != nil {
+			t.Fatalf("zip write %s: %v", name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip close: %v", err)
+	}
+	raw := buffer.Bytes()
+	// The bomb's deflate stream begins a few dozen bytes in and runs for ~64 KB,
+	// so this lands squarely inside it and nowhere near a header.
+	for offset := 128; offset < 1024 && offset < len(raw); offset++ {
+		raw[offset] ^= 0xFF
+	}
+	return raw
+}
+
+func seedColmapDirectoryResource(t *testing.T, mem *store.MemoryStore, root, fileID, name string, relatives ...string) {
+	t.Helper()
+	// Staged in a subdirectory for the same reason seedTextResource does it: the
+	// upload-catalog migration re-catalogs top-level upload-root entries and would
+	// otherwise clobber the seeded ownership.
+	storageRelative := filepath.Join("staged", fileID+"__"+safeOriginalFilename(name))
+	writeColmapModel(t, filepath.Join(root, storageRelative), relatives...)
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   fileID,
+		OriginalName: name,
+		ContentType:  "application/octet-stream",
+		SizeBytes:    4096,
+		StoragePath:  storageRelative,
+		SourceType:   "upload",
+		ResourceKind: "dataset",
+		OwnerUserID:  "field-researcher",
+		OwnerOrgID:   "smithsonian",
+		Status:       "active",
+	}); err != nil {
+		t.Fatalf("seed COLMAP resource: %v", err)
+	}
+}
+
+func TestColmapPeekRecognizesModelsAtEveryKnownRoot(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		members          []string
+		wantModelPath    string
+		wantRecordFormat string
+		wantPoints3D     bool
+		wantCameras      string
+		wantPoints3DName string
+	}{
+		{
+			name:             "at-the-resource-root",
+			members:          []string{"cameras.bin", "images.bin", "points3D.bin"},
+			wantRecordFormat: "bin",
+			wantPoints3D:     true,
+			wantCameras:      "cameras.bin",
+			wantPoints3DName: "points3D.bin",
+		},
+		{
+			name:             "sparse-0",
+			members:          []string{"sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin"},
+			wantModelPath:    "sparse/0",
+			wantRecordFormat: "bin",
+			wantPoints3D:     true,
+			wantCameras:      "cameras.bin",
+			wantPoints3DName: "points3D.bin",
+		},
+		{
+			name:             "sparse",
+			members:          []string{"sparse/cameras.txt", "sparse/images.txt", "sparse/points3D.txt"},
+			wantModelPath:    "sparse",
+			wantRecordFormat: "txt",
+			wantPoints3D:     true,
+			wantCameras:      "cameras.txt",
+			wantPoints3DName: "points3D.txt",
+		},
+		{
+			name:             "dense-sparse",
+			members:          []string{"dense/sparse/cameras.bin", "dense/sparse/images.bin"},
+			wantModelPath:    "dense/sparse",
+			wantRecordFormat: "bin",
+			wantCameras:      "cameras.bin",
+		},
+		{
+			// A pose-only model is a real COLMAP output; it renders as frusta and must
+			// be recognized, with the missing geometry stated rather than implied.
+			name:             "cameras-and-images-only",
+			members:          []string{"cameras.bin", "images.bin"},
+			wantRecordFormat: "bin",
+			wantCameras:      "cameras.bin",
+		},
+		{
+			name:             "half-converted-model-is-still-a-model",
+			members:          []string{"cameras.bin", "images.txt"},
+			wantRecordFormat: "mixed",
+			wantCameras:      "cameras.bin",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			info, ok := colmapPeek(newColmapModelDir(t, test.members...))
+			if !ok {
+				t.Fatalf("colmapPeek rejected %v", test.members)
+			}
+			if info.variant != "directory" || info.modelPath != test.wantModelPath {
+				t.Fatalf("variant/modelPath = %q/%q, want directory/%q", info.variant, info.modelPath, test.wantModelPath)
+			}
+			if info.recordFormat != test.wantRecordFormat || info.camerasName != test.wantCameras {
+				t.Fatalf("recordFormat/cameras = %q/%q, want %q/%q",
+					info.recordFormat, info.camerasName, test.wantRecordFormat, test.wantCameras)
+			}
+			if info.hasPoints3D != test.wantPoints3D || info.points3DName != test.wantPoints3DName {
+				t.Fatalf("points3D = %t/%q, want %t/%q",
+					info.hasPoints3D, info.points3DName, test.wantPoints3D, test.wantPoints3DName)
+			}
+			if info.hasRigs || info.hasFrames {
+				t.Fatalf("legacy model reported rigs=%t frames=%t, want neither", info.hasRigs, info.hasFrames)
+			}
+		})
+	}
+}
+
+// Modern COLMAP writes rigs.bin/frames.bin beside the model. A legacy model has
+// neither, and their presence must never turn a model into a non-model.
+func TestColmapPeekToleratesRigsAndFrames(t *testing.T) {
+	t.Parallel()
+
+	modern := newColmapModelDir(t,
+		"sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin",
+		"sparse/0/rigs.bin", "sparse/0/frames.bin",
+		"sparse/0/project.ini", "database.db", "images/DSC_0001.jpg",
+	)
+	info, ok := colmapPeek(modern)
+	if !ok {
+		t.Fatal("colmapPeek rejected a modern model carrying rigs.bin + frames.bin")
+	}
+	if !info.hasRigs || !info.hasFrames {
+		t.Fatalf("rigs=%t frames=%t, want both reported", info.hasRigs, info.hasFrames)
+	}
+	if info.modelPath != "sparse/0" || !info.hasPoints3D {
+		t.Fatalf("model = %+v, want sparse/0 with points3D", info)
+	}
+}
+
+func TestColmapPeekRejectsTreesThatOnlyLookLikeModels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		members []string
+	}{
+		{
+			// The decoy: a file called images.txt buried in an unrelated tree. Probing
+			// only the four roots COLMAP actually writes is what refuses this.
+			name: "images-txt-in-a-deep-unrelated-tree",
+			members: []string{
+				"docs/reports/2024/field-notes/images.txt",
+				"docs/reports/2024/field-notes/cameras.txt",
+				"README.md",
+			},
+		},
+		{name: "images-without-cameras", members: []string{"sparse/0/images.bin", "sparse/0/points3D.bin"}},
+		{name: "cameras-without-images", members: []string{"cameras.bin", "points3D.bin"}},
+		{name: "points3d-alone", members: []string{"sparse/0/points3D.bin"}},
+		{
+			// Split across two roots: neither root is a model, and the pair must not be
+			// stitched into one.
+			name:    "cameras-and-images-in-different-roots",
+			members: []string{"sparse/cameras.bin", "dense/sparse/images.bin"},
+		},
+		{name: "one-level-too-deep", members: []string{"sparse/0/1/cameras.bin", "sparse/0/1/images.bin"}},
+		{name: "empty-directory"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if info, ok := colmapPeek(newColmapModelDir(t, test.members...)); ok {
+				t.Fatalf("colmapPeek accepted %s: %+v", test.name, info)
+			}
+		})
+	}
+
+	// A directory whose model members are directories, not files, is not a model.
+	nested := newColmapModelDir(t, "cameras.bin/inner", "images.bin/inner")
+	if _, ok := colmapPeek(nested); ok {
+		t.Fatal("colmapPeek accepted directories named cameras.bin / images.bin")
+	}
+
+	// Non-archive regular files and missing paths stop at the magic/stat check.
+	if _, ok := colmapPeek(writeFixture(t, "scene.ply", splatFixtureBytes(4))); ok {
+		t.Fatal("colmapPeek accepted a PLY file")
+	}
+	if _, ok := colmapPeek(writeFixture(t, "tiny.bin", []byte("PK"))); ok {
+		t.Fatal("colmapPeek accepted a 2-byte file")
+	}
+	if _, ok := colmapPeek(filepath.Join(t.TempDir(), "missing")); ok {
+		t.Fatal("colmapPeek accepted a missing path")
+	}
+}
+
+func TestColmapZipPeekReadsTheCentralDirectoryOnly(t *testing.T) {
+	t.Parallel()
+
+	// A model at any depth inside the archive is found; the members must share a
+	// directory, and the shallowest model wins so the choice is deterministic.
+	nested := writeFixture(t, "reconstruction.zip", colmapZipBytes(t,
+		"office-scan/sparse/0/cameras.bin",
+		"office-scan/sparse/0/images.bin",
+		"office-scan/sparse/0/points3D.bin",
+		"office-scan/database.db",
+		"office-scan/images/DSC_0001.jpg",
+	))
+	info, ok := colmapPeek(nested)
+	if !ok {
+		t.Fatal("colmapPeek rejected a zipped model nested under a wrapper folder")
+	}
+	if info.variant != "zip" || info.modelPath != "office-scan/sparse/0" {
+		t.Fatalf("variant/modelPath = %q/%q, want zip/office-scan/sparse/0", info.variant, info.modelPath)
+	}
+	if info.recordFormat != "bin" || !info.hasPoints3D || info.points3DName != "points3D.bin" {
+		t.Fatalf("zip model = %+v, want bin records with points3D.bin", info)
+	}
+
+	atRoot := writeFixture(t, "model.zip", colmapZipBytes(t, "cameras.txt", "images.txt"))
+	rootInfo, ok := colmapPeek(atRoot)
+	if !ok || rootInfo.modelPath != "" || rootInfo.recordFormat != "txt" || rootInfo.hasPoints3D {
+		t.Fatalf("archive-root model = %+v (ok=%t), want modelPath \"\" txt without points3D", rootInfo, ok)
+	}
+
+	shallowest := writeFixture(t, "two-models.zip", colmapZipBytes(t,
+		"deep/wrapper/sparse/0/cameras.bin", "deep/wrapper/sparse/0/images.bin",
+		"sparse/cameras.bin", "sparse/images.bin",
+	))
+	if info, ok := colmapPeek(shallowest); !ok || info.modelPath != "sparse" {
+		t.Fatalf("two-model archive picked %q (ok=%t), want the shallowest (sparse)", info.modelPath, ok)
+	}
+
+	// Members split across directories are not a model, however suggestive the names.
+	split := writeFixture(t, "split.zip", colmapZipBytes(t, "a/cameras.bin", "b/images.bin", "c/points3D.bin"))
+	if info, ok := colmapPeek(split); ok {
+		t.Fatalf("colmapPeek stitched a model out of members in different archive directories: %+v", info)
+	}
+
+	// A traversal member never becomes a model path handed to the derive job.
+	traversal := writeFixture(t, "traversal.zip", colmapZipBytes(t, "../escape/cameras.bin", "../escape/images.bin"))
+	if info, ok := colmapPeek(traversal); ok {
+		t.Fatalf("colmapPeek accepted a traversal model path: %+v", info)
+	}
+}
+
+// The zip-bomb guard: recognition must cost the central directory and nothing
+// else. The archive's first member declares 64 MiB and its compressed stream is
+// deliberately corrupt, so an implementation that inflates anything fails here.
+func TestColmapZipPeekNeverInflatesAMember(t *testing.T) {
+	t.Parallel()
+
+	raw := colmapZipBombBytes(t)
+	if int64(len(raw)) > (1 << 20) {
+		t.Fatalf("bomb archive is %d bytes; the fixture must stay far smaller than the %d bytes it declares",
+			len(raw), colmapZipBombDeclaredBytes)
+	}
+	path := writeFixture(t, "bomb.zip", raw)
+
+	started := time.Now()
+	info, ok := colmapPeek(path)
+	elapsed := time.Since(started)
+	if !ok {
+		t.Fatal("colmapPeek rejected a valid model because of an unrelated bomb member")
+	}
+	if info.variant != "zip" || info.modelPath != "sparse/0" {
+		t.Fatalf("bomb archive model = %+v, want the zip model at sparse/0", info)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("colmapPeek took %s on a %d-byte archive; it is not reading names only", elapsed, len(raw))
+	}
+
+	// Proof that the assertion above has teeth: the bomb member genuinely cannot be
+	// inflated, and its declared size is what an inflating probe would have paid.
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatalf("open bomb archive: %v", err)
+	}
+	defer func() { _ = reader.Close() }()
+	var bomb *zip.File
+	for _, entry := range reader.File {
+		if entry.Name == "bomb.bin" {
+			bomb = entry
+		}
+	}
+	if bomb == nil {
+		t.Fatal("bomb.bin is missing from the fixture")
+	}
+	if int64(bomb.UncompressedSize64) != colmapZipBombDeclaredBytes {
+		t.Fatalf("bomb declares %d bytes, want %d", bomb.UncompressedSize64, colmapZipBombDeclaredBytes)
+	}
+	stream, err := bomb.Open()
+	if err == nil {
+		_, err = io.Copy(io.Discard, stream)
+		_ = stream.Close()
+	}
+	if err == nil {
+		t.Fatal("the bomb member inflated cleanly, so this test cannot prove colmapPeek avoided inflating it")
+	}
+}
+
+// The archive probe refuses an archive with a hostile member count BEFORE
+// archive/zip parses the central directory: that parse is eager and this code
+// runs on every viewer, manifest and chunk request.
+func TestColmapZipPeekRefusesArchivesPastItsBoundedProbe(t *testing.T) {
+	t.Parallel()
+
+	names := []string{"cameras.bin", "images.bin", "points3D.bin"}
+	for index := 0; index <= colmapZipMaxEntries; index++ {
+		names = append(names, fmt.Sprintf("images/frame_%06d.jpg", index))
+	}
+	oversized := writeFixture(t, "oversized.zip", colmapZipBytes(t, names...))
+	if info, ok := colmapPeek(oversized); ok {
+		t.Fatalf("colmapPeek parsed an archive with %d entries: %+v", len(names), info)
+	}
+	// The same model in a small archive is recognized, so the refusal above is the
+	// bound doing its job and not a broken probe.
+	if _, ok := colmapPeek(writeFixture(t, "small.zip", colmapZipBytes(t, "cameras.bin", "images.bin", "points3D.bin"))); !ok {
+		t.Fatal("colmapPeek rejected the same model in a small archive")
+	}
+}
+
+func TestResourceIsScene3dCoversPlyAndColmap(t *testing.T) {
+	t.Parallel()
+
+	ply := writePlyFixture(t, "drone.ply", splatFixtureBytes(4))
+	if !resourceIsScene3d(resourceRecord{FileID: "f-ply", OriginalName: "drone.ply"}, ply) {
+		t.Fatal("resourceIsScene3d rejected a PLY splat")
+	}
+	model := newColmapModelDir(t, "sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin")
+	if !resourceIsScene3d(resourceRecord{FileID: "f-colmap", OriginalName: "office-scan"}, model) {
+		t.Fatal("resourceIsScene3d rejected a COLMAP directory model")
+	}
+	archive := writeFixture(t, "office.zip", colmapZipBytes(t, "sparse/0/cameras.bin", "sparse/0/images.bin"))
+	if !resourceIsScene3d(resourceRecord{FileID: "f-zip", OriginalName: "office.zip"}, archive) {
+		t.Fatal("resourceIsScene3d rejected a zipped COLMAP model")
+	}
+	decoy := newColmapModelDir(t, "docs/reports/field-notes/images.txt")
+	if resourceIsScene3d(resourceRecord{FileID: "f-decoy", OriginalName: "docs"}, decoy) {
+		t.Fatal("resourceIsScene3d accepted a tree that merely contains an images.txt")
+	}
+
+	// scene3dPeek reports COLMAP's own kind, not a splat/pointcloud guess.
+	info, ok := scene3dPeek(resourceRecord{FileID: "f-colmap", OriginalName: "office-scan"}, model)
+	if !ok || info.format != "colmap" || info.sceneKind != "colmap" || !info.hasColmap || info.hasPly {
+		t.Fatalf("scene3dPeek(colmap) = %+v ok=%t", info, ok)
+	}
+}
+
 func newScene3dTestRouter(t *testing.T, imageServiceURL string) (http.Handler, *store.MemoryStore, string, *recordingDataAgentJobPublisher) {
 	t.Helper()
 	mem := store.NewMemoryStore()
@@ -484,6 +927,215 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A COLMAP DIRECTORY has to produce the descriptor from both dispatch arms, and
+// on the way it must never reach the image service (libbioimage can only return a
+// confusing empty region for a directory) or be queued for an imgcnv pyramid
+// transcode of a folder of camera poses.
+func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
+	var imageServiceCalls atomic.Int64
+	imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		imageServiceCalls.Add(1)
+		http.Error(w, "a COLMAP model must never reach the image service", http.StatusInternalServerError)
+	}))
+	defer imageService.Close()
+
+	for _, arm := range []struct {
+		name            string
+		imageServiceURL string
+	}{
+		{name: "image_service_configured", imageServiceURL: imageService.URL},
+		{name: "image_service_unconfigured", imageServiceURL: ""},
+	} {
+		arm := arm
+		t.Run(arm.name, func(t *testing.T) {
+			router, mem, root, publisher := newScene3dTestRouter(t, arm.imageServiceURL)
+			fileID := "file_colmap_" + arm.name
+			seedColmapDirectoryResource(t, mem, root, fileID, "office-scan",
+				"sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin",
+				"sparse/0/rigs.bin", "sparse/0/frames.bin", "database.db",
+			)
+
+			rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			payload := decodeScene3dJSON(t, rec)
+			if payload["kind"] != "scene3d" || payload["scene_kind"] != "colmap" || payload["format"] != "colmap" {
+				t.Fatalf("kind/scene_kind/format = %v/%v/%v, want scene3d/colmap/colmap",
+					payload["kind"], payload["scene_kind"], payload["format"])
+			}
+			if payload["status"] != "deriving" || payload["decodable"] != true {
+				t.Fatalf("status/decodable = %v/%v, want deriving/true", payload["status"], payload["decodable"])
+			}
+			source, sourceOK := payload["source"].(map[string]any)
+			if !sourceOK {
+				t.Fatalf("descriptor has no source object: %v", payload)
+			}
+			if source["variant"] != "directory" || source["model_path"] != "sparse/0" || source["record_format"] != "bin" {
+				t.Fatalf("source layout = %v, want a directory model at sparse/0 with bin records", source)
+			}
+			if source["cameras_file"] != "cameras.bin" || source["images_file"] != "images.bin" ||
+				source["has_points3d"] != true || source["points3d_file"] != "points3D.bin" {
+				t.Fatalf("source members = %v", source)
+			}
+			if source["has_rigs"] != true || source["has_frames"] != true {
+				t.Fatalf("source rigs/frames = %v/%v, want both true", source["has_rigs"], source["has_frames"])
+			}
+			// Counts require walking a variable-stride images.bin; the control plane
+			// must not claim numbers it never measured.
+			for _, invented := range []string{"vertex_count", "camera_count", "point_count", "measured_sh_degree"} {
+				if _, present := source[invented]; present {
+					t.Fatalf("descriptor reported %q, which this path never measures: %v", invented, source)
+				}
+			}
+			// service_urls are advertised exactly as they are for the PLY path.
+			urls, urlsOK := payload["service_urls"].(map[string]any)
+			if !urlsOK ||
+				urls["manifest"] != "/v2/uploads/"+fileID+"/scene3d/manifest" ||
+				urls["chunk"] != "/v2/uploads/"+fileID+"/scene3d/chunk/{index}" ||
+				urls["download"] != "/v2/resources/"+fileID+"/download" {
+				t.Fatalf("service_urls = %v", payload["service_urls"])
+			}
+			limitations := scene3dLimitationsFromPayload(t, payload)
+			if !containsSubstring(limitations, "recognized from its layout alone") ||
+				!containsSubstring(limitations, "2D feature observations are skipped") ||
+				!containsSubstring(limitations, "source world frame") {
+				t.Fatalf("limitations = %v", limitations)
+			}
+			if containsSubstring(limitations, "classified by file extension alone") {
+				t.Fatalf("a structurally-recognized model claimed extension-only classification: %v", limitations)
+			}
+
+			sceneJobs := 0
+			for _, job := range publisher.jobs {
+				if job.JobType == "image.derive_pyramid" {
+					t.Fatalf("a COLMAP model enqueued a pyramid transcode: %+v", job.Metadata)
+				}
+				if job.JobType == "scene.derive" {
+					sceneJobs++
+					if job.Metadata["resource_id"] != fileID ||
+						!strings.HasSuffix(fmt.Sprint(job.Metadata["dst_dir"]), fileID+"__scene3d") {
+						t.Fatalf("scene.derive metadata = %+v", job.Metadata)
+					}
+					if !strings.HasSuffix(fmt.Sprint(job.Metadata["src_path"]), fileID+"__office-scan") {
+						t.Fatalf("scene.derive src_path = %v, want the model directory", job.Metadata["src_path"])
+					}
+				}
+			}
+			if sceneJobs != 1 {
+				t.Fatalf("scene.derive jobs = %d, want exactly 1", sceneJobs)
+			}
+			if imageServiceCalls.Load() != 0 {
+				t.Fatalf("image service calls = %d, want zero for a COLMAP model", imageServiceCalls.Load())
+			}
+			// The record itself is not pyramid-eligible either, so the upload-time
+			// prewarm cannot queue a transcode behind the viewer's back.
+			record := resourceRecord{FileID: fileID, OriginalName: "office-scan", ContentType: "application/octet-stream", SizeBytes: 4096}
+			if shouldDerivePyramid(record) {
+				t.Fatal("shouldDerivePyramid accepted a COLMAP model record")
+			}
+		})
+	}
+}
+
+// A pose-only model states the missing geometry instead of rendering an empty
+// canvas, and the scene3d routes accept it like any other scene.
+func TestScene3dColmapWithoutPoints3DIsHonestAndServed(t *testing.T) {
+	router, mem, root, _ := newScene3dTestRouter(t, "")
+	fileID := "file_colmap_poses"
+	seedColmapDirectoryResource(t, mem, root, fileID, "poses-only", "cameras.txt", "images.txt")
+
+	payload := decodeScene3dJSON(t, getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil))
+	source := payload["source"].(map[string]any)
+	if source["has_points3d"] != false || source["record_format"] != "txt" || source["model_path"] != "" {
+		t.Fatalf("source = %v, want a txt model at the root with no points3D", source)
+	}
+	if _, present := source["points3d_file"]; present {
+		t.Fatalf("descriptor named a points3D file that does not exist: %v", source)
+	}
+	limitations := scene3dLimitationsFromPayload(t, payload)
+	if !containsSubstring(limitations, "no points3D file") {
+		t.Fatalf("limitations = %v, want the missing geometry stated", limitations)
+	}
+	if message, _ := payload["message"].(string); !strings.Contains(message, "COLMAP reconstruction") {
+		t.Fatalf("message = %q, want it to name a COLMAP reconstruction", message)
+	}
+
+	// The derived-stream routes resolve for a COLMAP resource exactly as for a PLY:
+	// 202 while the derive is outstanding, not 415.
+	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/manifest", nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("manifest status = %d body=%s, want 202", rec.Code, rec.Body.String())
+	}
+	if chunk := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/chunk/0", nil); chunk.Code != http.StatusNotFound {
+		t.Fatalf("undelivered chunk status = %d, want 404", chunk.Code)
+	}
+}
+
+// A zipped model reports the archive variant and says plainly that nothing inside
+// it has been decompressed.
+func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
+	router, mem, root, _ := newScene3dTestRouter(t, "")
+	fileID := "file_colmap_zip"
+	storageRelative := filepath.Join("staged", fileID+"__office.zip")
+	archive := filepath.Join(root, storageRelative)
+	if err := os.MkdirAll(filepath.Dir(archive), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw := colmapZipBytes(t, "office/sparse/0/cameras.bin", "office/sparse/0/images.bin", "office/sparse/0/points3D.bin")
+	if err := os.WriteFile(archive, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID: fileID, OriginalName: "office.zip", ContentType: "application/zip",
+		SizeBytes: int64(len(raw)), StoragePath: storageRelative, SourceType: "upload",
+		ResourceKind: "dataset", OwnerUserID: "field-researcher", OwnerOrgID: "smithsonian", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	payload := decodeScene3dJSON(t, getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil))
+	if payload["scene_kind"] != "colmap" {
+		t.Fatalf("scene_kind = %v, want colmap", payload["scene_kind"])
+	}
+	source := payload["source"].(map[string]any)
+	if source["variant"] != "zip" || source["model_path"] != "office/sparse/0" {
+		t.Fatalf("source = %v, want a zip model at office/sparse/0", source)
+	}
+	if source["bytes"] != float64(len(raw)) {
+		t.Fatalf("source.bytes = %v, want the archive's size on disk (%d)", source["bytes"], len(raw))
+	}
+	if limitations := scene3dLimitationsFromPayload(t, payload); !containsSubstring(limitations, "central directory") {
+		t.Fatalf("limitations = %v, want the archive statement", limitations)
+	}
+}
+
+func scene3dLimitationsFromPayload(t *testing.T, payload map[string]any) []string {
+	t.Helper()
+	raw, ok := payload["limitations"].([]any)
+	if !ok || len(raw) == 0 {
+		t.Fatalf("limitations = %v, want the honesty field to be populated", payload["limitations"])
+	}
+	limitations := make([]string, 0, len(raw))
+	for _, item := range raw {
+		text, isText := item.(string)
+		if !isText {
+			t.Fatalf("limitation %v is not a sentence", item)
+		}
+		limitations = append(limitations, text)
+	}
+	return limitations
+}
+
+func containsSubstring(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestScene3dPointCloudDescriptorReportsItsOwnSpecies(t *testing.T) {

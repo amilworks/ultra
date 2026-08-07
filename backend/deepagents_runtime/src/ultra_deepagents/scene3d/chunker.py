@@ -201,6 +201,24 @@ def build_chunk_plan(
     if importance is not None and np.asarray(importance).shape != (count,):
         raise ValueError("importance must be (n,)")
 
+    # Reject non-finite coordinates BEFORE subdividing. This is a LIVENESS guard, not
+    # input tidiness: every comparison against NaN is False, so NaN points all fall into
+    # the same octant, that cell's edge stays NaN, `edge <= min_cell_size` is never true,
+    # and _subdivide recurses forever. One NaN coordinate anywhere in a source file hangs
+    # a derive worker with no timeout and no error.
+    #
+    # Raising rather than dropping is deliberate. `order`/`dest` address the source array,
+    # so filtering here would silently misalign every column the caller scatters by
+    # `dest`; and quietly discarding elements is exactly what the no-silent-decimation
+    # rule forbids. Callers that legitimately expect junk (the COLMAP path) filter and
+    # count it themselves before calling.
+    non_finite = int(count - int(np.count_nonzero(np.isfinite(points).all(axis=1))))
+    if non_finite:
+        raise ValueError(
+            f"{non_finite} of {count} elements have a non-finite coordinate; "
+            "filter them before chunking"
+        )
+
     extent = float((points.max(axis=0) - points.min(axis=0)).max())
     floor_size = (
         extent * DEFAULT_MIN_CELL_FRACTION if min_cell_size is None else float(min_cell_size)

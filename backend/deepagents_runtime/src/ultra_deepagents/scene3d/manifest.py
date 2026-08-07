@@ -17,6 +17,7 @@ __all__ = [
     "SCHEMA",
     "build_layer",
     "build_manifest",
+    "camera_limitations",
     "infer_up_axis",
     "splat_limitations",
 ]
@@ -114,6 +115,61 @@ def splat_limitations(
         "Splat centres are exact float32. Scale and colour are stored as float16 (~0.05% "
         "relative) and rotation as a 10-10-12 octahedral quaternion (~0.1 degree)."
     )
+    return sentences
+
+
+def camera_limitations(
+    *,
+    camera_count: int,
+    drawn_count: int,
+    distorted_count: int,
+    distorted_models: tuple[str, ...] = (),
+    has_points: bool,
+    has_rig_metadata: bool = False,
+) -> list[str]:
+    """The COLMAP camera-layer honesty sentences.
+
+    ``camera_count`` is every registered image; ``drawn_count`` is how many of them the
+    layer actually carries (an image whose ``camera_id`` has no calibration is dropped,
+    never guessed at). ``distorted_count`` counts frusta drawn from a camera whose
+    distortion coefficients are non-zero — the frustum is the pinhole part of the model
+    only, so those edges are straight where the real lens curves them.
+    """
+    sentences: list[str] = []
+    sentences.append(
+        "Camera poses are served exactly as COLMAP stores them: a world-to-camera rotation as "
+        "a (w, x, y, z) quaternion and its translation, in COLMAP's right-down-forward frame. "
+        "The derive neither inverts nor re-orders them; the renderer performs the single "
+        "inversion to a camera centre and the one right-up-back flip."
+    )
+    if distorted_count:
+        models = ", ".join(distorted_models)
+        detail = f" ({models})" if models else ""
+        sentences.append(
+            f"{distorted_count:,} of {drawn_count:,} camera frusta come from a model carrying "
+            f"non-zero distortion coefficients{detail}, which the frusta do not apply. Each "
+            "frustum is drawn from the pinhole part of its model — focal length and principal "
+            "point — so its edges are straight where the real lens curves them."
+        )
+    if drawn_count < camera_count:
+        sentences.append(
+            f"{camera_count - drawn_count:,} of {camera_count:,} registered image(s) reference a "
+            "camera_id the model does not calibrate, so no frustum is drawn for them."
+        )
+    if not has_points:
+        sentences.append(
+            "This model registers cameras but holds no 3D points, so the scene is the camera "
+            "poses alone. Nothing else is drawn, and the bounds come from the camera centres."
+        )
+    sentences.append(
+        "Per-image 2D feature observations and per-point tracks are read past and dropped. Only "
+        "the 3D points, their colours, and the camera poses reach the viewer."
+    )
+    if has_rig_metadata:
+        sentences.append(
+            "This model carries rig/frame metadata (rigs, frames) that the viewer does not use; "
+            "every pose is read from the images table."
+        )
     return sentences
 
 

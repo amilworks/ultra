@@ -23,6 +23,12 @@ import {
   splatViews,
 } from "@/components/viewer/scene3d/sceneChunks";
 import { srgbBytesToLinearFloat } from "@/components/viewer/scene3d/sceneColor";
+import {
+  applyMat3,
+  cameraBasisFromColmap,
+  cameraCentreFromColmap,
+} from "@/components/viewer/scene3d/sceneFrame";
+import { focalOf } from "@/components/viewer/scene3d/sceneIntrinsics";
 import { resolveScenePixelRatio } from "@/components/viewer/scene3d/sceneBudget";
 
 type ChunkInfo = { index: number; count: number; bytes: number; origin: number[]; bbox: number[] };
@@ -128,7 +134,54 @@ async function main() {
   }
 
   let loaded = 0;
+  let frustaDrawn = 0;
   let SparkRendererCtor: unknown = null;
+
+  // Camera frusta, built from the SAME pure modules the Lens viewer uses. This is the
+  // only check that the COLMAP world-to-camera convention survives the whole trip: the
+  // derive emits qvec/tvec verbatim, and every inversion happens here.
+  const cameraLayer = manifest.layers.find((entry) => entry.type === "cameras");
+  if (cameraLayer && cameraLayer.chunks.length > 0) {
+    const index = cameraLayer.chunks[0].index;
+    const raw = await (await fetch(`${base}/chunk_${String(index).padStart(5, "0")}.bin`)).text();
+    const poses = (JSON.parse(raw).cameras ?? []) as {
+      qvec: number[];
+      tvec: number[];
+      camera: { model: string; width: number; height: number; params: number[] };
+    }[];
+    const rayLength = radius * 0.09;
+    const vertices: number[] = [];
+    for (const pose of poses) {
+      const centre = cameraCentreFromColmap(pose.qvec, pose.tvec);
+      const basis = cameraBasisFromColmap(pose.qvec, pose.tvec);
+      const { fx, fy, cx, cy } = focalOf(pose.camera);
+      // Corner rays in camera space from the REAL intrinsics, so an ignored fy or an
+      // off-centre principal point shows up as a visibly skewed frustum.
+      const { width, height } = pose.camera;
+      for (const [px, py] of [
+        [0, 0],
+        [width, 0],
+        [width, height],
+        [0, height],
+      ]) {
+        const dir = applyMat3(basis, [
+          ((px - cx) / fx) * rayLength,
+          -((py - cy) / fy) * rayLength,
+          -rayLength,
+        ]);
+        vertices.push(centre[0], centre[1], centre[2]);
+        vertices.push(centre[0] + dir[0], centre[1] + dir[1], centre[2] + dir[2]);
+      }
+      frustaDrawn += 1;
+    }
+    if (vertices.length > 0) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+      three.add(
+        new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0xde8b34 }))
+      );
+    }
+  }
 
   if (layer.type === "splats") {
     const spark = await import("@sparkjsdev/spark");
@@ -183,6 +236,7 @@ async function main() {
     `${scene}  ${manifest.scene_kind}\n` +
     `chunks ${picked.length}/${layer.chunks.length}   ${(acc / 1e6).toFixed(1)} MB\n` +
     `showing ${loaded.toLocaleString("en-US")} of ${layer.total.toLocaleString("en-US")}\n` +
+    (frustaDrawn ? `cameras ${frustaDrawn}\n` : "") +
     `bbox ${bbox.map((v) => v.toFixed(1)).join(", ")}\n` +
     `units ${manifest.world.units}`;
 
@@ -206,6 +260,7 @@ async function main() {
     elementsTotal: layer.total,
     bytes: acc,
     hasSpark: Boolean(SparkRendererCtor),
+    frustaDrawn,
     objectsInScene: three.children.length,
     cameraPos: camera.position.toArray().map((v) => Math.round(v)),
     cameraTarget: controls.target.toArray().map((v) => Math.round(v)),

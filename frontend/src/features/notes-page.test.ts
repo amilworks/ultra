@@ -21,6 +21,10 @@ const apiSource = readFileSync(path.join(process.cwd(), "src/lib/api.ts"), "utf8
 const navSource = readFileSync(path.join(process.cwd(), "src/lib/navUrl.ts"), "utf8");
 const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 const mockApi = readFileSync(path.join(process.cwd(), "scripts/mock-api.mjs"), "utf8");
+const markdownSource = readFileSync(
+  path.join(process.cwd(), "src/components/prompt-kit/markdown.tsx"),
+  "utf8"
+);
 
 describe("navigation", () => {
   it("sits directly below Resources in the sidebar with its own shortcut", () => {
@@ -114,5 +118,74 @@ describe("plumbing", () => {
   it("the harness serves notes so the page can be driven end to end", () => {
     expect(mockApi).toContain('url.pathname === "/v2/notes"');
     expect(mockApi).toContain("note_seed_protocol");
+  });
+});
+
+describe("media in notes — one pipeline, one catalog", () => {
+  it("drops, pastes, and slash-picks all ride apiClient.uploadFiles — the SAME pipeline as chat, so files land in Resources", () => {
+    expect(pageSource).toContain("apiClient.uploadFiles(files)");
+    expect(pageSource).toContain("<FileUpload");
+    expect(pageSource).toContain("onPaste={handleBodyPaste}");
+    expect(pageSource).toContain('id: "media", label: "Image or video"');
+    // No parallel upload endpoint, no note-private storage.
+    expect(pageSource).not.toContain("uploadNoteMedia");
+  });
+
+  it("stores portable ultra:// references, never absolute URLs", () => {
+    expect(pageSource).toContain("ultra://resource/");
+    expect(pageSource).toMatch(/markdownForUpload/);
+    expect(pageSource).not.toMatch(/insertAtCaret\(`\\n!\[.*http/);
+  });
+
+  it("renders video references as a native player and images inline, resolved through the Resources download URL", () => {
+    expect(pageSource).toContain("VIDEO_EXTENSION_PATTERN.test(name)");
+    expect(pageSource).toContain('className="notes-media-video"');
+    expect(pageSource).toContain("controls");
+    expect(pageSource).toContain("resourceDownloadUrl(match[1])");
+  });
+
+  it("previews in the house markdown voice — pk-message-content, no private dialect", () => {
+    expect(pageSource).toContain('className="pk-message-content notes-preview-markdown"');
+    expect(pageSource).toContain("components={previewComponents}");
+  });
+
+  it("whispers upload progress in the same voice as autosave", () => {
+    expect(pageSource).toMatch(/Uploading \{uploadingCount\} file/);
+  });
+
+  it("styles media with tokens — hairline border, house radius", () => {
+    const img = styles.match(/\.notes-media-img\s*\{[^}]*\}/s)?.[0];
+    const video = styles.match(/\.notes-media-video\s*\{[^}]*\}/s)?.[0];
+    expect(img).toContain("var(--line)");
+    expect(img).toContain("var(--radius)");
+    expect(video).toContain("var(--line)");
+    expect(video).toContain("max-width: 100%");
+  });
+});
+
+describe("the ultra:// scheme in shared markdown", () => {
+  it("passes through the first-party scheme instead of blanking it, everything else stays sanitized", () => {
+    expect(markdownSource).toContain("defaultUrlTransform");
+    expect(markdownSource).toMatch(/url\.startsWith\("ultra:\/\/"\) \? url : defaultUrlTransform\(url\)/);
+    expect(markdownSource).toContain("urlTransform={ultraUrlTransform}");
+  });
+});
+
+describe("write mode is the raw source — and the type says so", () => {
+  it("body edits in the house mono; preview flips to the reading face", () => {
+    const body = styles.match(/\.notes-body-input\s*\{[^}]*\}/s)?.[0];
+    expect(body).toContain('"JetBrains Mono"');
+    expect(body).toContain("font-variant-ligatures: none;");
+    expect(body).toContain("tab-size: 2;");
+    // Preview keeps the chat reading voice — the mode contrast IS the signal.
+    expect(pageSource).toContain('className="pk-message-content notes-preview-markdown"');
+  });
+
+  it("Tab indents inside the body instead of escaping the editor", () => {
+    expect(pageSource).toMatch(/event\.key === "Tab" && !event\.shiftKey[\s\S]{0,600}setSelectionRange\(start \+ 2/);
+  });
+
+  it("text pastes pass straight through — only FILE pastes are intercepted", () => {
+    expect(pageSource).toMatch(/clipboardData\?\.files[\s\S]{0,120}files\.length > 0[\s\S]{0,60}preventDefault/);
   });
 });

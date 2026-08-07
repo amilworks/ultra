@@ -4874,6 +4874,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .notes-body-shell { position: relative; flex: 1; min-height: 0; display: flex; }
 
+/* Write mode IS the raw source, and the type says so: the house mono (same
+   stack as the code/data viewers) marks "this is plaintext you can dump into"
+   the way Sublime does — while Preview flips to the reading face. Ligatures
+   off on purpose: raw text must never render != as a single glyph. */
 .notes-body-input {
   flex: 1;
   min-height: 16rem;
@@ -4882,9 +4886,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   outline: none;
   background: transparent;
   resize: none;
-  font-family: var(--font-sans);
-  font-size: 0.95rem;
-  line-height: 1.6;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  font-variant-ligatures: none;
+  tab-size: 2;
   color: var(--text-main);
   padding-top: 6px;
 }
@@ -4923,6 +4929,47 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .notes-slash-item[data-highlighted="true"] { background: color-mix(in oklab, var(--accent) 85%, transparent); }
 
 .notes-preview { width: min(100%, 46rem); padding-top: 6px; }
+
+/* Media blocks: quiet frames in the house geometry. The preview column, not
+   the file, bounds them; video keeps a dark stage so letterboxing reads as
+   intentional in both themes. */
+.notes-media-img {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0.4rem 0 0.9rem;
+}
+
+.notes-media-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0.4rem 0 0.9rem;
+  /* A video stage stays dark in both themes on purpose — letterboxing must
+     read as intentional, and media content is not chrome. */
+  background: black;
+}
+
+.notes-preview-markdown {
+  background: transparent;
+  padding: 0;
+}
+
+.notes-editor-drop {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.notes-editor-drop.pk-file-upload-drag {
+  outline: 1.5px dashed var(--line-strong, var(--line));
+  outline-offset: -8px;
+  border-radius: var(--radius);
+}
 
 .notes-editor-empty {
   display: flex;

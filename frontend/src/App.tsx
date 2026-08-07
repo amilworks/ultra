@@ -249,7 +249,7 @@ import type {
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
-import { TraceIcon } from "./components/icons/MeridianIcons";
+import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
 import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
@@ -13811,7 +13811,7 @@ export function App() {
                       baseline carries the trace — the one moment brass may
                       touch this control. Sits ON the top hairline. */}
                   {activeSending ? (
-                    <TraceIcon className="app-composer-recorder" aria-hidden="true" />
+                    <RecorderTraceIcon className="app-composer-recorder" />
                   ) : null}
                   {slashMenuOpen ? (
                     <Suspense fallback={null}>

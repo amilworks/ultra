@@ -249,7 +249,17 @@ describe("the composer — calm focus, and a baseline that records", () => {
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.app-composer-recorder path\s*\{\s*animation:\s*none;\s*stroke-dashoffset:\s*0;/s
     );
     expect(appSource).toMatch(
-      /\{activeSending \? \(\s*<TraceIcon className="app-composer-recorder" aria-hidden="true" \/>\s*\) : null\}/
+      /\{activeSending \? \(\s*<RecorderTraceIcon className="app-composer-recorder" \/>\s*\) : null\}/
+    );
+    // The recorder is its OWN geometry, not the compact thinking-bar glyph:
+    // 96x10 viewBox rendered in a 6rem x 10px box (1:1 units, crisp stroke),
+    // flat lead-in and long tail lying on the baseline, wiggle centred at
+    // y=5. The compact icon letterboxed into a floating squiggle once.
+    const icons = read("src/components/icons/MeridianIcons.tsx");
+    expect(icons).toMatch(/RecorderTraceIcon[\s\S]{0,600}viewBox="0 0 96 10"/);
+    expect(icons).toMatch(/M1 5h18l3-3\.4 3 6 3-7 3 5 3-2\.6 3 1\.8h56/);
+    expect(stylesSource).toMatch(
+      /\.app-composer-recorder\s*\{[^}]*width:\s*6rem;[^}]*height:\s*10px;/s
     );
   });
 });

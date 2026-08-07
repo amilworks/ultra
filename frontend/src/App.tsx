@@ -249,6 +249,7 @@ import type {
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
+import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -2583,6 +2584,7 @@ const ConversationTranscript = memo(
               </div>
             ) : (
               <div className="blank-chat-welcome">
+                <MeridianField />
                 <div className="blank-chat-welcome-greeting">
                   {welcomeName ? (
                     <p className="blank-chat-welcome-eyebrow">

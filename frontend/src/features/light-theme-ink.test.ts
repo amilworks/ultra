@@ -22,14 +22,112 @@ const darkBlock = (() => {
 })();
 
 describe("light theme ink", () => {
-  it("keeps body ink near-black and secondary text on the sage tone", () => {
-    // 16.12:1 on --bg-page. Deliberately near-black: this is the reading surface
-    // for scientific answers, and the earlier #3b383c (10.59:1) gave up more
-    // legibility than the airiness was worth. Airiness is bought elsewhere — a
-    // quieter sidebar and a real reading measure — not out of the text itself.
-    expect(lightRoot).toMatch(/--text-main:\s*#191919;/);
-    // 3.77:1 — clears AA for large text, deliberately just under it for small.
-    expect(lightRoot).toMatch(/--text-muted:\s*#787f78;/);
+  it("puts body and secondary text on the Meridian magnitude ladder", () => {
+    // Meridian Drift · Day. Hierarchy is a geometric series in CONTRAST RATIO
+    // at 1.80x per step, solved numerically against the ground the text sits
+    // on — not a set of greys anyone picked.
+    //   m0 #171b1d 15.60:1 body · m1 #424547 8.69:1 · m2 #696b6d 4.81:1
+    // m0 is not #000000 for the same reason Night's ink is not #ffffff: a
+    // clipped top end reads as a display rather than as a material.
+    expect(lightRoot).toMatch(/--text-main:\s*#171b1d;/);
+    // m2, the last rung that can legally hold text. 4.81:1 — unlike the grey it
+    // replaced (3.87:1) this clears AA for small text outright.
+    expect(lightRoot).toMatch(/--text-muted:\s*#696b6d;/);
+  });
+
+  it("re-solves the ladder for Night rather than inverting it", () => {
+    // The ladder was first derived in LUMINANCE space, which works on a dark
+    // ground only because contrast is (L_hi + .05)/(L_lo + .05) and the .05
+    // floor dominates when L_lo is near zero. Mirrored onto a light ground it
+    // collapses — m1 lands at #acadae, 2.02:1. Contrast-space is
+    // ground-independent, so ONE step governs both blocks and each solves its
+    // own values. Same step, different hexes: that is the invariant.
+    expect(darkBlock).toMatch(/--text-main:\s*#dce3ea;/);
+    expect(darkBlock).toMatch(/--text-muted:\s*#777c82;/);
+    // Neither ground clips to pure black or pure white.
+    expect(lightRoot).not.toMatch(/--text-main:\s*#000000;/);
+    expect(darkBlock).not.toMatch(/--text-main:\s*#(fff|ffffff);/);
+  });
+
+  it("measures the ladder — a 1.80x contrast step, computed, on both grounds", () => {
+    // The design's claim is that hierarchy is a DERIVATION, not a set of greys
+    // somebody picked. So derive it: every adjacent pair of rungs must sit one
+    // 1.80x contrast step apart on its own ground, and m2 — the last rung
+    // allowed to carry text — must hold AA. Pinned hexes alone can't catch a
+    // future edit that swaps one grey for a plausible-looking neighbour.
+    const luminance = (hex: string): number => {
+      const channel = (c: number): number => {
+        const s = c / 255;
+        return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+      };
+      const n = parseInt(hex.slice(1), 16);
+      return (
+        0.2126 * channel((n >> 16) & 255) +
+        0.7152 * channel((n >> 8) & 255) +
+        0.0722 * channel(n & 255)
+      );
+    };
+    const contrast = (a: string, b: string): number => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    const ladders = [
+      { ground: "#f2f3f3", rungs: ["#171b1d", "#424547", "#696b6d", "#939697", "#c8c9ca"] },
+      { ground: "#0b0e11", rungs: ["#dce3ea", "#a5abb0", "#777c82", "#505559", "#2b2e32"] },
+    ];
+    for (const { ground, rungs } of ladders) {
+      const ratios = rungs.map((rung) => contrast(rung, ground));
+      expect(ratios[0]).toBeGreaterThan(14); // m0 body ink
+      expect(ratios[2]).toBeGreaterThanOrEqual(4.5); // m2 must hold AA
+      for (let i = 1; i < ratios.length; i++) {
+        const step = ratios[i - 1] / ratios[i];
+        expect(step, `${ground} m${i - 1}->m${i}`).toBeGreaterThan(1.68);
+        expect(step, `${ground} m${i - 1}->m${i}`).toBeLessThan(1.95);
+      }
+    }
+    // The shipped tokens must BE rungs of these ladders, so the hex pins above
+    // and this derivation cannot drift apart silently.
+    expect(lightRoot).toMatch(/--bg-main:\s*#f2f3f3;/);
+    expect(darkBlock).toMatch(/--bg-main:\s*#0b0e11;/);
+  });
+
+  it("keeps the Day chrome achromatic — crisp, not tinted", () => {
+    // The plate. Day surfaces run a channel spread of 1–2; past 3 they start
+    // reading as a tinted panel, which is the failure Night hit at 12–16.
+    const spread = (hex: string): number => {
+      const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      return Math.max(...c) - Math.min(...c);
+    };
+    for (const token of ["bg-main", "bg-panel-strong", "sidebar"]) {
+      const hex = lightRoot.match(new RegExp(`--${token}:\\s*(#[0-9a-f]{6});`))?.[1];
+      expect(hex, `${token} must be a hex literal`).toBeTruthy();
+      expect(spread(hex as string), `${token} (${hex}) is tinted`).toBeLessThanOrEqual(3);
+    }
+  });
+
+  it("gives Night its own danger instead of inheriting paper's", () => {
+    // --danger was light-only for the theme's whole life: dark inherited
+    // #c62828, which measures 3.44:1 on the Night ground — sub-AA error text.
+    // #d45e5e is the first stop along #c62828 -> white clearing AA on both
+    // Night surfaces it sits on (5.13:1 ground, 4.76:1 panel).
+    expect(lightRoot).toMatch(/--danger:\s*#c62828;/);
+    expect(darkBlock).toMatch(/--danger:\s*#d45e5e;/);
+  });
+
+  it("keeps the Night chrome from reading as a blue panel", () => {
+    // An earlier cut ran the dark surfaces at a channel spread of 12–16 and the
+    // sidebar read as blue rather than as black. Baffle black keeps a spread of
+    // 6 because optical flock genuinely is cool; everything above it is held
+    // tighter. Guard the surfaces that carry large areas.
+    const spread = (hex: string) => {
+      const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      return Math.max(...c) - Math.min(...c);
+    };
+    for (const token of ["bg-main", "bg-panel-strong", "sidebar"]) {
+      const hex = darkBlock.match(new RegExp(`--${token}:\\s*(#[0-9a-f]{6});`))?.[1];
+      expect(hex, `${token} must be a hex literal`).toBeTruthy();
+      expect(spread(hex as string), `${token} (${hex}) is too chromatic`).toBeLessThanOrEqual(8);
+    }
   });
 
   it("defines the strong hairline in BOTH theme blocks", () => {
@@ -39,8 +137,12 @@ describe("light theme ink", () => {
     // ink. The undefined-var() failure mode is invisible — no error, no
     // console warning — so the definitions are pinned here in both blocks
     // (any token consumed by theme-agnostic rules must exist in every theme).
-    expect(lightRoot).toMatch(/--line-strong:\s*rgba\(23, 23, 23, 0\.16\);/);
-    expect(darkBlock).toMatch(/--line-strong:\s*rgba\(255, 255, 255, 0\.24\);/);
+    // Both grounds now carry the SAME alpha pair (.12 rest / .22 hover), which
+    // they could not before: each resolves onto its own m4 rung, so the
+    // perceived step matches without the hand-tuned per-theme offsets this
+    // token used to need.
+    expect(lightRoot).toMatch(/--line-strong:\s*rgba\(23, 27, 29, 0\.22\);/);
+    expect(darkBlock).toMatch(/--line-strong:\s*rgba\(220, 227, 234, 0\.22\);/);
     // And it must stay consumed — a defined-but-dead token is the opposite drift.
     expect(stylesSource).toMatch(/border-color:\s*var\(--line-strong\)/);
   });
@@ -65,58 +167,42 @@ describe("light theme ink", () => {
     // The sidebar rules reference this var in both themes. An undefined var()
     // makes `color` invalid at computed-value time and the row silently
     // inherits — so a light-only definition breaks dark without erroring.
-    expect(lightRoot).toMatch(/--sidebar-ink-hover:\s*#0a0a0a;/);
-    expect(darkBlock).toMatch(/--sidebar-ink-hover:\s*#ffffff;/);
+    expect(lightRoot).toMatch(/--sidebar-ink-hover:\s*#0b0e0f;/);
+    expect(darkBlock).toMatch(/--sidebar-ink-hover:\s*#eef3f8;/);
     expect(lightRoot).toMatch(/--sidebar-accent-foreground:\s*var\(--sidebar-ink-hover\);/);
     expect(darkBlock).toMatch(/--sidebar-accent-foreground:\s*var\(--sidebar-ink-hover\);/);
   });
 
-  it("splits the sidebar: structural nav at full ink, Recents quiet", () => {
-    // Only the Recents list is quieted. It is long, repetitive and the actual
-    // source of sidebar noise; the handful of fixed nav rows are the app's spine
-    // and reading them as noise made the whole sidebar mushy.
+  it("keeps the sidebar on the ladder: rows at full ink, supporting copy at m1", () => {
+    // Upstream moved Recents rows to full ink with pill-carried hover (the
+    // macOS-sidebar model), superseding the earlier quiet-row split. Meridian
+    // keeps that model and puts the QUIET tier — account copy and labels that
+    // draw --sidebar-foreground — on m1, solved against the sidebar's own
+    // ground (8.07:1 light / 8.04:1 dark).
     expect(lightRoot).toMatch(/--sidebar-nav-foreground:\s*var\(--text-main\);/);
-    // 6.41:1 vs body ink's 16.12:1, and past AA's 4.5:1 for the 14px/500 labels.
-    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#575a57;/);
+    expect(lightRoot).toMatch(/--sidebar-foreground:\s*#424547;/);
     expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
-    // Structural nav draws the nav token, not the quiet one.
-    expect(stylesSource).toMatch(
-      /\.app-new-chat-button,\s*\.app-resource-browser-button,\s*\.app-bisque-browser-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
-    );
-    expect(stylesSource).toMatch(
-      /\.app-bisque-link-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
-    );
-    expect(stylesSource).toMatch(
-      /\.app-sidebar-brand-button\[data-slot="button"\]\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
-    );
-    // Recents rest at the SAME full ink as the structural nav (the
-    // macOS-sidebar model, adopted 2026-08-05): every label is one voice and
-    // the pill background alone carries hover/selection. The quiet token
-    // survives for genuine metadata (account line), never for row labels.
+    expect(darkBlock).toMatch(/--sidebar-foreground:\s*#a5abb0;/);
+    expect(darkBlock).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Rows draw the nav ink; the m1 token stays consumed by the quiet tier.
     expect(stylesSource).toMatch(
       /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
     );
-    expect(stylesSource).not.toMatch(
-      /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-foreground\);/s
-    );
+    expect(stylesSource).toMatch(/color:\s*var\(--sidebar-foreground\);/);
   });
 
   it("puts the hover affordance where it can actually be seen", () => {
-    // Lookbehind so `border-color`/`background-color` never count as text color.
-    const HOVER_TEXT_COLOR = /(?<![-\w])color\s*:/;
-    // Recents rest at full ink, so a hover ink step (#191919 -> #0a0a0a) is a
-    // 1.13:1 non-event — declaring it would be the exact "misleading to keep
-    // as if it worked" case the nav rule below documents. Background only.
-    const historyHover = stylesSource.match(/\.app-history-button:hover\s*\{[^}]*\}/s)?.[0];
-    expect(historyHover).toBeTruthy();
-    expect(historyHover).toMatch(/background:/);
-    expect(historyHover).not.toMatch(HOVER_TEXT_COLOR);
-    const historyActive = stylesSource.match(
-      /\.app-history-button\[data-active="true"\]\s*\{[^}]*\}/s
-    )?.[0];
-    expect(historyActive).toBeTruthy();
-    expect(historyActive).toMatch(/background:/);
-    expect(historyActive).not.toMatch(HOVER_TEXT_COLOR);
+    // Recents rows darken: from 6.41:1 to --sidebar-ink-hover's 18.15:1 is a
+    // legible 2.83:1 step. This must be a real declaration, not just the
+    // --sidebar-accent-foreground token: the rows pin `color:
+    // var(--sidebar-foreground)` in unlayered CSS, which beats Tailwind v4's
+    // LAYERED hover:text-sidebar-accent-foreground utility at any specificity.
+    expect(stylesSource).toMatch(
+      /\.app-history-button:hover\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-history-button\[data-active="true"\]\s*\{[^}]*color:\s*var\(--sidebar-ink-hover\);/s
+    );
     // Structural nav must NOT darken on hover: already at full ink, so the step
     // to #0a0a0a is 1.13:1 — invisible, and misleading to keep as if it worked.
     // Its background shift carries the affordance instead.

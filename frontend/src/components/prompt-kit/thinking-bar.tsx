@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { DEFAULT_THINKING_TEXT } from "@/lib/runStepCopy";
+import { TraceIcon } from "@/components/icons/MeridianIcons";
 import { TextShimmer } from "./text-shimmer";
 
 type ThinkingBarProps = {
@@ -24,13 +25,17 @@ export function ThinkingBar({
         <button
           type="button"
           onClick={onClick}
-          className="flex items-center gap-1 text-sm transition-opacity hover:opacity-80"
+          className="flex items-center gap-1.5 text-sm transition-opacity hover:opacity-80"
         >
+          <TraceIcon className="thinking-bar-trace" />
           <TextShimmer className="font-medium">{text}</TextShimmer>
           <ChevronRight className="text-muted-foreground size-4" />
         </button>
       ) : (
-        <TextShimmer className="cursor-default font-medium">{text}</TextShimmer>
+        <span className="flex items-center gap-1.5">
+          <TraceIcon className="thinking-bar-trace" />
+          <TextShimmer className="cursor-default font-medium">{text}</TextShimmer>
+        </span>
       )}
       {onStop ? (
         <button

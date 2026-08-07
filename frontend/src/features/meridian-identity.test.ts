@@ -249,7 +249,12 @@ describe("the composer — calm focus, and a baseline that records", () => {
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.app-composer-recorder path\s*\{\s*animation:\s*none;\s*stroke-dashoffset:\s*0;/s
     );
     expect(appSource).toMatch(
-      /\{activeSending \? \(\s*<RecorderTraceIcon className="app-composer-recorder" \/>\s*\) : null\}/
+      /\{activeSending \? \(\s*<RecorderTraceIcon className="app-composer-recorder" \/>\s*\) : null\}\s*<PromptInput/
+    );
+    // ...and OUTSIDE the card: the card clips (overflow: hidden), which once
+    // beheaded the wiggle into a flat line with one dip. The wrapper anchors.
+    expect(stylesSource).toMatch(
+      /\.app-composer-shell \.pk-file-upload\s*\{\s*position:\s*relative;/s
     );
     // The recorder is its OWN geometry, not the compact thinking-bar glyph:
     // 96x10 viewBox rendered in a 6rem x 10px box (1:1 units, crisp stroke),

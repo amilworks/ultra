@@ -7811,6 +7811,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    Gated in App.tsx by activeSending, so brass touches the composer only while
    a run is genuinely live; the mid-run steer/queue/stop controls carry the
    rest of the running state. */
+/* The recorder's anchor. The card itself clips (overflow: hidden), so the
+   trace hangs off the FileUpload wrapper, which shares the card's exact box
+   and clips nothing. Scoped to the composer: pk-file-upload is a shared
+   primitive and other uses must not gain a positioning context. */
+.app-composer-shell .pk-file-upload {
+  position: relative;
+}
+
 .app-composer-recorder {
   position: absolute;
   left: 1.35rem;

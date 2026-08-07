@@ -13791,6 +13791,15 @@ export function App() {
                 multiple
                 allowDirectories
               >
+                {/* The recorder: while the instrument runs, the composer's
+                    baseline carries the trace — the one moment brass may touch
+                    this control. It lives on the FileUpload wrapper, NOT inside
+                    the card: the card clips (overflow: hidden), and a trace
+                    centred on the border loses every upward peak to that clip —
+                    it shipped once as a flat line with a single dip. */}
+                {activeSending ? (
+                  <RecorderTraceIcon className="app-composer-recorder" />
+                ) : null}
                 <PromptInput
                   /* Hydration is the ONLY thing that disables typing. Folding
                      activeSending in here disabled the textarea for the whole
@@ -13807,12 +13816,6 @@ export function App() {
                   }}
                   className="app-composer-card relative z-10 w-full"
                 >
-                  {/* The recorder: while the instrument runs, the composer's
-                      baseline carries the trace — the one moment brass may
-                      touch this control. Sits ON the top hairline. */}
-                  {activeSending ? (
-                    <RecorderTraceIcon className="app-composer-recorder" />
-                  ) : null}
                   {slashMenuOpen ? (
                     <Suspense fallback={null}>
                       <LazyComposerSlashMenu

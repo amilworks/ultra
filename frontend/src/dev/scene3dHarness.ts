@@ -185,18 +185,37 @@ async function main() {
 
   if (layer.type === "splats") {
     const spark = await import("@sparkjsdev/spark");
-    const sparkRenderer = new spark.SparkRenderer({ renderer });
+    // `product` mirrors Scene3dCanvas exactly, so this harness can bisect a difference
+    // between the two rather than only proving the wire format.
+    const productMode = params.get("mode") === "product";
+    const sparkRenderer = productMode
+      ? new spark.SparkRenderer({ renderer, sortRadial: false, onDirty: () => {} })
+      : new spark.SparkRenderer({ renderer });
+    if (productMode) {
+      sparkRenderer.material.depthTest = true;
+      sparkRenderer.material.depthWrite = false;
+    }
     three.add(sparkRenderer);
     SparkRendererCtor = sparkRenderer;
+
+    const splatGroup = new THREE.Group();
+    if (productMode) three.add(splatGroup);
 
     for (const index of picked) {
       const buf = await (await fetch(`${base}/chunk_${String(index).padStart(5, "0")}.bin`)).arrayBuffer();
       const header = parseChunkHeader(buf);
       const { extA, extB } = splatViews(buf, header);
-      const ext = new spark.ExtSplats({ extArrays: [extA, extB], numSplats: header.count });
+      const take = header.count;
+      const ext = productMode
+        ? new spark.ExtSplats({
+            extArrays: [extA.subarray(0, take * 4), extB.subarray(0, take * 4)],
+            numSplats: take,
+          })
+        : new spark.ExtSplats({ extArrays: [extA, extB], numSplats: header.count });
       const mesh = new spark.SplatMesh({ splats: ext });
       mesh.position.set(header.origin[0], header.origin[1], header.origin[2]);
-      three.add(mesh);
+      (productMode ? splatGroup : three).add(mesh);
+      if (productMode) await mesh.initialized;
       loaded += header.count;
     }
   } else {

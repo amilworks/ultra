@@ -80,7 +80,8 @@ for (const scene of scenes) {
   page.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
 
-  const url = `http://127.0.0.1:${port}/scene3d-harness.html?scene=${scene}&budget=${budget}&tier=0`;
+  const mode = args.get("mode") ? `&mode=${args.get("mode")}` : "";
+  const url = `http://127.0.0.1:${port}/scene3d-harness.html?scene=${scene}&budget=${budget}&tier=0${mode}`;
   await page.goto(url, { waitUntil: "load" });
 
   let state;

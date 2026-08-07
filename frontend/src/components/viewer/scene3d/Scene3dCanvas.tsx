@@ -342,8 +342,20 @@ export function Scene3dCanvas({
       setScaleBar({ label: bar.label, barPx });
     };
 
-    // On-demand rAF: a settled splat scene should not burn a GPU frame every 16 ms.
+    // On-demand rAF for point and camera scenes — a settled point cloud should not burn a
+    // GPU frame every 16 ms — but a CONTINUOUS loop once splats are present.
+    //
+    // Spark builds and sorts its Gsplat collection across frames, asynchronously. With
+    // one-shot frames the canvas stays black indefinitely: the first frame draws before
+    // any sort exists, and nothing schedules another until the user happens to move the
+    // camera (which is exactly what "it appears when I drag it" looked like in testing).
+    // setDirty() and onDirty are necessary but NOT sufficient — measured, not assumed.
+    // Points never hit this because THREE.Points needs no sort, which is why the bug
+    // survived the point path and only showed on splats.
     let animationFrame = 0;
+    // Decided from the manifest at setup rather than from inside the async chunk loader:
+    // the loader's ordering is exactly what made this fragile to begin with.
+    const continuous = Boolean(layerOfType(manifest, "splats"));
     const renderFrame = () => {
       animationFrame = 0;
       if (disposed) {
@@ -352,6 +364,9 @@ export function Scene3dCanvas({
       controls.update();
       renderer.render(scene, camera);
       publishScaleBar();
+      if (continuous) {
+        animationFrame = window.requestAnimationFrame(renderFrame);
+      }
     };
     const requestRender = () => {
       if (disposed || animationFrame) {
@@ -359,6 +374,7 @@ export function Scene3dCanvas({
       }
       animationFrame = window.requestAnimationFrame(renderFrame);
     };
+
 
     const resize = () => {
       const width = Math.max(1, stage.clientWidth || 1);
@@ -554,7 +570,22 @@ export function Scene3dCanvas({
         groups.splats.add(mesh);
         disposables.push(ext, mesh);
         await mesh.initialized;
+        spark3d.setDirty();
       });
+
+      // Rebuild Spark's Gsplat collection ONCE, after every chunk is in the scene.
+      //
+      // Chunks arrive asynchronously, long after the SparkRenderer was constructed, and
+      // Spark otherwise waits for a view change before it re-accumulates — measured, the
+      // canvas stayed black until the user dragged, with setDirty() and a continuous rAF
+      // both already in place. update() does the pass explicitly. It must run after the
+      // loop, not inside it: called per chunk it snapshots a partial collection and only
+      // that fragment ever draws.
+      if (!disposed) {
+        spark3d.setDirty();
+        spark3d.update({ scene, camera });
+        requestRender();
+      }
     };
 
     const loadCameras = async (layer: Scene3dLayer) => {

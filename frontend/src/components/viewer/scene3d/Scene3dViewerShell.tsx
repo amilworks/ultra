@@ -165,6 +165,12 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
         up_axis_basis: String(world.up_axis_basis ?? "unknown"),
         frame: String(world.frame ?? "source"),
         bbox: toNumberArray(world.bbox),
+        // The camera frames on this, not on `bbox` — see frameOf in Scene3dCanvas.
+        // Omitted when the manifest predates the field, in which case frameOf falls
+        // back to `bbox`. This normalizer rebuilds `world` field by field, so a new
+        // manifest key that is not listed here is silently dropped.
+        bbox_robust:
+          world.bbox_robust === undefined ? undefined : toNumberArray(world.bbox_robust),
       },
       layers,
       limitations: Array.isArray(raw.limitations) ? raw.limitations.map((item) => String(item)) : [],

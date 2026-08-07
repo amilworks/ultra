@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
+import zipfile
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -134,6 +136,72 @@ def _write_failure_marker(job: Scene3dDeriveJob, exc: DeterministicDerivativeErr
     with suppress(OSError):
         os.makedirs(os.path.dirname(marker) or ".", exist_ok=True)
         _atomic_write(marker, json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+# A COLMAP model is small (metadata plus points); an archive far past this is either not
+# a reconstruction or is carrying the source photographs, which we never read.
+_ZIP_MAX_TOTAL_BYTES = 8 << 30
+_ZIP_MAX_MEMBERS = 20_000
+# Only these are worth extracting. Source images are the bulk of a real archive and
+# nothing in the derive looks at them.
+_COLMAP_MEMBER_NAMES = frozenset(
+    {
+        "cameras.bin",
+        "cameras.txt",
+        "images.bin",
+        "images.txt",
+        "points3D.bin",
+        "points3D.txt",
+        "rigs.bin",
+        "rigs.txt",
+        "frames.bin",
+        "frames.txt",
+    }
+)
+
+
+def _looks_like_zip(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(4) in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    except OSError:
+        return False
+
+
+def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
+    """Extract just the COLMAP model records from an archive; return the model dir.
+
+    Only the recognised record names are written, and only after the central directory's
+    declared sizes are checked — so a zip bomb, an absolute path, or a `..` traversal is
+    rejected before anything is decompressed.
+    """
+    with zipfile.ZipFile(src_path) as archive:
+        entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+        if len(entries) > _ZIP_MAX_MEMBERS:
+            return None
+        wanted = [
+            entry
+            for entry in entries
+            if os.path.basename(entry.filename) in _COLMAP_MEMBER_NAMES
+        ]
+        if not wanted:
+            return None
+        if sum(entry.file_size for entry in wanted) > _ZIP_MAX_TOTAL_BYTES:
+            return None
+        root = os.path.realpath(dest_dir)
+        for entry in wanted:
+            # Normalise the member's own path, then confirm the result still lands under
+            # dest_dir. zipfile does not do this for us.
+            relative = os.path.normpath(entry.filename).lstrip("/")
+            if relative.startswith(".."):
+                continue
+            target = os.path.realpath(os.path.join(root, relative))
+            if not (target == root or target.startswith(root + os.sep)):
+                continue
+            os.makedirs(os.path.dirname(target) or root, exist_ok=True)
+            with archive.open(entry) as source, open(target, "wb") as sink:
+                shutil.copyfileobj(source, sink)
+    return colmap.detect_model_dir(dest_dir)
 
 
 def _require(header: ply.PlyHeader, names: tuple[str, ...], code: str) -> None:
@@ -805,6 +873,23 @@ def _run(
         raise TransientDerivativeError("scene_source_unavailable") from exc
     if model_dir is not None:
         return _run_colmap(job, model_dir, poster_fn=poster_fn)
+
+    # A COLMAP model also arrives as a ZIP, because that is how reconstructions are
+    # actually distributed and because a zip is a regular file — it gets Range serving,
+    # sha dedupe, retention GC and agent staging for free, none of which a directory
+    # bundle has today. The control plane already recognises one from its central
+    # directory alone, so refusing it here would promise a derive we never run.
+    if _looks_like_zip(job.src_path):
+        with tempfile.TemporaryDirectory(prefix="scene3d-zip-") as staged:
+            try:
+                extracted = _extract_colmap_zip(job.src_path, staged)
+            except zipfile.BadZipFile as exc:
+                raise DeterministicDerivativeError("unsupported_scene_source") from exc
+            except OSError as exc:
+                raise TransientDerivativeError("scene_source_unavailable") from exc
+            if extracted is None:
+                raise DeterministicDerivativeError("unsupported_scene_source")
+            return _run_colmap(job, extracted, poster_fn=poster_fn)
 
     try:
         source_bytes = os.path.getsize(job.src_path)

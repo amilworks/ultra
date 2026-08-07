@@ -309,14 +309,16 @@ const mockNotes = [
     title: "Prairie dog survey — field protocol",
     body_markdown: "## Transects\n- Spacing 40 m\n- [x] Flag GSD < 1.2 cm\n- [ ] Re-fly plot 7\n\n| Plot | GSD | Pass |\n| --- | --- | --- |\n| 3 | 1.1 cm | yes |\n| 7 | 1.4 cm | no |",
     pinned: true,
+    editor_mode: "markdown",
     created_at: new Date(Date.now() - 86400e3 * 6).toISOString(),
     updated_at: new Date(Date.now() - 86400e3 * 2).toISOString(),
   },
   {
     note_id: "note_seed_teaching",
     title: "Max pooling teaching notes",
-    body_markdown: "Working notes for the CNN workshop.\n\n```python\nout[r][c] = max(x[2r][2c], x[2r][2c+1], x[2r+1][2c], x[2r+1][2c+1])\n```",
+    body_markdown: "Working notes for the CNN workshop. The ==argmax provenance== demo lands hardest.\n\n```python\nout[r][c] = max(x[2r][2c], x[2r][2c+1], x[2r+1][2c], x[2r+1][2c+1])\n```",
     pinned: false,
+    editor_mode: "markdown",
     created_at: new Date(Date.now() - 3600e3 * 5).toISOString(),
     updated_at: new Date(Date.now() - 3600e3).toISOString(),
   },
@@ -325,6 +327,7 @@ const mockNotes = [
     title: "Reading list — spatial transcriptomics",
     body_markdown: "- liana notebook\n- the two Nature methods papers",
     pinned: false,
+    editor_mode: "plaintext",
     created_at: new Date(Date.now() - 86400e3 * 9).toISOString(),
     updated_at: new Date(Date.now() - 86400e3 * 8).toISOString(),
   },
@@ -2262,12 +2265,13 @@ const server = http.createServer(async (request, response) => {
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       let payload = {};
-      try { payload = JSON.parse(body || "{}"); } catch {}
+      try { payload = JSON.parse(body || "{}"); } catch { /* malformed json → empty note */ }
       const note = {
         note_id: `note_mock_${++mockNoteCounter}`,
         title: payload.title || "",
         body_markdown: payload.body_markdown || "",
         pinned: Boolean(payload.pinned),
+        editor_mode: payload.editor_mode === "plaintext" ? "plaintext" : "markdown",
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -2292,10 +2296,13 @@ const server = http.createServer(async (request, response) => {
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
         let payload = {};
-        try { payload = JSON.parse(body || "{}"); } catch {}
+        try { payload = JSON.parse(body || "{}"); } catch { /* malformed json → no-op patch */ }
         if (typeof payload.title === "string") note.title = payload.title;
         if (typeof payload.body_markdown === "string") note.body_markdown = payload.body_markdown;
         if (typeof payload.pinned === "boolean") note.pinned = payload.pinned;
+        if (payload.editor_mode === "markdown" || payload.editor_mode === "plaintext") {
+          note.editor_mode = payload.editor_mode;
+        }
         note.updated_at = new Date().toISOString();
         sendJson(response, 200, note);
       });

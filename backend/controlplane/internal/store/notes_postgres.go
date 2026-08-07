@@ -7,7 +7,7 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 )
 
-const noteColumns = `note_id, user_id, org_id, title, body_markdown, pinned, created_at, updated_at`
+const noteColumns = `note_id, user_id, org_id, title, body_markdown, pinned, editor_mode, created_at, updated_at`
 
 // notesSnippetSourceLimit bounds how much body the LIST query ships per row —
 // the snippet is a row preview, never the document.
@@ -23,6 +23,7 @@ func scanNote(row interface{ Scan(...any) error }) (domain.NoteRecord, error) {
 		&record.Title,
 		&record.BodyMarkdown,
 		&record.Pinned,
+		&record.EditorMode,
 		&record.CreatedAt,
 		&record.UpdatedAt,
 	); err != nil {
@@ -43,8 +44,8 @@ func escapeNoteLike(query string) string {
 
 func (s *PostgresStore) CreateNote(ctx context.Context, record domain.NoteRecord) (domain.NoteRecord, error) {
 	return scanNote(s.pool.QueryRow(ctx, `
-INSERT INTO control_notes (note_id, user_id, org_id, title, body_markdown, pinned, created_at, updated_at)
-VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $7)
+INSERT INTO control_notes (note_id, user_id, org_id, title, body_markdown, pinned, editor_mode, created_at, updated_at)
+VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7, $8, $8)
 RETURNING `+noteColumns,
 		record.NoteID,
 		record.UserID,
@@ -52,6 +53,7 @@ RETURNING `+noteColumns,
 		record.Title,
 		record.BodyMarkdown,
 		record.Pinned,
+		record.EditorMode,
 		record.CreatedAt,
 	))
 }
@@ -71,10 +73,11 @@ UPDATE control_notes SET
   title = COALESCE($3, title),
   body_markdown = COALESCE($4, body_markdown),
   pinned = COALESCE($5, pinned),
+  editor_mode = COALESCE($6, editor_mode),
   updated_at = now()
 WHERE note_id = $1 AND user_id = $2
 RETURNING `+noteColumns,
-		noteID, userID, input.Title, input.BodyMarkdown, input.Pinned,
+		noteID, userID, input.Title, input.BodyMarkdown, input.Pinned, input.EditorMode,
 	))
 }
 

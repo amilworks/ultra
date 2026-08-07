@@ -61,6 +61,9 @@ func TestNotesCrudIsOwnerScoped(t *testing.T) {
 	if note.NoteID == "" || note.Title != "Field protocol" || note.Pinned {
 		t.Fatalf("created note = %+v", note)
 	}
+	if note.EditorMode != domain.NoteEditorModeMarkdown {
+		t.Fatalf("new notes default to the markdown surface, got %q", note.EditorMode)
+	}
 
 	if rec := notesRequest(router, http.MethodGet, "/v2/notes/"+note.NoteID, "ada", ""); rec.Code != http.StatusOK {
 		t.Fatalf("owner get = %d", rec.Code)
@@ -75,7 +78,7 @@ func TestNotesCrudIsOwnerScoped(t *testing.T) {
 	}
 
 	updated := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada",
-		`{"body_markdown":"Transect spacing 40 m. Flag GSD < 1.2 cm.","pinned":true}`)
+		`{"body_markdown":"Transect spacing 40 m. Flag GSD < 1.2 cm.","pinned":true,"editor_mode":"plaintext"}`)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("owner patch = %d body=%s", updated.Code, updated.Body.String())
 	}
@@ -85,6 +88,19 @@ func TestNotesCrudIsOwnerScoped(t *testing.T) {
 	}
 	if !patched.Pinned || patched.Title != "Field protocol" || !strings.Contains(patched.BodyMarkdown, "GSD") {
 		t.Fatalf("patched note = %+v (partial update must not clobber untouched fields)", patched)
+	}
+	if patched.EditorMode != domain.NoteEditorModePlaintext {
+		t.Fatalf("editor_mode = %q, want the flip to plaintext persisted", patched.EditorMode)
+	}
+
+	// The mode is sticky: a later partial update without editor_mode keeps it.
+	retitled := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada", `{"title":"Field protocol v2"}`)
+	var afterRetitle domain.NoteRecord
+	if err := json.Unmarshal(retitled.Body.Bytes(), &afterRetitle); err != nil {
+		t.Fatalf("decode retitle: %v", err)
+	}
+	if afterRetitle.EditorMode != domain.NoteEditorModePlaintext {
+		t.Fatalf("editor_mode after unrelated patch = %q, want sticky plaintext", afterRetitle.EditorMode)
 	}
 
 	if rec := notesRequest(router, http.MethodDelete, "/v2/notes/"+note.NoteID, "ada", ""); rec.Code != http.StatusOK {
@@ -160,5 +176,21 @@ func TestNotesRejectsOversizedWrites(t *testing.T) {
 	rec := notesRequest(router, http.MethodPost, "/v2/notes", "ada", `{"body_markdown":"`+huge+`"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("oversized create = %d, want 400", rec.Code)
+	}
+}
+
+func TestNotesRejectsUnknownEditorMode(t *testing.T) {
+	t.Parallel()
+	router := newNotesTestRouter(t)
+	if rec := notesRequest(router, http.MethodPost, "/v2/notes", "ada", `{"editor_mode":"wysiwyg"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown editor_mode create = %d, want 400", rec.Code)
+	}
+	created := notesRequest(router, http.MethodPost, "/v2/notes", "ada", `{"title":"n"}`)
+	var note domain.NoteRecord
+	if err := json.Unmarshal(created.Body.Bytes(), &note); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	if rec := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada", `{"editor_mode":"rich"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown editor_mode patch = %d, want 400", rec.Code)
 	}
 }

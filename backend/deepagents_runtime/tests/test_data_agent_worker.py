@@ -27,6 +27,7 @@ from ultra_deepagents.data_agent.worker import (
     DataAgentLeaseConflict,
     DefaultDataAgentProcessor,
     NATSDataAgentWorker,
+    RetryableDataAgentProcessingError,
     acquire_control_plane_data_agent_job_lease,
     append_control_plane_data_agent_job_event,
     build_data_agent_consumer_config,
@@ -265,9 +266,18 @@ def test_data_agent_control_plane_helpers_send_owner_headers(monkeypatch):
     assert lease.lease_token == "lease-token-1"
     assert renewed.lease_token == "lease-token-1"
     assert [call["method"] for call in captured] == ["POST", "PATCH", "PATCH", "POST", "DELETE"]
-    assert captured[0]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/lease"
-    assert captured[2]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/status"
-    assert captured[3]["url"] == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/events"
+    assert (
+        captured[0]["url"]
+        == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/lease"
+    )
+    assert (
+        captured[2]["url"]
+        == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/status"
+    )
+    assert (
+        captured[3]["url"]
+        == "https://control.example.test/v2/data-agent/jobs/data_agent_job_1/events"
+    )
     for call in captured:
         assert call["headers"]["X-ultra-user-id"] == "agent-user"
         assert call["headers"]["X-ultra-org-id"] == "agent-org"
@@ -395,6 +405,48 @@ def test_worker_processes_data_agent_job_updates_terminal_status_and_acks():
         "resource_count": 2,
     }
     assert calls[-1] == ("release", "lease-token-1")
+
+
+def test_worker_naks_retryable_processor_failure_without_terminal_status():
+    statuses: list[dict[str, object]] = []
+    released: list[str] = []
+
+    async def processor(_job: DataAgentJobEnvelope, _progress):
+        raise RetryableDataAgentProcessingError("lifecycle marker storage unavailable")
+
+    async def acquire(job: DataAgentJobEnvelope, settings: RuntimeSettings):
+        return ControlPlaneDataAgentJobLease(
+            job_id=job.job_id,
+            worker_id=settings.data_agent_worker_id,
+            lease_token="lease-token-retry",
+        )
+
+    async def release(lease, settings, *, job):
+        released.append(lease.lease_token)
+
+    async def update_status(job, settings, **kwargs):
+        statuses.append(kwargs)
+
+    async def scenario():
+        worker = NATSDataAgentWorker(
+            _settings(),
+            processor=processor,
+            job_status_func=no_data_agent_job_status,
+            lease_func=acquire,
+            release_lease_func=release,
+            status_update_func=update_status,
+            worker_heartbeat_func=no_worker_heartbeat,
+        )
+        message = FakeAck(json.dumps(_job_payload(job_type="analysis.megaseg")).encode("utf-8"))
+        await worker._process_message(message)
+        return message
+
+    message = asyncio.run(scenario())
+
+    assert message.acked == 0
+    assert message.naked == 1
+    assert [status["status"] for status in statuses] == ["running"]
+    assert released == ["lease-token-retry"]
 
 
 def test_worker_maps_canceled_output_summary_to_canceled_terminal_status():
@@ -552,7 +604,10 @@ def test_worker_posts_skip_event_before_ack_for_terminal_control_plane_data_agen
     assert calls[1][0] == "event"
     skip = calls[1][1]
     assert skip["event_type"] == "data_agent.job.skipped"
-    assert skip["event_id"] == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    assert (
+        skip["event_id"]
+        == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    )
     assert skip["message"] == "Data Agent job delivery skipped before worker lease."
     assert skip["metadata"] == {
         "ack_action": "ack",
@@ -634,7 +689,10 @@ def test_worker_naks_missing_control_plane_data_agent_job_when_skip_event_cannot
     assert message.naked == 1
     assert message.nak_delays == [45.0]
     assert skip_events[0]["event_type"] == "data_agent.job.skipped"
-    assert skip_events[0]["event_id"] == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    assert (
+        skip_events[0]["event_id"]
+        == "data_agent_job_event_data_agent_job_1_dispatch_1_skipped_initial_status"
+    )
     assert skip_events[0]["metadata"]["control_status"] == "not_found"
 
 
@@ -849,7 +907,9 @@ def test_data_agent_worker_live_nats_smoke():
 
 def test_data_agent_worker_go_control_plane_live_smoke(tmp_path):
     if os.getenv("ULTRA_DEEPAGENTS_TEST_GO_CONTROL_PLANE", "").strip() != "1":
-        pytest.skip("set ULTRA_DEEPAGENTS_TEST_GO_CONTROL_PLANE=1 to run the Go control-plane smoke")
+        pytest.skip(
+            "set ULTRA_DEEPAGENTS_TEST_GO_CONTROL_PLANE=1 to run the Go control-plane smoke"
+        )
     nats_url = os.getenv("ULTRA_DEEPAGENTS_TEST_NATS_URL", "").strip()
     if not nats_url:
         pytest.skip("ULTRA_DEEPAGENTS_TEST_NATS_URL is not set")

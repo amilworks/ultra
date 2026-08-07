@@ -596,7 +596,7 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	}
 	// NIfTI keeps the dedicated, volume-specialized medical viewer.
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		deps.writeNiftiUploadViewer(w, record, path)
+		deps.writeNiftiUploadViewer(w, root, record, path)
 		return
 	}
 	// OME-Zarr (and other ngff-served special formats) is served natively by the
@@ -777,7 +777,9 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 				return
 			}
 		}
-		if err := serveNiftiSliceAsPNG(w, path, r); err != nil {
+		if err := serveNiftiSliceAsPNG(w, path, r, niftiDecompressedSidecarIdentity{
+			root: authorization.root, resourceID: record.FileID, sourceSHA256: record.SHA256,
+		}); err != nil {
 			writeError(w, http.StatusUnsupportedMediaType, err)
 		}
 		return

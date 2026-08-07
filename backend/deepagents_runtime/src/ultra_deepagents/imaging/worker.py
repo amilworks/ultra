@@ -14,15 +14,19 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import tempfile
 from collections.abc import Callable
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from ultra_deepagents.imaging.derivative_manifest import (
     DeterministicDerivativeError,
     StaleDerivativeJobError,
+    TransientDerivativeError,
+    _publication_lock,
 )
 from ultra_deepagents.imaging.job import run_derive_pyramid_job
 
@@ -35,6 +39,10 @@ DEFAULT_DURABLE = "ultra-image-convert-worker"
 # ConsumerConfig.max_deliver. Bounds a poison job (a source that always fails to
 # convert) so it cannot loop forever. Override with ULTRA_IMGSVC_MAX_DELIVER.
 DEFAULT_MAX_DELIVER = 5
+DEFAULT_RETRY_DELAY_SECONDS = 30.0
+DEFAULT_ACK_PROGRESS_INTERVAL_SECONDS = 10.0
+DEFAULT_FETCH_ERROR_BACKOFF_SECONDS = 0.25
+MAX_FETCH_ERROR_BACKOFF_SECONDS = 5.0
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -105,7 +113,11 @@ def extract_derive_pyramid_payload(envelope: dict[str, Any]) -> dict[str, Any] |
         return None
     meta = envelope.get("metadata")
     if isinstance(meta, dict) and "src_path" in meta:
-        return meta
+        payload = dict(meta)
+        envelope_job_id = envelope.get("job_id")
+        if envelope_job_id is not None:
+            payload["force_id"] = str(envelope_job_id)
+        return payload
     return envelope
 
 
@@ -120,14 +132,44 @@ def _delivery_attempt(msg: Any) -> int:
     return num if num >= 1 else 1
 
 
-async def _safe_ack_op(msg: Any, op: str) -> None:
+async def _safe_ack_op(msg: Any, op: str, *, delay_seconds: float | None = None) -> None:
     """Invoke msg.ack/nak/term if present, swallowing transport errors — a failed ack
     operation must never crash the worker loop."""
     fn = getattr(msg, op, None)
     if not callable(fn):
         return
     with suppress(Exception):
-        await fn()
+        if delay_seconds is None:
+            await fn()
+        else:
+            # JetStream treats a bare NAK as an immediate redelivery. If a
+            # transport cannot accept the delay, leave the message unacked so
+            # AckWait provides bounded spacing instead of falling back to a
+            # storage-outage hot loop.
+            await fn(delay=delay_seconds)
+
+
+def _start_ack_progress_task(msg: Any, *, interval_seconds: float) -> asyncio.Task | None:
+    if interval_seconds <= 0 or not callable(getattr(msg, "in_progress", None)):
+        return None
+    return asyncio.create_task(_ack_progress_loop(msg, interval_seconds=interval_seconds))
+
+
+async def _ack_progress_loop(msg: Any, *, interval_seconds: float) -> None:
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await msg.in_progress()
+        except Exception:
+            logger.debug("imaging worker: JetStream ack progress failed", exc_info=True)
+
+
+async def _stop_ack_progress_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
 
 
 def _failure_marker_path(dst_path: str) -> str:
@@ -137,53 +179,72 @@ def _failure_marker_path(dst_path: str) -> str:
     return dst_path[:-4] + ".failed" if dst_path.endswith(".tif") else dst_path + ".failed"
 
 
-def _write_failure_marker(job: dict[str, Any] | None, exc: DeterministicDerivativeError) -> None:
-    """Best-effort: record that this resource's pyramid derivation permanently failed,
+def _write_failure_marker(job: dict[str, Any] | None, exc: DeterministicDerivativeError) -> str:
+    """Record that this resource's pyramid derivation permanently failed.
+
     so the control plane stops re-enqueuing a doomed conversion on every viewer open
     (which would keep burning the engine — the failure mode behind the 707k-redelivery
     incident). The marker's mtime gives the control plane a backoff window; a later
-    successful derive or an explicit re-derive clears it. Never raises."""
+    successful derive or an explicit re-derive clears it. The typed result keeps a
+    transient marker-publication failure retryable instead of silently terminating the
+    only delivery that could publish the durable failure record.
+    """
     try:
         dst = (job or {}).get("dst_path")
-        if not dst:
-            return
-        marker = _failure_marker_path(str(dst))
-        directory = os.path.dirname(marker)
-        os.makedirs(directory, exist_ok=True)
-        payload = {
-            "schema": "ultra.image-derived-pyramid-failure.v1",
-            "resource_id": (job or {}).get("resource_id"),
-            "source_sha256": (job or {}).get("source_sha256"),
-            "source_size_bytes": (job or {}).get("source_size_bytes"),
-            "conversion_spec": {
-                "tile_size": (job or {}).get("tile_size", 512),
-                "compression": (job or {}).get("compression", "lzw"),
-                "layout": (job or {}).get("layout", "topdirs"),
-                "fmt": (job or {}).get("fmt", "auto"),
-            },
-            "code": exc.code,
-        }
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{os.path.basename(marker)}.", dir=directory
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                os.fchmod(stream.fileno(), 0o644)
-                json.dump(payload, stream, allow_nan=False, separators=(",", ":"), sort_keys=True)
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, marker)
-            directory_descriptor = os.open(directory, os.O_RDONLY)
+        src = (job or {}).get("src_path")
+        if not dst or not src:
+            return "not_applicable"
+        with _publication_lock(Path(str(dst)), Path(str(src))):
+            marker = _failure_marker_path(str(dst))
+            directory = os.path.dirname(marker)
+            os.makedirs(directory, exist_ok=True)
+            payload = {
+                "schema": "ultra.image-derived-pyramid-failure.v1",
+                "resource_id": (job or {}).get("resource_id"),
+                "source_sha256": (job or {}).get("source_sha256"),
+                "source_size_bytes": (job or {}).get("source_size_bytes"),
+                "conversion_spec": {
+                    "tile_size": (job or {}).get("tile_size", 512),
+                    "compression": (job or {}).get("compression", "lzw"),
+                    "layout": (job or {}).get("layout", "topdirs"),
+                    "fmt": (job or {}).get("fmt", "auto"),
+                },
+                "code": exc.code,
+            }
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{os.path.basename(marker)}.", dir=directory
+            )
             try:
-                os.fsync(directory_descriptor)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                    os.fchmod(stream.fileno(), 0o644)
+                    json.dump(
+                        payload,
+                        stream,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, marker)
+                directory_descriptor = os.open(directory, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
             finally:
-                os.close(directory_descriptor)
-        finally:
-            with suppress(OSError):
-                os.unlink(temporary)
+                with suppress(OSError):
+                    os.unlink(temporary)
+        return "written"
+    except StaleDerivativeJobError:
+        return "stale"
+    except (TransientDerivativeError, OSError):
+        logger.warning("imaging worker: deterministic failure marker is temporarily unavailable")
+        return "retryable"
     except Exception:
-        logger.debug("imaging worker: failed to write deterministic failure marker")
+        logger.exception("imaging worker: invalid deterministic failure marker payload")
+        return "not_applicable"
 
 
 def _has_strict_source_identity(job: dict[str, Any]) -> bool:
@@ -213,14 +274,27 @@ async def _handle_message(
     viewer_info_fn: Callable[[str], dict[str, Any]] | None = None,
     source_viewer_info_fn: Callable[[str], dict[str, Any]] | None = None,
     max_deliver: int = DEFAULT_MAX_DELIVER,
+    retry_delay_seconds: float = DEFAULT_RETRY_DELAY_SECONDS,
+    ack_progress_interval_seconds: float = DEFAULT_ACK_PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     job: dict[str, Any] | None = None
+    progress_task: asyncio.Task | None = None
+
+    async def finish_delivery(op: str, *, delay_seconds: float | None = None) -> None:
+        nonlocal progress_task
+        # Keep extending AckWait through every potentially blocking publication
+        # step, including failure-marker durability. Stop only immediately before
+        # the single terminal JetStream disposition.
+        await _stop_ack_progress_task(progress_task)
+        progress_task = None
+        await _safe_ack_op(msg, op, delay_seconds=delay_seconds)
+
     try:
         envelope = json.loads(msg.data.decode("utf-8"))
         job = extract_derive_pyramid_payload(envelope)
         if job is None:
-            await _safe_ack_op(
-                msg, "ack"
+            await finish_delivery(
+                "ack"
             )  # not our job type; ack so JetStream stops redelivering it to us
             return
         if not _has_strict_source_identity(job):
@@ -228,8 +302,11 @@ async def _handle_message(
                 "retiring stale derive_pyramid job without immutable source identity: resource=%s",
                 job.get("resource_id"),
             )
-            await _safe_ack_op(msg, "ack")
+            await finish_delivery("ack")
             return
+        progress_task = _start_ack_progress_task(
+            msg, interval_seconds=ack_progress_interval_seconds
+        )
         result = await asyncio.to_thread(
             run_derive_pyramid_job,
             job,
@@ -244,7 +321,7 @@ async def _handle_message(
             result.get("derived_path"),
             result.get("levels"),
         )
-        await _safe_ack_op(msg, "ack")
+        await finish_delivery("ack")
         # Pre-warm the source's viewer-info sidecar so the FIRST viewer open is instant
         # (engine.viewer_info persists it to a shared sidecar). Best-effort; never blocks.
         src = (job or {}).get("src_path")
@@ -280,7 +357,7 @@ async def _handle_message(
                 (job or {}).get("resource_id"),
                 getattr(exc, "code", "stale_job"),
             )
-            await _safe_ack_op(msg, "ack")
+            await finish_delivery("ack")
             return
         attempt = _delivery_attempt(msg)
         if failure_class == "deterministic" or attempt >= max_deliver:
@@ -292,10 +369,14 @@ async def _handle_message(
                 getattr(exc, "code", "retry_limit_exhausted"),
             )
             if isinstance(exc, DeterministicDerivativeError):
-                _write_failure_marker(
-                    job, exc
-                )  # source/spec-bound marker suppresses only the same doomed conversion
-            await _safe_ack_op(msg, "term")
+                marker_outcome = await asyncio.to_thread(_write_failure_marker, job, exc)
+                if marker_outcome == "stale":
+                    await finish_delivery("ack")
+                    return
+                if marker_outcome == "retryable":
+                    await finish_delivery("nak", delay_seconds=retry_delay_seconds)
+                    return
+            await finish_delivery("term")
         else:
             logger.warning(
                 "derive_pyramid failed (attempt %d/%d); will retry: resource=%s code=%s",
@@ -304,7 +385,46 @@ async def _handle_message(
                 (job or {}).get("resource_id"),
                 getattr(exc, "code", "transient_failure"),
             )
-            await _safe_ack_op(msg, "nak")
+            await finish_delivery("nak", delay_seconds=retry_delay_seconds)
+    finally:
+        await _stop_ack_progress_task(progress_task)
+
+
+def _is_fetch_timeout(exc: BaseException) -> bool:
+    return isinstance(exc, TimeoutError) or type(exc).__name__ == "TimeoutError"
+
+
+async def _fetch_one(
+    subscription: Any,
+    *,
+    consecutive_failures: int,
+) -> tuple[list[Any], int]:
+    """Fetch one delivery with bounded backoff for immediate transport failures."""
+
+    try:
+        messages = await subscription.fetch(1, timeout=5)
+        return list(messages), 0
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if _is_fetch_timeout(exc):
+            return [], 0
+        next_failures = min(max(consecutive_failures, 0) + 1, 32)
+        base_delay = min(
+            MAX_FETCH_ERROR_BACKOFF_SECONDS,
+            DEFAULT_FETCH_ERROR_BACKOFF_SECONDS * (2 ** min(next_failures - 1, 8)),
+        )
+        delay = min(
+            MAX_FETCH_ERROR_BACKOFF_SECONDS,
+            base_delay * random.uniform(0.8, 1.2),
+        )
+        logger.warning(
+            "imaging worker fetch failed; backing off before retry",
+            extra={"delay_seconds": delay, "consecutive_failures": next_failures},
+            exc_info=True,
+        )
+        await asyncio.sleep(delay)
+        return [], next_failures
 
 
 async def run_worker_loop(
@@ -327,6 +447,24 @@ async def run_worker_loop(
                 max_deliver = parsed
         except ValueError:
             pass
+    retry_delay_seconds = DEFAULT_RETRY_DELAY_SECONDS
+    raw_retry_delay = os.environ.get("ULTRA_IMGSVC_RETRY_DELAY_SECONDS")
+    if raw_retry_delay:
+        try:
+            parsed_delay = float(raw_retry_delay)
+            if parsed_delay > 0:
+                retry_delay_seconds = parsed_delay
+        except ValueError:
+            pass
+    ack_progress_interval_seconds = DEFAULT_ACK_PROGRESS_INTERVAL_SECONDS
+    raw_ack_progress = os.environ.get("ULTRA_IMGSVC_ACK_PROGRESS_INTERVAL_SECONDS")
+    if raw_ack_progress:
+        try:
+            parsed_interval = float(raw_ack_progress)
+            if parsed_interval >= 0:
+                ack_progress_interval_seconds = parsed_interval
+        except ValueError:
+            pass
 
     nc = await nats.connect(nats_url)
     js = nc.jetstream()
@@ -334,12 +472,13 @@ async def run_worker_loop(
         await js.add_stream(name=DEFAULT_STREAM, subjects=[subject])
     sub = await js.pull_subscribe(subject, durable=durable)
     logger.info("imaging convert worker subscribed: subject=%s durable=%s", subject, durable)
+    fetch_failures = 0
     try:
         while True:
-            try:
-                msgs = await sub.fetch(1, timeout=5)
-            except Exception:
-                continue
+            msgs, fetch_failures = await _fetch_one(
+                sub,
+                consecutive_failures=fetch_failures,
+            )
             for msg in msgs:
                 await _handle_message(
                     msg,
@@ -347,6 +486,8 @@ async def run_worker_loop(
                     viewer_info_fn=viewer_info_fn,
                     source_viewer_info_fn=source_viewer_info_fn,
                     max_deliver=max_deliver,
+                    retry_delay_seconds=retry_delay_seconds,
+                    ack_progress_interval_seconds=ack_progress_interval_seconds,
                 )
     finally:
         await nc.drain()

@@ -4,6 +4,7 @@ failure isolation, and resume-skip — with the GPU and control-plane clients mo
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import tarfile
@@ -15,7 +16,10 @@ import ultra_deepagents.analysis.processor as proc
 from ultra_deepagents.analysis.client import _safe_extract
 from ultra_deepagents.analysis.config import AnalysisSettings
 from ultra_deepagents.analysis.processor import AnalysisProcessor
-from ultra_deepagents.data_agent.worker import DataAgentJobEnvelope
+from ultra_deepagents.data_agent.worker import (
+    DataAgentJobEnvelope,
+    RetryableDataAgentProcessingError,
+)
 
 
 def _settings(tmp_path: Path) -> AnalysisSettings:
@@ -75,7 +79,9 @@ def test_megaseg_batch_registers_outputs_and_isolates_failures(tmp_path, monkeyp
 
     registered: list[tuple[str, list[dict], str]] = []
 
-    def fake_register(*, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""):
+    def fake_register(
+        *, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""
+    ):
         registered.append((job_id, outputs, collection_id))
         return {"count": len(outputs)}
 
@@ -106,12 +112,199 @@ def test_megaseg_batch_registers_outputs_and_isolates_failures(tmp_path, monkeyp
     assert mask["storage_path"] == "analysis/job1/file_a/mask__mask.tif"
     assert mask["source_resource_id"] == "file_a"
     assert mask["size_bytes"] == 4 and mask["sha256"]
-    assert mask["resource_id"] == "file_an_job1_file_a_mask"
+    expected_id = (
+        "file_an_" + hashlib.sha256(b"job1\0analysis/job1/file_a/mask__mask.tif").hexdigest()
+    )
+    assert mask["resource_id"] == expected_id
     assert mask["metadata"]["model_version"] == "epoch_650"
     assert mask["metadata"]["segmentation"] == {"object_count": 2}
     assert (settings.upload_root / mask["storage_path"]).read_bytes() == b"MASK"
 
     assert progress_calls and progress_calls[-1]["progress_completed"] == 1
+
+
+def test_megaseg_all_failed_batch_is_terminal_failed(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    monkeypatch.setattr(proc, "_resolve_source_path", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(proc, "fetch_job", lambda **_kwargs: {})
+
+    async def progress(**_kwargs):
+        return None
+
+    summary = asyncio.run(AnalysisProcessor(settings)(_megaseg_job(), progress))
+
+    assert summary["processed"] == 0
+    assert summary["failed"] == 3
+    assert summary["terminal_status"] == "failed"
+
+
+def test_megaseg_cancellation_after_failed_items_is_terminal_canceled(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    cancellation_checks = 0
+
+    async def fake_is_canceled(*_args, **_kwargs):
+        nonlocal cancellation_checks
+        cancellation_checks += 1
+        return cancellation_checks >= 2
+
+    monkeypatch.setattr(proc, "_resolve_source_path", lambda *_args, **_kwargs: None)
+    processor = AnalysisProcessor(settings)
+    monkeypatch.setattr(processor, "_prior_items", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(processor, "_is_canceled", fake_is_canceled)
+
+    async def progress(**_kwargs):
+        return None
+
+    job = DataAgentJobEnvelope(
+        job_id="job-megaseg-canceled-after-failure",
+        job_type="analysis.megaseg",
+        resource_ids=("file_a", "file_b", "file_c", "file_d", "file_e", "file_f"),
+        resource_count=6,
+    )
+
+    summary = asyncio.run(processor(job, progress))
+
+    assert summary["processed"] == 0
+    assert summary["failed"] == 5
+    assert summary["canceled"] is True
+    assert summary["terminal_status"] == "canceled"
+
+
+def test_megaseg_publication_availability_error_remains_retryable(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    source = settings.upload_root / "file_a__a.tif"
+    source.write_bytes(b"A")
+
+    def fake_infer(*, dest_dir, **_kwargs):
+        destination = Path(dest_dir)
+        destination.mkdir(parents=True, exist_ok=True)
+        (destination / "mask.tif").write_bytes(b"MASK")
+        return {"files": [{"mask_path": "mask.tif"}]}
+
+    monkeypatch.setattr(
+        proc,
+        "_resolve_source_path",
+        lambda file_id, _roots: source if file_id == "file_a" else None,
+    )
+    monkeypatch.setattr(proc, "run_megaseg_infer", fake_infer)
+    monkeypatch.setattr(proc, "fetch_job", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        proc,
+        "_publish_analysis_output",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RetryableDataAgentProcessingError("tombstone storage unavailable")
+        ),
+    )
+
+    async def progress(**_kwargs):
+        return None
+
+    job = DataAgentJobEnvelope(
+        job_id="job-retry",
+        job_type="analysis.megaseg",
+        resource_ids=("file_a",),
+        resource_count=1,
+    )
+    with pytest.raises(RetryableDataAgentProcessingError):
+        asyncio.run(AnalysisProcessor(settings)(job, progress))
+
+
+@pytest.mark.parametrize("tombstone_kind", ["permanent", "deleted"])
+def test_analysis_output_publication_is_blocked_by_resource_tombstone(tmp_path, tombstone_kind):
+    settings = _settings(tmp_path)
+    source = tmp_path / "mask.tif"
+    source.write_bytes(b"MASK")
+    destination = settings.upload_root / "analysis" / "job1" / "file_a" / "mask__mask.tif"
+    storage_path = destination.relative_to(settings.upload_root).as_posix()
+    resource_id = proc._analysis_output_resource_id("job1", storage_path)
+    tombstone = settings.upload_root / ".tombstones" / tombstone_kind / resource_id
+    tombstone.parent.mkdir(parents=True)
+    tombstone.write_text("deleted\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="resource was deleted"):
+        proc._publish_analysis_output(
+            source,
+            destination,
+            settings.upload_root,
+            "job1",
+        )
+
+    assert not destination.exists()
+    assert not list(settings.upload_root.rglob(".*__analysis.tmp-*"))
+
+
+def test_analysis_output_staged_before_delete_cannot_publish(tmp_path, monkeypatch):
+    settings = _settings(tmp_path)
+    source = tmp_path / "mask.tif"
+    source.write_bytes(b"MASK")
+    destination = settings.upload_root / "analysis" / "job-1" / "mask.tif"
+    storage_path = destination.relative_to(settings.upload_root).as_posix()
+    resource_id = proc._analysis_output_resource_id("job-1", storage_path)
+    original_stage = proc._stage_copy_with_sha
+
+    def stage_then_delete(src, dst, staged_resource_id):
+        result = original_stage(src, dst, staged_resource_id)
+        tombstone = settings.upload_root / ".tombstones" / "permanent" / resource_id
+        tombstone.parent.mkdir(parents=True)
+        tombstone.write_text("deleted\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(proc, "_stage_copy_with_sha", stage_then_delete)
+
+    with pytest.raises(RuntimeError, match="resource was deleted"):
+        proc._publish_analysis_output(
+            source,
+            destination,
+            settings.upload_root,
+            "job-1",
+        )
+
+    assert not destination.exists()
+    assert not list(settings.upload_root.rglob(".*__analysis.tmp-*"))
+
+
+def test_analysis_output_rejects_symlinked_managed_ancestor(tmp_path):
+    settings = _settings(tmp_path)
+    source = tmp_path / "mask.tif"
+    source.write_bytes(b"MASK")
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_bytes(b"unchanged")
+    (settings.upload_root / "analysis").symlink_to(external, target_is_directory=True)
+    destination = settings.upload_root / "analysis" / "job-1" / "mask.tif"
+
+    with pytest.raises(proc.RetryableDataAgentProcessingError):
+        proc._publish_analysis_output(source, destination, settings.upload_root, "job-1")
+
+    assert sentinel.read_bytes() == b"unchanged"
+    assert sorted(path.name for path in external.iterdir()) == ["sentinel"]
+
+
+def test_analysis_output_rejects_symlinked_lock_ancestor(tmp_path):
+    settings = _settings(tmp_path)
+    source = tmp_path / "mask.tif"
+    source.write_bytes(b"MASK")
+    external = tmp_path / "external-locks"
+    external.mkdir()
+    (settings.upload_root / ".locks").symlink_to(external, target_is_directory=True)
+    destination = settings.upload_root / "analysis" / "job-1" / "mask.tif"
+
+    with pytest.raises(proc.RetryableDataAgentProcessingError):
+        proc._publish_analysis_output(source, destination, settings.upload_root, "job-1")
+
+    assert not destination.exists()
+    assert list(external.iterdir()) == []
+
+
+def test_analysis_tombstone_identity_is_injective_for_dotted_resource_ids(tmp_path):
+    upload_root = tmp_path / "uploads"
+    tombstone = upload_root / ".tombstones" / "permanent" / "file-1.deleted"
+    tombstone.parent.mkdir(parents=True)
+    tombstone.write_text("deleted\n", encoding="utf-8")
+
+    assert not proc._analysis_output_tombstoned(upload_root, "file-1")
+    assert proc._analysis_output_tombstoned(upload_root, "file-1.deleted")
 
 
 def test_megaseg_batch_resumes_already_done_items(tmp_path, monkeypatch):
@@ -210,8 +403,14 @@ def test_megaseg_control_plane_calls_include_worker_token(tmp_path, monkeypatch)
 
     assert seen_fetch_headers
     assert seen_register_headers
-    assert all(headers["X-Ultra-Worker-Token"] == "analysis-worker-secret" for headers in seen_fetch_headers)
-    assert all(headers["X-Ultra-Worker-Token"] == "analysis-worker-secret" for headers in seen_register_headers)
+    assert all(
+        headers["X-Ultra-Worker-Token"] == "analysis-worker-secret"
+        for headers in seen_fetch_headers
+    )
+    assert all(
+        headers["X-Ultra-Worker-Token"] == "analysis-worker-secret"
+        for headers in seen_register_headers
+    )
 
 
 def test_rarespot_batch_registers_outputs_and_isolates_missing_inputs(tmp_path, monkeypatch):
@@ -246,7 +445,11 @@ def test_rarespot_batch_registers_outputs_and_isolates_missing_inputs(tmp_path, 
                     "input_path": str(img_a),
                     "prediction_xml_path": str(out / "prediction_xml" / "survey-a.xml"),
                     "class_counts": {"burrow": 1, "prairie_dog": 2},
-                    "boxes": [{"class_name": "prairie_dog"}, {"class_name": "prairie_dog"}, {"class_name": "burrow"}],
+                    "boxes": [
+                        {"class_name": "prairie_dog"},
+                        {"class_name": "prairie_dog"},
+                        {"class_name": "burrow"},
+                    ],
                 }
             ],
             "artifacts": [
@@ -279,7 +482,9 @@ def test_rarespot_batch_registers_outputs_and_isolates_missing_inputs(tmp_path, 
 
     registered: list[tuple[str, list[dict], str]] = []
 
-    def fake_register(*, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""):
+    def fake_register(
+        *, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""
+    ):
         registered.append((job_id, outputs, collection_id))
         return {"count": len(outputs)}
 
@@ -439,7 +644,9 @@ def test_rarespot_batch_maps_real_overlay_artifacts_by_prediction_index(tmp_path
 
     registered: list[tuple[str, list[dict], str]] = []
 
-    def fake_register(*, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""):
+    def fake_register(
+        *, control_base_url, job_id, principal_headers, outputs, timeout, collection_id=""
+    ):
         registered.append((job_id, outputs, collection_id))
         return {"count": len(outputs)}
 
@@ -482,7 +689,9 @@ def test_rarespot_batch_maps_real_overlay_artifacts_by_prediction_index(tmp_path
     }
 
 
-def test_rarespot_batch_returns_failed_summary_without_inference_when_inputs_missing(tmp_path, monkeypatch):
+def test_rarespot_batch_returns_failed_summary_without_inference_when_inputs_missing(
+    tmp_path, monkeypatch
+):
     settings = _settings(tmp_path)
     inference_called = False
     registered: list[dict] = []
@@ -575,11 +784,19 @@ def test_rarespot_control_plane_calls_include_worker_token(tmp_path, monkeypatch
 
     assert seen_fetch_headers
     assert seen_register_headers
-    assert all(headers["X-Ultra-Worker-Token"] == "analysis-worker-secret" for headers in seen_fetch_headers)
-    assert all(headers["X-Ultra-Worker-Token"] == "analysis-worker-secret" for headers in seen_register_headers)
+    assert all(
+        headers["X-Ultra-Worker-Token"] == "analysis-worker-secret"
+        for headers in seen_fetch_headers
+    )
+    assert all(
+        headers["X-Ultra-Worker-Token"] == "analysis-worker-secret"
+        for headers in seen_register_headers
+    )
 
 
-def test_rarespot_canceled_after_progress_callback_skips_staging_and_registration(tmp_path, monkeypatch):
+def test_rarespot_canceled_after_progress_callback_skips_staging_and_registration(
+    tmp_path, monkeypatch
+):
     settings = _settings(tmp_path)
     img_a = settings.upload_root / "file_a__survey-a.jpg"
     img_a.write_bytes(b"A")
@@ -627,7 +844,9 @@ def test_rarespot_canceled_after_progress_callback_skips_staging_and_registratio
     assert summary["canceled"] is True
     assert summary["terminal_status"] == "canceled"
     assert registered == []
-    assert not (settings.upload_root / "analysis" / "jobR-cancel-after-progress" / "rarespot").exists()
+    assert not (
+        settings.upload_root / "analysis" / "jobR-cancel-after-progress" / "rarespot"
+    ).exists()
 
 
 def test_rarespot_checks_cancellation_on_every_progress_callback(tmp_path, monkeypatch):
@@ -668,7 +887,9 @@ def test_rarespot_checks_cancellation_on_every_progress_callback(tmp_path, monke
     assert summary["canceled"] is True
     assert summary["terminal_status"] == "canceled"
     assert registered == []
-    assert not (settings.upload_root / "analysis" / "jobR-cancel-every-callback" / "rarespot").exists()
+    assert not (
+        settings.upload_root / "analysis" / "jobR-cancel-every-callback" / "rarespot"
+    ).exists()
 
 
 def test_rarespot_inference_failure_without_prior_success_is_terminal_failed(tmp_path, monkeypatch):
@@ -701,7 +922,9 @@ def test_rarespot_inference_failure_without_prior_success_is_terminal_failed(tmp
     assert summary["items"]["file_a"]["status"] == "failed"
 
 
-def test_rarespot_registration_failure_without_prior_success_is_terminal_failed(tmp_path, monkeypatch):
+def test_rarespot_registration_failure_without_prior_success_is_terminal_failed(
+    tmp_path, monkeypatch
+):
     settings = _settings(tmp_path)
     img_a = settings.upload_root / "file_a__survey-a.jpg"
     img_a.write_bytes(b"A")
@@ -724,7 +947,11 @@ def test_rarespot_registration_failure_without_prior_success_is_terminal_failed(
     monkeypatch.setattr(proc, "_resolve_source_path", lambda file_id, upload_roots: img_a)
     monkeypatch.setattr(proc, "fetch_job", lambda **kwargs: {})
     monkeypatch.setattr(proc, "run_rarespot_inference", fake_infer, raising=False)
-    monkeypatch.setattr(proc, "register_outputs", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("register down")))
+    monkeypatch.setattr(
+        proc,
+        "register_outputs",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("register down")),
+    )
 
     async def progress(**kwargs):
         return None
@@ -822,7 +1049,9 @@ def test_rarespot_rejects_unsafe_job_id_before_staging_outside_upload_root(tmp_p
     assert not (tmp_path / "escape").exists()
 
 
-def test_safe_extract_rejects_too_many_members(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_safe_extract_rejects_too_many_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(analysis_client, "MAX_EXTRACTED_TAR_MEMBERS", 1)
     archive_path = tmp_path / "result.tar.gz"
     dest_dir = tmp_path / "dest"
@@ -848,7 +1077,9 @@ def test_safe_extract_rejects_too_many_members(tmp_path: Path, monkeypatch: pyte
     assert not (dest_dir / "safe" / "a.txt").exists()
 
 
-def test_safe_extract_rejects_oversize_uncompressed_members(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_safe_extract_rejects_oversize_uncompressed_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(analysis_client, "MAX_EXTRACTED_TAR_UNCOMPRESSED_BYTES", 3)
     archive_path = tmp_path / "result.tar.gz"
     dest_dir = tmp_path / "dest"

@@ -5820,6 +5820,159 @@ func TestV2UploadRejectsResourceQuotaAndCleansBlob(t *testing.T) {
 	}
 }
 
+func TestV2UploadReconcilesCommitAcknowledgementLossWithoutDeletingSource(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	catalog := &commitThenErrorUploadStore{MemoryStore: store.NewMemoryStore(), failOnce: true}
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "ack-loss.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 3, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-User-Id", "ack-user")
+	req.Header.Set("X-Ultra-Org-Id", "ack-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s, want reconciled success", rec.Code, rec.Body.String())
+	}
+	var response uploadFilesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one", response.Uploaded)
+	}
+	resource, err := catalog.GetResourceForUser(context.Background(), response.Uploaded[0].FileID, "ack-user", "ack-org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resource.StoragePath)); err != nil {
+		t.Fatalf("catalog row points at removed data: %v", err)
+	}
+}
+
+func TestV2UploadRetainsDurableReconciliationIntentOnUnknownCatalogOutcome(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	// Simulate a steady-state process whose one-time filesystem migration already
+	// completed. The ambiguous write must be repaired by the durable intent
+	// worker itself, not incidentally by a later list request starting migration.
+	uploadCatalogMigrations.Store(uploadRoot, &uploadCatalogMigrationState{done: true})
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(uploadRoot) })
+	catalog := &unknownOutcomeUploadStore{
+		MemoryStore: store.NewMemoryStore(), failWrites: true, failLookups: true,
+	}
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "unknown.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 2, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-User-Id", "unknown-user")
+	req.Header.Set("X-Ultra-Org-Id", "unknown-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("upload status = %d body=%s, want ambiguous 500", rec.Code, rec.Body.String())
+	}
+	resources, err := listUploadResources(uploadRoot)
+	if err != nil || len(resources) != 1 {
+		t.Fatalf("retained upload resources = %+v err=%v, want one", resources, err)
+	}
+	retained := resources[0]
+	source := filepath.Join(uploadRoot, retained.FileID+"__"+retained.OriginalName)
+	for _, path := range []string{
+		source,
+		uploadMetadataPath(uploadRoot, retained.FileID),
+		filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID)),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("ambiguous catalog outcome did not retain %q: %v", path, err)
+		}
+	}
+
+	catalog.setFailures(false, false)
+	listResources := func(activeRouter http.Handler) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+		request.Header.Set("X-Ultra-User-Id", "unknown-user")
+		request.Header.Set("X-Ultra-Org-Id", "unknown-org")
+		response := httptest.NewRecorder()
+		activeRouter.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("resource list status = %d body=%s", response.Code, response.Body.String())
+		}
+	}
+	// Reconciliation runs independently of the viewer hot path. Recover the
+	// catalog and wait for the bounded worker without issuing a request that
+	// could hide a broken steady-state scheduler.
+	var resource domain.ResourceRecord
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resource, err = catalog.GetResourceForUser(context.Background(), retained.FileID, "unknown-user", "unknown-org")
+		_, intentErr := os.Stat(filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID)))
+		if err == nil && errors.Is(intentErr, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background catalog reconciliation did not converge: catalog=%v intent=%v", err, intentErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resource.StoragePath)); err != nil {
+		t.Fatalf("reconciled catalog row points at removed data: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconciliation intent survived successful catalog repair: %v", err)
+	}
+	if writes := catalog.successfulWriteCount(); writes != 1 {
+		t.Fatalf("successful catalog reconciliation writes = %d, want exactly one", writes)
+	}
+	// Repeated requests and a fresh process state are idempotent: neither path
+	// duplicates nor loses the repaired resource.
+	listResources(router)
+	uploadCatalogMigrations.Delete(uploadRoot)
+	restartedRouter := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+	listResources(restartedRouter)
+	page, err := catalog.ListResourcesForUser(context.Background(), domain.ResourceListInput{
+		UserID: "unknown-user", OrgID: "unknown-org", Limit: 20,
+	})
+	if err != nil || page.TotalCount != 1 {
+		t.Fatalf("reconciled catalog after replay/restart = %+v err=%v, want one resource", page, err)
+	}
+}
+
 func TestV2UploadRejectsDeclaredBodyAboveDirectUploadLimit(t *testing.T) {
 	t.Parallel()
 
@@ -7590,6 +7743,224 @@ type countingUploadStore struct {
 	chunksBySession          map[string][]domain.UploadChunkRecord
 }
 
+type commitThenErrorUploadStore struct {
+	*store.MemoryStore
+	mu       sync.Mutex
+	failOnce bool
+}
+
+func (s *commitThenErrorUploadStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	resource, err := s.MemoryStore.UpsertResource(ctx, input)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failOnce
+	s.failOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog commit acknowledgement lost")
+	}
+	return resource, nil
+}
+
+type commitThenErrorResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu              sync.Mutex
+	failDeleteOnce  bool
+	failRestoreOnce bool
+}
+
+type failBeforeRestoreResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu             sync.Mutex
+	failResourceID string
+	failed         bool
+}
+
+type failBeforeDeleteResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu             sync.Mutex
+	failResourceID string
+	failed         bool
+}
+
+func (s *failBeforeRestoreResourceLifecycleStore) RestoreResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	restoredAt time.Time,
+) (domain.ResourceRecord, error) {
+	s.mu.Lock()
+	shouldFail := resourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceRecord{}, errors.New("injected restore failure before commit")
+	}
+	return s.MemoryStore.RestoreResourceForUser(ctx, resourceID, userID, orgID, restoredAt)
+}
+
+func (s *failBeforeRestoreResourceLifecycleStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	s.mu.Lock()
+	shouldFail := input.ResourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("injected restore failure before commit")
+	}
+	return s.MemoryStore.RestoreResourceForUserWithEvent(ctx, input)
+}
+
+func (s *failBeforeDeleteResourceLifecycleStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	s.mu.Lock()
+	shouldFail := input.ResourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("injected delete failure before commit")
+	}
+	return s.MemoryStore.SoftDeleteResourceForUserWithEvent(ctx, input)
+}
+
+func (s *commitThenErrorResourceLifecycleStore) SoftDeleteResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	deletedAt time.Time,
+) (domain.ResourceRecord, error) {
+	record, err := s.MemoryStore.SoftDeleteResourceForUser(ctx, resourceID, userID, orgID, deletedAt)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failDeleteOnce
+	s.failDeleteOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("soft-delete commit acknowledgement lost")
+	}
+	return record, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	result, err := s.MemoryStore.SoftDeleteResourceForUserWithEvent(ctx, input)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	fail := s.failDeleteOnce
+	s.failDeleteOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("soft-delete commit acknowledgement lost")
+	}
+	return result, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) RestoreResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	restoredAt time.Time,
+) (domain.ResourceRecord, error) {
+	record, err := s.MemoryStore.RestoreResourceForUser(ctx, resourceID, userID, orgID, restoredAt)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failRestoreOnce
+	s.failRestoreOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("restore commit acknowledgement lost")
+	}
+	return record, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	result, err := s.MemoryStore.RestoreResourceForUserWithEvent(ctx, input)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	fail := s.failRestoreOnce
+	s.failRestoreOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("restore commit acknowledgement lost")
+	}
+	return result, nil
+}
+
+type unknownOutcomeUploadStore struct {
+	*store.MemoryStore
+	mu               sync.RWMutex
+	failWrites       bool
+	failLookups      bool
+	successfulWrites int
+}
+
+func (s *unknownOutcomeUploadStore) setFailures(writes bool, lookups bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failWrites = writes
+	s.failLookups = lookups
+}
+
+func (s *unknownOutcomeUploadStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	s.mu.RLock()
+	fail := s.failWrites
+	s.mu.RUnlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog write outcome unavailable")
+	}
+	record, err := s.MemoryStore.UpsertResource(ctx, input)
+	if err == nil {
+		s.mu.Lock()
+		s.successfulWrites++
+		s.mu.Unlock()
+	}
+	return record, err
+}
+
+func (s *unknownOutcomeUploadStore) successfulWriteCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.successfulWrites
+}
+
+func (s *unknownOutcomeUploadStore) GetResourceForUser(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	s.mu.RLock()
+	fail := s.failLookups
+	s.mu.RUnlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog reconciliation lookup unavailable")
+	}
+	return s.MemoryStore.GetResourceForUser(ctx, resourceID, userID, orgID)
+}
+
 type exactOrganizationLookupStore struct {
 	*store.MemoryStore
 	org       domain.Organization
@@ -7965,6 +8336,66 @@ func TestEnsureUploadCatalogMigratedDoesNotCacheTransientFailure(t *testing.T) {
 	}
 	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
 		t.Fatalf("migration must retry after a transient failure, got: %v", err)
+	}
+}
+
+func TestEnsureUploadCatalogMigratedWaitersHonorTheirOwnContexts(t *testing.T) {
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{Version: "test-version", Store: mem}
+	root := t.TempDir()
+	attempt := &uploadCatalogMigrationAttempt{done: make(chan struct{})}
+	state := &uploadCatalogMigrationState{migration: attempt}
+	uploadCatalogMigrations.Store(root, state)
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(root) })
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			results <- deps.ensureUploadCatalogMigrated(ctx, root)
+		}()
+	}
+	for range 2 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("migration waiter error = %v, want deadline exceeded", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("migration waiter ignored its request context")
+		}
+	}
+
+	state.mu.Lock()
+	state.done = true
+	state.migration = nil
+	close(attempt.done)
+	state.mu.Unlock()
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
+		t.Fatalf("completed shared migration remained blocked: %v", err)
+	}
+}
+
+func TestEnsureUploadCatalogMigratedSteadyStateDoesNotTouchFilesystem(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:   mem,
+	}
+	// A regular file would make both migration and reconciliation fail. Marking
+	// this unique root complete proves steady-state viewer requests use only the
+	// in-memory fast path and perform no filesystem scan.
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uploadCatalogMigrations.Store(root, &uploadCatalogMigrationState{done: true})
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(root) })
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
+		t.Fatalf("steady-state catalog gate touched filesystem: %v", err)
 	}
 }
 
@@ -9971,6 +10402,11 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	if err != nil || len(matches) != 1 {
 		t.Fatalf("uploaded fixture files = %v err=%v, want one file", matches, err)
 	}
+	originalBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDigest := sha256.Sum256(originalBytes)
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resources/"+fileID, nil)
 	deleteReq.Header.Set("X-Ultra-User-Id", "test-user")
 	deleteReq.Header.Set("X-Ultra-Org-Id", "test-org")
@@ -9981,6 +10417,38 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	}
 	if _, err := os.Stat(matches[0]); err != nil {
 		t.Fatalf("soft delete removed the physical blob: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceTombstoneDir, resourceFilesystemDeleteFenceName(fileID))); err != nil {
+		t.Fatalf("soft delete did not publish its reversible filesystem fence: %v", err)
+	}
+	root, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock, lockErr := acquireResourceLifecycleLock(context.Background(), root, fileID, filepath.Base(matches[0])); !errors.Is(lockErr, errResourceLifecycleTombstoned) {
+		if lock != nil {
+			_ = lock.release()
+		}
+		_ = root.Close()
+		t.Fatalf("replayed producer lock error = %v, want delete-fence rejection", lockErr)
+	}
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID: fileID, OwnerUserID: "test-user", OwnerOrgID: "test-org", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, store.ErrConflict) {
+		_ = root.Close()
+		t.Fatalf("replayed resource registration error = %v, want lifecycle conflict", err)
+	}
+	retainedBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		_ = root.Close()
+		t.Fatal(err)
+	}
+	if retainedDigest := sha256.Sum256(retainedBytes); retainedDigest != originalDigest {
+		_ = root.Close()
+		t.Fatalf("soft-deleted source generation changed: got %x want %x", retainedDigest, originalDigest)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
@@ -10006,6 +10474,16 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	router.ServeHTTP(restoreRec, restoreReq)
 	if restoreRec.Code != http.StatusOK {
 		t.Fatalf("restore status = %d body=%s", restoreRec.Code, restoreRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceTombstoneDir, resourceFilesystemDeleteFenceName(fileID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore retained reversible filesystem fence: %v", err)
+	}
+	restoredBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredDigest := sha256.Sum256(restoredBytes); restoredDigest != originalDigest {
+		t.Fatalf("restored source generation = %x, want original %x", restoredDigest, originalDigest)
 	}
 	listAgainRec := httptest.NewRecorder()
 	router.ServeHTTP(listAgainRec, listReq)
@@ -10052,6 +10530,143 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	router.ServeHTTP(foreignEventsRec, foreignEventsReq)
 	if foreignEventsRec.Code != http.StatusNotFound {
 		t.Fatalf("foreign events status = %d body=%s, want 404", foreignEventsRec.Code, foreignEventsRec.Body.String())
+	}
+}
+
+func TestV2ResourceLifecycleMutationReturnsRetryableBusyWhilePublisherOwnsFence(t *testing.T) {
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	fileID := writeTestUploadFile(t, uploadRoot, "busy-lifecycle.png", testPNGBytes(t, 2, 2))
+
+	migrateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	migrateReq.Header.Set("X-Ultra-User-Id", "test-user")
+	migrateReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	migrateRec := httptest.NewRecorder()
+	router.ServeHTTP(migrateRec, migrateReq)
+	if migrateRec.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body=%s", migrateRec.Code, migrateRec.Body.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(uploadRoot, fileID+"__*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("uploaded fixture files = %v err=%v, want one file", matches, err)
+	}
+	root, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	request := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	assertRetryableBusy := func(rec *httptest.ResponseRecorder, elapsed time.Duration) {
+		t.Helper()
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("busy lifecycle status = %d body=%s, want 503", rec.Code, rec.Body.String())
+		}
+		if retryAfter := rec.Header().Get("Retry-After"); retryAfter != "1" {
+			t.Fatalf("Retry-After = %q, want 1", retryAfter)
+		}
+		if elapsed > 2*resourceLifecycleMutationLockWait {
+			t.Fatalf("busy lifecycle request took %s, want bounded near %s", elapsed, resourceLifecycleMutationLockWait)
+		}
+	}
+
+	publisherLock, err := acquireResourceLifecycleLock(
+		context.Background(),
+		root,
+		fileID,
+		filepath.Base(matches[0]),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	busyDelete := request(http.MethodDelete, "/v2/resources/"+fileID)
+	assertRetryableBusy(busyDelete, time.Since(started))
+	if err := publisherLock.release(); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := request(http.MethodDelete, "/v2/resources/"+fileID); deleted.Code != http.StatusOK {
+		t.Fatalf("delete after publisher release = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+
+	mutationLock, err := acquireResourceLifecycleMutationLock(context.Background(), root, fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started = time.Now()
+	busyRestore := request(http.MethodPost, "/v2/resources/"+fileID+"/restore")
+	assertRetryableBusy(busyRestore, time.Since(started))
+	if err := mutationLock.release(); err != nil {
+		t.Fatal(err)
+	}
+	if restored := request(http.MethodPost, "/v2/resources/"+fileID+"/restore"); restored.Code != http.StatusOK {
+		t.Fatalf("restore after lifecycle release = %d body=%s", restored.Code, restored.Body.String())
+	}
+}
+
+func TestV2ResourceLifecycleAmbiguousCommitsEmitExactlyOneAuditEvent(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	baseStore := store.NewMemoryStore()
+	faultStore := &commitThenErrorResourceLifecycleStore{
+		MemoryStore:     baseStore,
+		failDeleteOnce:  true,
+		failRestoreOnce: true,
+	}
+	router := NewRouter(ServerDeps{Version: "test-version", Store: faultStore, UploadRoot: uploadRoot})
+	fileID := writeTestUploadFile(t, uploadRoot, "ambiguous-lifecycle.png", testPNGBytes(t, 2, 2))
+
+	migrateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	migrateReq.Header.Set("X-Ultra-User-Id", "test-user")
+	migrateReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	migrateRec := httptest.NewRecorder()
+	router.ServeHTTP(migrateRec, migrateReq)
+	if migrateRec.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body=%s", migrateRec.Code, migrateRec.Body.String())
+	}
+
+	request := func(method string, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	deleted := request(http.MethodDelete, "/v2/resources/"+fileID)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("ambiguous committed delete = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+	restored := request(http.MethodPost, "/v2/resources/"+fileID+"/restore")
+	if restored.Code != http.StatusOK {
+		t.Fatalf("ambiguous committed restore = %d body=%s", restored.Code, restored.Body.String())
+	}
+
+	events, err := baseStore.ListResourceEvents(context.Background(), fileID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		counts[event.EventType]++
+	}
+	for _, eventType := range []string{"resource.deleted", "resource.restored"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s event count = %d, want exactly one; events=%+v", eventType, counts[eventType], events)
+		}
 	}
 }
 
@@ -10185,6 +10800,208 @@ func TestV2ResourceBulkDeleteIsAtomicAndAudited(t *testing.T) {
 	}
 	if events.Count != 2 || events.TotalCount != 2 {
 		t.Fatalf("bulk delete events = %+v, want two deleted events", events)
+	}
+}
+
+func TestV2ResourceBulkDeleteHonorsRequestWideDeadline(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	now := time.Now().UTC()
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "bulk_deadline_a",
+		OriginalName: "bulk-deadline-a.nii.gz",
+		ContentType:  "application/gzip",
+		SizeBytes:    64,
+		SHA256:       "sha-bulk-deadline-a",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       domain.ResourceStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	uploadRootHandle, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer uploadRootHandle.Close()
+	heldLock, err := acquireResourceLifecycleMutationLock(
+		context.Background(), uploadRootHandle, "bulk_deadline_a",
+	)
+	if err != nil {
+		t.Fatalf("acquireResourceLifecycleMutationLock: %v", err)
+	}
+	defer heldLock.release() //nolint:errcheck // test cleanup
+
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancelRequest()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resources/delete/bulk",
+		strings.NewReader(`{"resource_ids":["bulk_deadline_a"]}`),
+	).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "alice")
+	req.Header.Set("X-Ultra-Org-Id", "org-a")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("bulk delete deadline status = %d body=%s, want 503", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+	}
+	resource, err := mem.GetResourceForUser(
+		context.Background(), "bulk_deadline_a", "alice", "org-a",
+	)
+	if err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("resource after timed-out bulk delete = %+v err=%v, want active", resource, err)
+	}
+}
+
+func TestV2ResourceBulkDeleteDeadlineIncludesCatalogMigrationWait(t *testing.T) {
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	attempt := &uploadCatalogMigrationAttempt{done: make(chan struct{})}
+	state := &uploadCatalogMigrationState{migration: attempt}
+	uploadCatalogMigrations.Store(uploadRoot, state)
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(uploadRoot) })
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancelRequest()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resources/delete/bulk",
+		strings.NewReader(`{"resource_ids":["unreached"]}`),
+	).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "alice")
+	req.Header.Set("X-Ultra-Org-Id", "org-a")
+	rec := httptest.NewRecorder()
+	started := time.Now()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("bulk delete migration wait status = %d body=%s, want 503", rec.Code, rec.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bulk delete migration wait took %s, want request-bounded", elapsed)
+	}
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+	}
+
+	state.mu.Lock()
+	state.done = true
+	state.migration = nil
+	close(attempt.done)
+	state.mu.Unlock()
+}
+
+func TestV2ResourceBulkDeleteRetryResumesWithoutDuplicateEvents(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	faultStore := &failBeforeDeleteResourceLifecycleStore{
+		MemoryStore:    mem,
+		failResourceID: "bulk_delete_resume_b",
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(faultStore, eventbus.NewMemoryBus()),
+		Store:      faultStore,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for index, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: resourceID + ".nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    int64(64 + index),
+			SHA256:       "sha-" + resourceID,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       domain.ResourceStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+	}
+
+	requestDelete := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/resources/delete/bulk", strings.NewReader(`{
+			"resource_ids":["bulk_delete_resume_a","bulk_delete_resume_b"]
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-User-Id", "alice")
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := requestDelete()
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first bulk delete status = %d body=%s, want 500", first.Code, first.Body.String())
+	}
+	if resource, err := mem.GetResourceForOwner(context.Background(), "bulk_delete_resume_a", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusDeleted {
+		t.Fatalf("first resource after partial delete = %+v err=%v, want deleted", resource, err)
+	}
+	if resource, err := mem.GetResourceForUser(context.Background(), "bulk_delete_resume_b", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("second resource after injected failure = %+v err=%v, want active", resource, err)
+	}
+
+	second := requestDelete()
+	if second.Code != http.StatusOK {
+		t.Fatalf("retried bulk delete status = %d body=%s, want 200", second.Code, second.Body.String())
+	}
+	for _, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		resource, err := mem.GetResourceForOwner(context.Background(), resourceID, "alice", "org-a")
+		if err != nil || resource.Status != domain.ResourceStatusDeleted {
+			t.Fatalf("resource %s after retry = %+v err=%v, want deleted", resourceID, resource, err)
+		}
+	}
+
+	events, err := mem.ListResourceEventsForUser(context.Background(), domain.ResourceEventListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		EventType: "resource.deleted",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser: %v", err)
+	}
+	if events.TotalCount != 2 || len(events.Events) != 2 {
+		t.Fatalf("deleted events after replay = %+v, want exactly one per resource", events)
+	}
+	counts := map[string]int{}
+	for _, event := range events.Events {
+		counts[event.ResourceID]++
+	}
+	for _, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		if counts[resourceID] != 1 {
+			t.Fatalf("deleted event count for %s = %d, want 1; events=%+v", resourceID, counts[resourceID], events.Events)
+		}
 	}
 }
 
@@ -10323,6 +11140,103 @@ func TestV2ResourceBulkRestoreIsAtomicAndAudited(t *testing.T) {
 	for _, event := range events.Events {
 		if event.EventType != "resource.restored" {
 			t.Fatalf("bulk restore event = %+v, want resource.restored", event)
+		}
+	}
+}
+
+func TestV2ResourceBulkRestoreRetryResumesWithoutDuplicateEvents(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	faultStore := &failBeforeRestoreResourceLifecycleStore{
+		MemoryStore:    mem,
+		failResourceID: "bulk_resume_b",
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(faultStore, eventbus.NewMemoryBus()),
+		Store:      faultStore,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for index, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: resourceID + ".nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    int64(64 + index),
+			SHA256:       "sha-" + resourceID,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       domain.ResourceStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+		if _, err := mem.SoftDeleteResourceForUser(
+			context.Background(), resourceID, "alice", "org-a", now.Add(time.Minute),
+		); err != nil {
+			t.Fatalf("SoftDeleteResourceForUser(%s): %v", resourceID, err)
+		}
+	}
+
+	requestRestore := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/resources/restore/bulk", strings.NewReader(`{
+			"resource_ids":["bulk_resume_a","bulk_resume_b"]
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-User-Id", "alice")
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := requestRestore()
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first bulk restore status = %d body=%s, want 500", first.Code, first.Body.String())
+	}
+	if resource, err := mem.GetResourceForUser(context.Background(), "bulk_resume_a", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("first resource after partial restore = %+v err=%v, want active", resource, err)
+	}
+	if resource, err := mem.GetResourceForOwner(context.Background(), "bulk_resume_b", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusDeleted {
+		t.Fatalf("second resource after injected failure = %+v err=%v, want deleted", resource, err)
+	}
+
+	second := requestRestore()
+	if second.Code != http.StatusOK {
+		t.Fatalf("retried bulk restore status = %d body=%s, want 200", second.Code, second.Body.String())
+	}
+	for _, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		resource, err := mem.GetResourceForUser(context.Background(), resourceID, "alice", "org-a")
+		if err != nil || resource.Status != domain.ResourceStatusActive {
+			t.Fatalf("resource %s after retry = %+v err=%v, want active", resourceID, resource, err)
+		}
+	}
+
+	events, err := mem.ListResourceEventsForUser(context.Background(), domain.ResourceEventListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		EventType: "resource.restored",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser: %v", err)
+	}
+	if events.TotalCount != 2 || len(events.Events) != 2 {
+		t.Fatalf("restored events after replay = %+v, want exactly one per resource", events)
+	}
+	counts := map[string]int{}
+	for _, event := range events.Events {
+		counts[event.ResourceID]++
+	}
+	for _, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		if counts[resourceID] != 1 {
+			t.Fatalf("restored event count for %s = %d, want 1; events=%+v", resourceID, counts[resourceID], events.Events)
 		}
 	}
 }

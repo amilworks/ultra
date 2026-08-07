@@ -7,7 +7,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Protocol
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -38,6 +38,10 @@ class DataAgentLeaseConflict(RuntimeError):
 
 class DataAgentLeaseUnavailable(RuntimeError):
     pass
+
+
+class RetryableDataAgentProcessingError(RuntimeError):
+    """A processor-side operational failure that must leave the delivery retryable."""
 
 
 @dataclass(frozen=True)
@@ -108,14 +112,28 @@ DataAgentLeaseFunc = Callable[
     [DataAgentJobEnvelope, RuntimeSettings],
     Awaitable[ControlPlaneDataAgentJobLease | None],
 ]
-RenewDataAgentLeaseFunc = Callable[
-    [ControlPlaneDataAgentJobLease, RuntimeSettings],
-    Awaitable[ControlPlaneDataAgentJobLease | None],
-]
-ReleaseDataAgentLeaseFunc = Callable[
-    [ControlPlaneDataAgentJobLease, RuntimeSettings],
-    Awaitable[None],
-]
+
+
+class RenewDataAgentLeaseFunc(Protocol):
+    async def __call__(
+        self,
+        lease: ControlPlaneDataAgentJobLease,
+        settings: RuntimeSettings,
+        *,
+        job: DataAgentJobEnvelope,
+    ) -> ControlPlaneDataAgentJobLease | None: ...
+
+
+class ReleaseDataAgentLeaseFunc(Protocol):
+    async def __call__(
+        self,
+        lease: ControlPlaneDataAgentJobLease,
+        settings: RuntimeSettings,
+        *,
+        job: DataAgentJobEnvelope,
+    ) -> None: ...
+
+
 DataAgentStatusUpdateFunc = Callable[..., Awaitable[dict[str, Any] | None]]
 DataAgentEventAppendFunc = Callable[..., Awaitable[dict[str, Any] | None]]
 
@@ -334,7 +352,9 @@ def _request_control_plane_data_agent_job_lease(
         data = _request_control_plane_json(url, method, payload, settings, job)
     except urllib_error.HTTPError as exc:
         if exc.code == 409:
-            raise DataAgentLeaseConflict("control plane data-agent job lease is already held") from exc
+            raise DataAgentLeaseConflict(
+                "control plane data-agent job lease is already held"
+            ) from exc
         if settings.data_agent_control_lease_required:
             raise DataAgentLeaseUnavailable(
                 f"control plane data-agent lease request failed with HTTP {exc.code}"
@@ -346,7 +366,9 @@ def _request_control_plane_data_agent_job_lease(
         return None
     except Exception as exc:
         if settings.data_agent_control_lease_required:
-            raise DataAgentLeaseUnavailable("control plane data-agent lease request failed") from exc
+            raise DataAgentLeaseUnavailable(
+                "control plane data-agent lease request failed"
+            ) from exc
         logger.warning(
             "Control-plane data-agent lease request failed; proceeding without durable lease.",
             extra={"job_id": job.job_id},
@@ -402,7 +424,9 @@ def _data_agent_job_url(
 
 def _data_agent_skip_event_id(job: DataAgentJobEnvelope) -> str:
     dispatch_part = _event_id_part(job.dispatch_id) or "no_dispatch"
-    return f"data_agent_job_event_{_event_id_part(job.job_id)}_{dispatch_part}_skipped_initial_status"
+    return (
+        f"data_agent_job_event_{_event_id_part(job.job_id)}_{dispatch_part}_skipped_initial_status"
+    )
 
 
 def _event_id_part(value: str) -> str:
@@ -512,7 +536,9 @@ def _data_agent_template_display_name(job_type: str) -> str:
 
 def _default_data_agent_summary_text(job_type: str, job: DataAgentJobEnvelope) -> str:
     label = _data_agent_template_display_name(job_type)
-    return f"Prepared {label} for {job.resource_count} resources from the Data Agent queue envelope."
+    return (
+        f"Prepared {label} for {job.resource_count} resources from the Data Agent queue envelope."
+    )
 
 
 def _data_agent_tags(job: DataAgentJobEnvelope) -> list[str]:
@@ -720,7 +746,9 @@ class NATSDataAgentWorker:
                         self.settings,
                         status="running",
                         progress_completed=_int(kwargs.get("progress_completed"), default=0),
-                        progress_total=_int(kwargs.get("progress_total"), default=job.resource_count),
+                        progress_total=_int(
+                            kwargs.get("progress_total"), default=job.resource_count
+                        ),
                         message=_string(kwargs.get("message")),
                         output_summary=_dict(kwargs.get("output_summary")),
                         metadata=_dict(kwargs.get("metadata")),
@@ -780,6 +808,18 @@ class NATSDataAgentWorker:
                     await _nak_message(message)
                     return
                 raise
+            except RetryableDataAgentProcessingError:
+                should_ack = False
+                logger.warning(
+                    "Data Agent processor is temporarily unavailable; NAKing delivery for retry.",
+                    extra={"job_id": job.job_id, "job_type": job.job_type},
+                    exc_info=True,
+                )
+                await _nak_message(
+                    message,
+                    delay_seconds=data_agent_redelivery_delay(self.settings),
+                )
+                return
             except Exception as exc:
                 try:
                     await self._update_status(
@@ -988,7 +1028,9 @@ async def _stop_data_agent_heartbeat_task(task: asyncio.Task | None) -> None:
         await task
 
 
-def _start_ack_progress_task(message: Any | None, *, interval_seconds: float) -> asyncio.Task | None:
+def _start_ack_progress_task(
+    message: Any | None, *, interval_seconds: float
+) -> asyncio.Task | None:
     if message is None or interval_seconds <= 0 or not hasattr(message, "in_progress"):
         return None
     return asyncio.create_task(_ack_progress_loop(message, interval_seconds=interval_seconds))
@@ -1058,12 +1100,16 @@ async def _reconcile_data_agent_consumer(
         await js.add_consumer(settings.data_agent_nats_stream, config=config)
 
 
-def _data_agent_consumer_config_matches(existing_config: Any, desired_config: ConsumerConfig) -> bool:
+def _data_agent_consumer_config_matches(
+    existing_config: Any, desired_config: ConsumerConfig
+) -> bool:
     if existing_config is None:
         return False
     return (
         getattr(existing_config, "filter_subject", None) == desired_config.filter_subject
-        and _ack_policy_equal(getattr(existing_config, "ack_policy", None), desired_config.ack_policy)
+        and _ack_policy_equal(
+            getattr(existing_config, "ack_policy", None), desired_config.ack_policy
+        )
         and _float_equal(getattr(existing_config, "ack_wait", None), desired_config.ack_wait)
         and getattr(existing_config, "max_deliver", None) == desired_config.max_deliver
         and getattr(existing_config, "max_ack_pending", None) == desired_config.max_ack_pending
@@ -1071,14 +1117,14 @@ def _data_agent_consumer_config_matches(existing_config: Any, desired_config: Co
 
 
 def _ack_policy_equal(left: Any, right: Any) -> bool:
-    return getattr(left, "value", left) == getattr(right, "value", right)
+    return bool(getattr(left, "value", left) == getattr(right, "value", right))
 
 
 def _float_equal(left: Any, right: Any) -> bool:
     try:
         return abs(float(left) - float(right)) < 0.001
     except (TypeError, ValueError):
-        return left == right
+        return bool(left == right)
 
 
 def _consumer_update_rejected(exc: Exception) -> bool:

@@ -180,10 +180,12 @@ INSERT INTO control_resources (
   size_bytes, sha256, storage_uri, storage_path, source_type, resource_kind,
   source_uri, project_id, status, created_at, updated_at, deleted_at, retention_expires_at, metadata
 )
-VALUES (
+SELECT
   $1, $2, $3, $4, $5, $6,
   $7, $8, $9, $10, $11, $12,
   $13, $14, $15, $16, $17, $18, $19, $20
+WHERE NOT EXISTS (
+  SELECT 1 FROM control_resource_purge_tombstones WHERE resource_id = $1
 )
 ON CONFLICT (resource_id) DO UPDATE SET
   owner_user_id = EXCLUDED.owner_user_id,
@@ -204,6 +206,10 @@ ON CONFLICT (resource_id) DO UPDATE SET
   deleted_at = EXCLUDED.deleted_at,
   retention_expires_at = EXCLUDED.retention_expires_at,
   metadata = EXCLUDED.metadata
+WHERE control_resources.status = 'active'
+  AND EXCLUDED.status = 'active'
+  AND control_resources.owner_user_id = EXCLUDED.owner_user_id
+  AND control_resources.owner_org_id IS NOT DISTINCT FROM EXCLUDED.owner_org_id
 RETURNING *;
 
 -- name: GetResourceForUser :one
@@ -488,6 +494,19 @@ FROM control_resources
 ORDER BY created_at DESC, resource_id ASC
 LIMIT $1 OFFSET $2;
 
+-- name: ListResourceLifecycleFenceCandidates :many
+SELECT *
+FROM control_resources
+WHERE status IN ('deleted', 'purging', 'retention_blocked')
+  AND resource_id COLLATE "C" > (sqlc.arg(after_resource_id)::text COLLATE "C")
+ORDER BY resource_id COLLATE "C" ASC
+LIMIT sqlc.arg(page_limit);
+
+-- name: GetResourceLifecycleStatus :one
+SELECT status
+FROM control_resources
+WHERE resource_id = $1;
+
 -- name: CountResourcesForUser :one
 WITH visible_resources AS (
   SELECT r.resource_id, r.original_name, r.content_type, r.sha256, r.source_uri, r.project_id,
@@ -718,7 +737,7 @@ SET status = 'deleted',
 WHERE resource_id = $1
   AND owner_user_id = $2
   AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
-  AND status <> 'deleted'
+  AND status = 'active'
 RETURNING *;
 
 -- name: RestoreResourceForUser :one
@@ -730,6 +749,9 @@ SET status = 'active',
 WHERE resource_id = $1
   AND owner_user_id = $2
   AND (COALESCE(owner_org_id, '') = '' OR owner_org_id = $3)
+  AND status = 'deleted'
+  AND retention_expires_at IS NOT NULL
+  AND retention_expires_at > clock_timestamp()
 RETURNING *;
 
 -- name: ResourceStorageStats :one

@@ -6,14 +6,18 @@ import errno
 import hashlib
 import json
 import os
+import stat
+import subprocess
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
+from ultra_deepagents import safe_storage
 from ultra_deepagents.imaging import derivative_manifest
 from ultra_deepagents.imaging.convert import ConvertResult
 from ultra_deepagents.imaging.derivative_manifest import (
@@ -77,6 +81,72 @@ def _assert_valid_manifest_artifact_pair(manifest_path):
     assert artifact.stat().st_size == manifest["artifact"]["size_bytes"]
     assert hashlib.sha256(payload).hexdigest() == manifest["artifact"]["sha256"]
     return manifest, artifact
+
+
+def test_managed_directory_creation_fsyncs_each_parent(monkeypatch, tmp_path):
+    events = []
+    original_mkdir = safe_storage.os.mkdir
+    original_fsync = safe_storage.os.fsync
+
+    def tracked_mkdir(component, *, mode, dir_fd):
+        original_mkdir(component, mode=mode, dir_fd=dir_fd)
+        events.append(("mkdir", component))
+
+    def tracked_fsync(descriptor):
+        events.append(("fsync", descriptor))
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(safe_storage.os, "mkdir", tracked_mkdir)
+    monkeypatch.setattr(safe_storage.os, "fsync", tracked_fsync)
+    with safe_storage.open_directory_chain_no_follow(
+        tmp_path,
+        (".staging", "file-1", "pyramid"),
+        create=True,
+    ):
+        pass
+
+    assert [kind for kind, _value in events] == [
+        "mkdir",
+        "fsync",
+        "mkdir",
+        "fsync",
+        "mkdir",
+        "fsync",
+    ]
+
+
+def test_managed_directory_creation_retries_parent_fsync_after_mkdir_succeeds(
+    monkeypatch, tmp_path
+):
+    original_fsync = safe_storage.os.fsync
+    attempts = 0
+
+    def fail_first_fsync(descriptor):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EIO, "injected parent sync failure")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(safe_storage.os, "fsync", fail_first_fsync)
+
+    with pytest.raises(OSError, match="injected parent sync failure"):
+        with safe_storage.open_directory_chain_no_follow(
+            tmp_path,
+            (".staging", "file-1", "pyramid"),
+            create=True,
+        ):
+            pass
+
+    with safe_storage.open_directory_chain_no_follow(
+        tmp_path,
+        (".staging", "file-1", "pyramid"),
+        create=True,
+    ):
+        pass
+
+    assert attempts == 4
+    assert (tmp_path / ".staging" / "file-1" / "pyramid").is_dir()
 
 
 def test_strict_derivative_publishes_immutable_artifact_manifest_last_and_replays(tmp_path):
@@ -143,6 +213,215 @@ def test_strict_derivative_publishes_immutable_artifact_manifest_last_and_replay
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("tombstone_kind", ["permanent", "deleted"])
+def test_strict_derivative_cannot_publish_after_resource_tombstone(tmp_path, tombstone_kind):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    src = upload_root / "file-1__source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = upload_root / "derived" / "file-1__pyramid.tif"
+    tombstone = upload_root / ".tombstones" / tombstone_kind / "file-1"
+    tombstone.parent.mkdir(parents=True)
+    tombstone.write_text("deleted\n", encoding="utf-8")
+    calls = []
+
+    with pytest.raises(StaleDerivativeJobError) as excinfo:
+        run_derive_pyramid_job(
+            _strict_job(src, dst),
+            convert_fn=_writing_convert(calls),
+            meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+            viewer_info_fn=lambda _path: _viewer_info(),
+        )
+
+    assert excinfo.value.code == "resource_deleted"
+    assert calls == []
+    assert not dst.with_suffix(".manifest.json").exists()
+
+
+def test_strict_derivative_conversion_does_not_block_delete_and_fails_closed(tmp_path):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    src = upload_root / "file-1__source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = upload_root / "derived" / "file-1__pyramid.tif"
+    conversion_started = threading.Event()
+    release_conversion = threading.Event()
+
+    def blocking_convert(_src, staged_path, *, spec):
+        del spec
+        conversion_started.set()
+        assert release_conversion.wait(timeout=5), "test did not release conversion"
+        Path(staged_path).write_bytes(b"strict pyramid bytes")
+        return ConvertResult(str(src), str(staged_path), 0, "", "")
+
+    outcome = []
+
+    def publish():
+        try:
+            run_derive_pyramid_job(
+                _strict_job(src, dst),
+                convert_fn=blocking_convert,
+                meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+                viewer_info_fn=lambda _path: _viewer_info(),
+            )
+        except BaseException as exc:  # capture the worker-visible typed result
+            outcome.append(exc)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert conversion_started.wait(timeout=5), "conversion did not start"
+
+    # This is the deletion critical section: it must acquire the same lock while
+    # conversion is still blocked, publish the tombstone, and remove the source.
+    tombstone = upload_root / ".tombstones" / "permanent" / "file-1"
+    with derivative_manifest._publication_lock(dst, src):
+        tombstone.parent.mkdir(parents=True)
+        tombstone.write_text("deleted\n", encoding="utf-8")
+        src.unlink()
+    assert not release_conversion.is_set(), "delete waited for conversion"
+
+    release_conversion.set()
+    publisher.join(timeout=5)
+    assert not publisher.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], StaleDerivativeJobError)
+    assert outcome[0].code == "resource_deleted"
+    assert not dst.with_suffix(".manifest.json").exists()
+    assert not any(".tmp-" in entry.name for entry in dst.parent.iterdir())
+
+
+def test_catalog_hashing_does_not_hold_lifecycle_lock(monkeypatch, tmp_path):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    src = upload_root / "file-1__source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = upload_root / "derived" / "file-1__pyramid.tif"
+    hashing_started = threading.Event()
+    release_hashing = threading.Event()
+    original_verify = derivative_manifest._verify_catalog_source
+
+    def blocking_verify(*args, **kwargs):
+        result = original_verify(*args, **kwargs)
+        hashing_started.set()
+        assert release_hashing.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(derivative_manifest, "_verify_catalog_source", blocking_verify)
+    outcome = []
+
+    def publish():
+        try:
+            run_derive_pyramid_job(
+                _strict_job(src, dst),
+                convert_fn=_writing_convert([]),
+                meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+                viewer_info_fn=lambda _path: _viewer_info(),
+            )
+        except BaseException as exc:
+            outcome.append(exc)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert hashing_started.wait(timeout=5)
+    tombstone = upload_root / ".tombstones" / "permanent" / "file-1"
+    with derivative_manifest._publication_lock(dst, src):
+        tombstone.parent.mkdir(parents=True)
+        tombstone.write_text("deleted\n", encoding="utf-8")
+        src.unlink()
+    release_hashing.set()
+    publisher.join(timeout=5)
+
+    assert not publisher.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], StaleDerivativeJobError)
+    assert outcome[0].code == "resource_deleted"
+    assert not dst.with_suffix(".manifest.json").exists()
+    assert not dst.parent.exists() or not any(dst.parent.iterdir())
+
+
+def test_artifact_hashing_does_not_hold_lifecycle_lock(monkeypatch, tmp_path):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    src = upload_root / "file-1__source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = upload_root / "derived" / "file-1__pyramid.tif"
+    hashing_started = threading.Event()
+    release_hashing = threading.Event()
+    original_digest = derivative_manifest._open_digest_and_sync_regular_file
+
+    def blocking_digest(path, **kwargs):
+        result = original_digest(path, **kwargs)
+        if kwargs.get("label") == "temporary derivative artifact":
+            hashing_started.set()
+            assert release_hashing.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(derivative_manifest, "_open_digest_and_sync_regular_file", blocking_digest)
+    outcome = []
+
+    def publish():
+        try:
+            run_derive_pyramid_job(
+                _strict_job(src, dst),
+                convert_fn=_writing_convert([]),
+                meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+                viewer_info_fn=lambda _path: _viewer_info(),
+            )
+        except BaseException as exc:
+            outcome.append(exc)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    assert hashing_started.wait(timeout=5)
+    tombstone = upload_root / ".tombstones" / "permanent" / "file-1"
+    with derivative_manifest._publication_lock(dst, src):
+        tombstone.parent.mkdir(parents=True)
+        tombstone.write_text("deleted\n", encoding="utf-8")
+        src.unlink()
+    release_hashing.set()
+    publisher.join(timeout=5)
+
+    assert not publisher.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], StaleDerivativeJobError)
+    assert outcome[0].code == "resource_deleted"
+    assert not dst.with_suffix(".manifest.json").exists()
+    assert not any(".tmp-" in entry.name for entry in dst.parent.iterdir())
+
+
+def test_derivative_tombstone_identity_is_injective_for_dotted_resource_ids(tmp_path):
+    destination = tmp_path / "uploads" / "derived" / "file-1__pyramid.tif"
+    permanent, reversible = derivative_manifest._publication_tombstone_paths(destination)
+
+    assert permanent == tmp_path / "uploads" / ".tombstones" / "permanent" / "file-1"
+    assert reversible == tmp_path / "uploads" / ".tombstones" / "deleted" / "file-1"
+    assert permanent != tmp_path / "uploads" / ".tombstones" / "permanent" / "file-1.deleted"
+
+
+@pytest.mark.parametrize("ancestor", [".locks", ".tombstones"])
+def test_strict_derivative_rejects_symlinked_lifecycle_ancestor(tmp_path, ancestor):
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (upload_root / ancestor).symlink_to(external, target_is_directory=True)
+    src = upload_root / "file-1__source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = upload_root / "derived" / "file-1__pyramid.tif"
+    calls = []
+
+    with pytest.raises(TransientDerivativeError):
+        run_derive_pyramid_job(
+            _strict_job(src, dst),
+            convert_fn=_writing_convert(calls),
+            meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+            viewer_info_fn=lambda _path: _viewer_info(),
+        )
+
+    assert calls == []
+    assert list(external.iterdir()) == []
+
+
 def test_concurrent_strict_publication_singleflights_and_leaves_no_temporary_files(tmp_path):
     src = tmp_path / "source.ome.tif"
     src.write_bytes(b"source-generation-one")
@@ -170,6 +449,176 @@ def test_concurrent_strict_publication_singleflights_and_leaves_no_temporary_fil
     assert not any(".tmp-" in entry.name or ".transcode" in entry.name for entry in entries)
 
 
+def test_new_work_owner_reclaims_private_workspace_without_touching_other_resource(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    dst.parent.mkdir()
+    workspace = tmp_path / ".staging" / "file-1" / "pyramid"
+    workspace.mkdir(parents=True)
+    abandoned = workspace / "artifact.tif"
+    abandoned_transcode = workspace / "artifact.tif.transcode.ome.tif"
+    abandoned_manifest = workspace / "manifest.tmp"
+    unrelated = tmp_path / ".staging" / "file-10" / "pyramid" / "artifact.tif"
+    unrelated.parent.mkdir(parents=True)
+    for path in (abandoned, abandoned_transcode, abandoned_manifest):
+        path.write_bytes(b"partial")
+    unrelated.write_bytes(b"keep")
+
+    result = run_derive_pyramid_job(
+        _strict_job(src, dst),
+        convert_fn=_writing_convert([]),
+        meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        viewer_info_fn=lambda _path: _viewer_info(),
+    )
+
+    assert result["status"] == "succeeded"
+    assert not abandoned.exists()
+    assert not abandoned_transcode.exists()
+    assert not abandoned_manifest.exists()
+    assert unrelated.read_bytes() == b"keep"
+
+
+def test_cross_process_derivation_lock_runs_converter_once(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    counter = tmp_path / "converter-calls"
+    start = tmp_path / "start"
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    script = r"""
+import hashlib, os, pathlib, sys, time
+sys.path.insert(0, sys.argv[1])
+from ultra_deepagents.imaging.derivative_manifest import run_strict_publication
+src, dst, counter, start = map(pathlib.Path, sys.argv[2:])
+while not start.exists():
+    time.sleep(0.005)
+payload = src.read_bytes()
+def viewer(_path):
+    return {
+        "dims_order": "TCZYX",
+        "axis_sizes": {"T": 2, "C": 2, "Z": 3, "Y": 8, "X": 16},
+        "dtype": "uint16",
+        "channel_names": ["DAPI", "FITC"],
+        "physical_spacing": {"x": 0.25, "y": 0.25, "z": 1.0},
+        "metadata": {
+            "selected_scene_id": "scene-0",
+            "spacing_units": {"x": "um", "y": "um", "z": "um"},
+        },
+        "viewer": {
+            "tile_scheme": {"levels": [{"level": 0, "width": 16, "height": 8}]},
+            "atlas_scheme": {"columns": 2, "rows": 2, "cell_w": 16, "cell_h": 8},
+        },
+        "tile_scheme": {"levels": [{"level": 0, "width": 16, "height": 8}]},
+    }
+def produce(path):
+    descriptor = os.open(counter, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+    os.write(descriptor, b"call\n")
+    os.close(descriptor)
+    time.sleep(0.1)
+    pathlib.Path(path).write_bytes(b"strict pyramid bytes")
+    return {}
+run_strict_publication(
+    resource_id="file-1",
+    src_path=str(src),
+    dst_path=str(dst),
+    source_sha256=hashlib.sha256(payload).hexdigest(),
+    source_size_bytes=len(payload),
+    viewer_info_fn=viewer,
+    source_viewer_info_fn=None,
+    source_reader="libbioimage",
+    conversion_spec={
+        "tile_size": 512,
+        "compression": "lzw",
+        "layout": "topdirs",
+        "fmt": "bigtiff",
+    },
+    produce_fn=produce,
+)
+"""
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(source_root),
+                str(src),
+                str(dst),
+                str(counter),
+                str(start),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    start.write_text("go", encoding="utf-8")
+    failures = []
+    for process in processes:
+        stdout, stderr = process.communicate(timeout=10)
+        if process.returncode != 0:
+            failures.append((process.returncode, stdout, stderr))
+
+    assert failures == []
+    assert counter.read_text(encoding="utf-8").splitlines() == ["call"]
+
+
+def test_publication_lock_is_cross_process_and_rechecks_source_after_wait(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    lock_path = tmp_path / ".locks" / ".file-1__pyramid.lock"
+    ready = tmp_path / "lock-ready"
+    release = tmp_path / "lock-release"
+    script = """
+import fcntl, os, pathlib, sys, time
+lock_path, ready, release = map(pathlib.Path, sys.argv[1:])
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(descriptor, fcntl.LOCK_EX)
+ready.write_text("ready")
+while not release.exists():
+    time.sleep(0.01)
+fcntl.flock(descriptor, fcntl.LOCK_UN)
+os.close(descriptor)
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", script, str(lock_path), str(ready), str(release)]
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "child process did not acquire the lifecycle lock"
+        entered = threading.Event()
+        outcome = []
+
+        def wait_for_lock():
+            try:
+                with derivative_manifest._publication_lock(dst, src):
+                    entered.set()
+            except BaseException as exc:  # capture the worker-visible typed result
+                outcome.append(exc)
+
+        waiter = threading.Thread(target=wait_for_lock)
+        waiter.start()
+        time.sleep(0.1)
+        assert not entered.is_set(), "publisher ignored the cross-process lock"
+        src.unlink()
+        release.write_text("release")
+        waiter.join(timeout=5)
+        assert not waiter.is_alive()
+        assert not entered.is_set()
+        assert len(outcome) == 1
+        assert isinstance(outcome[0], StaleDerivativeJobError)
+        assert outcome[0].code == "source_generation_changed"
+    finally:
+        release.write_text("release")
+        holder.wait(timeout=5)
+
+
 def test_strict_publication_rejects_artifact_path_swap_after_semantic_probe(tmp_path):
     src = tmp_path / "source.ome.tif"
     src.write_bytes(b"source-generation-one")
@@ -177,7 +626,7 @@ def test_strict_publication_rejects_artifact_path_swap_after_semantic_probe(tmp_
 
     def swapping_viewer_info(path):
         artifact = os.fspath(path)
-        if ".tmp-" in artifact:
+        if Path(artifact).name == "artifact.tif":
             replacement = tmp_path / "replacement.tif"
             replacement.write_bytes(b"replaced pyramid data")
             os.replace(replacement, artifact)
@@ -241,7 +690,7 @@ def test_strict_publication_preserves_old_manifest_when_source_swaps_during_deri
     initial_mtime = src.stat().st_mtime_ns
 
     def swapping_derived_viewer(path):
-        if ".tmp-" in os.fspath(path):
+        if Path(path).name == "artifact.tif":
             replacement = tmp_path / "replacement"
             replacement.write_bytes(b"source-two")
             os.utime(replacement, ns=(initial_mtime, initial_mtime))
@@ -494,7 +943,7 @@ def test_artifact_fsync_eio_from_filesystem_adapter_is_retryable(monkeypatch, tm
 
     def fail_first_fsync(descriptor):
         nonlocal failed
-        if not failed:
+        if not failed and stat.S_ISREG(os.fstat(descriptor).st_mode):
             failed = True
             raise OSError(errno.EIO, "injected artifact sync failure")
         return original_fsync(descriptor)
@@ -593,6 +1042,321 @@ def test_strict_replay_is_invalidated_by_spec_change_and_force(tmp_path):
     regenerated = run_derive_pyramid_job(changed, **kwargs)
     assert regenerated["status"] == "succeeded"
     assert len(calls) == 4
+
+
+def test_forced_envelope_redelivery_replays_once_and_reclaims_previous_digest(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    calls = []
+    payloads = [b"first forced artifact", b"second forced artifact"]
+
+    def convert(source, destination, *, spec):
+        payload = payloads[len(calls)]
+        calls.append((source, destination, spec))
+        Path(destination).write_bytes(payload)
+        return ConvertResult(source, destination, 0, "", "")
+
+    def envelope(job_id):
+        return {
+            "job_id": job_id,
+            "job_type": "image.derive_pyramid",
+            "metadata": {**_strict_job(src, dst), "force": True},
+        }
+
+    kwargs = {
+        "convert_fn": convert,
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+        "require_manifest": True,
+    }
+    first_job = extract_derive_pyramid_payload(envelope("derive-request-1"))
+    assert first_job is not None and first_job["force_id"] == "derive-request-1"
+    first = run_derive_pyramid_job(first_job, **kwargs)
+    redelivery = run_derive_pyramid_job(first_job, **kwargs)
+
+    assert first["status"] == "succeeded"
+    assert redelivery["status"] == "replayed"
+    assert len(calls) == 1
+
+    second_job = extract_derive_pyramid_payload(envelope("derive-request-2"))
+    assert second_job is not None
+    second = run_derive_pyramid_job(second_job, **kwargs)
+    manifest = json.loads(dst.with_suffix(".manifest.json").read_text())
+    artifacts = list(dst.parent.glob("file-1__pyramid.sha256-*.tif"))
+
+    assert second["status"] == "succeeded"
+    assert len(calls) == 2
+    assert manifest["schema"] == derivative_manifest.SCHEMA_V1
+    assert "request" not in manifest
+    force_record = json.loads(
+        (tmp_path / ".staging" / "file-1" / "pyramid" / "request.json").read_text()
+    )
+    assert force_record["force_id"] == "derive-request-2"
+    assert artifacts == [Path(second["derived_path"])]
+    assert not Path(first["derived_path"]).exists()
+
+
+def test_forced_redelivery_repairs_private_record_from_durable_journal(monkeypatch, tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    calls = []
+    envelope = {
+        "job_id": "derive-request-crash-window",
+        "job_type": "image.derive_pyramid",
+        "metadata": {**_strict_job(src, dst), "force": True},
+    }
+    job = extract_derive_pyramid_payload(envelope)
+    assert job is not None
+    kwargs = {
+        "convert_fn": _writing_convert(calls),
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+        "require_manifest": True,
+    }
+    original_cleanup = derivative_manifest._cleanup_publication_workspace
+    original_write_force_record = derivative_manifest._write_force_record
+    simulate_crash_window = True
+
+    def maybe_cleanup(destination):
+        if simulate_crash_window:
+            return None
+        return original_cleanup(destination)
+
+    def maybe_write_force_record(destination, force_id, manifest_payload):
+        if simulate_crash_window:
+            return None
+        return original_write_force_record(destination, force_id, manifest_payload)
+
+    monkeypatch.setattr(derivative_manifest, "_cleanup_publication_workspace", maybe_cleanup)
+    monkeypatch.setattr(derivative_manifest, "_write_force_record", maybe_write_force_record)
+
+    first = run_derive_pyramid_job(job, **kwargs)
+    workspace = tmp_path / ".staging" / "file-1" / "pyramid"
+    journal = json.loads((workspace / "journal.json").read_text())
+
+    assert first["status"] == "succeeded"
+    assert journal["schema"] == derivative_manifest.PUBLICATION_JOURNAL_SCHEMA_V2
+    assert journal["force_id"] == "derive-request-crash-window"
+    assert (
+        journal["manifest_sha256"]
+        == hashlib.sha256(dst.with_suffix(".manifest.json").read_bytes()).hexdigest()
+    )
+    assert not (workspace / "request.json").exists()
+
+    simulate_crash_window = False
+    redelivery = run_derive_pyramid_job(job, **kwargs)
+    force_record = json.loads((workspace / "request.json").read_text())
+
+    assert redelivery["status"] == "replayed"
+    assert len(calls) == 1
+    assert force_record["force_id"] == "derive-request-crash-window"
+    assert force_record["manifest_sha256"] == journal["manifest_sha256"]
+    assert not (workspace / "journal.json").exists()
+
+
+def test_transient_force_record_read_failure_retries_without_conversion(monkeypatch, tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    calls = []
+    envelope = {
+        "job_id": "derive-request-read-eio",
+        "job_type": "image.derive_pyramid",
+        "metadata": {**_strict_job(src, dst), "force": True},
+    }
+    job = extract_derive_pyramid_payload(envelope)
+    assert job is not None
+    kwargs = {
+        "convert_fn": _writing_convert(calls),
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+        "require_manifest": True,
+    }
+    first = run_derive_pyramid_job(job, **kwargs)
+    assert first["status"] == "succeeded"
+    original_read_at = derivative_manifest._read_stable_regular_file_at
+
+    def fail_force_record_read(directory, name, *, label, max_bytes):
+        if name == "request.json":
+            raise OSError(errno.EIO, "injected force-record read failure")
+        return original_read_at(directory, name, label=label, max_bytes=max_bytes)
+
+    monkeypatch.setattr(
+        derivative_manifest,
+        "_read_stable_regular_file_at",
+        fail_force_record_read,
+    )
+
+    with pytest.raises(TransientDerivativeError) as excinfo:
+        run_derive_pyramid_job(job, **kwargs)
+
+    assert excinfo.value.code == "manifest_io_unavailable"
+    assert len(calls) == 1
+
+
+def test_rollout_publication_remains_v1_and_replayable(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    calls = []
+    job = _strict_job(src, dst)
+    kwargs = {
+        "convert_fn": _writing_convert(calls),
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+    }
+    run_derive_pyramid_job(job, **kwargs)
+    manifest_path = dst.with_suffix(".manifest.json")
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["schema"] == derivative_manifest.SCHEMA_V1
+    assert "request" not in manifest
+
+    replay = run_derive_pyramid_job(job, **kwargs)
+
+    assert replay["status"] == "replayed"
+    assert len(calls) == 1
+
+
+def test_crash_journal_reclaims_only_uncommitted_resource_workspace(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    job = _strict_job(src, dst)
+    kwargs = {
+        "convert_fn": _writing_convert([]),
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+    }
+    first = run_derive_pyramid_job(job, **kwargs)
+    committed = Path(first["derived_path"])
+    orphan = dst.parent / f"{dst.stem}.sha256-{'f' * 64}{dst.suffix}"
+    orphan.write_bytes(b"uncommitted")
+    unrelated = dst.parent / f"file-10__pyramid.sha256-{'e' * 64}.tif"
+    unrelated.write_bytes(b"neighbor")
+    workspace = tmp_path / ".staging" / "file-1" / "pyramid"
+    workspace.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "artifact.tif",
+        "artifact.tif.transcode.ome.tif",
+        "manifest.tmp",
+        "publish.link",
+        "recovery.link",
+        "journal.tmp",
+    ):
+        (workspace / name).write_bytes(b"abandoned")
+    (workspace / "journal.json").write_text(
+        json.dumps(
+            {
+                "schema": "ultra.image-pyramid-publication-journal.v1",
+                "artifact_basename": orphan.name,
+                "previous_artifact_basename": committed.name,
+            }
+        )
+    )
+
+    replay = run_derive_pyramid_job(job, **kwargs)
+
+    assert replay["status"] == "replayed"
+    assert committed.is_file()
+    assert not orphan.exists()
+    assert unrelated.read_bytes() == b"neighbor"
+    assert {path.name for path in workspace.iterdir()} == {"request.json"}
+
+
+def test_crash_recovery_rejects_symlinked_derived_without_touching_referent(tmp_path):
+    upload_root = tmp_path / "uploads"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    resource_id = "file-1"
+    destination = upload_root / "derived" / f"{resource_id}__pyramid.tif"
+    artifact_name = f"{destination.stem}.sha256-{'f' * 64}{destination.suffix}"
+    outside_artifact = outside / artifact_name
+    outside_artifact.write_bytes(b"outside artifact")
+    workspace = upload_root / ".staging" / resource_id / "pyramid"
+    workspace.mkdir(parents=True)
+    (workspace / "journal.json").write_text(
+        json.dumps(
+            {
+                "schema": "ultra.image-pyramid-publication-journal.v1",
+                "artifact_basename": artifact_name,
+                "previous_artifact_basename": "",
+            }
+        )
+    )
+    os.symlink(outside, upload_root / "derived")
+
+    with pytest.raises(TransientDerivativeError) as excinfo:
+        derivative_manifest._cleanup_publication_workspace(destination)
+
+    assert excinfo.value.code == "publication_recovery_unavailable"
+    assert outside_artifact.read_bytes() == b"outside artifact"
+    assert (workspace / "journal.json").is_file()
+
+
+def test_spec_change_reclaims_prior_digest_even_when_not_replay_compatible(tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    payloads = [b"old pyramid bytes", b"new pyramid bytes"]
+    calls = []
+
+    def convert(source, destination, *, spec):
+        Path(destination).write_bytes(payloads[len(calls)])
+        calls.append((source, destination, spec))
+        return ConvertResult(source, destination, 0, "", "")
+
+    base = _strict_job(src, dst)
+    kwargs = {
+        "convert_fn": convert,
+        "meta_fn": lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        "viewer_info_fn": lambda _path: _viewer_info(),
+    }
+    first = run_derive_pyramid_job(base, **kwargs)
+    second = run_derive_pyramid_job({**base, "tile_size": 256}, **kwargs)
+
+    assert second["status"] == "succeeded"
+    assert len(calls) == 2
+    assert not Path(first["derived_path"]).exists()
+    assert list(dst.parent.glob("file-1__pyramid.sha256-*.tif")) == [Path(second["derived_path"])]
+
+
+def test_equal_size_in_place_artifact_mutation_after_commit_is_rejected(monkeypatch, tmp_path):
+    src = tmp_path / "source.ome.tif"
+    src.write_bytes(b"source-generation-one")
+    dst = tmp_path / "derived" / "file-1__pyramid.tif"
+    manifest_path = dst.with_suffix(".manifest.json")
+    original_replace = derivative_manifest.os.replace
+    mutated = False
+
+    def mutate_artifact_after_manifest_commit(source, target):
+        nonlocal mutated
+        result = original_replace(source, target)
+        if os.fspath(target) == os.fspath(manifest_path) and not mutated:
+            mutated = True
+            artifact = next(dst.parent.glob("file-1__pyramid.sha256-*.tif"))
+            before = artifact.stat()
+            with artifact.open("r+b") as stream:
+                stream.write(b"x" * before.st_size)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.utime(artifact, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+
+    monkeypatch.setattr(derivative_manifest.os, "replace", mutate_artifact_after_manifest_commit)
+
+    with pytest.raises(TransientDerivativeError) as excinfo:
+        run_derive_pyramid_job(
+            _strict_job(src, dst),
+            convert_fn=_writing_convert([]),
+            meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+            viewer_info_fn=lambda _path: _viewer_info(),
+        )
+
+    assert excinfo.value.code == "artifact_publication_changed"
+    assert not manifest_path.exists()
+    assert not list(dst.parent.glob("file-1__pyramid.sha256-*.tif"))
 
 
 def test_strict_auto_format_records_requested_and_effective_specs(tmp_path):
@@ -1330,6 +2094,7 @@ def test_runner_propagates_convert_failure():
 
 def test_extract_payload_from_data_agent_envelope():
     env = {
+        "job_id": "derive-request-7",
         "job_type": "image.derive_pyramid",
         "metadata": {
             "resource_id": "r",
@@ -1340,6 +2105,7 @@ def test_extract_payload_from_data_agent_envelope():
     }
     job = extract_derive_pyramid_payload(env)
     assert job is not None and job["src_path"] == "/a.lsm" and job["tile_size"] == 256
+    assert job["force_id"] == "derive-request-7"
 
 
 def test_extract_payload_skips_other_job_types():

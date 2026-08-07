@@ -303,6 +303,7 @@ func writeStrictDerivativeForTest(
 	manifest := derivativeManifest{
 		Schema:             derivedPyramidManifestSchema,
 		ConversionContract: derivedPyramidConversionSchema,
+		Request:            &derivativeManifestRequest{},
 		ConversionSpec: derivativePublicationSpec{
 			Requested: derivativeConversionSpec{
 				TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "auto",
@@ -344,6 +345,54 @@ func writeStrictDerivativeForTest(
 		t.Fatal(err)
 	}
 	return artifactPath
+}
+
+func TestReadDerivativeManifestAcceptsV1DuringV2Rollout(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	const fileID = "file_manifest_v1_compat"
+	sourceBytes := []byte("source-generation")
+	sourcePath := filepath.Join(root, fileID+"__source.tif")
+	if err := os.WriteFile(sourcePath, sourceBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := resourceRecord{
+		FileID: fileID, SizeBytes: int64(len(sourceBytes)),
+		SHA256: fmt.Sprintf("%x", sha256.Sum256(sourceBytes)),
+	}
+	viewerInfo := derivativeViewerInfoForTest(1, 1, 1, 8, 16, 512)
+	semantics, ok := viewerDerivativeSemantics(viewerInfo)
+	if !ok {
+		t.Fatal("invalid compatibility fixture semantics")
+	}
+	writeStrictDerivativeForTest(
+		t, root, sourcePath, record, viewerInfo,
+		derivativeCapabilitiesForViewer(viewerInfo, semantics),
+		[]byte("compatible-v1-artifact"),
+	)
+	manifestPath := derivedPyramidManifestPath(root, fileID)
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest derivativeManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Schema = derivedPyramidManifestSchemaV1
+	manifest.Request = nil
+	manifestBytes, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted {
+		t.Fatal("v1 derivative manifest was not admitted during the v2 rollout")
+	}
 }
 
 func writeCommittedThumbnailDerivativeForTest(
@@ -3021,13 +3070,20 @@ func TestNiftiThumbnailIgnoresLegacyDecompressedSidecar(t *testing.T) {
 	if err := os.WriteFile(path, compressed.Bytes(), 0o600); err != nil {
 		t.Fatalf("write gzip NIfTI fixture: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(niftiDecompressedSidecarPath(path)), 0o755); err != nil {
+	identity := niftiDecompressedSidecarIdentity{
+		root: filepath.Dir(path), resourceID: "file_authenticated", sourceSHA256: strings.Repeat("a", 64),
+	}
+	sidecar, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		t.Fatal("valid sidecar identity was rejected")
+	}
+	if err := os.MkdirAll(filepath.Dir(sidecar), 0o755); err != nil {
 		t.Fatalf("mkdir stale sidecar directory: %v", err)
 	}
-	if err := os.WriteFile(niftiDecompressedSidecarPath(path), []byte("stale untrusted sidecar"), 0o600); err != nil {
+	if err := os.WriteFile(sidecar, []byte("stale untrusted sidecar"), 0o600); err != nil {
 		t.Fatalf("write stale sidecar: %v", err)
 	}
-	if readyDecompressedNiftiSidecar(path) == "" {
+	if readyDecompressedNiftiSidecar(identity) == "" {
 		t.Fatal("test setup did not produce a legacy-ready sidecar")
 	}
 	plan, err := niftiThumbnailPreflight(path)

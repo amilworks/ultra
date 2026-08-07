@@ -253,6 +253,11 @@ type ControlResourceEvent struct {
 	Metadata    []byte             `json:"metadata"`
 }
 
+type ControlResourcePurgeTombstone struct {
+	ResourceID string             `json:"resource_id"`
+	PurgedAt   pgtype.Timestamptz `json:"purged_at"`
+}
+
 type ControlResourceSearchDocument struct {
 	ResourceID   string             `json:"resource_id"`
 	OwnerUserID  string             `json:"owner_user_id"`

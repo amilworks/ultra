@@ -2152,6 +2152,262 @@ paths:
                 required: [error]
                 properties:
                   error: { type: string }
+  /v2/uploads/{file_id}/scene3d/manifest:
+    get:
+      operationId: getUploadScene3dManifest
+      description: >-
+        Manifest (schema ultra.scene3d.v1) of a source-bound derived 3D scene —
+        Gaussian splats, a point cloud, or a zipped COLMAP/HLOC model. The
+        control plane only performs a bounded header or archive-directory probe,
+        then enqueues scene.derive and serves the digest-named derived bytes.
+        Until the derive lands this returns 202 with a status field.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: The derived scene manifest, with a strong ETag over the artifact's size and mtime.
+          headers:
+            ETag:
+              required: true
+              schema: { type: string }
+            Cache-Control:
+              required: true
+              schema: { type: string, example: "private, max-age=60" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema, generator_revision, scene_kind, source, world, layers, service_urls]
+                properties:
+                  schema: { type: string, example: ultra.scene3d.v1 }
+                  generator_revision: { type: string, example: scene3d-rad-v3 }
+                  scene_kind: { type: string, enum: [splat, pointcloud, colmap] }
+                  source:
+                    type: object
+                    description: Header-derived source facts; measured_sh_degree is the highest non-zero band from the derive job's exact full-source scan, never the declared value.
+                    properties:
+                      format: { type: string, example: ply }
+                      writer: { type: string, example: postshot }
+                      vertex_count: { type: integer, format: int64 }
+                      bytes: { type: integer, format: int64 }
+                      sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+                      declared_sh_degree: { type: integer }
+                      measured_sh_degree: { type: integer }
+                      stride_bytes: { type: integer }
+                  world:
+                    type: object
+                    description: Source world frame; geometry is never rotated and up_axis is a camera hint only.
+                    properties:
+                      units: { type: string, example: arbitrary }
+                      up_axis: { type: string, enum: [unknown, y, z] }
+                      up_axis_basis: { type: string, enum: [unknown, heuristic, declared, user] }
+                      frame: { type: string, example: source }
+                      bbox:
+                        type: array
+                        items: { type: number }
+                      bbox_robust:
+                        type: array
+                        description: Approximate 1st-to-99th percentile source box used only for initial camera framing.
+                        items: { type: number }
+                  layers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string, enum: [splats, points, cameras] }
+                        encoding: { type: string, enum: [spark-rad-v1, usx-v1, upc-v1, json] }
+                        total: { type: integer, format: int64 }
+                        chunks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              index: { type: integer, minimum: 0 }
+                              count: { type: integer }
+                              bytes: { type: integer, format: int64 }
+                              origin:
+                                type: array
+                                items: { type: number }
+                              bbox:
+                                type: array
+                                items: { type: number }
+                        tiers:
+                          type: array
+                          description: tiers[k] lists the additive chunks at level k; the complete cumulative tiers are deterministic whole-source density refinements and their union contains every finite source record.
+                          items:
+                            type: array
+                            items: { type: integer }
+                        activation_domain: { type: string }
+                        source_frame: { type: string, enum: [rdf, rub, source] }
+                        quantization: { type: object }
+                        lod:
+                          type: object
+                          description: Present for a paged, appearance-preserving Spark RAD Gaussian layer.
+                          properties:
+                            format: { type: string, enum: [spark-rad-v1] }
+                            method: { type: string, example: bhatt-lod-quality }
+                            builder_revision: { type: string }
+                            paged: { type: boolean }
+                            source_elements: { type: integer, format: int64 }
+                            max_sh_degree:
+                              type: integer
+                              minimum: 0
+                              maximum: 3
+                              description: Highest source spherical-harmonic band retained by the RAD artifact.
+                            header: { type: object }
+                            chunks:
+                              type: array
+                              items: { type: object }
+                  limitations:
+                    type: array
+                    description: Plain sentences stating what the viewer is not doing; rendered verbatim.
+                    items: { type: string }
+                  service_urls:
+                    type: object
+                    properties:
+                      chunk: { type: string }
+                      lod: { type: string }
+                      download: { type: string }
+        "202":
+          description: >-
+            The derived scene is not available yet. status is "deriving" once the
+            scene.derive job is queued, or "failed" while a permanent-failure
+            marker is in its backoff window (which also suppresses re-enqueueing).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, file_id]
+                properties:
+                  status: { type: string, enum: [deriving, failed] }
+                  file_id: { type: string }
+        "304":
+          description: The client's If-None-Match matches the current manifest.
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file (or its PLY header could not be described exactly)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/scene3d/chunk/{index}:
+    get:
+      operationId: getUploadScene3dChunk
+      description: >-
+        One derived scene chunk — planar USX1 (splats) or UPC1 (points) bytes
+        behind a 64-byte header. The source-digest-bound artifacts support Range
+        and conditional requests under the shared in-flight byte budget. The
+        public authenticated URL is stable, so clients must revalidate rather
+        than cache it as immutable across catalog repairs.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: index
+          in: path
+          required: true
+          description: Chunk index as a plain non-negative decimal (no sign, no leading zeros, no separators).
+          schema: { type: integer, minimum: 0, maximum: 999999 }
+      responses:
+        "200":
+          description: Chunk bytes
+          headers:
+            ETag:
+              required: true
+              schema: { type: string }
+            Cache-Control:
+              required: true
+              schema: { type: string, example: "private, max-age=60, must-revalidate" }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Requested byte range of the chunk
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: The client's If-None-Match matches the current chunk.
+        "400":
+          description: Chunk index is not a plain non-negative decimal, or resolves outside the derived scene directory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal, or this chunk has not been derived
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scene-chunk admission is temporarily saturated
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/scene3d/lod/{artifact}:
+    get:
+      operationId: getUploadScene3dLodArtifact
+      description: >-
+        One source-bound Spark RAD header or RADC page for view-adaptive Gaussian
+        level of detail. Only scene-lod.rad and canonical scene-lod-N.radc names
+        are addressable. Range, conditional requests, authorization, and the shared
+        scene delivery byte budget are enforced identically to ordinary chunks.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: artifact
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^scene-lod(?:-[0-9]+\\.radc|\\.rad)$"
+      responses:
+        "200":
+          description: RAD artifact bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "206":
+          description: Requested byte range of the RAD artifact
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "304":
+          description: The client's If-None-Match matches the current artifact.
+        "400":
+          description: Artifact name is not canonical
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible or the artifact has not been derived
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scene-artifact admission is temporarily saturated
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/hdf5/dataset:
     get:
       operationId: getUploadHdf5Dataset

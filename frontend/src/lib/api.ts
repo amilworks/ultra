@@ -96,6 +96,7 @@ import type {
   UploadViewerInfo,
   CiftiCarpetResponse,
   CiftiConnectivityResponse,
+  Scene3dManifestResponse,
   UploadChunkResponse,
   UploadedFileRecord,
   UploadFilesResponse,
@@ -5293,6 +5294,61 @@ export class ApiClient {
       {},
       params
     );
+  }
+
+  // Lens scene3d: the derive job's manifest. Small JSON regardless of the (often
+  // multi-GB) source, because the control plane never parses a scene file in the
+  // request path — it serves what the worker already derived. While the job is
+  // still running the same endpoint answers with `{status:"deriving"}`, so callers
+  // poll this rather than treating a non-ready answer as an error.
+  async getScene3dManifest(fileId: string): Promise<Scene3dManifestResponse> {
+    return this.fetchJson<Scene3dManifestResponse>(
+      `/v2/uploads/${encodeURIComponent(fileId)}/scene3d/manifest`
+    );
+  }
+
+  // A single derived chunk (USX1 splats or UPC1 points), returned as raw bytes so
+  // the caller can build zero-copy typed-array views over the planar payload. The
+  // response is immutable + ETagged, and the caller passes a signal so in-flight
+  // tier fetches abort when the viewer unmounts mid-stream.
+  async fetchScene3dChunk(
+    fileId: string,
+    index: number,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ArrayBuffer> {
+    const safeFileId = encodeURIComponent(fileId);
+    const safeIndex = Math.max(0, Math.floor(Number(index) || 0));
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/chunk/${safeIndex}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: options.signal,
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return response.arrayBuffer();
+  }
+
+  // Spark's PagedSplats performs its own Range requests for the RAD header and the
+  // relative RADC pages named inside it. Give that loader the same authenticated
+  // request context as every ordinary API call; handing it a bare URL would work for
+  // an unauthenticated localhost and fail for real users behind X-API-Key auth.
+  getScene3dPagedLodSource(fileId: string): {
+    url: string;
+    requestHeader: Record<string, string>;
+    withCredentials: true;
+  } {
+    const safeFileId = encodeURIComponent(fileId);
+    const headerArtifact = encodeURIComponent("scene-lod.rad");
+    return {
+      url: buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/lod/${headerArtifact}`),
+      requestHeader: this.headers(),
+      withCredentials: true,
+    };
   }
 
   async getHdf5DatasetSummary(fileId: string, datasetPath: string): Promise<Hdf5DatasetSummary> {

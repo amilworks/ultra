@@ -16,6 +16,27 @@
 # built as linux/amd64 even when Docker Desktop's host default is arm64.
 ARG ULTRA_IMAGE_PLATFORM=linux/amd64
 
+# ---------- Stage 0: build Spark's scientific Gaussian LoD converter ----------
+#
+# The browser cannot safely ingest a 14.5M-splat / 3.2 GB PLY just to construct an LoD
+# tree. Build the official Spark converter once, at the exact renderer release used by
+# the frontend, and let the worker publish its paged RAD representation instead. The
+# immutable commit keeps this supply-chain input reproducible; --no-default-features
+# drops the optional GPU clustering stack, which the DC-only reference scene does not
+# need and which is unavailable in the worker container anyway.
+FROM --platform=${ULTRA_IMAGE_PLATFORM} rust:1.88-bookworm AS spark-lod-build
+ARG SPARK_REPO=https://github.com/sparkjsdev/spark.git
+ARG SPARK_REF=f22236f95fdd8078f0c12e3aab479523d401daf6
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates git \
+  && rm -rf /var/lib/apt/lists/*
+RUN git clone --filter=blob:none "${SPARK_REPO}" /src/spark \
+  && git -C /src/spark checkout --detach "${SPARK_REF}"
+WORKDIR /src/spark/rust
+RUN cargo build --release --locked --no-default-features --package build-lod \
+  && install -D -m 0755 target/release/build-lod /opt/spark/bin/spark-build-lod \
+  && install -D -m 0644 /src/spark/LICENSE /opt/spark/share/LICENSE
+
 # ---------- Stage 1: build the engine ----------
 FROM --platform=${ULTRA_IMAGE_PLATFORM} ubuntu:24.04 AS engine-build
 ENV DEBIAN_FRONTEND=noninteractive
@@ -77,6 +98,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Native engine: shared lib on the loader path + the CLI (used by the convert job).
 COPY --from=engine-build /opt/imgcnv/lib/ /usr/local/lib/
 COPY --from=engine-build /opt/imgcnv/bin/imgcnv /usr/local/bin/imgcnv
+COPY --from=spark-lod-build /opt/spark/bin/spark-build-lod /usr/local/bin/spark-build-lod
+COPY --from=spark-lod-build /opt/spark/share/LICENSE /usr/share/doc/spark-build-lod/LICENSE
 RUN ldconfig
 
 # Python image service from this repo + the libbioimage binding from the
@@ -94,6 +117,7 @@ RUN python -c 'import libbioimage.libbioimage as bim; formats = {str(name).lower
 # HDF5 uploads live on NFS; disable libhdf5 file locking so a read-only open
 # can't wedge on an NFS POSIX lock (belt-and-suspenders with hdf5.py locking=False).
 ENV HDF5_USE_FILE_LOCKING=FALSE
+ENV ULTRA_SCENE3D_BUILD_LOD=/usr/local/bin/spark-build-lod
 
 EXPOSE 8090
 # Default command runs the FastAPI image service; the same image also runs the

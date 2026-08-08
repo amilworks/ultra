@@ -11,6 +11,9 @@ importers:
       '@fontsource/jetbrains-mono':
         specifier: ^5.2.8
         version: 5.2.8
+      '@sparkjsdev/spark':
+        specifier: ^2.1.0
+        version: 2.1.0(three@0.184.0)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -1417,6 +1420,11 @@ packages:
   '@sindresorhus/merge-streams@4.0.0':
     resolution: {integrity: sha512-tlqY9xq5ukxTUZBmoOp+m61cqwQD5pHJtFY3Mn8CA8ps6yghLH/Hw8UPdqg4OLmFW3IFlcXnQNmo/dh8HzXYIQ==}
     engines: {node: '>=18'}
+
+  '@sparkjsdev/spark@2.1.0':
+    resolution: {integrity: sha512-BRw+MuMzx0B3K8fDLQygt2OHEhYUV+41RX7btq9pZ3rCVrq42o57jW34VAIvC7JO/84DJh/1AutACV9ym6BfVg==}
+    peerDependencies:
+      three: '>=0.180.0'
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -5425,6 +5433,11 @@ snapshots:
   '@shikijs/vscode-textmate@10.0.2': {}
 
   '@sindresorhus/merge-streams@4.0.0': {}
+
+  '@sparkjsdev/spark@2.1.0(three@0.184.0)':
+    dependencies:
+      fflate: 0.8.3
+      three: 0.184.0
 
   '@standard-schema/spec@1.1.0': {}
 

@@ -41,6 +41,18 @@ func TestDerivativeNameMatcherUsesExactOwnedGrammar(t *testing.T) {
 		"file_a__nifti.sha256-" + digest + ".nii",
 		"file_a__nifti.sha256-" + digest + ".nii.tmp",
 		".file_a__nifti.tmp-0123456789abcdef01234567.nii",
+		"file_a__scene3d.sha256-" + digest,
+		"file_a__scene3d.sha256-" + digest + ".failed",
+		".file_a__scene3d.sha256-" + digest + ".tmp-abcdefgh",
+		".file_a__scene3d.sha256-" + digest + ".failed.abcdefgh",
+		"file_a__scene3d.v2.sha256-" + digest,
+		"file_a__scene3d.v2.sha256-" + digest + ".failed",
+		".file_a__scene3d.v2.sha256-" + digest + ".tmp-abcdefgh",
+		".file_a__scene3d.v2.sha256-" + digest + ".failed.abcdefgh",
+		"file_a__scene3d.v3.sha256-" + digest,
+		"file_a__scene3d.v3.sha256-" + digest + ".failed",
+		".file_a__scene3d.v3.sha256-" + digest + ".tmp-abcdefgh",
+		".file_a__scene3d.v3.sha256-" + digest + ".failed.abcdefgh",
 	}
 	for _, name := range positives {
 		if !matcher.MatchString(name) {
@@ -55,10 +67,15 @@ func TestDerivativeNameMatcherUsesExactOwnedGrammar(t *testing.T) {
 		"file_a__nifti.nii",
 		"file_a__nifti.sha256-" + strings.Repeat("g", 64) + ".nii",
 		"file_ab__nifti.sha256-" + digest + ".nii",
+		"file_ab__scene3d.sha256-" + digest,
+		"file_a__scene3d.sha256-" + strings.Repeat("g", 64),
+		"file_a__scene3d.sha256-" + digest + ".tmp-abcdefgh",
+		"file_a__scene3d.sha256-" + digest + ".manifest.json",
 		"../file_a__pyramid.tif",
 		resourceLifecycleLockName("file_a"),
 		".file_a__pyramid.work.lock",
 		".file_a__nifti.work.lock",
+		".file_a__scene3d.work.lock",
 	}
 	for _, name := range negatives {
 		if matcher.MatchString(name) {
@@ -596,6 +613,9 @@ func TestScanOwnedDerivativeNamesForResourcesInventoriesBatchOnce(t *testing.T) 
 		"file_a": {
 			".file_a__pyramid.failed.abcdefgh",
 			"file_a__pyramid.sha256-" + digest + ".tif",
+			"file_a__scene3d.sha256-" + digest,
+			"file_a__scene3d.v2.sha256-" + digest,
+			"file_a__scene3d.v3.sha256-" + digest,
 		},
 		"file_a__pyramid_beta": {
 			"file_a__pyramid_beta__pyramid.manifest.json",
@@ -1292,6 +1312,73 @@ func TestOwnedDerivativeHardLinksCountReclaimedBytesOnce(t *testing.T) {
 	}
 	if freed != int64(len(payload)) {
 		t.Fatalf("hard-linked reclaimed bytes = %d, want %d", freed, len(payload))
+	}
+}
+
+func TestOwnedScene3dDerivativeDirectoriesAreReclaimedExactly(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	const resourceID = "file_scene"
+	digest := strings.Repeat("c", 64)
+	derivedPath := filepath.Join(rootPath, resourceDerivedDir)
+	if err := os.MkdirAll(derivedPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ownedNames := make([]string, 0, 8)
+	for _, version := range []string{"", ".v2", ".v3"} {
+		ownedDirectory := resourceID + "__scene3d" + version + ".sha256-" + digest
+		ownedTemporary := "." + ownedDirectory + ".tmp-abcdefgh"
+		for _, directory := range []string{ownedDirectory, ownedTemporary} {
+			path := filepath.Join(derivedPath, directory)
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "chunk_00000.bin"), []byte("scene bytes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ownedNames = append(ownedNames, directory)
+		}
+		ownedMarker := ownedDirectory + ".failed"
+		ownedMarkerTemporary := "." + ownedMarker + ".abcdefgh"
+		for _, name := range []string{ownedMarker, ownedMarkerTemporary} {
+			if err := os.WriteFile(filepath.Join(derivedPath, name), []byte("failure"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ownedNames = append(ownedNames, name)
+		}
+	}
+	ownedDirectory := resourceID + "__scene3d.sha256-" + digest
+	neighborDirectory := "file_scene_neighbor__scene3d.sha256-" + digest
+	if err := os.Mkdir(filepath.Join(derivedPath, neighborDirectory), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nearMiss := ownedDirectory + ".manifest.json"
+	if err := os.WriteFile(filepath.Join(derivedPath, nearMiss), []byte("not owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	lock, err := acquireResourceLifecycleLock(context.Background(), root, resourceID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.release()
+	if _, err := removeOwnedResourceNamespace(root, resourceID, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range ownedNames {
+		if _, err := os.Lstat(filepath.Join(derivedPath, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("owned scene derivative %q remains: %v", name, err)
+		}
+	}
+	for _, name := range []string{neighborDirectory, nearMiss} {
+		if _, err := os.Lstat(filepath.Join(derivedPath, name)); err != nil {
+			t.Fatalf("neighbor/near-miss %q was changed: %v", name, err)
+		}
 	}
 }
 

@@ -63,6 +63,22 @@ describe("ApiClient browser auth hardening", () => {
     );
   });
 
+  it("hands Spark an authenticated, credentialed RAD source without query secrets", () => {
+    const client = new ApiClient({
+      baseUrl: "https://ultra.example.org/control",
+      apiKey: "dev-secret",
+    });
+
+    const source = client.getScene3dPagedLodSource("file/with spaces");
+
+    expect(source).toEqual({
+      url: "https://ultra.example.org/v2/uploads/file%2Fwith%20spaces/scene3d/lod/scene-lod.rad",
+      requestHeader: { "X-API-Key": "dev-secret" },
+      withCredentials: true,
+    });
+    expect(new URL(source.url).searchParams.has("api_key")).toBe(false);
+  });
+
   it("honors same-origin advertised thumbnail URLs only when capability is ready", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org/control" });
 

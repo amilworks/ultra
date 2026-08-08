@@ -101,4 +101,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "tier2_chaos: fault-injection tests needing a docker daemon (real NATS JetStream)",
+    "slow: multi-second tests over real multi-gigabyte fixtures (opt in with -m slow)",
 ]

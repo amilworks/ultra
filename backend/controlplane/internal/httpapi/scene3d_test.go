@@ -216,6 +216,16 @@ func TestParsePlyHeaderDerivesLayoutFromTheHeader(t *testing.T) {
 	if crlf.dataOffset != int64(len(plyPointCloudHeader(7))+strings.Count(plyPointCloudHeader(7), "\n")) {
 		t.Fatalf("CRLF data offset = %d, want the byte length of the CRLF header", crlf.dataOffset)
 	}
+
+	// The Python worker can address a vertex element after a fixed-width prefix.
+	// Admission must compute the same offset instead of rejecting a file the worker
+	// can decode.
+	prefixedHeader := "ply\nformat binary_little_endian 1.0\nelement camera 2\nproperty float focal\n" +
+		"element vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n"
+	prefixed, ok := parsePlyHeader([]byte(prefixedHeader))
+	if !ok || prefixed.dataOffset != int64(len(prefixedHeader)+8) {
+		t.Fatalf("fixed-prefix data offset = %d (ok=%t), want %d", prefixed.dataOffset, ok, len(prefixedHeader)+8)
+	}
 }
 
 func TestParsePlyHeaderRejectsHeadersItCannotDescribeExactly(t *testing.T) {
@@ -234,8 +244,8 @@ func TestParsePlyHeaderRejectsHeadersItCannotDescribeExactly(t *testing.T) {
 				"property list uchar int extra\nend_header\n",
 		},
 		{
-			name: "vertex-is-not-the-first-element",
-			header: "ply\nformat binary_little_endian 1.0\nelement camera 2\nproperty float focal\n" +
+			name: "variable-width-element-before-vertex",
+			header: "ply\nformat binary_little_endian 1.0\nelement camera 2\nproperty list uchar float calibration\n" +
 				"element vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n",
 		},
 		{
@@ -244,6 +254,12 @@ func TestParsePlyHeaderRejectsHeadersItCannotDescribeExactly(t *testing.T) {
 				"element vertex 4\nproperty float x\nend_header\n",
 		},
 		{name: "no-coordinates", header: "ply\nformat binary_little_endian 1.0\nelement vertex 3\nproperty uchar red\nend_header\n"},
+		{name: "ascii", header: "ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n"},
+		{
+			name: "partial-splat-schema",
+			header: "ply\nformat binary_little_endian 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\n" +
+				"property float f_dc_0\nproperty float opacity\nproperty float scale_0\nproperty float rot_0\nend_header\n",
+		},
 		{name: "unknown-byte-order", header: "ply\nformat binary_middle_endian 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n"},
 		{name: "no-vertex-element", header: "ply\nformat binary_little_endian 1.0\nelement face 3\nproperty list uchar int vertex_indices\nend_header\n"},
 	}
@@ -257,12 +273,6 @@ func TestParsePlyHeaderRejectsHeadersItCannotDescribeExactly(t *testing.T) {
 		})
 	}
 
-	// ASCII is a legitimate PLY encoding with no fixed stride; it is classified,
-	// and its stride is reported as unknown rather than invented.
-	ascii, ok := parsePlyHeader([]byte("ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nend_header\n"))
-	if !ok || ascii.strideBytes != 0 || ascii.species != "pointcloud" {
-		t.Fatalf("ascii PLY = stride %d species %q (ok=%t), want stride 0 pointcloud", ascii.strideBytes, ascii.species, ok)
-	}
 }
 
 func TestPlyPeekBoundsTheReadAndVerifiesThePayloadIsPresent(t *testing.T) {
@@ -361,8 +371,9 @@ func TestScene3dNameClassification(t *testing.T) {
 		t.Fatalf("scene3dPeek(compact) = %+v ok=%t, want unsupported", info, ok)
 	}
 	notAPly := writePlyFixture(t, "fake.ply", []byte("this is not a PLY file at all"))
-	if resourceIsScene3d(resourceRecord{FileID: "f2", OriginalName: "fake.ply"}, notAPly) {
-		t.Fatal("resourceIsScene3d accepted a .ply whose header does not parse")
+	info, ok := scene3dPeek(resourceRecord{FileID: "f2", OriginalName: "fake.ply"}, notAPly)
+	if !ok || info.unsupportedReason == "" || scene3dCanDerive(resourceRecord{}, info) {
+		t.Fatalf("malformed named PLY = %+v ok=%t, want a recognized unsupported scene", info, ok)
 	}
 }
 
@@ -655,7 +666,7 @@ func TestColmapZipPeekReadsTheCentralDirectoryOnly(t *testing.T) {
 	t.Parallel()
 
 	// A model at any depth inside the archive is found; the members must share a
-	// directory, and the shallowest model wins so the choice is deterministic.
+	// directory, and exactly one model must exist before it can be derived.
 	nested := writeFixture(t, "reconstruction.zip", colmapZipBytes(t,
 		"office-scan/sparse/0/cameras.bin",
 		"office-scan/sparse/0/images.bin",
@@ -670,6 +681,9 @@ func TestColmapZipPeekReadsTheCentralDirectoryOnly(t *testing.T) {
 	if info.variant != "zip" || info.modelPath != "office-scan/sparse/0" {
 		t.Fatalf("variant/modelPath = %q/%q, want zip/office-scan/sparse/0", info.variant, info.modelPath)
 	}
+	if info.modelCount != 1 || len(info.modelPaths) != 1 || info.modelPaths[0] != info.modelPath {
+		t.Fatalf("unique model inventory = count %d paths %v", info.modelCount, info.modelPaths)
+	}
 	if info.recordFormat != "bin" || !info.hasPoints3D || info.points3DName != "points3D.bin" {
 		t.Fatalf("zip model = %+v, want bin records with points3D.bin", info)
 	}
@@ -680,12 +694,13 @@ func TestColmapZipPeekReadsTheCentralDirectoryOnly(t *testing.T) {
 		t.Fatalf("archive-root model = %+v (ok=%t), want modelPath \"\" txt without points3D", rootInfo, ok)
 	}
 
-	shallowest := writeFixture(t, "two-models.zip", colmapZipBytes(t,
+	ambiguous := writeFixture(t, "two-models.zip", colmapZipBytes(t,
 		"deep/wrapper/sparse/0/cameras.bin", "deep/wrapper/sparse/0/images.bin",
 		"sparse/cameras.bin", "sparse/images.bin",
 	))
-	if info, ok := colmapPeek(shallowest); !ok || info.modelPath != "sparse" {
-		t.Fatalf("two-model archive picked %q (ok=%t), want the shallowest (sparse)", info.modelPath, ok)
+	if info, ok := colmapPeek(ambiguous); !ok || info.modelCount != 2 || info.modelPath != "" ||
+		strings.Join(info.modelPaths, ",") != "sparse,deep/wrapper/sparse/0" {
+		t.Fatalf("two-model archive = %+v (ok=%t), want an explicit two-model ambiguity", info, ok)
 	}
 
 	// Members split across directories are not a model, however suggestive the names.
@@ -927,7 +942,7 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 					}
 					if !strings.HasSuffix(
 						fmt.Sprint(job.Metadata["dst_dir"]),
-						fileID+"__scene3d.v3.sha256-"+sourceSHA256,
+						fileID+"__scene3d.v4.sha256-"+sourceSHA256,
 					) {
 						t.Fatalf("scene.derive dst_dir = %v", job.Metadata["dst_dir"])
 					}
@@ -940,6 +955,39 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatalf("image service calls = %d, want zero for a 3D scene", imageServiceCalls.Load())
 			}
 		})
+	}
+}
+
+func TestScene3dViewerRejectsUnsupportedPlyBeforeImageOrWorkerDispatch(t *testing.T) {
+	t.Parallel()
+
+	var imageServiceCalls atomic.Int64
+	imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		imageServiceCalls.Add(1)
+		http.Error(w, "unsupported PLY must not reach the image service", http.StatusInternalServerError)
+	}))
+	defer imageService.Close()
+	router, _, _, publisher := newScene3dTestRouter(t, imageService.URL)
+	ascii := []byte("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n")
+	fileID := uploadNamedFileForProxyTest(t, router, "ascii-cloud.ply", ascii)
+
+	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	payload := decodeScene3dJSON(t, rec)
+	if payload["kind"] != "scene3d" || payload["status"] != "failed" || payload["decodable"] != false {
+		t.Fatalf("unsupported PLY descriptor = %v", payload)
+	}
+	message := fmt.Sprint(payload["message"])
+	if !strings.Contains(message, "ASCII PLY") || !strings.Contains(message, "binary") {
+		t.Fatalf("unsupported PLY message = %q", message)
+	}
+	if len(publisher.jobs) != 0 {
+		t.Fatalf("unsupported PLY queued jobs: %+v", publisher.jobs)
+	}
+	if imageServiceCalls.Load() != 0 {
+		t.Fatalf("image service calls = %d, want zero", imageServiceCalls.Load())
 	}
 }
 
@@ -981,8 +1029,8 @@ func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatalf("kind/scene_kind/format = %v/%v/%v, want scene3d/colmap/colmap",
 					payload["kind"], payload["scene_kind"], payload["format"])
 			}
-			if payload["status"] != "failed" || payload["decodable"] != true {
-				t.Fatalf("status/decodable = %v/%v, want failed/true", payload["status"], payload["decodable"])
+			if payload["status"] != "failed" || payload["decodable"] != false {
+				t.Fatalf("status/decodable = %v/%v, want failed/false", payload["status"], payload["decodable"])
 			}
 			source, sourceOK := payload["source"].(map[string]any)
 			if !sourceOK {
@@ -1043,6 +1091,55 @@ func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatal("shouldDerivePyramid accepted a COLMAP model record")
 			}
 		})
+	}
+}
+
+func TestScene3dColmapArchiveRefusesAmbiguousModelSelection(t *testing.T) {
+	t.Parallel()
+
+	router, _, _, publisher := newScene3dTestRouter(t, "")
+	raw := colmapZipBytes(t,
+		"sparse/0/cameras.bin", "sparse/0/images.bin", "sparse/0/points3D.bin",
+		"sparse/1/cameras.bin", "sparse/1/images.bin", "sparse/1/points3D.bin",
+	)
+	fileID := uploadNamedFileForProxyTest(t, router, "reconstruction.zip", raw)
+
+	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("viewer status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	payload := decodeScene3dJSON(t, rec)
+	if payload["kind"] != "scene3d" || payload["scene_kind"] != "colmap" ||
+		payload["status"] != "failed" || payload["decodable"] != false {
+		t.Fatalf("ambiguous descriptor = %v", payload)
+	}
+	source, ok := payload["source"].(map[string]any)
+	if !ok || source["model_count"] != float64(2) {
+		t.Fatalf("ambiguous source inventory = %v", payload["source"])
+	}
+	if _, selected := source["model_path"]; selected {
+		t.Fatalf("ambiguous source selected a model path: %v", source)
+	}
+	if !strings.Contains(fmt.Sprint(payload["message"]), "multiple COLMAP models") {
+		t.Fatalf("ambiguous message = %v", payload["message"])
+	}
+	if !containsSubstring(scene3dLimitationsFromPayload(t, payload), "does not choose one") {
+		t.Fatalf("ambiguous limitations = %v", payload["limitations"])
+	}
+	for _, queued := range publisher.jobs {
+		if queued.JobType == "scene.derive" || queued.JobType == "image.derive_pyramid" {
+			t.Fatalf("ambiguous COLMAP archive queued %q: %+v", queued.JobType, queued.Metadata)
+		}
+	}
+
+	manifest := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/manifest", nil)
+	if manifest.Code != http.StatusAccepted {
+		t.Fatalf("manifest status = %d body=%s", manifest.Code, manifest.Body.String())
+	}
+	manifestPayload := decodeScene3dJSON(t, manifest)
+	if manifestPayload["status"] != "failed" ||
+		!strings.Contains(fmt.Sprint(manifestPayload["error"]), "multiple COLMAP models") {
+		t.Fatalf("manifest ambiguity response = %v", manifestPayload)
 	}
 }
 

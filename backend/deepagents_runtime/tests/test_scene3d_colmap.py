@@ -444,21 +444,45 @@ def test_detect_model_dir_finds_sparse_0_from_a_parent(tmp_path):
 
 def test_detect_model_dir_accepts_sparse_and_dense_sparse(tmp_path):
     flat = tmp_path / "flat"
-    write_model(flat / "sparse", points=sample_points(4))
+    write_model(
+        flat / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
     dense = tmp_path / "dense-run"
-    write_model(dense / "dense" / "sparse", points=sample_points(4))
+    write_model(
+        dense / "dense" / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
 
     assert colmap.detect_model_dir(flat) == str(flat / "sparse")
     assert colmap.detect_model_dir(dense) == str(dense / "dense" / "sparse")
 
 
-def test_detect_model_dir_prefers_a_binary_model_over_a_text_one(tmp_path):
+def test_detect_model_dir_refuses_multiple_reconstructions(tmp_path):
     root = tmp_path / "both"
-    write_model(root / "sparse" / "0", points=sample_points(4), text=True)
-    write_model(root / "dense" / "sparse", points=sample_points(4))
+    write_model(
+        root / "sparse" / "0",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+        text=True,
+    )
+    write_model(
+        root / "dense" / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
 
-    # sparse/0 is searched first, but it is text-only; the .bin model wins.
-    assert colmap.detect_model_dir(root) == str(root / "dense" / "sparse")
+    assert colmap.detect_model_dirs(root) == (
+        str(root / "sparse" / "0"),
+        str(root / "dense" / "sparse"),
+    )
+    assert colmap.detect_model_dir(root) is None
 
 
 def test_model_files_prefers_bin_when_both_flavours_sit_together(tmp_path):
@@ -480,16 +504,25 @@ def test_detect_model_dir_returns_none_for_anything_that_is_not_a_model(tmp_path
     (plain / "scene.ply").write_bytes(b"ply\nformat binary_little_endian 1.0\n")
     calibration_only = tmp_path / "calibration"
     write_model(calibration_only, cameras=[PINHOLE_CAMERA])
+    points_only = tmp_path / "points-only"
+    write_model(points_only, points=sample_points(4))
 
     assert colmap.detect_model_dir(plain) is None
     assert colmap.detect_model_dir(plain / "scene.ply") is None
     assert colmap.detect_model_dir(tmp_path / "absent") is None
     # cameras alone is a calibration, not a scene.
     assert colmap.detect_model_dir(calibration_only) is None
+    # A points table alone does not prove a complete COLMAP reconstruction.
+    assert colmap.detect_model_dir(points_only) is None
 
 
 def test_detect_model_dir_accepts_a_path_to_one_of_the_model_files(tmp_path):
-    model_dir = write_model(tmp_path / "sparse" / "0", points=sample_points(4))
+    model_dir = write_model(
+        tmp_path / "sparse" / "0",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
 
     assert colmap.detect_model_dir(model_dir / "points3D.bin") == str(model_dir)
 
@@ -497,7 +530,12 @@ def test_detect_model_dir_accepts_a_path_to_one_of_the_model_files(tmp_path):
 def test_a_ply_named_after_a_colmap_table_is_not_redirected_at_the_model(tmp_path):
     """`points3D.ply` beside a model is still a PLY; deriving the model instead would
     hand the caller a scene it did not ask for."""
-    model_dir = write_model(tmp_path / "sparse", points=sample_points(4))
+    model_dir = write_model(
+        tmp_path / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
     decoy = model_dir / "points3D.ply"
     decoy.write_bytes(b"ply\nformat binary_little_endian 1.0\nend_header\n")
 
@@ -523,7 +561,12 @@ def test_a_model_carrying_rigs_and_frames_still_parses(tmp_path):
     assert len(colmap.read_cameras(model_dir)) == 1
     assert colmap.read_points3d(model_dir)[0].shape == (16, 3)
     # A legacy model has neither file and is not treated as deficient.
-    legacy = write_model(tmp_path / "legacy", points=sample_points(4))
+    legacy = write_model(
+        tmp_path / "legacy",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(4),
+    )
     assert colmap.model_files(legacy).has_rig_metadata is False
 
 
@@ -829,7 +872,12 @@ def test_an_empty_model_fails_deterministically(tmp_path):
 
 
 def test_a_corrupt_model_fails_deterministically_not_transiently(tmp_path):
-    model_dir = write_model(tmp_path / "sparse", points=sample_points(8))
+    model_dir = write_model(
+        tmp_path / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(8),
+    )
     (model_dir / "points3D.bin").write_bytes(struct.pack("<Q", 4) + b"\x01" * 9)
 
     with pytest.raises(DeterministicDerivativeError) as caught:

@@ -66,6 +66,14 @@ const toNonNegativeInt = (value: unknown, fallback: number): number =>
 const toNumberArray = (value: unknown): number[] =>
   Array.isArray(value) ? value.map((entry) => toFiniteNumber(entry, 0)) : [];
 
+const toStringArray = (value: unknown): string[] =>
+  Array.isArray(value) ? value.map((entry) => String(entry)) : [];
+
+const summarizeProperties = (values: string[], limit = 8): string => {
+  if (values.length <= limit) return values.join(", ");
+  return `${values.slice(0, limit).join(", ")}, +${values.length - limit} more`;
+};
+
 const toTriple = (value: unknown): [number, number, number] => {
   const parsed = toNumberArray(value);
   return [parsed[0] ?? 0, parsed[1] ?? 0, parsed[2] ?? 0];
@@ -167,6 +175,11 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
   }
 
   const source: Record<string, unknown> = isRecord(raw.source) ? raw.source : {};
+  const propertyProvenance: Record<string, unknown> | null = isRecord(
+    source.property_provenance
+  )
+    ? source.property_provenance
+    : null;
   const world: Record<string, unknown> = isRecord(raw.world) ? raw.world : {};
   const urls: Record<string, unknown> = isRecord(raw.service_urls) ? raw.service_urls : {};
   return {
@@ -187,6 +200,21 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
         declared_sh_degree: toNonNegativeInt(source.declared_sh_degree, 0),
         measured_sh_degree: toNonNegativeInt(source.measured_sh_degree, 0),
         stride_bytes: toNonNegativeInt(source.stride_bytes, 0),
+        property_provenance: propertyProvenance
+          ? {
+            preserved: toStringArray(propertyProvenance.preserved),
+            synthesized: toStringArray(propertyProvenance.synthesized),
+            omitted: toStringArray(propertyProvenance.omitted),
+            omitted_elements: Array.isArray(propertyProvenance.omitted_elements)
+              ? propertyProvenance.omitted_elements
+                .filter(isRecord)
+                .map((element) => ({
+                  name: String(element.name ?? "element"),
+                  count: toNonNegativeInt(element.count, 0),
+                }))
+              : [],
+          }
+          : undefined,
       },
       world: {
         units: String(world.units ?? "arbitrary"),
@@ -497,6 +525,40 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
                     <>
                       <dt>stride</dt>
                       <dd>{count(scene.manifest.source.stride_bytes)} B</dd>
+                    </>
+                  ) : null}
+                  {scene.manifest.source.property_provenance?.preserved.length ? (
+                    <>
+                      <dt>preserved</dt>
+                      <dd title={scene.manifest.source.property_provenance.preserved.join(", ")}>
+                        {summarizeProperties(scene.manifest.source.property_provenance.preserved)}
+                      </dd>
+                    </>
+                  ) : null}
+                  {scene.manifest.source.property_provenance?.synthesized.length ? (
+                    <>
+                      <dt>synthesized</dt>
+                      <dd title={scene.manifest.source.property_provenance.synthesized.join(", ")}>
+                        {summarizeProperties(scene.manifest.source.property_provenance.synthesized)}
+                      </dd>
+                    </>
+                  ) : null}
+                  {scene.manifest.source.property_provenance?.omitted.length ? (
+                    <>
+                      <dt>omitted</dt>
+                      <dd title={scene.manifest.source.property_provenance.omitted.join(", ")}>
+                        {summarizeProperties(scene.manifest.source.property_provenance.omitted)}
+                      </dd>
+                    </>
+                  ) : null}
+                  {scene.manifest.source.property_provenance?.omitted_elements.length ? (
+                    <>
+                      <dt>omitted elements</dt>
+                      <dd>
+                        {scene.manifest.source.property_provenance.omitted_elements
+                          .map((element) => `${element.name} (${count(element.count)})`)
+                          .join(", ")}
+                      </dd>
                     </>
                   ) : null}
                 </dl>

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,10 +31,10 @@ import (
 // engine for nothing. It is served instead from a DERIVED, chunked stream that
 // the imaging worker builds once (see backend/contracts/scene3d/CONTRACT.md §7):
 //
-//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/manifest.json
-//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/chunk_{n:05d}.bin
-//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/scene-lod.{rad,radc}
-//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}.failed
+//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/manifest.json
+//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/chunk_{n:05d}.bin
+//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/scene-lod.{rad,radc}
+//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}.failed
 //
 // The control plane NEVER parses a scene file in the request path. The real
 // files are 3.4 GB with 14.5M splats; everything here is a bounded 64 KiB header
@@ -77,7 +78,7 @@ const (
 	scene3dLodHeaderName   = "scene-lod.rad"
 	scene3dLodChunkPrefix  = "scene-lod-"
 	scene3dLodChunkSuffix  = ".radc"
-	scene3dDerivativeRev   = "v3"
+	scene3dDerivativeRev   = "v4"
 
 	// scene3dMaxChunkIndex caps the addressable chunk space. At the default
 	// 50k elements per chunk this is 5e10 elements — far past any real scene —
@@ -128,6 +129,14 @@ type plyProperty struct {
 	size int
 }
 
+type plyElementInfo struct {
+	name          string
+	count         int64
+	propertyNames []string
+	strideBytes   int64
+	hasList       bool
+}
+
 // plyInfo is everything the bounded header peek can PROVE about a PLY file.
 // declaredSHDegree is what the header allocates, never what the data contains —
 // the measured degree is scanned by the derive job and reported in the manifest
@@ -141,6 +150,8 @@ type plyInfo struct {
 	declaredSHDegree int
 	restCount        int // f_rest_* property count the degree was derived from
 	propertyCount    int
+	propertyNames    []string
+	elements         []plyElementInfo
 	writer           string // parsed from PLY comments when recognizable
 }
 
@@ -153,7 +164,19 @@ type scene3dInfo struct {
 	hasPly    bool
 	colmap    colmapInfo
 	hasColmap bool
+	// unsupportedReason is non-empty only for a named Scene3D container whose
+	// schema Lens can identify but cannot decode without scientific ambiguity.
+	// Such a file must stay on the Scene3D path so it never falls through to the
+	// image service or a worker that will reject it later.
+	unsupportedReason string
 }
+
+var (
+	errPlyASCII              = errors.New("ASCII PLY is not supported; re-export it as binary_little_endian or binary_big_endian PLY")
+	errPlyIncompleteSplat    = errors.New("incomplete Gaussian-splat schema")
+	errPlyVariablePrefix     = errors.New("variable-width element precedes the vertex element")
+	errPlyUnsupportedPayload = errors.New("PLY header or payload cannot be addressed safely")
+)
 
 // plyScalarSizes is the PLY scalar type table (both the modern and legacy names).
 var plyScalarSizes = map[string]int{
@@ -186,26 +209,29 @@ var plyKnownWriters = []struct {
 }
 
 // parsePlyHeader reads the ASCII header out of the peeked prefix and derives the
-// vertex element's stride and data offset FROM THE HEADER. It returns ok=false
-// for anything it cannot describe exactly: a non-PLY magic, a header that does
-// not fit the peek window, a vertex element that is not first (its data would
-// then start after elements whose sizes we refuse to assume), or a vertex list
-// property (no fixed stride).
+// vertex element's stride and data offset FROM THE HEADER. The boolean wrapper
+// is retained for the existing bounded-probe API; the detailed parser carries a
+// stable reason to the viewer when a named PLY is unsupported.
 func parsePlyHeader(head []byte) (plyInfo, bool) {
+	info, err := parsePlyHeaderDetailed(head)
+	return info, err == nil
+}
+
+func parsePlyHeaderDetailed(head []byte) (plyInfo, error) {
 	if !bytes.HasPrefix(head, []byte("ply")) {
-		return plyInfo{}, false // cheap rejection: not a PLY at all
+		return plyInfo{}, fmt.Errorf("%w: missing PLY magic", errPlyUnsupportedPayload)
 	}
 	info := plyInfo{}
-	var properties []plyProperty
-	element := ""
-	elementIndex := -1
+	var elements []plyElementInfo
+	currentElement := -1
 	vertexElementIndex := -1
+	var properties []plyProperty
 	sawMagic := false
 	offset := 0
 	for offset < len(head) {
 		newline := bytes.IndexByte(head[offset:], '\n')
 		if newline < 0 {
-			return plyInfo{}, false // header incomplete inside the peek window
+			return plyInfo{}, fmt.Errorf("%w: header exceeds the bounded peek", errPlyUnsupportedPayload)
 		}
 		line := strings.TrimRight(string(head[offset:offset+newline]), "\r")
 		offset += newline + 1
@@ -216,12 +242,12 @@ func parsePlyHeader(head []byte) (plyInfo, bool) {
 		switch fields[0] {
 		case "ply":
 			if sawMagic || len(fields) != 1 {
-				return plyInfo{}, false
+				return plyInfo{}, fmt.Errorf("%w: malformed PLY magic", errPlyUnsupportedPayload)
 			}
 			sawMagic = true
 		case "format":
-			if len(fields) < 2 {
-				return plyInfo{}, false
+			if len(fields) != 3 || fields[2] != "1.0" {
+				return plyInfo{}, fmt.Errorf("%w: unsupported PLY format declaration", errPlyUnsupportedPayload)
 			}
 			info.byteOrder = fields[1]
 		case "comment":
@@ -230,77 +256,143 @@ func parsePlyHeader(head []byte) (plyInfo, bool) {
 			}
 		case "element":
 			if len(fields) != 3 {
-				return plyInfo{}, false
+				return plyInfo{}, fmt.Errorf("%w: malformed element declaration", errPlyUnsupportedPayload)
+			}
+			if info.byteOrder == "" {
+				return plyInfo{}, fmt.Errorf("%w: element declared before format", errPlyUnsupportedPayload)
 			}
 			count, err := strconv.ParseInt(fields[2], 10, 64)
 			if err != nil || count < 0 {
-				return plyInfo{}, false
+				return plyInfo{}, fmt.Errorf("%w: invalid element count", errPlyUnsupportedPayload)
 			}
-			elementIndex++
-			element = fields[1]
-			if element == "vertex" {
+			elements = append(elements, plyElementInfo{name: fields[1], count: count})
+			currentElement = len(elements) - 1
+			if fields[1] == "vertex" {
 				if vertexElementIndex >= 0 {
-					return plyInfo{}, false // two vertex elements: ambiguous
+					return plyInfo{}, fmt.Errorf("%w: duplicate vertex element", errPlyUnsupportedPayload)
 				}
-				vertexElementIndex = elementIndex
+				vertexElementIndex = currentElement
 				info.vertexCount = count
 			}
 		case "property":
-			if element != "vertex" {
-				continue // other elements (faces, …) do not affect the vertex layout
+			if currentElement < 0 {
+				return plyInfo{}, fmt.Errorf("%w: property declared before an element", errPlyUnsupportedPayload)
 			}
+			element := &elements[currentElement]
 			if len(fields) >= 2 && fields[1] == "list" {
-				return plyInfo{}, false // variable-length vertex record: no stride
+				if len(fields) != 5 {
+					return plyInfo{}, fmt.Errorf("%w: malformed list property", errPlyUnsupportedPayload)
+				}
+				if _, known := plyScalarSizes[fields[2]]; !known {
+					return plyInfo{}, fmt.Errorf("%w: unknown list-count scalar type", errPlyUnsupportedPayload)
+				}
+				if _, known := plyScalarSizes[fields[3]]; !known {
+					return plyInfo{}, fmt.Errorf("%w: unknown list-item scalar type", errPlyUnsupportedPayload)
+				}
+				for _, existing := range element.propertyNames {
+					if existing == fields[4] {
+						return plyInfo{}, fmt.Errorf("%w: duplicate property %q", errPlyUnsupportedPayload, fields[4])
+					}
+				}
+				element.hasList = true
+				element.propertyNames = append(element.propertyNames, fields[4])
+				if element.name == "vertex" {
+					return plyInfo{}, fmt.Errorf("%w: variable-width vertex records", errPlyUnsupportedPayload)
+				}
+				continue
 			}
 			if len(fields) != 3 {
-				return plyInfo{}, false
+				return plyInfo{}, fmt.Errorf("%w: malformed scalar property", errPlyUnsupportedPayload)
 			}
 			size, known := plyScalarSizes[fields[1]]
 			if !known {
-				return plyInfo{}, false
+				return plyInfo{}, fmt.Errorf("%w: unknown scalar type", errPlyUnsupportedPayload)
 			}
-			properties = append(properties, plyProperty{name: fields[2], size: size})
+			for _, existing := range element.propertyNames {
+				if existing == fields[2] {
+					return plyInfo{}, fmt.Errorf("%w: duplicate property %q", errPlyUnsupportedPayload, fields[2])
+				}
+			}
+			element.propertyNames = append(element.propertyNames, fields[2])
+			element.strideBytes += int64(size)
+			if element.name == "vertex" {
+				properties = append(properties, plyProperty{name: fields[2], size: size})
+			}
 		case "end_header":
-			if !sawMagic || vertexElementIndex != 0 || len(properties) == 0 {
-				return plyInfo{}, false
+			if !sawMagic || vertexElementIndex < 0 || len(properties) == 0 {
+				return plyInfo{}, fmt.Errorf("%w: no fixed-width vertex element", errPlyUnsupportedPayload)
 			}
-			info.dataOffset = int64(offset)
+			if info.byteOrder == "ascii" {
+				return plyInfo{}, errPlyASCII
+			}
+			if info.byteOrder != "binary_little_endian" && info.byteOrder != "binary_big_endian" {
+				return plyInfo{}, fmt.Errorf("%w: unsupported byte order", errPlyUnsupportedPayload)
+			}
+			dataOffset := int64(offset)
+			for index := 0; index < vertexElementIndex; index++ {
+				prefix := elements[index]
+				if prefix.hasList {
+					return plyInfo{}, errPlyVariablePrefix
+				}
+				prefixBytes, exact := checkedNonNegativeProduct(prefix.count, prefix.strideBytes)
+				if !exact || prefixBytes > math.MaxInt64-dataOffset {
+					return plyInfo{}, fmt.Errorf("%w: element offsets overflow", errPlyUnsupportedPayload)
+				}
+				dataOffset += prefixBytes
+			}
+			info.dataOffset = dataOffset
 			info.propertyCount = len(properties)
 			for _, property := range properties {
 				info.strideBytes += property.size
+				info.propertyNames = append(info.propertyNames, property.name)
 			}
-			if info.byteOrder == "ascii" {
-				info.strideBytes = 0 // ascii records are not fixed-width
-			} else if info.byteOrder != "binary_little_endian" && info.byteOrder != "binary_big_endian" {
-				return plyInfo{}, false
-			}
-			species, classified := classifyPlyProperties(properties)
-			if !classified {
-				return plyInfo{}, false
+			species, err := classifyPlyPropertiesDetailed(properties)
+			if err != nil {
+				return plyInfo{}, err
 			}
 			info.species = species
 			info.restCount, info.declaredSHDegree = plyDeclaredSHDegree(properties)
-			return info, true
+			info.elements = elements
+			return info, nil
 		}
 	}
-	return plyInfo{}, false
+	return plyInfo{}, fmt.Errorf("%w: missing end_header", errPlyUnsupportedPayload)
 }
 
 // classifyPlyProperties names the species from the property set. Splats carry
 // the INRIA parameter block (DC colour, opacity, log scales, rotation quat);
 // anything else with coordinates is a point cloud.
 func classifyPlyProperties(properties []plyProperty) (string, bool) {
+	species, err := classifyPlyPropertiesDetailed(properties)
+	return species, err == nil
+}
+
+func classifyPlyPropertiesDetailed(properties []plyProperty) (string, error) {
 	present := make(map[string]bool, len(properties))
 	for _, property := range properties {
 		present[property.name] = true
 	}
 	if !present["x"] || !present["y"] || !present["z"] {
-		return "", false // not a scene we can place in space
+		return "", fmt.Errorf("%w: missing x/y/z coordinates", errPlyUnsupportedPayload)
 	}
-	if present["f_dc_0"] && present["opacity"] && present["scale_0"] && present["rot_0"] {
-		return "splat", true
+	required := []string{
+		"x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2", "opacity",
+		"scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
 	}
-	return "pointcloud", true
+	completeSplat := true
+	for _, name := range required {
+		completeSplat = completeSplat && present[name]
+	}
+	if completeSplat {
+		return "splat", nil
+	}
+	for name := range present {
+		if name == "opacity" || strings.HasPrefix(name, "f_dc_") || strings.HasPrefix(name, "f_rest_") ||
+			strings.HasPrefix(name, "scale_") || strings.HasPrefix(name, "rot_") {
+			return "", errPlyIncompleteSplat
+		}
+	}
+	return "pointcloud", nil
 }
 
 // plyDeclaredSHDegree derives the DECLARED spherical-harmonic degree from the
@@ -339,31 +431,34 @@ func plyWriterFromComment(line string) string {
 // It also verifies the payload is actually present (size ≥ offset + count×stride):
 // a truncated splat file must not be advertised as renderable.
 func plyPeek(path string) (plyInfo, bool) {
+	info, err := plyPeekDetailed(path)
+	return info, err == nil
+}
+
+func plyPeekDetailed(path string) (plyInfo, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return plyInfo{}, false
+		return plyInfo{}, err
 	}
 	defer func() { _ = file.Close() }()
 	stat, err := file.Stat()
 	if err != nil || !stat.Mode().IsRegular() {
-		return plyInfo{}, false
+		return plyInfo{}, fmt.Errorf("%w: PLY is not a regular file", errPlyUnsupportedPayload)
 	}
 	head := make([]byte, plyHeaderPeekMaxBytes)
 	read, err := io.ReadFull(file, head)
 	if read == 0 || (err != nil && err != io.ErrUnexpectedEOF && err != io.EOF) {
-		return plyInfo{}, false
+		return plyInfo{}, fmt.Errorf("%w: PLY header cannot be read", errPlyUnsupportedPayload)
 	}
-	info, ok := parsePlyHeader(head[:read])
-	if !ok {
-		return plyInfo{}, false
+	info, err := parsePlyHeaderDetailed(head[:read])
+	if err != nil {
+		return plyInfo{}, err
 	}
-	if info.strideBytes > 0 {
-		payloadBytes, exact := checkedNonNegativeProduct(info.vertexCount, int64(info.strideBytes))
-		if !exact || payloadBytes > stat.Size()-info.dataOffset {
-			return plyInfo{}, false // truncated: the declared vertices are not on disk
-		}
+	payloadBytes, exact := checkedNonNegativeProduct(info.vertexCount, int64(info.strideBytes))
+	if !exact || info.dataOffset > stat.Size() || payloadBytes > stat.Size()-info.dataOffset {
+		return plyInfo{}, fmt.Errorf("%w: truncated vertex payload", errPlyUnsupportedPayload)
 	}
-	return info, true
+	return info, nil
 }
 
 // --- COLMAP model recognition ------------------------------------------------
@@ -375,6 +470,8 @@ func plyPeek(path string) (plyInfo, bool) {
 type colmapInfo struct {
 	variant      string // "directory" | "zip"
 	modelPath    string // slash-separated model root relative to the resource ("" = at the root)
+	modelCount   int
+	modelPaths   []string
 	recordFormat string // "bin" | "txt" | "mixed"
 	camerasName  string // the member name as it actually appears
 	imagesName   string
@@ -491,6 +588,7 @@ func colmapPeek(path string) (colmapInfo, bool) {
 // 13 stats, and a root that is not a model costs 2 (cameras.bin, cameras.txt) —
 // which is what makes this affordable in the request path.
 func colmapDirectoryPeek(root string) (colmapInfo, bool) {
+	models := []colmapInfo{}
 	for _, modelPath := range colmapModelRoots {
 		directory := root
 		if modelPath != "" {
@@ -505,10 +603,10 @@ func colmapDirectoryPeek(root string) (colmapInfo, bool) {
 		}
 		if info, ok := colmapModelFromMembers(modelPath, lookup); ok {
 			info.variant = "directory"
-			return info, true
+			models = append(models, info)
 		}
 	}
-	return colmapInfo{}, false
+	return summarizeColmapModels("directory", models)
 }
 
 // colmapZipPeek recognizes a zipped model from the archive's CENTRAL DIRECTORY
@@ -551,7 +649,7 @@ func colmapZipPeek(path string, size int64) (colmapInfo, bool) {
 			members[directory][lower] = base
 		}
 	}
-	best, found := colmapInfo{}, false
+	models := []colmapInfo{}
 	for directory, names := range members {
 		lookup := func(candidate string) (string, bool) {
 			actual, present := names[strings.ToLower(candidate)]
@@ -561,18 +659,38 @@ func colmapZipPeek(path string, size int64) (colmapInfo, bool) {
 		if !ok {
 			continue
 		}
-		// Deterministic choice: the shallowest model wins (an archive that wraps a
-		// model in one folder is the common case), ties broken lexicographically, so
-		// the same archive always reports the same model root.
-		if !found || colmapModelRootPrecedes(info.modelPath, best.modelPath) {
-			best, found = info, true
-		}
+		models = append(models, info)
 	}
-	if !found {
+	return summarizeColmapModels("zip", models)
+}
+
+// summarizeColmapModels preserves every candidate root. A unique model exposes
+// its detailed layout; an ambiguous resource deliberately exposes only the
+// sorted candidate paths so neither the request path nor the worker silently
+// decides which reconstruction represents the scientist's data.
+func summarizeColmapModels(variant string, models []colmapInfo) (colmapInfo, bool) {
+	if len(models) == 0 {
 		return colmapInfo{}, false
 	}
-	best.variant = "zip"
-	return best, true
+	sort.Slice(models, func(left, right int) bool {
+		return colmapModelRootPrecedes(models[left].modelPath, models[right].modelPath)
+	})
+	paths := make([]string, 0, len(models))
+	for _, model := range models {
+		paths = append(paths, model.modelPath)
+	}
+	if len(models) == 1 {
+		info := models[0]
+		info.variant = variant
+		info.modelCount = 1
+		info.modelPaths = paths
+		return info, true
+	}
+	return colmapInfo{
+		variant:    variant,
+		modelCount: len(models),
+		modelPaths: paths,
+	}, true
 }
 
 // colmapModelRootPrecedes orders candidate model roots: shallower first, then
@@ -736,9 +854,10 @@ func scene3dFormatFromName(name string) string {
 	return ""
 }
 
-// scene3dPeek classifies a resource as a 3D scene. PLY must parse — a file named
-// .ply whose header we cannot describe falls through to the normal ladder and
-// ends up as an honest "unsupported" descriptor rather than an empty canvas.
+// scene3dPeek classifies a resource as a 3D scene. A named PLY stays on this
+// path even when its schema is unsupported, so Lens can show the precise format
+// failure instead of handing the file to the image service or drawing an empty
+// canvas.
 //
 // A COLMAP reconstruction carries no name signal, so it is probed structurally
 // once the name has proven to be none of the single-file containers. That order
@@ -755,11 +874,26 @@ func scene3dPeek(record resourceRecord, path string) (scene3dInfo, bool) {
 		}
 		return scene3dInfo{}, false
 	}
-	ply, ok := plyPeek(path)
-	if !ok {
-		return scene3dInfo{}, false
+	ply, err := plyPeekDetailed(path)
+	if err != nil {
+		return scene3dInfo{
+			format:            "ply",
+			sceneKind:         "unknown",
+			unsupportedReason: plyUnsupportedReason(err),
+		}, true
 	}
 	return scene3dInfo{format: format, sceneKind: ply.species, ply: ply, hasPly: true}, true
+}
+
+func plyUnsupportedReason(err error) string {
+	switch {
+	case errors.Is(err, errPlyASCII):
+		return errPlyASCII.Error() + "."
+	case errors.Is(err, errPlyIncompleteSplat):
+		return "The PLY declares Gaussian-splat properties but its schema is incomplete; export x/y/z, f_dc_0..2, opacity, scale_0..2, and rot_0..3."
+	default:
+		return "This PLY header or payload cannot be addressed safely by Lens."
+	}
 }
 
 func resourceIsScene3d(record resourceRecord, path string) bool {
@@ -777,7 +911,13 @@ func scene3dCanDerive(record resourceRecord, info scene3dInfo) bool {
 	if !isSHA256Hex(strings.ToLower(strings.TrimSpace(record.SHA256))) || record.SizeBytes < 0 {
 		return false
 	}
-	return !info.hasColmap || info.colmap.variant != "directory"
+	if info.unsupportedReason != "" {
+		return false
+	}
+	if info.hasColmap {
+		return info.colmap.variant != "directory" && info.colmap.modelCount == 1
+	}
+	return true
 }
 
 // --- derived artifacts -------------------------------------------------------
@@ -924,6 +1064,7 @@ func (deps ServerDeps) handleGetUploadScene3dManifest(w http.ResponseWriter, r *
 		writeJSON(w, http.StatusAccepted, map[string]any{
 			"status":  "failed",
 			"file_id": record.FileID,
+			"error":   scene3dMessage(info, "failed"),
 		})
 		return
 	}
@@ -1100,6 +1241,7 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 		if info.ply.writer != "" {
 			source["writer"] = info.ply.writer
 		}
+		source["vertex_properties"] = append([]string(nil), info.ply.propertyNames...)
 	}
 	if info.hasColmap {
 		// Layout facts only: which container, where the model root is, how its
@@ -1107,20 +1249,25 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 		// absent on purpose — both require walking a variable-stride file, which is
 		// the derive job's work and never this path's.
 		source["variant"] = info.colmap.variant
-		source["model_path"] = info.colmap.modelPath
-		source["record_format"] = info.colmap.recordFormat
-		source["cameras_file"] = info.colmap.camerasName
-		source["images_file"] = info.colmap.imagesName
-		source["has_points3d"] = info.colmap.hasPoints3D
-		if info.colmap.hasPoints3D {
-			source["points3d_file"] = info.colmap.points3DName
+		source["model_count"] = info.colmap.modelCount
+		source["model_paths"] = append([]string(nil), info.colmap.modelPaths...)
+		if info.colmap.modelCount == 1 {
+			source["model_path"] = info.colmap.modelPath
+			source["record_format"] = info.colmap.recordFormat
+			source["cameras_file"] = info.colmap.camerasName
+			source["images_file"] = info.colmap.imagesName
+			source["has_points3d"] = info.colmap.hasPoints3D
+			if info.colmap.hasPoints3D {
+				source["points3d_file"] = info.colmap.points3DName
+			}
+			source["has_rigs"] = info.colmap.hasRigs
+			source["has_frames"] = info.colmap.hasFrames
 		}
-		source["has_rigs"] = info.colmap.hasRigs
-		source["has_frames"] = info.colmap.hasFrames
 	}
+	decodable := scene3dCanDerive(record, info)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"kind":          "scene3d",
-		"decodable":     true,
+		"decodable":     decodable,
 		"file_id":       record.FileID,
 		"original_name": record.OriginalName,
 		"format":        info.format,
@@ -1140,6 +1287,9 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 }
 
 func scene3dMessage(info scene3dInfo, status string) string {
+	if info.unsupportedReason != "" {
+		return info.unsupportedReason
+	}
 	subject := "Point-cloud scene"
 	switch info.sceneKind {
 	case "splat":
@@ -1152,6 +1302,10 @@ func scene3dMessage(info scene3dInfo, status string) string {
 		return subject + " — streamed as derived, chunked geometry in the source world frame. " +
 			"The original file is never sent to the browser; download it to open it in a desktop tool."
 	case "failed":
+		if info.hasColmap && info.colmap.modelCount > 1 {
+			return subject + " — this archive contains multiple COLMAP models, so Lens does not choose one. " +
+				"Export or upload one reconstruction per archive."
+		}
 		if info.hasColmap && info.colmap.variant == "directory" {
 			return subject + " — archive the model directory as a zip before uploading it. " +
 				"That gives every camera and point record one immutable source identity for accurate derivation."
@@ -1166,15 +1320,25 @@ func scene3dMessage(info scene3dInfo, status string) string {
 // viewer is NOT doing, rendered verbatim in the provenance panel.
 func scene3dLimitations(info scene3dInfo, status string) []string {
 	limitations := []string{}
+	if info.unsupportedReason != "" {
+		return []string{info.unsupportedReason}
+	}
 	switch status {
 	case "deriving":
 		limitations = append(limitations, "The streamable scene is still being derived; nothing is rendered until its manifest exists.")
 	case "failed":
-		if !(info.hasColmap && info.colmap.variant == "directory") {
+		if !(info.hasColmap && (info.colmap.variant == "directory" || info.colmap.modelCount > 1)) {
 			limitations = append(limitations, "Deriving the streamable scene failed permanently for this file; nothing is rendered.")
 		}
 	}
 	if info.hasColmap {
+		if info.colmap.modelCount > 1 {
+			limitations = append(limitations,
+				fmt.Sprintf("This resource contains %d COLMAP models. Lens reports every model root and does not choose one because they may represent different reconstructions.", info.colmap.modelCount),
+				"Upload one reconstruction per archive to derive and render it.",
+			)
+			return limitations
+		}
 		limitations = append(limitations,
 			"The reconstruction is recognized from its layout alone; no camera, image or point record is read until the derive job runs.")
 		if info.colmap.variant == "zip" {

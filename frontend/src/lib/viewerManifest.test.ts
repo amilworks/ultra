@@ -123,6 +123,26 @@ describe("thumbnailScrubAxis", () => {
   });
 });
 
+describe("normalizeUploadViewerInfo Scene3D admission", () => {
+  it("preserves an unsupported PLY identity instead of relabeling it as a point cloud", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-ascii",
+      original_name: "ascii.ply",
+      decodable: false,
+      scene_kind: "unknown",
+      status: "failed",
+      message: "ASCII PLY is not supported; re-export as binary PLY.",
+      service_urls: {},
+    });
+
+    expect(viewer.decodable).toBe(false);
+    expect(viewer.scene3d?.scene_kind).toBe("unknown");
+    expect(viewer.scene3d?.status).toBe("failed");
+    expect(viewer.message).toContain("ASCII PLY");
+  });
+});
+
 describe("normalizeUploadViewerInfo scalar medical defaults", () => {
   it("does not repair malformed mask provenance into authoritative semantics", () => {
     const viewer = normalizeUploadViewerInfo({

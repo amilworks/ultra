@@ -243,8 +243,7 @@ def _validate_scene_identity(job: Scene3dDeriveJob) -> tuple[Path, dict[str, int
     # a worker with new pixel/geometry semantics from reusing a same-shaped generation
     # produced by the legacy uniform-preview pipeline.
     expected_name = (
-        f"{job.resource_id}__scene3d.{manifest.DERIVATIVE_REVISION}.sha256-"
-        f"{job.source_sha256}"
+        f"{job.resource_id}__scene3d.{manifest.DERIVATIVE_REVISION}.sha256-{job.source_sha256}"
     )
     if destination.name != expected_name or destination.parent.name != "derived":
         raise StaleDerivativeJobError("scene_destination_identity_mismatch")
@@ -501,8 +500,8 @@ _COLMAP_MEMBER_NAMES = frozenset(
         "cameras.txt",
         "images.bin",
         "images.txt",
-        "points3D.bin",
-        "points3D.txt",
+        "points3d.bin",
+        "points3d.txt",
         "rigs.bin",
         "rigs.txt",
         "frames.bin",
@@ -531,18 +530,49 @@ def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
         if len(entries) > _ZIP_MAX_MEMBERS:
             return None
         wanted = [
-            entry for entry in entries if os.path.basename(entry.filename) in _COLMAP_MEMBER_NAMES
+            entry
+            for entry in entries
+            if os.path.basename(entry.filename).lower() in _COLMAP_MEMBER_NAMES
         ]
         if not wanted:
             return None
         if sum(entry.file_size for entry in wanted) > _ZIP_MAX_TOTAL_BYTES:
             return None
-        root = os.path.realpath(dest_dir)
+
+        safe_members: list[tuple[zipfile.ZipInfo, str, str, str]] = []
+        members_by_directory: dict[str, set[str]] = {}
         for entry in wanted:
-            # Normalise the member's own path, then confirm the result still lands under
-            # dest_dir. zipfile does not do this for us.
+            if entry.filename.startswith("/") or "\\" in entry.filename or "\x00" in entry.filename:
+                continue
+            directory, _, basename = entry.filename.rpartition("/")
+            if not basename or any(segment in {".", ".."} for segment in directory.split("/")):
+                continue
             relative = os.path.normpath(entry.filename).lstrip("/")
-            if relative.startswith(".."):
+            normalized_name = basename.lower()
+            safe_members.append((entry, directory, normalized_name, relative))
+            members_by_directory.setdefault(directory, set()).add(normalized_name)
+
+        camera_names = {"cameras.bin", "cameras.txt"}
+        image_names = {"images.bin", "images.txt"}
+        model_roots = sorted(
+            (
+                directory
+                for directory, names in members_by_directory.items()
+                if names & camera_names and names & image_names
+            ),
+            key=lambda value: (value.count("/"), value),
+        )
+        if len(model_roots) > 1:
+            raise DeterministicDerivativeError("ambiguous_colmap_models")
+        if not model_roots:
+            return None
+
+        selected_root = model_roots[0]
+        root = os.path.realpath(dest_dir)
+        model_dir = root if not selected_root else os.path.join(root, selected_root)
+        extracted_names: set[str] = set()
+        for entry, directory, normalized_name, relative in safe_members:
+            if directory != selected_root or normalized_name in extracted_names:
                 continue
             target = os.path.realpath(os.path.join(root, relative))
             if not (target == root or target.startswith(root + os.sep)):
@@ -550,12 +580,104 @@ def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
             os.makedirs(os.path.dirname(target) or root, exist_ok=True)
             with archive.open(entry) as source, open(target, "wb") as sink:
                 shutil.copyfileobj(source, sink)
-    return colmap.detect_model_dir(dest_dir)
+            extracted_names.add(normalized_name)
+    return model_dir if colmap.model_files(model_dir).is_model else None
 
 
 def _require(header: ply.PlyHeader, names: tuple[str, ...], code: str) -> None:
     if not header.has(*names):
         raise DeterministicDerivativeError(code)
+
+
+def _ply_property_provenance(
+    header: ply.PlyHeader,
+    scene_kind: str,
+    *,
+    retained_sh_degree: int | None = None,
+) -> dict[str, Any]:
+    """Describe exactly which declared properties reach the viewer.
+
+    ``retained_sh_degree=None`` is the legacy USX splat path, which carries DC
+    colour only. RAD supplies its measured retained degree. Point display values
+    that do not exist in the source are named explicitly rather than being
+    presented as source colour.
+    """
+
+    names = header.names
+    preserved_names: set[str]
+    synthesized: list[str] = []
+    if scene_kind == "splat":
+        preserved_names = {
+            "x",
+            "y",
+            "z",
+            *_DC_NAMES,
+            "opacity",
+            *_SCALE_NAMES,
+            *_ROT_NAMES,
+        }
+        rest = ply.f_rest_names(header)
+        if retained_sh_degree and rest and len(rest) % 3 == 0:
+            per_channel = len(rest) // 3
+            for index, name in enumerate(rest):
+                band = int(np.floor(np.sqrt((index % per_channel) + 1)))
+                if band <= retained_sh_degree:
+                    preserved_names.add(name)
+    else:
+        preserved_names = {"x", "y", "z"}
+        has_rgb = header.has("red", "green", "blue")
+        if has_rgb:
+            preserved_names.update(("red", "green", "blue"))
+            if header.has("alpha"):
+                preserved_names.add("alpha")
+            else:
+                synthesized.append("alpha=255")
+        else:
+            synthesized.extend(("red=255", "green=255", "blue=255", "alpha=255"))
+
+    preserved = [name for name in names if name in preserved_names]
+    omitted = [name for name in names if name not in preserved_names]
+    omitted_elements = [
+        {"name": element.name, "count": int(element.count)}
+        for element in header.elements
+        if element.name != header.element and element.count > 0
+    ]
+    return {
+        "preserved": preserved,
+        "synthesized": synthesized,
+        "omitted": omitted,
+        "omitted_elements": omitted_elements,
+    }
+
+
+def _ply_provenance_limitations(
+    header: ply.PlyHeader, scene_kind: str, provenance: dict[str, Any]
+) -> list[str]:
+    sentences: list[str] = []
+    if scene_kind == "pointcloud":
+        if header.has("red", "green", "blue"):
+            sentences.append(
+                "Source RGB properties are retained in the u8-sRGB display channel; integer "
+                "values are clipped to [0,255], normalized floating values are converted to "
+                "[0,255], and the renderer performs the single conversion to linear light."
+            )
+        else:
+            sentences.append(
+                "The source has no RGB colour triplet. Lens synthesizes opaque white "
+                "display colour so the coordinates remain visible; that colour is not source data."
+            )
+    for element in provenance["omitted_elements"]:
+        if element["name"].lower() == "face":
+            sentences.append(
+                f"The source declares {element['count']:,} face topology record(s); topology is "
+                "not transmitted, so Lens renders vertices as points rather than a surface mesh."
+            )
+        else:
+            sentences.append(
+                f"The source declares {element['count']:,} {element['name']} element record(s) "
+                "that are not transmitted to the viewer."
+            )
+    return sentences
 
 
 def _read_columns(
@@ -1288,11 +1410,13 @@ def _run(
     # source as a file: `read_header` on a directory raises IsADirectoryError, which is an
     # OSError, which the PLY path would (wrongly) classify as transient and retry forever.
     try:
-        model_dir = colmap.detect_model_dir(job.src_path)
+        model_dirs = colmap.detect_model_dirs(job.src_path)
     except OSError as exc:
         raise TransientDerivativeError("scene_source_unavailable") from exc
-    if model_dir is not None:
-        return _run_colmap(job, model_dir, poster_fn=poster_fn)
+    if len(model_dirs) > 1:
+        raise DeterministicDerivativeError("ambiguous_colmap_models")
+    if model_dirs:
+        return _run_colmap(job, model_dirs[0], poster_fn=poster_fn)
 
     # A COLMAP model also arrives as a ZIP, because that is how reconstructions are
     # actually distributed and because a zip is a regular file — it gets Range serving,
@@ -1320,7 +1444,11 @@ def _run(
         raise DeterministicDerivativeError("scene_source_missing") from exc
     except NotImplementedError as exc:
         raise DeterministicDerivativeError("unsupported_scene_encoding") from exc
-    except ValueError as exc:  # PlyFormatError and the encoders' shape checks
+    except ply.PlyFormatError as exc:
+        if "ASCII PLY" in str(exc):
+            raise DeterministicDerivativeError("unsupported_scene_encoding") from exc
+        raise DeterministicDerivativeError("unsupported_scene_source") from exc
+    except ValueError as exc:  # Encoder shape checks.
         raise DeterministicDerivativeError("unsupported_scene_source") from exc
     except OSError as exc:
         raise TransientDerivativeError("scene_source_unavailable") from exc
@@ -1515,6 +1643,8 @@ def _build_rad_manifest(
             "still occurs only at the final framebuffer.",
         ]
     )
+    property_provenance = _ply_property_provenance(header, "splat", retained_sh_degree=retained)
+    limitations.extend(_ply_provenance_limitations(header, "splat", property_provenance))
     limitations.extend(_view_limitations(rendered, up_axis, up_basis))
     document = manifest.build_manifest(
         resource_id=job.resource_id,
@@ -1533,6 +1663,7 @@ def _build_rad_manifest(
         layers=[layer],
         limitations=limitations,
         source_sha256=job.source_sha256,
+        property_provenance=property_provenance,
     )
     document["service_urls"]["lod"] = f"/v2/uploads/{job.resource_id}/scene3d/lod/{lod.header.name}"
     return document
@@ -1582,6 +1713,7 @@ def _build_streamed_manifest(
     )
 
     limitations: list[str] = []
+    property_provenance = _ply_property_provenance(header, derived.scene_kind)
     if is_splat:
         limitations.extend(
             manifest.splat_limitations(
@@ -1592,11 +1724,7 @@ def _build_streamed_manifest(
                 position_error=derived.max_position_error,
             )
         )
-    else:
-        limitations.append(
-            "Point colours are served exactly as the source stores them, in sRGB; the renderer "
-            "performs the single conversion to linear light."
-        )
+    limitations.extend(_ply_provenance_limitations(header, derived.scene_kind, property_provenance))
     tier_zero = sum(derived.entries[index]["count"] for index in derived.tiers[0])
     limitations.append(
         f"Tier 0 is a deterministic uniform sample of {tier_zero:,} of {derived.total:,} "
@@ -1628,6 +1756,7 @@ def _build_streamed_manifest(
         layers=[layer],
         limitations=limitations,
         source_sha256=job.source_sha256,
+        property_provenance=property_provenance,
     )
 
 
@@ -1665,77 +1794,3 @@ def _view_limitations(rendered: poster.PosterResult, up_axis: str, up_basis: str
         f"'{up_axis}' is a view hint for the camera controls ({up_basis}); the geometry is never "
         "rotated and stays in the source world frame.",
     ]
-
-
-def _build_manifest(
-    job: Scene3dDeriveJob,
-    header: ply.PlyHeader,
-    scene_kind: str,
-    plan: chunker.ChunkPlan,
-    entries: list[dict[str, Any]],
-    facts: dict[str, Any],
-    rendered: poster.PosterResult,
-    source_bytes: int,
-) -> dict[str, Any]:
-    bbox = _world_bbox(entries)
-    up_axis, up_basis = manifest.infer_up_axis(bbox)
-    declared = ply.declared_sh_degree(header)
-    is_splat = scene_kind == "splat"
-
-    quantization: dict[str, Any] = (
-        {
-            "center": "f32-exact",
-            "scale": "half-log",
-            "rotation": "oct-10-10-12",
-            "color": "half-display-referred",
-            "out_of_range_color_fraction": round(float(facts["out_of_range_color_fraction"]), 6),
-        }
-        if is_splat
-        else {"center": "f32-exact", "color": "u8-srgb"}
-    )
-    layer = manifest.build_layer(
-        layer_type="splats" if is_splat else "points",
-        encoding="usx-v1" if is_splat else "upc-v1",
-        total=plan.total,
-        chunks=entries,
-        tiers=[list(tier) for tier in plan.tiers],
-        activation_domain="post",
-        source_frame="source",
-        quantization=quantization,
-    )
-
-    limitations: list[str] = []
-    if is_splat:
-        limitations.extend(
-            manifest.splat_limitations(
-                declared_sh_degree=declared,
-                measured_sh_degree=int(facts["measured_sh_degree"]),
-                sh_sample=min(job.sh_sample, header.count),
-                out_of_range_color_fraction=float(facts["out_of_range_color_fraction"]),
-            )
-        )
-    else:
-        limitations.append(
-            "Point colours are served exactly as the source stores them, in sRGB; the renderer "
-            "performs the single conversion to linear light."
-        )
-    limitations.extend(_plan_limitations(job, plan))
-    limitations.extend(_view_limitations(rendered, up_axis, up_basis))
-    return manifest.build_manifest(
-        resource_id=job.resource_id,
-        scene_kind=scene_kind,
-        source_format="ply",
-        writer=ply.source_writer(header),
-        vertex_count=header.count,
-        source_bytes=source_bytes,
-        declared_sh_degree=declared,
-        measured_sh_degree=int(facts["measured_sh_degree"]),
-        stride_bytes=header.stride,
-        bbox=bbox,
-        bbox_robust=facts.get("bbox_robust"),
-        up_axis=up_axis,
-        up_axis_basis=up_basis,
-        layers=[layer],
-        limitations=limitations,
-        source_sha256=job.source_sha256,
-    )

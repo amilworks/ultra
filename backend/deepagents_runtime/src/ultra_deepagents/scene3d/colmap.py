@@ -55,6 +55,7 @@ __all__ = [
     "camera_centers",
     "camera_layer_json",
     "detect_model_dir",
+    "detect_model_dirs",
     "has_distortion",
     "model_bytes",
     "model_files",
@@ -158,12 +159,13 @@ class ColmapModelFiles:
 
     @property
     def is_model(self) -> bool:
-        """A model is posed cameras, or 3D points, or both.
+        """A model is the paired camera calibration and registered-image tables.
 
-        ``cameras`` alone is a calibration, not a scene; ``images`` alone has poses with
-        no intrinsics to build a frustum from.
+        ``points3D`` is optional. A points table alone may be useful data, but it does not
+        prove a complete COLMAP reconstruction and the control-plane gate deliberately
+        applies the same rule.
         """
-        return bool((self.cameras and self.images) or self.points3d)
+        return bool(self.cameras and self.images)
 
     @property
     def is_binary(self) -> bool:
@@ -266,8 +268,8 @@ def _candidate_dirs(root: str) -> list[str]:
         base = os.path.join(root, pattern)
         if not os.path.isdir(base):
             continue
-        # `sparse/0`, `sparse/1`, ... are separate reconstructions; take the lowest
-        # numbered one deterministically, then the directory itself.
+        # `sparse/0`, `sparse/1`, ... are separate reconstructions. Preserve every
+        # candidate so the caller can refuse ambiguity rather than silently taking 0.
         try:
             numbered = sorted((name for name in os.listdir(base) if _NUMERIC.match(name)), key=int)
         except OSError:
@@ -277,15 +279,15 @@ def _candidate_dirs(root: str) -> list[str]:
     return candidates
 
 
-def detect_model_dir(path: str | os.PathLike[str]) -> str | None:
-    """The directory actually holding a COLMAP model, or ``None``.
+def detect_model_dirs(path: str | os.PathLike[str]) -> tuple[str, ...]:
+    """Every directory that independently holds a COLMAP model.
 
     Accepts the model directory itself, a parent containing ``sparse/0``, ``sparse/`` or
-    ``dense/sparse/``, or a path to one of the model files. Binary models are preferred
-    over text ones: when a parent holds both a ``.txt`` export and the ``.bin`` original,
-    the ``.bin`` one is the source of truth.
+    ``dense/sparse/``, or a path to one of the model files. The result is stable and
+    preserves the candidate order, but it never assigns scientific priority to one
+    reconstruction over another.
 
-    Returns ``None`` for anything that is not a COLMAP model, so the caller can fall
+    Returns an empty tuple for anything that is not a COLMAP model, so the caller can fall
     through to the PLY path without catching an exception.
     """
     root = os.fspath(path)
@@ -295,19 +297,24 @@ def detect_model_dir(path: str | os.PathLike[str]) -> str | None:
         # be named after a COLMAP table, and redirecting it at a model that shares its
         # directory would derive something the caller did not ask for.
         if stem.lower() not in _STEMS or suffix.lower() not in _SUFFIXES:
-            return None
+            return ()
         root = os.path.dirname(root) or "."
     if not os.path.isdir(root):
-        return None
-    candidates = _candidate_dirs(root)
-    found = [(candidate, model_files(candidate)) for candidate in candidates]
-    for candidate, files in found:
-        if files.is_model and files.is_binary:
-            return candidate
-    for candidate, files in found:
-        if files.is_model:
-            return candidate
-    return None
+        return ()
+    return tuple(
+        candidate for candidate in _candidate_dirs(root) if model_files(candidate).is_model
+    )
+
+
+def detect_model_dir(path: str | os.PathLike[str]) -> str | None:
+    """Return a model directory only when discovery is unambiguous.
+
+    Multiple submodels commonly mean distinct reconstructions. Returning ``None``
+    forces the derive boundary to handle that state explicitly instead of choosing
+    the shallowest or lowest-numbered model on the scientist's behalf.
+    """
+    models = detect_model_dirs(path)
+    return models[0] if len(models) == 1 else None
 
 
 def model_bytes(directory: str | os.PathLike[str]) -> int:

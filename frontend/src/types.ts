@@ -1905,6 +1905,17 @@ export type Scene3dWorld = {
   bbox_robust?: number[];
 };
 
+export type Scene3dPropertyProvenance = {
+  /** Declared vertex properties whose semantics reach the viewer. */
+  preserved: string[];
+  /** Display values created by the derive because the source did not contain them. */
+  synthesized: string[];
+  /** Declared vertex properties deliberately not transmitted. */
+  omitted: string[];
+  /** Whole non-vertex element tables deliberately not transmitted. */
+  omitted_elements: Array<{ name: string; count: number }>;
+};
+
 export type Scene3dSource = {
   format: string;
   writer?: string | null;
@@ -1916,6 +1927,7 @@ export type Scene3dSource = {
   /** MEASURED by scanning the data, never the declared value. */
   measured_sh_degree: number;
   stride_bytes: number;
+  property_provenance?: Scene3dPropertyProvenance;
 };
 
 /** A resolved, ready-to-render scene3d manifest (contract §6). */

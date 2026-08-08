@@ -16,7 +16,7 @@ nominally claim.
 | --- | --- | --- |
 | 3D Gaussian splats | Binary INRIA / Postshot `.ply` | `@sparkjsdev/spark` `SplatMesh` |
 | Dense point maps | COLMAP/HLOC `fused.ply`, generic binary `.ply` with `x,y,z[,rgb]` | `THREE.Points` |
-| Sparse point maps + posed cameras | A ZIP containing a COLMAP/HLOC model (`cameras` + `images` + optional `points3D`) | `THREE.Points` + `THREE.LineSegments` frusta |
+| Sparse point maps + posed cameras | A ZIP containing exactly one COLMAP/HLOC model (`cameras` + `images` + optional `points3D`) | `THREE.Points` + `THREE.LineSegments` frusta |
 | NeRF | — | **Not rendered.** Only its export is. Stated explicitly in `limitations`. |
 
 Compact splat containers (`.spz`, `.splat`, `.ksplat`, `.sog`) are deliberately not
@@ -26,6 +26,15 @@ multi-gigabyte browser download. Each format becomes supported only with a bound
 fixture-tested converter. A raw COLMAP directory is recognized so it never reaches the
 image service, but it must be archived as ZIP to give the worker one immutable byte
 stream and SHA-256 identity.
+
+PLY admission is intentionally narrower than the file-format family: Lens accepts
+binary little- or big-endian PLY only. The schema must contain `x,y,z`; any declared
+Gaussian field makes it a splat candidate and therefore requires the complete
+`f_dc_0..2`, `opacity`, `scale_0..2`, and `rot_0..3` parameter block. ASCII PLY and a
+partial splat schema fail at the control-plane boundary with the same rule and bounded
+64 KiB header window the worker enforces. A COLMAP archive containing multiple valid
+model roots also fails closed and reports every root; neither tier silently chooses a
+reconstruction for the scientist.
 
 ---
 
@@ -164,7 +173,10 @@ fraction is counted and reported; raster outputs clamp only at the final display
 64+count*12   + count*4    colors    : Uint8Array,  rgba
 ```
 
-Colours are **sRGB** here, source-faithful, converted to linear in the shader. Point
+Colours are **sRGB** here, converted to linear in the shader. When complete source RGB
+properties exist, they are retained in the u8 display channel. When they do not, the
+derive synthesizes opaque white solely to make the coordinates visible and records that
+fact in `source.property_provenance`; white is never described as source colour. Point
 colours come from source photographs and are sRGB-encoded; three.js assumes vertex-colour
 attributes are already in the linear working space and would otherwise double-encode
 them — measured, sRGB 0.2 renders at ≈0.48. The renderer owns this conversion in one
@@ -234,7 +246,7 @@ their adaptive-node count separately, as described above.
 ```jsonc
 {
   "schema": "ultra.scene3d.v1",
-  "generator_revision": "scene3d-rad-v3",
+  "generator_revision": "scene3d-rad-v4",
   "scene_kind": "splat" | "pointcloud" | "colmap",
   "source": {
     "format": "ply",
@@ -244,7 +256,13 @@ their adaptive-node count separately, as described above.
     "sha256": "…",                   // catalog identity used by the derive
     "declared_sh_degree": 3,
     "measured_sh_degree": 0,           // MEASURED. See Appendix A.
-    "stride_bytes": 236
+    "stride_bytes": 236,
+    "property_provenance": {
+      "preserved": ["x", "y", "z", "f_dc_0", "..."],
+      "synthesized": [],
+      "omitted": ["nx", "ny", "nz", "f_rest_0", "..."],
+      "omitted_elements": [{"name": "face", "count": 42}]
+    }
   },
   "world": {
     "units": "arbitrary",              // never "meters" without a user reference
@@ -292,6 +310,13 @@ their adaptive-node count separately, as described above.
 `limitations` is the CIFTI honesty field. It is a list of plain sentences, shown to the
 user, stating what the viewer is *not* doing.
 
+`source.property_provenance` is the machine-readable companion. `preserved` enumerates
+declared vertex properties represented in the derived view; `synthesized` enumerates
+display values absent from the source; `omitted` enumerates declared vertex properties
+not transmitted; and `omitted_elements` records whole non-vertex tables such as mesh
+faces. A PLY mesh is therefore disclosed as vertices rendered as points, never implied
+to be a surface.
+
 ### Why `bbox_robust` exists
 
 Cameras frame on `bbox_robust`, never on `bbox`. Dense reconstructions routinely carry a
@@ -331,7 +356,7 @@ Mirrors `image.derive_pyramid` exactly, on the same worker node.
 - permanent failure writes `{dst_dir}.failed`; the control plane honours it as backoff
 - redelivery capped by the existing `max_deliver`
 
-`dst_dir` is exactly `{resource_id}__scene3d.v3.sha256-{source_sha256}`. The worker verifies
+`dst_dir` is exactly `{resource_id}__scene3d.v4.sha256-{source_sha256}`. The worker verifies
 the catalog digest and byte count before reading, serializes expensive conversion with
 the shared `scene3d.work.lock`, derives into a sibling temporary directory, revalidates
 the source generation, then atomically renames the complete directory while holding the

@@ -181,11 +181,8 @@ def test_iter_chunks_round_trips_every_record_in_file_order(tmp_path):
 def test_ascii_is_detected_and_refused_with_a_clear_message(tmp_path):
     path = tmp_path / "ascii.ply"
     path.write_text("ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nend_header\n1.0\n")
-    header = ply.read_header(path)
-
-    assert header.format == "ascii"
-    with pytest.raises(NotImplementedError, match="binary_little_endian"):
-        list(ply.iter_chunks(path, header))
+    with pytest.raises(ply.PlyFormatError, match="ASCII PLY.*binary"):
+        ply.read_header(path)
 
 
 def test_list_property_is_refused_rather_than_misread(tmp_path):
@@ -196,6 +193,35 @@ def test_list_property_is_refused_rather_than_misread(tmp_path):
     )
     with pytest.raises(ply.PlyFormatError, match="stride-addressable"):
         ply.read_header(path)
+
+
+def test_non_vertex_xyz_element_is_not_admitted_as_a_point_cloud(tmp_path):
+    path = tmp_path / "samples.ply"
+    path.write_bytes(
+        b"ply\nformat binary_little_endian 1.0\nelement samples 1\n"
+        b"property float x\nproperty float y\nproperty float z\nend_header\n" + bytes(12)
+    )
+
+    with pytest.raises(ply.PlyFormatError, match="no vertex element"):
+        ply.read_header(path)
+
+
+def test_header_inventory_records_omitted_face_topology(tmp_path):
+    path = tmp_path / "mesh.ply"
+    header_bytes = (
+        b"ply\nformat binary_little_endian 1.0\nelement vertex 2\n"
+        b"property float x\nproperty float y\nproperty float z\n"
+        b"element face 1\nproperty list uchar int vertex_indices\nend_header\n"
+    )
+    path.write_bytes(header_bytes + bytes(24) + b"\x03" + bytes(12))
+
+    header = ply.read_header(path)
+
+    assert header.data_offset == len(header_bytes)
+    assert [(item.name, item.count, item.has_list) for item in header.elements] == [
+        ("vertex", 2, False),
+        ("face", 1, True),
+    ]
 
 
 def test_measured_sh_degree_is_zero_when_45_declared_coefficients_are_all_zero(tmp_path):
@@ -242,6 +268,8 @@ def test_scene_kind_requires_the_whole_splat_parameter_set(tmp_path):
     rows = {name: np.zeros(4, np.float32) for name in ("x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2")}
     path = write_ply(tmp_path / "half.ply", props=list(rows), rows=rows)
 
-    # DC colour without scales/rotation is a point cloud, not a splat scene: read as
-    # splats it would render as zero-extent invisible Gaussians.
-    assert ply.detect_scene_kind(ply.read_header(path)) == "pointcloud"
+    # Any splat-specific field makes this an attempted splat schema. Silently
+    # downgrading it to points would omit declared appearance fields while claiming
+    # the source was rendered faithfully.
+    with pytest.raises(ply.PlyFormatError, match="incomplete Gaussian-splat schema"):
+        ply.detect_scene_kind(ply.read_header(path))

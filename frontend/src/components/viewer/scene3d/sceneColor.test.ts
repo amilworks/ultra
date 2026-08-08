@@ -174,7 +174,7 @@ describe("clampWithCount", () => {
     expect(clampWithCount([])).toEqual({ values: [], clamped: 0 });
   });
 
-  it("supports computing the manifest's clamped_color_fraction", () => {
+  it("counts display-boundary clipping without requiring splat-wire clamping", () => {
     const dcColours = [-0.2, 0.1, 0.4, 0.9, 1.4, 0.55, 0.6, 0.7];
     const { clamped } = clampWithCount(dcColours);
     expect(clamped / dcColours.length).toBeCloseTo(0.25, 12);

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   CHUNK_HEADER_BYTES,
   CHUNK_VERSION,
+  mergeSplatParts,
   parseChunkHeader,
   pointViews,
+  selectTierForBudget,
   selectTier,
   splatViews,
   UPC1_BYTES_PER_POINT,
@@ -185,6 +187,61 @@ describe("splatViews", () => {
   });
 });
 
+describe("mergeSplatParts", () => {
+  it("rebases positions into one origin while preserving every packed non-position word", () => {
+    const firstBuffer = splatChunk(2, { origin: [10, 20, 30] });
+    const secondBuffer = splatChunk(1, { origin: [-5, 4, 8] });
+    const first = splatViews(firstBuffer, parseChunkHeader(firstBuffer));
+    const second = splatViews(secondBuffer, parseChunkHeader(secondBuffer));
+    const firstFloat = new Float32Array(first.extA.buffer, first.extA.byteOffset, first.extA.length);
+    const secondFloat = new Float32Array(second.extA.buffer, second.extA.byteOffset, second.extA.length);
+    firstFloat.set([1, 2, 3], 0);
+    firstFloat.set([-1, -2, -3], 4);
+    secondFloat.set([0.25, 0.5, 0.75], 0);
+
+    const firstOpacity = first.extA[3];
+    const secondOpacity = second.extA[3];
+    const firstExtB = [...first.extB];
+    const secondExtB = [...second.extB];
+    const merged = mergeSplatParts(
+      [
+        { ...first, origin: [10, 20, 30] },
+        { ...second, origin: [-5, 4, 8] },
+      ],
+      [2, 3, 4]
+    );
+    const xyz = new Float32Array(merged.extA.buffer);
+
+    expect(merged.count).toBe(3);
+    expect(merged.origin).toEqual([2, 3, 4]);
+    expect([...xyz.slice(0, 3)]).toEqual([9, 19, 29]);
+    expect([...xyz.slice(4, 7)]).toEqual([7, 15, 23]);
+    expect([...xyz.slice(8, 11)]).toEqual([-6.75, 1.5, 4.75]);
+    expect(merged.extA[3]).toBe(firstOpacity);
+    expect(merged.extA[11]).toBe(secondOpacity);
+    expect([...merged.extB]).toEqual([...firstExtB, ...secondExtB]);
+  });
+
+  it("copies an already-rebased part bit for bit when the origin is unchanged", () => {
+    const buffer = splatChunk(2, { origin: [4, 5, 6] });
+    const views = splatViews(buffer, parseChunkHeader(buffer));
+    const merged = mergeSplatParts([{ ...views, origin: [4, 5, 6] }], [4, 5, 6]);
+    expect([...merged.extA]).toEqual([...views.extA]);
+    expect([...merged.extB]).toEqual([...views.extB]);
+    expect(merged.extA.buffer).not.toBe(views.extA.buffer);
+  });
+
+  it("rejects malformed parts before allocating a misleading scene", () => {
+    expect(() =>
+      mergeSplatParts(
+        [{ extA: new Uint32Array(4), extB: new Uint32Array(3), origin: [0, 0, 0] }],
+        [0, 0, 0]
+      )
+    ).toThrow(/inconsistent/);
+    expect(() => mergeSplatParts([], [Number.NaN, 0, 0])).toThrow(/finite/);
+  });
+});
+
 describe("pointViews", () => {
   it("lays positions then rgba after the header", () => {
     const count = 4;
@@ -259,5 +316,39 @@ describe("selectTier", () => {
     expect(selectTier([], 0)).toEqual([]);
     expect(selectTier([[]], 0)).toEqual([]);
     expect(selectTier([[0], undefined as unknown as number[], [2]], 2)).toEqual([0, 2]);
+  });
+});
+
+describe("selectTierForBudget", () => {
+  const chunks = [
+    { index: 0, count: 70 },
+    { index: 1, count: 30 },
+    { index: 2, count: 120 },
+    { index: 3, count: 260 },
+  ];
+  const tiers = [[0, 1], [2], [3]];
+
+  it("chooses the highest complete cumulative tier that fits", () => {
+    expect(selectTierForBudget(tiers, chunks, 250)).toEqual({
+      indices: [0, 1, 2],
+      count: 220,
+      level: 1,
+    });
+  });
+
+  it("never starts a refinement tier it cannot finish", () => {
+    expect(selectTierForBudget(tiers, chunks, 219)).toEqual({
+      indices: [0, 1],
+      count: 100,
+      level: 0,
+    });
+  });
+
+  it("keeps the preview tier intact even on an undersized budget", () => {
+    expect(selectTierForBudget(tiers, chunks, 50)).toEqual({
+      indices: [0, 1],
+      count: 100,
+      level: 0,
+    });
   });
 });

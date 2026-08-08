@@ -1,23 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { TrackballControls } from "three/examples/jsm/controls/TrackballControls.js";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { ApiClient } from "@/lib/api";
 import type { Scene3dLayer, Scene3dManifest } from "@/types";
 
 import { resolveVolumeScaleBar } from "../volumeScaleBar";
-import { describeDecimation, maxElementsFor, resolveScenePixelRatio } from "./sceneBudget";
+import {
+  describeAdaptiveLod,
+  describeDecimation,
+  hasPagedLodWork,
+  INTERACTIVE_LOD_RENDER_SCALE,
+  maxElementsFor,
+  PAGED_LOD_BOOTSTRAP_MS,
+  resolvePagedSplatPool,
+  resolveScenePixelRatio,
+  resolveSplatLodBudget,
+  SETTLED_LOD_RENDER_SCALE,
+} from "./sceneBudget";
 import {
   UPC1_FLAG_ALPHA,
+  mergeSplatParts,
   parseChunkHeader,
   pointViews,
-  selectTier,
+  selectTierForBudget,
   splatViews,
   type ChunkHeader,
+  type SplatChunkPart,
 } from "./sceneChunks";
 import { srgbBytesToLinearFloat } from "./sceneColor";
+import { resolveSceneDepthPlan } from "./sceneBounds";
 import { applyMat3, cameraBasisFromColmap, cameraCentreFromColmap } from "./sceneFrame";
 import { projectionMatrixFor, type ColmapCamera } from "./sceneIntrinsics";
+import {
+  createSceneInteractionController,
+  isContinuousSceneFrameDue,
+} from "./sceneInteraction";
+import { resolveSceneUpVector } from "./sceneOrientation";
 
 export type Scene3dSpecies = "points" | "splats" | "cameras";
 
@@ -39,6 +58,7 @@ type LayerProgress = {
   type: Scene3dSpecies;
   loaded: number;
   total: number;
+  mode: "source" | "adaptive-lod";
 };
 
 type ScaleBarState = {
@@ -62,11 +82,7 @@ type Scene3dCameraPose = {
 
 /** Frustum ray length as a fraction of the scene radius — long enough to read the pose. */
 const FRUSTUM_SCALE = 0.06;
-
-const UP_AXIS_VECTORS: Record<string, THREE.Vector3> = {
-  y: new THREE.Vector3(0, 1, 0),
-  z: new THREE.Vector3(0, 0, 1),
-};
+const SCENE_CAMERA_FOV = 50;
 
 const SPECIES_LABEL: Record<Scene3dSpecies, string> = {
   points: "points",
@@ -92,29 +108,6 @@ const isMobileDevice = (): boolean =>
 
 const layerOfType = (manifest: Scene3dManifest, type: string): Scene3dLayer | undefined =>
   manifest.layers.find((layer) => layer.type === type);
-
-/**
- * Scene centre and radius for the camera; a degenerate bbox still frames.
- *
- * Prefers `world.bbox_robust` (the derive's 1st..99th percentile box) over `world.bbox`.
- * Dense reconstructions routinely carry a few far-field outliers: on the measured COLMAP
- * corridor fixture the full bbox spans 3453 units while the middle 99% of its points
- * occupies 33 — 0.9% of the diagonal. Framing on the full bbox renders the actual scene
- * as a speck, which reads as "the viewer is broken" rather than "this file has outliers".
- */
-const frameOf = (bbox: number[]): { centre: THREE.Vector3; radius: number } => {
-  const box =
-    Array.isArray(bbox) && bbox.length >= 6
-      ? bbox.map((value) => (Number.isFinite(Number(value)) ? Number(value) : 0))
-      : [-1, -1, -1, 1, 1, 1];
-  const centre = new THREE.Vector3(
-    (box[0] + box[3]) / 2,
-    (box[1] + box[4]) / 2,
-    (box[2] + box[5]) / 2
-  );
-  const span = Math.hypot(box[3] - box[0], box[4] - box[1], box[5] - box[2]) / 2;
-  return { centre, radius: Number.isFinite(span) && span > 0 ? span : 1 };
-};
 
 const readCameraPoses = (payload: unknown): Scene3dCameraPose[] => {
   const rows = Array.isArray(payload)
@@ -242,6 +235,19 @@ export function Scene3dCanvas({
 
     let disposed = false;
     const abort = new AbortController();
+    const mobileDevice = isMobileDevice();
+    const initialWidth = Math.max(1, stage.clientWidth || 1);
+    const initialHeight = Math.max(1, stage.clientHeight || 1);
+    const up = resolveSceneUpVector(manifest);
+    const depthPlan = resolveSceneDepthPlan(
+      manifest.world.bbox_robust ?? manifest.world.bbox,
+      manifest.world.bbox,
+      { verticalFovDegrees: SCENE_CAMERA_FOV, aspect: initialWidth / initialHeight, up }
+    );
+    const frame = {
+      centre: new THREE.Vector3(...depthPlan.focus.centre),
+      radius: depthPlan.focus.radius,
+    };
 
     // Commit the gate out of the effect body, the same way SliceStackVolumeCanvas
     // commits its render errors: a synchronous setState here cascades a second render
@@ -258,7 +264,11 @@ export function Scene3dCanvas({
     // only reliable probe, and a WebGL1-only context cannot run the splat pass.
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: false, alpha: false });
+      renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        alpha: false,
+        logarithmicDepthBuffer: depthPlan.logarithmicDepthBuffer,
+      });
     } catch (error) {
       commitGate(error instanceof Error ? error.message : "WebGL unavailable");
       return () => {
@@ -275,32 +285,30 @@ export function Scene3dCanvas({
     commitGate(null);
 
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.setPixelRatio(resolveScenePixelRatio(window.devicePixelRatio || 1, isMobileDevice()));
+    renderer.setPixelRatio(resolveScenePixelRatio(window.devicePixelRatio || 1, mobileDevice));
     renderer.setClearColor(0x0b0d10, 1);
     host.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const frame = frameOf(manifest.world.bbox_robust ?? manifest.world.bbox);
-    // Depth planes fitted to the framed scene. A near/far ratio in the tens of thousands
-    // (radius/1000 .. radius*40) exhausts depth precision on a kilometre-scale scan: every
-    // fragment lands on NDC z = 1, points occlude each other, and the scene renders as a
-    // few hundred lit pixels. Measured on the COLMAP corridor fixture.
-    const fitDistance = frame.radius / Math.sin((50 * Math.PI) / 360);
+    // The camera starts on the robust scientific scene, while the depth range contains
+    // every exact source bound. Severe outlier ranges use three/Spark's shared log-depth
+    // shader chunks; ordinary scenes keep the faster conventional depth path.
     const camera = new THREE.PerspectiveCamera(
-      50,
-      1,
-      Math.max(fitDistance - frame.radius * 1.25, frame.radius / 100),
-      fitDistance + frame.radius * 4
+      SCENE_CAMERA_FOV,
+      initialWidth / initialHeight,
+      depthPlan.near,
+      depthPlan.far
     );
     // "Up" is a VIEW HINT (contract §2): it steers the controls and is never baked into
-    // geometry. An unknown up axis keeps three's default rather than guessing one.
-    camera.up.copy(UP_AXIS_VECTORS[manifest.world.up_axis] ?? new THREE.Vector3(0, 1, 0));
+    // geometry. In particular, legacy PLY/COLMAP Y is down, so physical up is -Y.
+    camera.up.fromArray(up);
 
-    const controls = new TrackballControls(camera, renderer.domElement);
-    controls.staticMoving = true;
-    controls.rotateSpeed = 4;
-    controls.zoomSpeed = 1.4;
-    controls.panSpeed = 0.8;
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = false;
+    controls.screenSpacePanning = true;
+    controls.rotateSpeed = 0.65;
+    controls.zoomSpeed = 0.9;
+    controls.panSpeed = 0.7;
 
     const groups: Record<Scene3dSpecies, THREE.Group> = {
       points: new THREE.Group(),
@@ -313,10 +321,17 @@ export function Scene3dCanvas({
     scene.add(groups.points, groups.splats, groups.cameras);
 
     const reframe = () => {
-      const direction = new THREE.Vector3(1, 0.55, 1).normalize();
-      camera.position.copy(frame.centre).addScaledVector(direction, frame.radius * 2.4);
+      const currentPlan = resolveSceneDepthPlan(
+        manifest.world.bbox_robust ?? manifest.world.bbox,
+        manifest.world.bbox,
+        { verticalFovDegrees: camera.fov, aspect: camera.aspect, up }
+      );
+      camera.position.fromArray(currentPlan.cameraPosition);
+      camera.near = currentPlan.near;
+      camera.far = currentPlan.far;
       controls.target.copy(frame.centre);
       camera.lookAt(frame.centre);
+      camera.updateProjectionMatrix();
       controls.update();
     };
     reframe();
@@ -342,29 +357,34 @@ export function Scene3dCanvas({
       setScaleBar({ label: bar.label, barPx });
     };
 
-    // On-demand rAF for point and camera scenes — a settled point cloud should not burn a
-    // GPU frame every 16 ms — but a CONTINUOUS loop once splats are present.
-    //
-    // Spark builds and sorts its Gsplat collection across frames, asynchronously. With
-    // one-shot frames the canvas stays black indefinitely: the first frame draws before
-    // any sort exists, and nothing schedules another until the user happens to move the
-    // camera (which is exactly what "it appears when I drag it" looked like in testing).
-    // setDirty() and onDirty are necessary but NOT sufficient — measured, not assumed.
-    // Points never hit this because THREE.Points needs no sort, which is why the bug
-    // survived the point path and only showed on splats.
+    // On-demand rendering while idle; a short continuous loop only while the user is
+    // manipulating the camera. Spark's sort completes asynchronously, so rendering one
+    // frame per pointer event leaves the displayed order behind the live camera and makes
+    // panning feel sticky. The settle latch below restores the capped scientific-detail
+    // view after the complete wheel/drag burst and forces its final exact sort.
     let animationFrame = 0;
-    // Decided from the manifest at setup rather than from inside the async chunk loader:
-    // the loader's ordering is exactly what made this fragile to begin with.
-    const continuous = Boolean(layerOfType(manifest, "splats"));
-    const renderFrame = () => {
+    let interactionActive = false;
+    let markSplatsDirty = () => {};
+    let setInteractiveSplatLod: (interactive: boolean) => void = () => {};
+    let publishAdaptiveLod = () => {};
+    let shouldPumpPagedLod = () => false;
+    let lastRenderedAt = Number.NEGATIVE_INFINITY;
+    const renderFrame = (now: number) => {
       animationFrame = 0;
       if (disposed) {
         return;
       }
+      const continuous = interactionActive || shouldPumpPagedLod();
+      if (continuous && !isContinuousSceneFrameDue(lastRenderedAt, now)) {
+        animationFrame = window.requestAnimationFrame(renderFrame);
+        return;
+      }
+      lastRenderedAt = now;
       controls.update();
       renderer.render(scene, camera);
+      publishAdaptiveLod();
       publishScaleBar();
-      if (continuous) {
+      if (interactionActive || shouldPumpPagedLod()) {
         animationFrame = window.requestAnimationFrame(renderFrame);
       }
     };
@@ -382,7 +402,6 @@ export function Scene3dCanvas({
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
-      controls.handleResize();
       requestRender();
     };
     const observer = new ResizeObserver(() => resize());
@@ -390,9 +409,19 @@ export function Scene3dCanvas({
     resize();
     publishScaleBar();
 
+    const interactionController = createSceneInteractionController((active) => {
+      interactionActive = active;
+      setInteractiveSplatLod(active);
+      if (!active) {
+        markSplatsDirty();
+      }
+      requestRender();
+    });
+    const onInteractionStart = () => interactionController.start();
+    const onInteractionEnd = () => interactionController.end();
     controls.addEventListener("change", requestRender);
-    controls.addEventListener("start", requestRender);
-    controls.addEventListener("end", requestRender);
+    controls.addEventListener("start", onInteractionStart);
+    controls.addEventListener("end", onInteractionEnd);
 
     // ---- loading ------------------------------------------------------------
 
@@ -411,13 +440,21 @@ export function Scene3dCanvas({
     }
 
     const ceilings = maxElementsFor({
-      isMobile: isMobileDevice(),
+      isMobile: mobileDevice,
       deviceMemoryGb: deviceMemoryGb(),
+      // The RAD builder measures and strips empty SH bands. Budget the planes Spark
+      // actually allocates, never the larger declaration in the source PLY header.
+      splatShDegree: splatLayer?.lod?.max_sh_degree ?? manifest.source.measured_sh_degree,
+    });
+    const splatLodBudget = resolveSplatLodBudget({
+      hardCeiling: ceilings.splats,
+      isMobile: mobileDevice,
     });
     const loaded: Record<Scene3dSpecies, number> = { points: 0, splats: 0, cameras: 0 };
     const disposables: Array<{ dispose: () => void }> = [];
     const pointMaterials: THREE.PointsMaterial[] = [];
     let sparkRenderer: { dispose: () => void } | null = null;
+    let activeSplatMesh: (THREE.Object3D & { dispose: () => void }) | null = null;
 
     const publishProgress = () => {
       if (disposed) {
@@ -428,35 +465,36 @@ export function Scene3dCanvas({
           type,
           loaded: loaded[type],
           total: layerOfType(manifest, type)?.total ?? 0,
+          mode:
+            type === "splats" && layerOfType(manifest, type)?.encoding === "spark-rad-v1"
+              ? "adaptive-lod"
+              : "source",
         }))
       );
     };
     publishProgress();
 
-    const addPointChunk = (buffer: ArrayBuffer, header: ChunkHeader, take: number) => {
+    const addPointChunk = (buffer: ArrayBuffer, header: ChunkHeader) => {
       const { positions, colors } = pointViews(buffer, header);
       const geometry = new THREE.BufferGeometry();
       // Zero-copy: the attribute wraps the fetched bytes; three copies once, on upload.
-      geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(positions.subarray(0, take * 3), 3)
-      );
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
 
       // UPC1 colour is sRGB, source-faithful. three assumes a vertex-colour attribute is
       // already in the linear working space and would otherwise double-encode it
       // (measured: sRGB 0.2 renders at ~0.48). This is the one place that conversion
       // happens. Alpha is not sRGB-encoded, so it is carried across untouched.
       const withAlpha = (header.flags & UPC1_FLAG_ALPHA) !== 0;
-      const rgbBytes = new Uint8Array(take * 3);
-      for (let index = 0; index < take; index += 1) {
+      const rgbBytes = new Uint8Array(header.count * 3);
+      for (let index = 0; index < header.count; index += 1) {
         rgbBytes[index * 3] = colors[index * 4];
         rgbBytes[index * 3 + 1] = colors[index * 4 + 1];
         rgbBytes[index * 3 + 2] = colors[index * 4 + 2];
       }
       const linear = srgbBytesToLinearFloat(rgbBytes);
       if (withAlpha) {
-        const rgba = new Float32Array(take * 4);
-        for (let index = 0; index < take; index += 1) {
+        const rgba = new Float32Array(header.count * 4);
+        for (let index = 0; index < header.count; index += 1) {
           rgba[index * 4] = linear[index * 3];
           rgba[index * 4 + 1] = linear[index * 3 + 1];
           rgba[index * 4 + 2] = linear[index * 3 + 2];
@@ -492,27 +530,34 @@ export function Scene3dCanvas({
     const loadChunkedLayer = async (
       layer: Scene3dLayer,
       type: "points" | "splats",
-      onChunk: (buffer: ArrayBuffer, header: ChunkHeader, take: number) => void | Promise<void>
+      onChunk: (buffer: ArrayBuffer, header: ChunkHeader) => void | Promise<void>,
+      onTierComplete?: () => void | Promise<void>
     ) => {
       const ceiling = type === "splats" ? ceilings.splats : ceilings.points;
-      const tierCount = Math.max(layer.tiers.length, 1);
+      const effectiveTiers =
+        layer.tiers.length > 0
+          ? layer.tiers
+          : [layer.chunks.map((chunk) => chunk.index)];
+      const selection = selectTierForBudget(effectiveTiers, layer.chunks, ceiling);
+      if (selection.count > ceiling) {
+        throw new Error(
+          `This scene's ${type} preview contains ${selection.count.toLocaleString("en-US")} ` +
+            `elements, above this device's safe ${ceiling.toLocaleString("en-US")} limit. ` +
+            "Regenerate its bounded scene preview."
+        );
+      }
+      const selected = new Set(selection.indices);
+      const chunkByIndex = new Map(layer.chunks.map((chunk) => [chunk.index, chunk]));
       const seen = new Set<number>();
-      for (let level = 0; level < tierCount; level += 1) {
-        // selectTier returns the cumulative union in load order, so tier 0 (complete
-        // spatial coverage at reduced density) always lands before any refinement.
-        const order =
-          layer.tiers.length > 0
-            ? selectTier(layer.tiers, level)
-            : layer.chunks.map((chunk) => chunk.index);
-        for (const index of order) {
-          if (disposed || seen.has(index)) {
+      for (let level = 0; level <= selection.level; level += 1) {
+        for (const index of effectiveTiers[level] ?? []) {
+          if (disposed || seen.has(index) || !selected.has(index)) {
             continue;
           }
           seen.add(index);
-          if (loaded[type] >= ceiling) {
-            // Budget reached. We stop here, and the readout states how many of the
-            // source's elements are on screen — the ceiling is never applied silently.
-            return;
+          const descriptor = chunkByIndex.get(index);
+          if (!descriptor) {
+            throw new Error(`Scene tier references missing chunk ${index}.`);
           }
           const buffer = await apiClient.fetchScene3dChunk(fileId, index, {
             signal: abort.signal,
@@ -521,16 +566,21 @@ export function Scene3dCanvas({
             return;
           }
           const header = parseChunkHeader(buffer);
-          // Elements within a chunk are ordered by descending importance (contract §5),
-          // so a prefix is a valid decimation of that chunk rather than a spatial hole.
-          const take = Math.min(header.count, Math.max(0, ceiling - loaded[type]));
-          if (take > 0) {
-            await onChunk(buffer, header, take);
-            loaded[type] += take;
+          const expectedMagic = type === "splats" ? "USX1" : "UPC1";
+          if (header.magic !== expectedMagic || header.count !== descriptor.count) {
+            throw new Error(
+              `Scene chunk ${index} does not match its manifest ` +
+                `(${header.magic}/${header.count}, expected ${expectedMagic}/${descriptor.count}).`
+            );
           }
-          publishProgress();
-          requestRender();
+          await onChunk(buffer, header);
+          loaded[type] += header.count;
         }
+        // Nothing becomes a claimed density level until its complete additive tier has
+        // arrived. Spark rebuilds/sorts exactly here; points paint on the same boundary.
+        publishProgress();
+        await onTierComplete?.();
+        requestRender();
       }
     };
 
@@ -542,14 +592,48 @@ export function Scene3dCanvas({
       if (disposed) {
         return;
       }
+      const isPagedRad = layer.encoding === "spark-rad-v1";
+      if (isPagedRad && (layer.lod?.format !== "spark-rad-v1" || layer.lod.paged !== true)) {
+        throw new Error("This Gaussian LoD manifest is incomplete; regenerate the scene.");
+      }
       // One SparkRenderer for the whole scene. `sortRadial: false` selects view-space z
       // as the sort key; radial (Euclidean) distance diverges off-axis and produces
       // stable, orientation-dependent seams near the frustum edges (contract §9).
       const spark3d = new spark.SparkRenderer({
         renderer,
         sortRadial: false,
+        // Camera motion can emit faster than the worker can produce meaningful new
+        // orderings. ~30 Hz sorting keeps interaction responsive; `end` forces the final
+        // view to settle exactly while idle rendering still stops completely.
+        minSortIntervalMs: 32,
+        // Do not infer a projection calibration from the PLY writer name. Spark's
+        // factor-two compatibility option is documented for PlayCanvas, while PLY and
+        // Postshot metadata do not encode a focal convention. The neutral Spark default
+        // is therefore the only source-grounded value until an asset declares one.
         onDirty: requestRender,
+        enableLod: isPagedRad,
+        enableLodFetching: isPagedRad,
+        lodSplatCount: isPagedRad ? splatLodBudget.settled : undefined,
+        lodRenderScale: isPagedRad ? SETTLED_LOD_RENDER_SCALE : undefined,
+        pagedExtSplats: isPagedRad,
+        maxPagedSplats: isPagedRad
+          ? resolvePagedSplatPool(splatLodBudget.settled, ceilings.splats)
+          : undefined,
       });
+      markSplatsDirty = () => spark3d.setDirty();
+      setInteractiveSplatLod = (interactive) => {
+        if (!isPagedRad) {
+          return;
+        }
+        spark3d.lodSplatScale = interactive ? splatLodBudget.interactiveScale : 1;
+        spark3d.lodRenderScale = interactive
+          ? INTERACTIVE_LOD_RENDER_SCALE
+          : SETTLED_LOD_RENDER_SCALE;
+        spark3d.setDirty();
+      };
+      // Loading may finish in the middle of a drag or wheel burst. Apply the live
+      // interaction state immediately rather than briefly allocating the settled view.
+      setInteractiveSplatLod(interactionActive);
       // depthTest against the point and frustum passes, but never depthWrite: splats are
       // a blended accumulation, and writing depth would occlude the splats behind them.
       spark3d.material.depthTest = true;
@@ -557,35 +641,140 @@ export function Scene3dCanvas({
       scene.add(spark3d);
       sparkRenderer = spark3d;
 
-      await loadChunkedLayer(layer, "splats", async (buffer, header, take) => {
+      if (isPagedRad) {
+        const source = apiClient.getScene3dPagedLodSource(fileId);
+        const maxSh = Math.max(
+          0,
+          Math.min(3, layer.lod?.max_sh_degree ?? manifest.source.declared_sh_degree)
+        );
+        const paged = new spark.PagedSplats({
+          rootUrl: source.url,
+          requestHeader: source.requestHeader,
+          withCredentials: source.withCredentials,
+          maxSh,
+        });
+        // Spark 2.1.0 declares `maxSh` on the constructor options but its runtime
+        // currently initializes from the shared pager default. Apply the public setter
+        // explicitly so a degree-0/1/2 asset cannot allocate or decode undeclared bands.
+        paged.setMaxSh(maxSh);
+        // Await the small RAD header explicitly. PagedSplats otherwise logs header
+        // failures internally and leaves the application with an unexplained blank
+        // canvas; Lens must surface an authenticated delivery or decode failure.
+        await paged.getRadMeta();
+        if (disposed) {
+          paged.dispose();
+          return;
+        }
+        const mesh = new spark.SplatMesh({
+          paged,
+          enableLod: true,
+          editable: false,
+          raycastable: false,
+        });
+        try {
+          await mesh.initialized;
+        } catch (error) {
+          mesh.dispose();
+          throw error;
+        }
+        if (disposed) {
+          mesh.dispose();
+          return;
+        }
+        groups.splats.add(mesh);
+        activeSplatMesh = mesh;
+
+        const bootstrapStartedAt = performance.now();
+        shouldPumpPagedLod = () => {
+          const pager = spark3d.pager;
+          const bootstrapping =
+            paged.getNumSplats() === 0 &&
+            performance.now() - bootstrapStartedAt < PAGED_LOD_BOOTSTRAP_MS;
+          return (
+            bootstrapping ||
+            (pager !== undefined &&
+              hasPagedLodWork({
+                fetchers: pager.fetchers.length,
+                fetched: pager.fetched.length,
+                newUploads: pager.newUploads.length,
+                readyUploads: pager.readyUploads.length,
+                lodTreeUpdates: pager.lodTreeUpdates.length,
+              }))
+          );
+        };
+
+        let lastActive = -1;
+        publishAdaptiveLod = () => {
+          // Paged meshes keep their active indices on PagedSplats, not in
+          // SparkRenderer.lodInstances (that map is only populated for resident LoD).
+          const active = paged.getNumSplats();
+          if (active === lastActive) {
+            return;
+          }
+          lastActive = active;
+          loaded.splats = active;
+          publishProgress();
+        };
+        spark3d.setDirty();
+        await spark3d.update({ scene, camera });
+        requestRender();
+        return;
+      }
+
+      const commonOrigin: [number, number, number] = [
+        frame.centre.x,
+        frame.centre.y,
+        frame.centre.z,
+      ];
+      let committed: SplatChunkPart | null = null;
+      let pending: SplatChunkPart[] = [];
+
+      await loadChunkedLayer(layer, "splats", async (buffer, header) => {
         const { extA, extB } = splatViews(buffer, header);
+        pending.push({ extA, extB, origin: header.origin });
+      }, async () => {
+        if (disposed) {
+          return;
+        }
+        // Transparent Gaussian compositing has one non-negotiable ordering domain.
+        // Tiers may arrive in many wire chunks, but Spark receives exactly one mesh so
+        // every visible splat participates in the same back-to-front sort.
+        const merged = mergeSplatParts(
+          committed ? [committed, ...pending] : pending,
+          commonOrigin
+        );
         const ext = new spark.ExtSplats({
-          extArrays: [extA.subarray(0, take * 4), extB.subarray(0, take * 4)],
-          numSplats: take,
+          extArrays: [merged.extA, merged.extB],
+          numSplats: merged.count,
         });
         const mesh = new spark.SplatMesh({ splats: ext });
-        // Translation only. Chunk-local coordinates plus the world origin, with the
-        // asset's own frame — and therefore its SH bands — left completely alone.
-        mesh.position.set(header.origin[0], header.origin[1], header.origin[2]);
-        groups.splats.add(mesh);
-        disposables.push(ext, mesh);
-        await mesh.initialized;
-        spark3d.setDirty();
-      });
+        mesh.position.set(...commonOrigin);
+        try {
+          await mesh.initialized;
+        } catch (error) {
+          mesh.dispose();
+          throw error;
+        }
+        if (disposed) {
+          mesh.dispose();
+          return;
+        }
 
-      // Rebuild Spark's Gsplat collection ONCE, after every chunk is in the scene.
-      //
-      // Chunks arrive asynchronously, long after the SparkRenderer was constructed, and
-      // Spark otherwise waits for a view change before it re-accumulates — measured, the
-      // canvas stayed black until the user dragged, with setDirty() and a continuous rAF
-      // both already in place. update() does the pass explicitly. It must run after the
-      // loop, not inside it: called per chunk it snapshots a partial collection and only
-      // that fragment ever draws.
-      if (!disposed) {
+        const previous = activeSplatMesh;
+        previous?.removeFromParent();
+        groups.splats.add(mesh);
+        activeSplatMesh = mesh;
+        previous?.dispose();
+        committed = {
+          extA: merged.extA,
+          extB: merged.extB,
+          origin: merged.origin,
+        };
+        pending = [];
         spark3d.setDirty();
-        spark3d.update({ scene, camera });
+        await spark3d.update({ scene, camera });
         requestRender();
-      }
+      });
     };
 
     const loadCameras = async (layer: Scene3dLayer) => {
@@ -652,7 +841,7 @@ export function Scene3dCanvas({
           await loadSplats(splatLayer);
         }
         if (pointLayer) {
-          await loadChunkedLayer(pointLayer, "points", addPointChunk);
+          await loadChunkedLayer(pointLayer, "points", addPointChunk, requestRender);
         }
         if (cameraLayer) {
           await loadCameras(cameraLayer);
@@ -669,15 +858,18 @@ export function Scene3dCanvas({
     return () => {
       disposed = true;
       abort.abort();
+      interactionController.dispose();
       rigRef.current = null;
       observer.disconnect();
       if (animationFrame) {
         window.cancelAnimationFrame(animationFrame);
       }
       controls.removeEventListener("change", requestRender);
-      controls.removeEventListener("start", requestRender);
-      controls.removeEventListener("end", requestRender);
+      controls.removeEventListener("start", onInteractionStart);
+      controls.removeEventListener("end", onInteractionEnd);
       controls.dispose();
+      activeSplatMesh?.removeFromParent();
+      activeSplatMesh?.dispose();
       sparkRenderer?.dispose();
       for (const disposable of disposables) {
         disposable.dispose();
@@ -712,7 +904,11 @@ export function Scene3dCanvas({
         .filter((entry) => visibility[entry.type])
         .map((entry) => ({
           type: entry.type,
-          text: `${SPECIES_LABEL[entry.type]} ${describeDecimation(entry.loaded, entry.total)}`,
+          text: `${SPECIES_LABEL[entry.type]} ${
+            entry.mode === "adaptive-lod"
+              ? describeAdaptiveLod(entry.loaded, entry.total)
+              : describeDecimation(entry.loaded, entry.total)
+          }`,
         })),
     [progress, visibility]
   );

@@ -9,9 +9,10 @@ import type {
   Scene3dManifestResponse,
   UploadViewerInfo,
 } from "@/types";
-import { Download } from "lucide-react";
+import { Download, RotateCcw } from "lucide-react";
 
 import { Scene3dCanvas, type Scene3dLayerVisibility, type Scene3dSpecies } from "./Scene3dCanvas";
+import { describeSceneUpDirection } from "./sceneOrientation";
 import "./scene3d-viewer.css";
 
 type Props = {
@@ -81,11 +82,20 @@ const normalizeChunk = (raw: unknown, fallbackIndex: number): Scene3dChunkInfo =
   };
 };
 
+const normalizeLodArtifact = (raw: unknown): { name: string; bytes: number } => {
+  const source: Record<string, unknown> = isRecord(raw) ? raw : {};
+  return {
+    name: String(source.name ?? ""),
+    bytes: toNonNegativeInt(source.bytes, 0),
+  };
+};
+
 const normalizeLayer = (raw: unknown): Scene3dLayer => {
   const source: Record<string, unknown> = isRecord(raw) ? raw : {};
   const quantization: Record<string, unknown> = isRecord(source.quantization)
     ? source.quantization
     : {};
+  const lod: Record<string, unknown> | null = isRecord(source.lod) ? source.lod : null;
   return {
     type: String(source.type ?? ""),
     encoding: String(source.encoding ?? ""),
@@ -105,11 +115,27 @@ const normalizeLayer = (raw: unknown): Scene3dLayer => {
       scale: quantization.scale == null ? undefined : String(quantization.scale),
       rotation: quantization.rotation == null ? undefined : String(quantization.rotation),
       color: quantization.color == null ? undefined : String(quantization.color),
-      clamped_color_fraction:
+      out_of_range_color_fraction:
+        quantization.out_of_range_color_fraction == null &&
         quantization.clamped_color_fraction == null
           ? undefined
-          : toFiniteNumber(quantization.clamped_color_fraction, 0),
+          : toFiniteNumber(
+            quantization.out_of_range_color_fraction ?? quantization.clamped_color_fraction,
+            0
+          ),
     },
+    lod: lod
+      ? {
+        format: String(lod.format ?? ""),
+        method: String(lod.method ?? ""),
+        builder_revision: String(lod.builder_revision ?? ""),
+        paged: lod.paged === true,
+        source_elements: toNonNegativeInt(lod.source_elements, 0),
+        max_sh_degree: Math.min(3, toNonNegativeInt(lod.max_sh_degree, 0)),
+        header: normalizeLodArtifact(lod.header),
+        chunks: Array.isArray(lod.chunks) ? lod.chunks.map(normalizeLodArtifact) : [],
+      }
+      : undefined,
   };
 };
 
@@ -149,10 +175,13 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
     failure,
     manifest: {
       schema: String(raw.schema ?? "ultra.scene3d.v1"),
+      generator_revision:
+        raw.generator_revision == null ? undefined : String(raw.generator_revision),
       scene_kind: String(raw.scene_kind ?? "pointcloud"),
       source: {
         format: String(source.format ?? "unknown"),
         writer: source.writer == null ? null : String(source.writer),
+        sha256: source.sha256 == null ? undefined : String(source.sha256),
         vertex_count: toNonNegativeInt(source.vertex_count, 0),
         bytes: toNonNegativeInt(source.bytes, 0),
         declared_sh_degree: toNonNegativeInt(source.declared_sh_degree, 0),
@@ -176,6 +205,7 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
       limitations: Array.isArray(raw.limitations) ? raw.limitations.map((item) => String(item)) : [],
       service_urls: {
         chunk: urls.chunk == null ? undefined : String(urls.chunk),
+        lod: urls.lod == null ? undefined : String(urls.lod),
         download: urls.download == null ? undefined : String(urls.download),
       },
     },
@@ -289,6 +319,7 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
     scene.manifest?.service_urls?.download ?? viewerInfo.scene3d?.service_urls?.download;
   const measuredSh = scene.manifest?.source.measured_sh_degree;
   const declaredSh = scene.manifest?.source.declared_sh_degree;
+  const upDirection = scene.manifest ? describeSceneUpDirection(scene.manifest) : "unknown";
 
   const downloadButton = downloadUrl ? (
     <Button asChild variant="outline" size="sm">
@@ -332,9 +363,9 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
           <p>This scene could not be prepared for the viewer.</p>
           {scene.failure ? <small>{scene.failure}</small> : null}
           <p className="scene3d-note">
-            The original file is untouched. Download it to open the scene in a desktop tool.
+            {viewerInfo.scene3d?.message ??
+              "The original file is untouched. Download it to open the scene in a desktop tool."}
           </p>
-          {downloadButton}
         </div>
       ) : scene.status === "loading" || scene.status === "deriving" ? (
         <div className="scene3d-status">
@@ -358,10 +389,62 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
             parses the source file. Large scenes take a few minutes; this page checks
             again on its own.
           </small>
-          {downloadButton}
         </div>
       ) : scene.manifest ? (
         <div className="scene3d-body">
+          <div className="scene3d-toolbar" aria-label="3D scene controls">
+            <div className="scene3d-toolgroup">
+              <span className="scene3d-toollabel">Layers</span>
+              <div className="scene3d-layer-toggles">
+                {present.map((species) => (
+                  <button
+                    type="button"
+                    key={species}
+                    aria-pressed={visibility[species]}
+                    title={`Show or hide ${SPECIES_LABEL[species].toLowerCase()}`}
+                    onClick={() => toggle(species, !visibility[species])}
+                  >
+                    <span>{SPECIES_LABEL[species]}</span>
+                    <span className="scene3d-layer-count">{count(totals[species])}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {present.includes("points") ? (
+              <div className="scene3d-toolgroup scene3d-point-control">
+                <label htmlFor="scene3d-point-size">
+                  Point size <span>{pointSize.toFixed(1)} px</span>
+                </label>
+                <input
+                  id="scene3d-point-size"
+                  type="range"
+                  min={0.5}
+                  max={6}
+                  step={0.1}
+                  value={pointSize}
+                  title="Adjust point size on screen"
+                  onChange={(event) => setPointSize(Number(event.target.value))}
+                />
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="scene3d-btn scene3d-reset"
+              title="Return to the initial scientific framing"
+              onClick={() => setResetToken((value) => value + 1)}
+            >
+              <RotateCcw aria-hidden="true" />
+              Reset view
+            </button>
+          </div>
+
+          {overlapWarning ? (
+            <p className="scene3d-warn">
+              Points and splats occupy the same reconstruction sites. Showing both can
+              make opaque points punch through the splat surface.
+            </p>
+          ) : null}
+
           <div className="scene3d-main">
             <Scene3dCanvas
               fileId={fileId}
@@ -373,133 +456,88 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
             />
           </div>
 
-          <aside className="scene3d-panel">
-            <section className="scene3d-section">
-              <div className="scene3d-section-title">Layers</div>
-              {present.map((species) => (
-                <label className="scene3d-layer" key={species}>
-                  <input
-                    type="checkbox"
-                    checked={visibility[species]}
-                    onChange={(event) => toggle(species, event.target.checked)}
-                  />
-                  <span className="scene3d-layer-name">{SPECIES_LABEL[species]}</span>
-                  <span className="scene3d-layer-count">
-                    <b>{count(totals[species])}</b> in source
-                  </span>
-                </label>
-              ))}
-              {overlapWarning ? (
-                <p className="scene3d-warn">
-                  Points and splats are drawn together. 3D Gaussian splatting initialises
-                  its Gaussians at the sparse points, so the opaque point sprites will
-                  punch through the splat cloud wherever the geometry is densest.
-                </p>
-              ) : null}
-            </section>
+          <details className="scene3d-details">
+            <summary>
+              <span>Scene details</span>
+              <span>
+                {scene.manifest.world.frame} frame · {scene.manifest.world.units}
+              </span>
+            </summary>
+            <div className="scene3d-details-grid">
+              <section className="scene3d-section">
+                <div className="scene3d-section-title">Provenance</div>
+                {scene.manifest.limitations.length > 0 ? (
+                  <ul className="scene3d-prov-list">
+                    {scene.manifest.limitations.map((limitation) => (
+                      <li key={limitation}>{limitation}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="scene3d-note">The derive reported no limitations for this scene.</p>
+                )}
 
-            <section className="scene3d-section">
-              <div className="scene3d-section-title">Display</div>
-              {present.includes("points") ? (
-                <div className="scene3d-control">
-                  <label className="scene3d-control-label" htmlFor="scene3d-point-size">
-                    <span>Point size</span>
-                    <span>{pointSize.toFixed(1)} px</span>
-                  </label>
-                  <input
-                    id="scene3d-point-size"
-                    type="range"
-                    min={0.5}
-                    max={6}
-                    step={0.1}
-                    value={pointSize}
-                    onChange={(event) => setPointSize(Number(event.target.value))}
-                  />
-                </div>
-              ) : null}
-              <button
-                type="button"
-                className="scene3d-btn"
-                onClick={() => setResetToken((value) => value + 1)}
-              >
-                Reset view
-              </button>
-            </section>
+                <dl className="scene3d-quant">
+                  <dt>frame</dt>
+                  <dd>
+                    {scene.manifest.world.frame} · up {upDirection} (
+                    {scene.manifest.world.up_axis_basis})
+                  </dd>
+                  <dt>units</dt>
+                  <dd>{scene.manifest.world.units}</dd>
+                  {typeof measuredSh === "number" && typeof declaredSh === "number" ? (
+                    <>
+                      <dt>SH degree</dt>
+                      <dd>
+                        {measuredSh} measured
+                        {declaredSh === measuredSh ? "" : ` · ${declaredSh} declared`}
+                      </dd>
+                    </>
+                  ) : null}
+                  {scene.manifest.source.stride_bytes > 0 ? (
+                    <>
+                      <dt>stride</dt>
+                      <dd>{count(scene.manifest.source.stride_bytes)} B</dd>
+                    </>
+                  ) : null}
+                </dl>
+              </section>
 
-            <section className="scene3d-section">
-              <div className="scene3d-section-title">Provenance</div>
-              {scene.manifest.limitations.length > 0 ? (
-                <ul className="scene3d-prov-list">
-                  {scene.manifest.limitations.map((limitation) => (
-                    <li key={limitation}>{limitation}</li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="scene3d-note">The derive reported no limitations for this scene.</p>
-              )}
-
-              <dl className="scene3d-quant">
-                <dt>frame</dt>
-                <dd>
-                  {scene.manifest.world.frame} · up {scene.manifest.world.up_axis} (
-                  {scene.manifest.world.up_axis_basis})
-                </dd>
-                <dt>units</dt>
-                <dd>{scene.manifest.world.units}</dd>
-                {typeof measuredSh === "number" && typeof declaredSh === "number" ? (
-                  <>
-                    <dt>SH degree</dt>
-                    <dd>
-                      {measuredSh} measured
-                      {declaredSh === measuredSh ? "" : ` · ${declaredSh} declared`}
-                    </dd>
-                  </>
-                ) : null}
-                {scene.manifest.source.stride_bytes > 0 ? (
-                  <>
-                    <dt>stride</dt>
-                    <dd>{count(scene.manifest.source.stride_bytes)} B</dd>
-                  </>
-                ) : null}
-              </dl>
-
-              {scene.manifest.layers.map((layer) => (
-                <div key={`${layer.type}-${layer.encoding}`}>
-                  <div className="scene3d-section-title">
-                    {layer.type} · {layer.encoding}
+              <section className="scene3d-section">
+                <div className="scene3d-section-title">Encoding</div>
+                {scene.manifest.layers.map((layer) => (
+                  <div className="scene3d-encoding" key={`${layer.type}-${layer.encoding}`}>
+                    <div className="scene3d-encoding-title">
+                      {layer.type} · {layer.encoding}
+                    </div>
+                    <dl className="scene3d-quant">
+                      <dt>domain</dt>
+                      <dd>
+                        {layer.activation_domain} · {layer.source_frame}
+                      </dd>
+                      {Object.entries(QUANTIZATION_LABEL).flatMap(([key, label]) => {
+                        const value = layer.quantization[key as keyof typeof layer.quantization];
+                        return typeof value === "string" && value.length > 0
+                          ? [<dt key={`${key}-term`}>{label}</dt>, <dd key={`${key}-def`}>{value}</dd>]
+                          : [];
+                      })}
+                      {typeof layer.quantization.out_of_range_color_fraction === "number" ? (
+                        <>
+                          <dt>outside gamut</dt>
+                          <dd>
+                            {percent(layer.quantization.out_of_range_color_fraction)} of colours
+                          </dd>
+                        </>
+                      ) : null}
+                    </dl>
                   </div>
-                  <dl className="scene3d-quant">
-                    <dt>domain</dt>
-                    <dd>
-                      {layer.activation_domain} · {layer.source_frame}
-                    </dd>
-                    {Object.entries(QUANTIZATION_LABEL).flatMap(([key, label]) => {
-                      const value = layer.quantization[key as keyof typeof layer.quantization];
-                      return typeof value === "string" && value.length > 0
-                        ? [<dt key={`${key}-term`}>{label}</dt>, <dd key={`${key}-def`}>{value}</dd>]
-                        : [];
-                    })}
-                    {typeof layer.quantization.clamped_color_fraction === "number" ? (
-                      <>
-                        <dt>clamped</dt>
-                        <dd>{percent(layer.quantization.clamped_color_fraction)} of colours</dd>
-                      </>
-                    ) : null}
-                  </dl>
-                </div>
-              ))}
-            </section>
-          </aside>
+                ))}
+              </section>
+            </div>
+          </details>
         </div>
       ) : (
         <div className="scene3d-status">Preparing view…</div>
       )}
-
-      <p className="scene3d-footer">
-        Rendered in the source world frame — nothing is re-oriented, so points, cameras and
-        splats co-register with the model they came from and the spherical-harmonic bands
-        stay valid. "Up" is a view hint applied to the controls only.
-      </p>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type * as ThreeTypes from "three";
@@ -7,6 +7,10 @@ import type { ApiClient } from "@/lib/api";
 import type { Scene3dManifestResponse, UploadViewerInfo } from "@/types";
 
 import { Scene3dViewerShell } from "./Scene3dViewerShell";
+
+const sparkMocks = vi.hoisted(() => ({
+  rendererOptions: vi.fn(),
+}));
 
 // jsdom has no WebGL, so the renderer is stubbed rather than the component: everything
 // else in Scene3dCanvas — the budget, the chunk parse, the readout, the scale bar — is
@@ -26,38 +30,51 @@ vi.mock("three", async (importOriginal) => {
   return { ...actual, WebGLRenderer: StubWebGLRenderer };
 });
 
-vi.mock("three/examples/jsm/controls/TrackballControls.js", async () => {
+vi.mock("three/examples/jsm/controls/OrbitControls.js", async () => {
   const THREE = await import("three");
-  class StubTrackballControls {
+  class StubOrbitControls {
     target = new THREE.Vector3();
-    staticMoving = false;
+    enableDamping = false;
+    screenSpacePanning = false;
     rotateSpeed = 0;
     zoomSpeed = 0;
     panSpeed = 0;
     update(): void {}
-    handleResize(): void {}
     dispose(): void {}
     addEventListener(): void {}
     removeEventListener(): void {}
   }
-  return { TrackballControls: StubTrackballControls };
+  return { OrbitControls: StubOrbitControls };
 });
 
-// The splat runtime never runs under jsdom; these tests exercise point scenes.
-vi.mock("@sparkjsdev/spark", () => {
+// GPU work stays hollow under jsdom, while the paged-loader contract remains real
+// enough to catch a normalized RAD manifest being dropped before it reaches Spark.
+vi.mock("@sparkjsdev/spark", async () => {
+  const THREE = await import("three");
   class ExtSplats {
     dispose(): void {}
   }
-  class SplatMesh {
-    position = { set: () => {} };
+  class PagedSplats {
+    constructor(options: unknown) { void options; }
+    setMaxSh(maxSh: number): void { void maxSh; }
+    dispose(): void {}
+  }
+  class SplatMesh extends THREE.Object3D {
     initialized = Promise.resolve();
     dispose(): void {}
   }
-  class SparkRenderer {
+  class SparkRenderer extends THREE.Object3D {
     material = { depthTest: false, depthWrite: true };
+    lodInstances = new Map<SplatMesh, { numSplats: number }>();
+    constructor(options: unknown) {
+      super();
+      sparkMocks.rendererOptions(options);
+    }
+    setDirty(): void {}
+    update(): Promise<void> { return Promise.resolve(); }
     dispose(): void {}
   }
-  return { ExtSplats, SplatMesh, SparkRenderer };
+  return { ExtSplats, PagedSplats, SplatMesh, SparkRenderer };
 });
 
 const VIEWER_INFO = {
@@ -138,7 +155,11 @@ const READY_MANIFEST: Scene3dManifestResponse = {
       tiers: [[0]],
       activation_domain: "post",
       source_frame: "source",
-      quantization: { center: "f32-exact", color: "srgb-u8", clamped_color_fraction: 0.0031 },
+      quantization: {
+        center: "f32-exact",
+        color: "srgb-u8",
+        out_of_range_color_fraction: 0.0031,
+      },
     },
   ],
   limitations: [
@@ -162,14 +183,21 @@ const clientWith = (
     return manifests[index];
   });
   const fetchScene3dChunk = vi.fn(async () => chunk);
-  return { getScene3dManifest, fetchScene3dChunk } as unknown as ApiClient & {
+  const getScene3dPagedLodSource = vi.fn(() => ({
+    url: "/v2/uploads/file-1/scene3d/lod/scene-lod.rad",
+    requestHeader: { "X-API-Key": "test" },
+    withCredentials: true as const,
+  }));
+  return { getScene3dManifest, fetchScene3dChunk, getScene3dPagedLodSource } as unknown as ApiClient & {
     getScene3dManifest: ReturnType<typeof vi.fn>;
     fetchScene3dChunk: ReturnType<typeof vi.fn>;
+    getScene3dPagedLodSource: ReturnType<typeof vi.fn>;
   };
 };
 
 afterEach(() => {
   vi.useRealTimers();
+  sparkMocks.rendererOptions.mockReset();
 });
 
 describe("Scene3dViewerShell", () => {
@@ -207,6 +235,53 @@ describe("Scene3dViewerShell", () => {
     expect(screen.getByText("0.31% of colours")).toBeInTheDocument();
   });
 
+  it("preserves the authenticated paged RAD contract through wire normalization", async () => {
+    const radManifest: Scene3dManifestResponse = {
+      ...READY_MANIFEST,
+      generator_revision: "scene3d-rad-v3",
+      scene_kind: "splat",
+      source: {
+        ...READY_MANIFEST.source!,
+        vertex_count: 14_469_103,
+        declared_sh_degree: 3,
+        measured_sh_degree: 0,
+      },
+      layers: [{
+        type: "splats",
+        encoding: "spark-rad-v1",
+        total: 14_469_103,
+        chunks: [],
+        tiers: [],
+        activation_domain: "post",
+        source_frame: "source",
+        quantization: {},
+        lod: {
+          format: "spark-rad-v1",
+          method: "bhatt-lod-quality",
+          builder_revision: "spark-build-lod-2.1.0-f22236f",
+          paged: true,
+          source_elements: 14_469_103,
+          max_sh_degree: 3,
+          header: { name: "scene-lod.rad", bytes: 1024 },
+          chunks: [{ name: "scene-lod-0.radc", bytes: 4096 }],
+        },
+      }],
+      service_urls: {
+        lod: "/v2/uploads/file-1/scene3d/lod/scene-lod.rad",
+        download: "/v2/resources/file-1/download",
+      },
+    };
+    const apiClient = clientWith([radManifest]);
+
+    render(<Scene3dViewerShell viewerInfo={VIEWER_INFO} apiClient={apiClient} />);
+
+    await waitFor(() => expect(apiClient.getScene3dPagedLodSource).toHaveBeenCalledWith("file-1"));
+    await waitFor(() => expect(sparkMocks.rendererOptions).toHaveBeenCalled());
+    expect(sparkMocks.rendererOptions.mock.lastCall?.[0]).not.toHaveProperty("focalAdjustment");
+    expect(screen.queryByText(/manifest is incomplete/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Gaussian splats")).toBeInTheDocument();
+  });
+
   it("says how many of the source's elements are actually on screen", async () => {
     const apiClient = clientWith([READY_MANIFEST]);
 
@@ -233,11 +308,26 @@ describe("Scene3dViewerShell", () => {
 
     render(<Scene3dViewerShell viewerInfo={VIEWER_INFO} apiClient={apiClient} />);
 
-    const card = await screen.findByText(/could not be prepared for the viewer/i);
+    await screen.findByText(/could not be prepared for the viewer/i);
     expect(screen.getByText("unsupported PLY property layout")).toBeInTheDocument();
-    const links = within(card.parentElement as HTMLElement).getAllByRole("link", {
-      name: /original/i,
-    });
-    expect(links[0]).toHaveAttribute("href", "/v2/resources/file-1/download");
+    expect(screen.getByRole("link", { name: /original/i })).toHaveAttribute(
+      "href",
+      "/v2/resources/file-1/download"
+    );
+  });
+
+  it("keeps scene controls compact and details opt-in", async () => {
+    const apiClient = clientWith([READY_MANIFEST]);
+
+    render(<Scene3dViewerShell viewerInfo={VIEWER_INFO} apiClient={apiClient} />);
+
+    const points = await screen.findByRole("button", { name: /points/i });
+    expect(points).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText("Scene details").closest("details")).not.toHaveAttribute("open");
+
+    fireEvent.click(points);
+    expect(points).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: /reset view/i }));
   });
 });

@@ -1855,8 +1855,22 @@ export type Scene3dQuantization = {
   scale?: string;
   rotation?: string;
   color?: string;
-  /** Fraction of colours clamped into [0,1] when linearising the DC term. */
-  clamped_color_fraction?: number;
+  /** Fraction of raw DC colour components outside display gamut; preserved for blending. */
+  out_of_range_color_fraction?: number;
+};
+
+export type Scene3dLodArtifact = { name: string; bytes: number };
+
+export type Scene3dLod = {
+  format: "spark-rad-v1" | string;
+  method: string;
+  builder_revision: string;
+  paged: boolean;
+  source_elements: number;
+  /** Highest source SH band retained by the RAD artifact. */
+  max_sh_degree: number;
+  header: Scene3dLodArtifact;
+  chunks: Scene3dLodArtifact[];
 };
 
 export type Scene3dLayer = {
@@ -1870,6 +1884,8 @@ export type Scene3dLayer = {
   activation_domain: string;
   source_frame: "rdf" | "rub" | "source" | string;
   quantization: Scene3dQuantization;
+  /** Native view-adaptive Gaussian tree; absent on points and legacy USX layers. */
+  lod?: Scene3dLod;
 };
 
 export type Scene3dWorld = {
@@ -1892,6 +1908,8 @@ export type Scene3dWorld = {
 export type Scene3dSource = {
   format: string;
   writer?: string | null;
+  /** Immutable source identity used to bind every derived scene artifact. */
+  sha256?: string;
   vertex_count: number;
   bytes: number;
   declared_sh_degree: number;
@@ -1903,13 +1921,14 @@ export type Scene3dSource = {
 /** A resolved, ready-to-render scene3d manifest (contract §6). */
 export type Scene3dManifest = {
   schema: string;
+  generator_revision?: string;
   scene_kind: "splat" | "pointcloud" | "colmap" | string;
   source: Scene3dSource;
   world: Scene3dWorld;
   layers: Scene3dLayer[];
   /** The CIFTI honesty field: plain sentences saying what the viewer is NOT doing. */
   limitations: string[];
-  service_urls: { chunk?: string; download?: string };
+  service_urls: { chunk?: string; lod?: string; download?: string };
 };
 
 /**
@@ -1934,7 +1953,7 @@ export type Scene3dViewerData = {
   /** Source element count if the header sniff found one; 0 when unknown. */
   element_count: number;
   message?: string | null;
-  service_urls: { manifest?: string; chunk?: string; download?: string };
+  service_urls: { manifest?: string; chunk?: string; lod?: string; download?: string };
 };
 
 export type UploadViewerInfo = {

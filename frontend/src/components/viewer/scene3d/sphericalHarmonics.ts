@@ -68,8 +68,8 @@ export const MAX_SH_DEGREE = 3;
  *
  * **Unclamped on purpose.** Measured on the real 14.5M-splat file, `0.5 + C0·f_dc_0`
  * spans −0.511 … 2.704 (contract Appendix A). Clamping here would hide how much of the
- * scene is out of gamut; clamping and *counting* is `sceneColor.clampWithCount`, and the
- * clamped fraction goes in the manifest.
+ * scene is out of gamut. The wire preserves those values for blending, while the
+ * out-of-range fraction goes in the manifest.
  */
 export const dcToBaseColour = (dc: readonly number[]): [number, number, number] => {
   if (dc.length < 3) {
@@ -145,8 +145,8 @@ export const deplanarizeSh = (planar: Float32Array, restPerChannel: number): Flo
  *                Coefficient `i` (1-based, matching the reference's `sh[i]`) lives at
  *                `rest[(i−1)*3 + channel]`.
  * @param dir     camera → splat. Normalized here, exactly as the reference does.
- * @returns       linear-ish colour, **unclamped**; the reference adds 0.5 and clamps at
- *                the call site while recording which components were clamped.
+ * @returns       display-referred colour, **unclamped**; the renderer preserves it through
+ *                Gaussian compositing and clips only at final display output.
  */
 export const evaluateSh = (
   degree: number,

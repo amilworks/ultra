@@ -141,6 +141,85 @@ export const splatViews = (
   };
 };
 
+export type SplatChunkPart = {
+  extA: Uint32Array;
+  extB: Uint32Array;
+  /** World-space origin used by the chunk-local positions in `extA`. */
+  origin: [number, number, number];
+};
+
+export type MergedSplatParts = {
+  extA: Uint32Array;
+  extB: Uint32Array;
+  count: number;
+  origin: [number, number, number];
+};
+
+/**
+ * Rebase several USX1 parts into one Spark `ExtSplats` pair.
+ *
+ * Gaussian alpha blending is order dependent. Giving Spark one `SplatMesh` per source
+ * chunk makes it sort each random whole-scene subset independently, then composite the
+ * subsets in object order — an attractive but scientifically false image. One merged
+ * source gives Spark one global back-to-front ordering domain.
+ *
+ * Only xyz changes. Opacity, colour, log-scale and quaternion words are copied bit for
+ * bit. The supplied common origin should be near the robust scene centre so the rebased
+ * float32 locals retain useful precision.
+ */
+export const mergeSplatParts = (
+  parts: readonly SplatChunkPart[],
+  origin: [number, number, number]
+): MergedSplatParts => {
+  if (!origin.every(Number.isFinite)) {
+    throw new Error("merged splat origin must be finite");
+  }
+
+  let count = 0;
+  for (const part of parts) {
+    if (
+      part.extA.length % 4 !== 0 ||
+      part.extB.length !== part.extA.length ||
+      !part.origin.every(Number.isFinite)
+    ) {
+      throw new Error("splat part arrays and origin are inconsistent");
+    }
+    count += part.extA.length / 4;
+  }
+
+  const extA = new Uint32Array(count * 4);
+  const extB = new Uint32Array(count * 4);
+  const positions = new Float32Array(extA.buffer);
+  let offset = 0;
+  for (const part of parts) {
+    const partCount = part.extA.length / 4;
+    extA.set(part.extA, offset * 4);
+    extB.set(part.extB, offset * 4);
+
+    const dx = part.origin[0] - origin[0];
+    const dy = part.origin[1] - origin[1];
+    const dz = part.origin[2] - origin[2];
+    if (dx !== 0 || dy !== 0 || dz !== 0) {
+      const local = new Float32Array(
+        part.extA.buffer,
+        part.extA.byteOffset,
+        part.extA.length
+      );
+      for (let index = 0; index < partCount; index += 1) {
+        const source = index * 4;
+        const target = (offset + index) * 4;
+        positions[target] = local[source] + dx;
+        positions[target + 1] = local[source + 1] + dy;
+        positions[target + 2] = local[source + 2] + dz;
+        // target + 3 is packed opacity and was already copied as a uint32 word.
+      }
+    }
+    offset += partCount;
+  }
+
+  return { extA, extB, count, origin: [...origin] as [number, number, number] };
+};
+
 /**
  * `UPC1` point arrays, as zero-copy views:
  *
@@ -196,4 +275,68 @@ export const selectTier = (tiers: number[][], level: number): number[] => {
     }
   }
   return out;
+};
+
+export type SceneChunkCount = { index: number; count: number };
+
+export type TierSelection = {
+  indices: number[];
+  count: number;
+  level: number;
+};
+
+/**
+ * Select the densest *complete* cumulative tier that fits an element budget.
+ *
+ * A refinement tier is an indivisible scientific view: loading only the first chunks
+ * would bias the scene toward their spatial regions. Tier 0 is always kept intact even
+ * when a caller supplies a smaller nominal budget; the producer deliberately bounds
+ * that whole-source preview, and breaking it would destroy its coverage guarantee.
+ */
+export const selectTierForBudget = (
+  tiers: number[][],
+  chunks: SceneChunkCount[],
+  maxElements: number
+): TierSelection => {
+  if (!Array.isArray(tiers) || tiers.length === 0) {
+    return { indices: [], count: 0, level: -1 };
+  }
+
+  const countByIndex = new Map<number, number>();
+  for (const chunk of chunks) {
+    if (
+      Number.isInteger(chunk.index) &&
+      chunk.index >= 0 &&
+      Number.isFinite(chunk.count) &&
+      chunk.count >= 0
+    ) {
+      countByIndex.set(chunk.index, Math.floor(chunk.count));
+    }
+  }
+
+  const budget = Math.max(0, Math.floor(Number.isFinite(maxElements) ? maxElements : 0));
+  let selected = selectTier(tiers, 0);
+  const countElements = (indices: number[]): number =>
+    indices.reduce((total, index) => {
+      const count = countByIndex.get(index);
+      if (count === undefined) {
+        throw new Error(`tier references missing chunk ${index}`);
+      }
+      return total + count;
+    }, 0);
+  let selectedCount = countElements(selected);
+  let selectedLevel = 0;
+
+  for (let level = 1; level < tiers.length; level += 1) {
+    const candidate = selectTier(tiers, level);
+    const candidateCount = countElements(candidate);
+    if (candidateCount > budget) {
+      break;
+    }
+    selected = candidate;
+    selectedCount = candidateCount;
+    selectedLevel = level;
+  }
+
+  return { indices: selected, count: selectedCount, level: selectedLevel };
 };

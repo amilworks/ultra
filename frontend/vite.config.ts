@@ -56,17 +56,17 @@ export default defineConfig({
             {
               name: "vendor-three",
               priority: 100,
-              test: (id) => /[\\/]three[\\/]/.test(id.replace(/\\/g, "/")),
+              test: (id: string) => /[\\/]three[\\/]/.test(id.replace(/\\/g, "/")),
             },
             {
               name: "vendor-spark",
               priority: 90,
-              test: (id) => id.replace(/\\/g, "/").includes("/@sparkjsdev/"),
+              test: (id: string) => id.replace(/\\/g, "/").includes("/@sparkjsdev/"),
             },
             {
               name: "vendor-ui",
               priority: 80,
-              test: (id) => {
+              test: (id: string) => {
                 const normalizedId = id.replace(/\\/g, "/");
                 if (!normalizedId.includes("node_modules")) {
                   return false;
@@ -87,7 +87,7 @@ export default defineConfig({
             {
               name: "api-client",
               priority: 70,
-              test: (id) => {
+              test: (id: string) => {
                 const normalizedId = id.replace(/\\/g, "/");
                 return (
                   !normalizedId.includes("node_modules") &&
@@ -98,7 +98,7 @@ export default defineConfig({
             ...["resources", "admin", "training", "chat"].map((feature) => ({
               name: `${feature}-client`,
               priority: 60,
-              test: (id) => {
+              test: (id: string) => {
                 const normalizedId = id.replace(/\\/g, "/");
                 return (
                   !normalizedId.includes("node_modules") &&

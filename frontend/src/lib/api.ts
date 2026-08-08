@@ -5333,6 +5333,24 @@ export class ApiClient {
     return response.arrayBuffer();
   }
 
+  // Spark's PagedSplats performs its own Range requests for the RAD header and the
+  // relative RADC pages named inside it. Give that loader the same authenticated
+  // request context as every ordinary API call; handing it a bare URL would work for
+  // an unauthenticated localhost and fail for real users behind X-API-Key auth.
+  getScene3dPagedLodSource(fileId: string): {
+    url: string;
+    requestHeader: Record<string, string>;
+    withCredentials: true;
+  } {
+    const safeFileId = encodeURIComponent(fileId);
+    const headerArtifact = encodeURIComponent("scene-lod.rad");
+    return {
+      url: buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/lod/${headerArtifact}`),
+      requestHeader: this.headers(),
+      withCredentials: true,
+    };
+  }
+
   async getHdf5DatasetSummary(fileId: string, datasetPath: string): Promise<Hdf5DatasetSummary> {
     const safeFileId = encodeURIComponent(fileId);
     const params: Record<string, string> = {

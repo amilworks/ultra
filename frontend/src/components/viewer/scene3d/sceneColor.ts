@@ -3,7 +3,8 @@
  *
  * Two colour paths meet here and they are not the same (contract §4):
  *
- *   - splats (`USX1`) carry **linear** colour, converted once in the derive;
+ *   - splats (`USX1`) carry Spark-compatible **display-referred** colour and do not
+ *     pass through these transfer functions;
  *   - points (`UPC1`) carry **sRGB** bytes straight from source photographs, and three.js
  *     assumes a vertex-colour attribute is already in the linear working space. Handing
  *     it sRGB double-encodes: measured, sRGB 0.2 renders at ≈0.48.
@@ -108,8 +109,8 @@ export const srgbBytesToLinearFloat = (src: Uint8Array, out?: Float32Array): Flo
  * Clamp to [0, 1] and count how many components needed it.
  *
  * The count is the point: `0.5 + C0·f_dc` runs out of gamut on real files, and the
- * manifest reports `clamped_color_fraction` so the provenance panel can say how much of
- * the scene's colour was altered rather than pretending the clamp was free.
+ * A final raster output may report how many values it clipped at the display boundary.
+ * Interactive splats preserve these values and do not call this helper per Gaussian.
  *
  * A non-finite component is not in [0, 1] either — it becomes 0 and counts as clamped.
  */

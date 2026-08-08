@@ -1,0 +1,7 @@
+# Built typeface binaries — regenerate with build_ultra_sans.py --all
+build/
+__pycache__/
+
+# Third-party TRIAL fonts used as local design references only.
+# Proprietary, all rights reserved. Never commit, ship, or derive from these.
+refs/

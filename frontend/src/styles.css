@@ -37,18 +37,37 @@
      Applies to PROSE only; block content that genuinely needs width keeps the
      full 49rem column. */
   --reading-measure: 44rem;
-  --font-weight-body: 400;
-  --font-weight-reading-body: 400;
-  --font-weight-strong: 700;
+  /* 440, not 400. Inter's 400 sets 4% lighter than the grotesques Ultra is
+     measured against — the gap is not stroke width but the ratio of stroke to
+     letter. Inter's stem is only 2.7% thinner than Söhne Buch's (0.0876em vs
+     0.0900em), but Inter's x-height is larger (0.5444 vs 0.5230), so the same
+     stroke covers proportionally less: stem/x-height 0.1609 against 0.1721.
+     Two independent measurements put the matching weight at 430 — solving
+     stem/x-height from the outlines gives 431, and integrating rendered ink
+     over the x-height band gives 430 — and it holds across the optical range
+     because Inter's x-height does not move with weight. 440 is one step past
+     the match, chosen deliberately: this product is read at 13–15px for long
+     stretches, and the extra unit buys density where it is scarcest.
+     Measured in frontend/font-lab/weight.html. */
+  --font-weight-body: 440;
+  --font-weight-reading-body: 440;
+  /* 670, not 700. At 700 the hero title read as a shout rather than a heading
+     once body moved to 440 and closed the gap from 300 to 260. Dropping 30
+     restores the step without giving up the contrast. Scattered `font-weight:
+     700` on small labels (0.5–0.92rem table headers, section eyebrows) is
+     deliberately NOT swept into this token — at those sizes 700 is doing the
+     legibility job the comment below describes, not a display job. */
+  --font-weight-strong: 670;
   --font-weight-reading-heading: 600;
   /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
      **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 400 → 600 is still an unmistakable
-     step at reading size; nothing now outweighs a heading.
-     --font-weight-strong (UI chrome) stays 700 — different job, sparse use. */
+     dark blots and cost more than it marked. 440 → 600 is a narrower step than
+     the 400 → 600 this was tuned against, but still unmistakable at reading
+     size; nothing now outweighs a heading.
+     --font-weight-strong (UI chrome) is 670 — different job, sparse use. */
   --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
   --font-weight-action: 500;
@@ -56,6 +75,18 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
+  /* Optical size for display type. `font-optical-sizing: auto` maps the CSS
+     px size onto Inter's opsz axis and clamps at 32, so anything above 32px
+     gets Inter's narrowest cut — the axis takes ~8.5% off the round lowercase
+     between opsz 14 and 32. 24 is where Inter's x-height/cap-height ratio
+     (0.7275) meets the consensus of the grotesques Ultra was measured against:
+     Graphik 0.7315, Söhne 0.7284, TWK Lausanne 0.7240, all within 1% of each
+     other and all well below Inter at text sizes (0.7503).
+     Applied ONLY to type that renders above ~24px, which in practice is the
+     hero titles. Every other heading already sits at 18–23px, where auto
+     resolves at or below 24 — pinning those would make them NARROWER, the
+     opposite of the intent. Compared in frontend/font-lab/optical.html. */
+  --display-optical-size: 24;
   /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
      Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
      was previously enabled to buy identity from the letterforms. In use it read
@@ -542,6 +573,10 @@ body {
   margin: 0;
   font-size: 2.45rem;
   font-weight: 400;
+  /* 39–46px across breakpoints, the largest type in the product and furthest
+     past Inter's opsz ceiling. See --display-optical-size. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.08;
   letter-spacing: 0;
 }
@@ -2484,6 +2519,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: clamp(1.65rem, 3.2vw, 2.35rem);
   font-weight: var(--font-weight-strong);
+  /* 26.4–37.6px, the only type in the app that rides the top of the opsz axis.
+     Left on `auto` it renders at Inter's narrowest cut; pinned it keeps the
+     rounder proportions. Both properties are required — `font-variation-settings`
+     alone loses to the automatic axis. See --display-optical-size. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   letter-spacing: 0;
   color: var(--text-main);
 }
@@ -2614,6 +2655,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: 1.6rem;
   font-weight: 400;
+  /* 25.6px — just past the pin point, so it gets the same treatment as
+     .hero-title rather than drifting narrower than its desktop counterpart. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   letter-spacing: -0.018em;
   color: var(--text-main);
 }
@@ -2725,12 +2770,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
   /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight. Tracking is NOT restrained here: at 34px this sits
-     past Inter's opsz ceiling (14–32), so the axis has stopped tightening and
-     the tracking has to be supplied by hand — see the tracking note at the top
-     of this file. Inter's metric for ~34px is -0.022em; -0.01em left the
-     largest text in the product visibly the loosest. */
+     regular reading weight. Tracking is NOT restrained here: the tracking has to
+     be supplied by hand — see the tracking note at the top of this file. Inter's
+     metric for ~34px is -0.022em; -0.01em left the largest text in the product
+     visibly the loosest.
+     The opsz pin below replaces what used to be a ceiling problem. At 34px on
+     `auto` this ran past Inter's opsz range (14–32) and rendered at the axis
+     maximum — the narrowest cut Inter has. Pinned at 24 it keeps the rounder
+     proportions the reference grotesques share. The hand-set tracking still
+     applies on top and is unchanged: it was measured against the glyph metric,
+     not the axis. */
   font-weight: 400;
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.2;
   letter-spacing: -0.022em;
   color: var(--text-main);

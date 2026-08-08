@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The opsz lever — Inter's display narrowing vs TWK Lausanne</title>
+<style>
+  @font-face { font-family:"US"; src:url("./build/UltraSans-calm.woff2") format("woff2"); font-weight:100 900; }
+  :root { --ink:#171b1d; --ink2:#5b6266; --ink3:#8b9296; --rule:#e4e7e9; --bg:#fff; --hit:#c2410c; --good:#0f766e;
+          font-synthesis:none; }
+  @media (prefers-color-scheme:dark) {
+    :root { --ink:#dce3ea; --ink2:#a5abb0; --ink3:#6f767b; --rule:#2a2f33; --bg:#141719; --hit:#fb923c; --good:#5eead4; } }
+  *{box-sizing:border-box}
+  body { margin:0; padding:44px 40px 96px; background:var(--bg); color:var(--ink);
+         font-family:"US",system-ui,sans-serif; font-optical-sizing:auto;
+         -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1120px; margin:0 auto; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 5px; letter-spacing:-.01em; }
+  .sub { font-size:13px; color:var(--ink2); line-height:1.62; margin:0 0 38px; max-width:72ch; }
+  .sub b { color:var(--ink); font-weight:600; }
+  section { border-top:1px solid var(--rule); padding:26px 0 10px; }
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase;
+             color:var(--ink3); margin:0 0 20px; }
+  .row { display:grid; grid-template-columns:132px 1fr; gap:22px; align-items:baseline;
+         padding:12px 0; border-bottom:1px solid var(--rule); }
+  .row:last-child { border-bottom:0; }
+  .tag { font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+         color:var(--ink3); padding-top:.5em; line-height:1.5; }
+  .tag em { font-style:normal; color:var(--hit); display:block; }
+  .tag b  { font-weight:600; color:var(--good); display:block; }
+
+  /* auto = the browser narrows Inter as size grows. pinned = keep the text-size
+     proportions at display size, which is where Lausanne stays. */
+  .auto   { font-optical-sizing:auto; }
+  .pinned { font-optical-sizing:none; font-variation-settings:"opsz" 14; }
+
+  .display { font-size:76px; letter-spacing:-.022em; line-height:1.06; }
+  .mid     { font-size:38px; letter-spacing:-.016em; }
+  .body    { font-size:15px; line-height:1.62; max-width:66ch; }
+  .note { font-size:12.5px; color:var(--ink2); line-height:1.65; margin:16px 0 0; max-width:74ch; }
+  .note b { color:var(--ink); font-weight:600; }
+  table { border-collapse:collapse; font-size:13px; margin-top:6px; }
+  th,td { text-align:right; padding:5px 15px 5px 0; border-bottom:1px solid var(--rule); }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink3); font-weight:600; }
+  td.n { font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); } .gap { color:var(--hit); }
+</style>
+</head>
+<body><div class="wrap">
+  <h1>The <code>opsz</code> lever</h1>
+  <p class="sub">TWK Lausanne is a <b>static</b> font — one set of proportions at every size.
+  Inter is variable, and its optical-size axis <b>narrows the round letters by about 8.5%</b> as
+  type gets bigger. Ultra sets <code>font-optical-sizing: auto</code> globally, so every heading
+  gets the narrowed display cut. Pinning <code>opsz</code> low keeps Inter's generous text
+  proportions at display size — which is exactly where Lausanne lives.</p>
+
+  <section>
+    <p class="eyebrow">Display — 76px, the size where the difference lives</p>
+    <div class="row"><span class="tag">auto<em>what ships today</em></span><span class="display auto">Lausanne Pan</span></div>
+    <div class="row"><span class="tag">opsz 14<b>pinned</b></span><span class="display pinned">Lausanne Pan</span></div>
+    <div class="row"><span class="tag">auto<em>what ships today</em></span><span class="display auto">BisQue Ultra</span></div>
+    <div class="row"><span class="tag">opsz 14<b>pinned</b></span><span class="display pinned">BisQue Ultra</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Mid — 38px, section headings</p>
+    <div class="row"><span class="tag">auto</span><span class="mid auto">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">opsz 14 pinned</span><span class="mid pinned">The quick brown fox jumped over the lazy dog.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Body — 15px, where the axis barely moves</p>
+    <div class="row"><span class="tag">auto</span><span class="body auto">The segmentation run finished in 47 minutes across 1,308 fields of view. Registration drift stayed under 0.6&thinsp;µm for all but three tiles.</span></div>
+    <div class="row"><span class="tag">opsz 14 pinned</span><span class="body pinned">The segmentation run finished in 47 minutes across 1,308 fields of view. Registration drift stayed under 0.6&thinsp;µm for all but three tiles.</span></div>
+    <p class="note">At body size the two are nearly identical — <code>opsz</code> is already near 14.
+    This change costs nothing where you read and pays off where you look.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Measured — advance widths in em, canvas ink measurement</p>
+    <table>
+      <tr><th>Glyph</th><th>Inter opsz 32</th><th>Inter opsz 14</th><th>Lausanne</th><th>Gap at opsz 14</th></tr>
+      <tr><td>o</td><td class="n">0.549</td><td class="n">0.600</td><td class="n">0.598</td><td class="n win">−0.3%</td></tr>
+      <tr><td>e</td><td class="n">0.536</td><td class="n">0.583</td><td class="n">0.580</td><td class="n win">−0.5%</td></tr>
+      <tr><td>a</td><td class="n">0.518</td><td class="n">0.562</td><td class="n">0.555</td><td class="n win">−1.2%</td></tr>
+      <tr><td>n</td><td class="n">0.547</td><td class="n">0.591</td><td class="n">0.584</td><td class="n win">−1.2%</td></tr>
+      <tr><td>g</td><td class="n">0.565</td><td class="n">0.613</td><td class="n">0.621</td><td class="n win">+1.3%</td></tr>
+      <tr><td>c</td><td class="n">0.523</td><td class="n">0.571</td><td class="n">0.581</td><td class="n win">+1.8%</td></tr>
+      <tr><td>H</td><td class="n">0.708</td><td class="n">0.743</td><td class="n">0.714</td><td class="n gap">−3.9%</td></tr>
+      <tr><td>t</td><td class="n">0.311</td><td class="n">0.327</td><td class="n">0.347</td><td class="n gap">+6.1%</td></tr>
+      <tr><td>O</td><td class="n">0.749</td><td class="n">0.765</td><td class="n">0.817</td><td class="n gap">+6.8%</td></tr>
+    </table>
+    <p class="note">Lowercase lands within ~2%. What genuinely differs is the <b>uppercase</b>:
+    Lausanne's round caps are wider (<code>O</code> +6.8%) while its straight caps are narrower
+    (<code>H</code> −3.9%) and 1.9% shorter. That is more contrast between round and square capitals
+    than Inter has — an outline property no axis or feature swap can reach. It needs drawing.</p>
+  </section>
+</div></body></html>

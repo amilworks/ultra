@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Inter vs Graphik, Söhne, Lausanne</title>
+<style>
+  @font-face { font-family:"US"; src:url("./build/UltraSans-calm.woff2") format("woff2"); font-weight:100 900; }
+  /* Klim TRIAL font — local evaluation only, never shipped. See refs/README.txt */
+  @font-face { font-family:"Soehne"; src:url("./refs/test-soehne-buch.woff2") format("woff2"); font-weight:400; }
+  @font-face { font-family:"Soehne"; src:url("./refs/test-soehne-halbfett.woff2") format("woff2"); font-weight:600; }
+  /* Graphik resolves from the macOS system font asset — nothing vendored. */
+
+  :root { --ink:#171b1d; --ink2:#5b6266; --ink3:#8b9296; --rule:#e4e7e9; --bg:#fff;
+          --hit:#c2410c; --good:#0f766e; --ref:#4f46e5; font-synthesis:none; }
+  @media (prefers-color-scheme:dark) {
+    :root { --ink:#dce3ea; --ink2:#a5abb0; --ink3:#6f767b; --rule:#2a2f33; --bg:#141719;
+            --hit:#fb923c; --good:#5eead4; --ref:#a5b4fc; } }
+  *{box-sizing:border-box}
+  body { margin:0; padding:44px 40px 96px; background:var(--bg); color:var(--ink);
+         font-family:"US",system-ui,sans-serif; font-optical-sizing:auto; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1160px; margin:0 auto; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 5px; letter-spacing:-.01em; }
+  .sub { font-size:13px; color:var(--ink2); line-height:1.62; margin:0 0 18px; max-width:74ch; }
+  .sub b { color:var(--ink); font-weight:600; }
+  .warn { font-size:12px; color:var(--ink2); border-left:2px solid var(--hit); padding:7px 0 7px 13px;
+          margin:0 0 34px; max-width:74ch; line-height:1.6; }
+  .warn b { color:var(--ink); font-weight:600; }
+  section { border-top:1px solid var(--rule); padding:26px 0 10px; }
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase;
+             color:var(--ink3); margin:0 0 20px; }
+  .row { display:grid; grid-template-columns:158px 1fr; gap:22px; align-items:baseline;
+         padding:11px 0; border-bottom:1px solid var(--rule); }
+  .row:last-child { border-bottom:0; }
+  .tag { font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+         color:var(--ink3); padding-top:.5em; line-height:1.55; }
+  .tag em { font-style:normal; display:block; color:var(--ref); }
+  .tag b  { font-weight:600; display:block; color:var(--good); }
+  .tag i  { font-style:normal; display:block; color:var(--hit); }
+
+  .graphik { font-family:"Graphik"; }
+  .soehne  { font-family:"Soehne"; }
+  .auto    { font-optical-sizing:auto; }
+  .o17 { font-optical-sizing:none; font-variation-settings:"opsz" 17; }
+  .o24 { font-optical-sizing:none; font-variation-settings:"opsz" 24; }
+  .o27 { font-optical-sizing:none; font-variation-settings:"opsz" 27; }
+
+  .pan  { font-size:26px; letter-spacing:-.012em; }
+  .lc   { font-size:33px; letter-spacing:.02em; }
+  .big  { font-size:62px; letter-spacing:-.021em; line-height:1.1; }
+  .body { font-size:15px; line-height:1.62; max-width:62ch; }
+  table { border-collapse:collapse; font-size:13px; margin-top:4px; width:100%; }
+  th,td { text-align:right; padding:5px 14px 5px 0; border-bottom:1px solid var(--rule); }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink3); font-weight:600; }
+  td.n { font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); } .gap { color:var(--hit); }
+  .note { font-size:12.5px; color:var(--ink2); line-height:1.65; margin:15px 0 0; max-width:76ch; }
+  .note b { color:var(--ink); font-weight:600; }
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Inter against its three references</h1>
+  <p class="sub">Graphik (Commercial Type), Söhne (Klim) and TWK Lausanne (Weltkern), each fitted to
+  Inter's optical-size axis by lowercase advance width. <b>Graphik renders from the macOS system font
+  asset</b>; nothing is vendored for it.</p>
+  <p class="warn"><b>All three references are proprietary.</b> Graphik © 2009 Commercial Type;
+  Söhne © 2025 Klim Type Foundry, supplied as a trial font. They appear here as on-screen references
+  only. Ultra Sans derives from Inter (OFL) and from nothing else.</p>
+
+  <section>
+    <p class="eyebrow">Pangram — 26px</p>
+    <div class="row"><span class="tag">Inter<i>ships today</i></span><span class="pan auto">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Graphik<em>reference</em></span><span class="pan graphik">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Söhne<em>reference</em></span><span class="pan soehne">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Inter opsz 17<b>Graphik fit</b></span><span class="pan o17">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Inter opsz 27<b>Söhne fit</b></span><span class="pan o27">The quick brown fox jumped over the lazy dog.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Lowercase — where the width signature reads</p>
+    <div class="row"><span class="tag">Inter</span><span class="lc auto">abcdefghijklmnopqrstuvwxyz</span></div>
+    <div class="row"><span class="tag">Graphik</span><span class="lc graphik">abcdefghijklmnopqrstuvwxyz</span></div>
+    <div class="row"><span class="tag">Söhne</span><span class="lc soehne">abcdefghijklmnopqrstuvwxyz</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Display — 62px</p>
+    <div class="row"><span class="tag">Inter</span><span class="big auto">BisQue Ultra</span></div>
+    <div class="row"><span class="tag">Graphik</span><span class="big graphik">BisQue Ultra</span></div>
+    <div class="row"><span class="tag">Söhne</span><span class="big soehne">BisQue Ultra</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Body — 15px</p>
+    <div class="row"><span class="tag">Inter</span><span class="body auto">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Graphik</span><span class="body graphik">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Söhne</span><span class="body soehne">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Fit — Inter's optical size per reference</p>
+    <table>
+      <tr><th>Reference</th><th>Best-fit opsz (width)</th><th>RMS width error</th><th>x/cap</th><th>opsz matching that x/cap</th></tr>
+      <tr><td>Graphik</td><td class="n">17.04</td><td class="n gap">3.46%</td><td class="n">0.7315</td><td class="n">22.1</td></tr>
+      <tr><td>Söhne Buch</td><td class="n">27.00</td><td class="n win">1.86%</td><td class="n">0.7284</td><td class="n">23.5</td></tr>
+      <tr><td>TWK Lausanne</td><td class="n">16.65</td><td class="n">2.27%</td><td class="n">0.7240</td><td class="n">25.4</td></tr>
+      <tr><td><b>Inter opsz 14</b></td><td class="n">—</td><td class="n">—</td><td class="n"><b>0.7503</b></td><td class="n">—</td></tr>
+      <tr><td><b>Inter opsz 32</b></td><td class="n">—</td><td class="n">—</td><td class="n"><b>0.7087</b></td><td class="n">—</td></tr>
+    </table>
+    <p class="note"><b>Graphik fits worst of the three (3.46%)</b> — not because it is far away on average,
+    but because it has a width signature Inter's axis cannot reproduce: a narrow <code>s</code> (−7.5%
+    against the fit), a wide <code>t</code> (+9.5%) and wide round capitals (<code>O</code> +6.4%).
+    Scaling one axis moves every glyph together; it cannot make <code>s</code> narrow and <code>t</code>
+    wide at once.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Advance widths in em, measured from the binaries</p>
+    <table>
+      <tr><th>Glyph</th><th>Inter 14</th><th>Inter 32</th><th>Graphik</th><th>Söhne</th><th>Lausanne</th></tr>
+      <tr><td>o</td><td class="n">0.600</td><td class="n">0.549</td><td class="n">0.604</td><td class="n">0.564</td><td class="n">0.598</td></tr>
+      <tr><td>n</td><td class="n">0.591</td><td class="n">0.547</td><td class="n">0.598</td><td class="n">0.564</td><td class="n">0.584</td></tr>
+      <tr><td>e</td><td class="n">0.583</td><td class="n">0.536</td><td class="n">0.568</td><td class="n">0.540</td><td class="n">0.580</td></tr>
+      <tr><td>a</td><td class="n">0.562</td><td class="n">0.518</td><td class="n">0.540</td><td class="n">0.526</td><td class="n">0.555</td></tr>
+      <tr><td>c</td><td class="n">0.571</td><td class="n">0.523</td><td class="n">0.570</td><td class="n">0.520</td><td class="n">0.581</td></tr>
+      <tr><td>s</td><td class="n">0.528</td><td class="n">0.475</td><td class="n gap">0.480</td><td class="n">0.486</td><td class="n">0.495</td></tr>
+      <tr><td>t</td><td class="n">0.327</td><td class="n">0.311</td><td class="n gap">0.355</td><td class="n">0.340</td><td class="n">0.347</td></tr>
+      <tr><td>g</td><td class="n">0.613</td><td class="n">0.565</td><td class="n">0.627</td><td class="n">0.593</td><td class="n">0.621</td></tr>
+      <tr><td>H</td><td class="n">0.743</td><td class="n">0.708</td><td class="n">0.730</td><td class="n">0.735</td><td class="n">0.714</td></tr>
+      <tr><td>O</td><td class="n">0.765</td><td class="n">0.749</td><td class="n gap">0.811</td><td class="n">0.726</td><td class="n">0.817</td></tr>
+      <tr><td>R</td><td class="n">0.644</td><td class="n">0.632</td><td class="n">0.628</td><td class="n">0.648</td><td class="n">0.664</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <p class="eyebrow">The one thing all three agree on</p>
+    <table>
+      <tr><th></th><th>cap height</th><th>x-height</th><th>x / cap</th></tr>
+      <tr><td>Graphik</td><td class="n">0.715</td><td class="n">0.523</td><td class="n">0.7315</td></tr>
+      <tr><td>Söhne</td><td class="n">0.718</td><td class="n">0.523</td><td class="n">0.7284</td></tr>
+      <tr><td>Lausanne</td><td class="n">0.714</td><td class="n">0.517</td><td class="n">0.7240</td></tr>
+      <tr><td><b>Inter opsz 14</b></td><td class="n">0.728</td><td class="n">0.546</td><td class="n gap"><b>0.7503</b></td></tr>
+      <tr><td><b>Inter opsz 24</b></td><td class="n">0.728</td><td class="n">0.529</td><td class="n win"><b>0.7275</b></td></tr>
+    </table>
+    <p class="note">All three references land within 1% of each other on x-height relative to cap
+    (0.724–0.732), and <b>all three sit well below Inter at text sizes</b> (0.750). That single number is
+    most of why Inter reads as a UI typeface and these read as brand typefaces — Inter's x-height is
+    deliberately taller so small text holds up on screen. Inter's own axis crosses the references'
+    consensus at about <b>opsz 24</b>. Everything else here is width; this is proportion.</p>
+  </section>
+</div></body></html>

@@ -1369,12 +1369,12 @@ const (
 // owner-scoped everywhere it is read. Deletion is HARD deletion — a note the
 // user deletes is erased, not concealed.
 type NoteRecord struct {
-	NoteID       string    `json:"note_id"`
-	UserID       string    `json:"user_id,omitempty"`
-	OrgID        string    `json:"org_id,omitempty"`
-	Title        string    `json:"title"`
-	BodyMarkdown string    `json:"body_markdown"`
-	Pinned       bool      `json:"pinned"`
+	NoteID       string `json:"note_id"`
+	UserID       string `json:"user_id,omitempty"`
+	OrgID        string `json:"org_id,omitempty"`
+	Title        string `json:"title"`
+	BodyMarkdown string `json:"body_markdown"`
+	Pinned       bool   `json:"pinned"`
 	// EditorMode is the owner's editing surface for this note — "markdown"
 	// (rich, doc-style) or "plaintext" (raw mono). Sticky per note; purely a
 	// presentation preference. The body is plain markdown in either mode.

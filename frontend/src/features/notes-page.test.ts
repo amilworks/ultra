@@ -1,10 +1,10 @@
 /**
- * Notes Phase 1 — the frictionless contract.
+ * Notes — the writing-first contract.
  *
  * Notes exists to sit next to the work and help it. Phase 1 is the page:
  * owner-scoped CRUD, markdown as the source of truth, and a surface where
- * nothing stands between "opened Notes" and "writing" — no dialogs, no save
- * buttons, autosave that flushes on every exit path.
+ * nothing stands between "new note" and writing. Blank drafts stay local,
+ * autosave is serialized, and sync failures remain explicit and retryable.
  */
 
 import { readFileSync } from "node:fs";
@@ -59,14 +59,17 @@ describe("navigation", () => {
 });
 
 describe("frictionless editing", () => {
-  it("creates a note and lands focus in the title — no dialogs anywhere", () => {
-    expect(pageSource).toContain("titleRef.current?.focus()");
-    expect(pageSource).not.toMatch(/<Dialog/);
+  it("starts a body-focused local draft without creating a server note", () => {
+    expect(pageSource).toContain('LOCAL_DRAFT_ID = "__ultra_local_note_draft__"');
+    expect(pageSource).toContain("pendingBodyFocusRef.current = true");
+    expect(pageSource).toContain("editorApiRef.current?.focus()");
+    expect(pageSource).not.toContain("apiClient.createNote({});");
   });
 
-  it("auto-creates the very first note instead of an empty lecture", () => {
-    expect(pageSource).toContain("autoCreatedRef");
-    expect(pageSource).toMatch(/items\.length === 0[\s\S]{0,120}void createNote\(\)/);
+  it("never creates blank list clutter; the empty state offers one direct action", () => {
+    expect(pageSource).not.toContain("autoCreatedRef");
+    expect(pageSource).toContain("!meaningfulDraft(currentDraft)");
+    expect(pageSource).toContain("Write your first note");
   });
 
   it("title Enter/Tab drops straight into the body — whichever surface is active", () => {
@@ -79,11 +82,11 @@ describe("frictionless editing", () => {
   });
 
   it("autosaves on debounce AND flushes on blur, note switch, and unmount", () => {
-    expect(pageSource).toContain("AUTOSAVE_DEBOUNCE_MS = 800");
-    expect(pageSource).toContain('onBlur={() => void flushSave()}');
+    expect(pageSource).toContain("AUTOSAVE_DEBOUNCE_MS = 700");
+    expect(pageSource).toContain("onBlur={handleEditorBlur}");
     // Switch: openNote flushes the previous draft before loading the next.
     expect(pageSource).toMatch(
-      /draftRef\.current\.noteId !== noteId[\s\S]{0,80}await flushSave\(\)/
+      /draftRef\.current\.noteId !== noteId[\s\S]{0,260}await flushSave\(\)/
     );
     // Unmount: the cleanup effect flushes.
     expect(pageSource).toMatch(/return \(\) => \{[\s\S]{0,200}void flushSave\(\);\s*\};\s*\}, \[flushSave\]\);/);
@@ -111,8 +114,9 @@ describe("frictionless editing", () => {
     }
   });
 
-  it("deletes with an inline two-step, never a browser confirm", () => {
-    expect(pageSource).toContain("Really delete");
+  it("confirms permanent deletion with an accessible alert dialog", () => {
+    expect(pageSource).toContain("<AlertDialog");
+    expect(pageSource).toContain("Deletion is permanent");
     expect(pageSource).not.toContain("window.confirm");
   });
 });
@@ -127,7 +131,7 @@ describe("plumbing", () => {
   it("styles stay in tokens, and the page collapses to the editor on phones", () => {
     const chip = styles.match(/\.notes-row-title\s*\{[^}]*\}/s)?.[0];
     expect(chip).toContain("var(--sidebar-nav-foreground)");
-    expect(styles).toMatch(/@media \(max-width: 720px\)[\s\S]{0,200}\.notes-page \{ grid-template-columns: 1fr; \}/);
+    expect(styles).toMatch(/@media \(max-width: 960px\)[\s\S]{0,200}\.notes-page \{ grid-template-columns: 1fr; \}/);
   });
 
   it("the harness serves notes so the page can be driven end to end", () => {
@@ -141,7 +145,7 @@ describe("media in notes — one pipeline, one catalog", () => {
     expect(pageSource).toContain("apiClient.uploadFiles(files)");
     expect(pageSource).toContain("<FileUpload");
     expect(pageSource).toContain("onPaste={handleBodyPaste}");
-    expect(pageSource).toContain('id: "media", label: "Image or video"');
+    expect(pageSource).toContain('id: "media", label: "Upload file"');
     // No parallel upload endpoint, no note-private storage.
     expect(pageSource).not.toContain("uploadNoteMedia");
   });
@@ -160,7 +164,7 @@ describe("media in notes — one pipeline, one catalog", () => {
   });
 
   it("whispers upload progress in the same voice as autosave", () => {
-    expect(pageSource).toMatch(/Uploading \{uploadingCount\} file/);
+    expect(pageSource).toContain("Uploading ${uploadingCount} file");
   });
 
   it("styles media with tokens — hairline border, house radius", () => {

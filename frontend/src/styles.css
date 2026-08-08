@@ -4974,6 +4974,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   text-overflow: ellipsis;
 }
 
+.notes-row-snippet:empty {
+  display: none;
+}
+
 .notes-list-state {
   display: flex;
   align-items: center;
@@ -5026,12 +5030,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 /* Phones collapse to the editor; this chip flips the list back in front.
    Desktop never sees it. */
-/* Control chrome never behaves like text on touch — a long-press on a
-   ribbon glyph, the back chip, or a list row must not start a selection
-   on iOS. */
+/* Control chrome never behaves like text on touch — a long-press on the
+   back chip or a list row must not start a selection on iOS. */
 .notes-mobile-back,
-.notes-mode-seg button,
-.notes-ribbon-btn,
 .notes-row {
   -webkit-user-select: none;
   user-select: none;
@@ -5053,32 +5054,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .notes-mobile-back svg { width: 1rem; height: 1rem; }
-
-.notes-mode-seg {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px;
-  background: var(--background);
-}
-
-.notes-mode-seg button {
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-family: var(--font-sans);
-  font-size: 0.76rem;
-  font-weight: 500;
-  padding: 0.22rem 0.7rem;
-  border-radius: 999px;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.notes-mode-seg button[data-active="true"] {
-  background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
-  color: var(--text-main);
-}
 
 .notes-title-input {
   border: 0;
@@ -5150,67 +5125,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .notes-slash-item small { color: var(--text-muted); font-size: 0.7rem; }
 .notes-slash-item[data-highlighted="true"] { background: color-mix(in oklab, var(--accent) 85%, transparent); }
-
-/* --- The Markdown-mode surface: ribbon + ProseMirror --- */
-
-/* One quiet row a professor reads at a glance. Every button writes plain
-   markdown; active state is ink-on-pill, never color. */
-.notes-ribbon {
-  display: flex;
-  align-items: center;
-  /* Wraps on narrow panes (the contextual table chips take a second quiet
-     row) — the phone regime overrides to one sideways-scrolling row. */
-  flex-wrap: wrap;
-  gap: 2px;
-  width: min(100%, 46rem);
-  padding: 2px 0 8px;
-  border-bottom: 1px solid var(--line);
-  flex: none;
-}
-
-.notes-ribbon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 28px;
-  height: 28px;
-  padding: 0 5px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-main);
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.notes-ribbon-btn svg { width: 0.95rem; height: 0.95rem; }
-
-.notes-ribbon-btn:hover { background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent); }
-
-.notes-ribbon-btn[data-active="true"] {
-  background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%);
-}
-
-.notes-ribbon-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ring); }
-
-.notes-ribbon-sep { width: 1px; height: 15px; background: var(--line); margin: 0 5px; flex: none; }
-
-.notes-ribbon-spacer { flex: 1; }
-
-.notes-ribbon-caret { width: 0.55rem !important; height: 0.55rem !important; margin-left: 2px; opacity: 0.55; }
-
-/* Contextual table controls: labeled chips, visible only with the caret in
-   a table — professors read words faster than pictograms. */
-.notes-ribbon-text {
-  min-width: 0;
-  padding: 0 8px;
-  font-family: var(--font-sans);
-  font-size: 0.76rem;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.notes-ribbon-menu [data-current="true"] { font-weight: 600; }
 
 .notes-link-pop {
   display: flex;
@@ -5528,7 +5442,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.9rem;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 960px) {
   .notes-page { grid-template-columns: 1fr; }
   .notes-list { display: none; }
   .notes-editor { padding: 12px 16px 20px; }
@@ -5544,23 +5458,868 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   .notes-md-prose { font-size: 16px; }
   .notes-title-input { font-size: 1.35rem; }
 
-  /* One row, finger-sized, scrolls sideways like a doc app's toolbar. */
-  .notes-ribbon {
-    width: 100%;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    padding-bottom: 6px;
+  .notes-editor-bar { flex-wrap: wrap; gap: 0.5rem; }
+}
+
+/* Writing-first Notes refinement. The rich editor is the primary surface;
+   formatting, raw source, resources, and destructive actions disclose only
+   when the writer asks for them. */
+.notes-page {
+  grid-template-columns: minmax(238px, 276px) minmax(0, 1fr);
+  background: var(--background);
+  transition: grid-template-columns 180ms var(--motion-ease);
+}
+
+.notes-page[data-focus-mode="true"] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.notes-page[data-focus-mode="true"] .notes-list {
+  visibility: hidden;
+  min-width: 0;
+  overflow: hidden;
+  padding-inline: 0;
+  border: 0;
+}
+
+.notes-list {
+  padding: 10px 8px 8px;
+  background: color-mix(in oklab, var(--background) 95%, var(--sidebar-accent));
+}
+
+.notes-list-head {
+  min-height: 50px;
+  padding: 4px 5px 8px 8px;
+}
+
+.notes-new-button {
+  min-height: 34px;
+  border-radius: 9px;
+}
+
+.notes-search {
+  margin: 0 4px 8px;
+  background: var(--background);
+}
+
+.notes-row {
+  position: relative;
+  gap: 0.16rem;
+  padding: 9px 10px 9px 12px;
+}
+
+.notes-row[data-active="true"]::before {
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 3px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--ring);
+  content: "";
+}
+
+.notes-row-time {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.notes-list-empty {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+}
+
+.notes-list-empty button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-list-error {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.notes-list-error button,
+.notes-resource-state button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-list-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.notes-list-foot::before {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--text-muted);
+  content: "";
+  opacity: 0.7;
+}
+
+.notes-editor {
+  position: relative;
+  padding: 0;
+  background: var(--background);
+}
+
+.notes-editor-drop {
+  position: relative;
+}
+
+.notes-editor-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 58px;
+  margin: 0;
+  padding: 8px 16px 8px 18px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in oklab, var(--background) 96%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.notes-save-state {
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.notes-save-state span {
+  min-width: 0;
+}
+
+.notes-save-state:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-save-state:focus-visible,
+.notes-mobile-back:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-save-state[data-state="error"] {
+  color: var(--danger);
+}
+
+.notes-save-menu {
+  width: 270px;
+}
+
+.notes-save-detail {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem 0.65rem;
+  color: var(--text-main);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.notes-save-detail strong {
+  font-weight: 600;
+}
+
+.notes-save-detail span {
+  color: var(--text-muted);
+}
+
+.notes-editor-actions {
+  gap: 0.2rem;
+}
+
+.notes-icon-button {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.notes-icon-button:hover,
+.notes-icon-button[aria-pressed="true"] {
+  border-color: var(--line);
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-icon-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-icon-button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.notes-delete-menu-item {
+  color: var(--danger);
+}
+
+.notes-editor-error {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 14px auto 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in oklab, var(--danger) 35%, var(--line));
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
+.notes-editor-error > span {
+  flex: 1;
+}
+
+.notes-editor-error button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.notes-editor-error svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-title-input {
+  display: block;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 46px auto 0;
+  padding: 0;
+  font-size: 1.72rem;
+  line-height: 1.24;
+}
+
+.notes-document-context {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 8px auto 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.notes-document-context span + span::before {
+  margin-right: 0.5rem;
+  content: "·";
+}
+
+.notes-document-context button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-document-context button::before {
+  margin-right: 0.5rem;
+  content: "·";
+}
+
+.notes-document-context button:hover {
+  color: var(--text-main);
+}
+
+.notes-document-context button:focus-visible,
+.notes-list-empty button:focus-visible,
+.notes-list-error button:focus-visible,
+.notes-resource-state button:focus-visible,
+.notes-source-banner button:focus-visible,
+.notes-resource-row:focus-visible,
+.notes-resource-upload:focus-visible,
+.notes-resource-picker-head button:focus-visible,
+.notes-table-tools button:focus-visible,
+.notes-selection-toolbar button:focus-visible,
+.notes-slash-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-search:focus-within,
+.notes-resource-search:focus-within,
+.notes-link-pop:focus-within {
+  border-color: color-mix(in oklab, var(--line) 40%, var(--text-muted) 60%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 72%, transparent);
+}
+
+.notes-body-shell,
+.notes-md-shell {
+  position: relative;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 28px auto 0;
+}
+
+.notes-body-shell {
+  flex: none;
+  min-height: 30rem;
+  flex-direction: column;
+}
+
+.notes-source-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--sidebar-accent) 48%, transparent);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.notes-source-banner button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-body-input {
+  width: 100%;
+  min-height: 28rem;
+  font-size: 0.88rem;
+}
+
+.notes-md-shell {
+  display: flex;
+  min-height: 32rem;
+  flex-direction: column;
+}
+
+.notes-md-shell > div:not(.notes-editor-placeholder):not(.notes-editor-hint) {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.notes-md-prose {
+  width: 100%;
+  min-height: 28rem;
+  padding-top: 0;
+  padding-bottom: 35vh;
+  font-size: 1rem;
+  line-height: 1.68;
+  caret-color: var(--ring);
+}
+
+.notes-editor-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  color: var(--text-muted);
+  font-size: 1rem;
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+.notes-md-shell > .notes-editor-hint {
+  position: absolute;
+  top: 2.15rem;
+  left: 0;
+  display: flex;
+  min-height: auto;
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  pointer-events: none;
+}
+
+.notes-md-shell > .notes-editor-hint kbd {
+  display: inline-grid;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-bottom-color: color-mix(in oklab, var(--text-main) 30%, var(--line));
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--sidebar-accent) 52%, transparent);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.notes-selection-toolbar {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 12px 30px rgba(16, 20, 18, 0.18);
+  transform: translateX(-50%);
+}
+
+.notes-selection-toolbar button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.notes-selection-toolbar button:hover,
+.notes-selection-toolbar button[data-active="true"] {
+  background: color-mix(in oklab, var(--sidebar-accent) 82%, transparent);
+}
+
+.notes-selection-toolbar svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-table-tools {
+  position: fixed;
+  z-index: 59;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  width: max-content;
+  max-width: calc(100vw - 20px);
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 12px 30px rgba(16, 20, 18, 0.16);
+  transform: translateX(-50%);
+}
+
+.notes-table-tools button {
+  min-height: 30px;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.73rem;
+  cursor: pointer;
+}
+
+.notes-table-tools button:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-link-pop-contextual {
+  position: fixed;
+  z-index: 65;
+  margin: 0;
+  transform: translateX(-50%);
+}
+
+.notes-slash-floating {
+  position: fixed;
+  top: auto;
+  z-index: 64;
+  width: min(310px, calc(100vw - 24px));
+  max-height: min(440px, calc(100vh - 24px));
+  overflow-y: auto;
+}
+
+.notes-slash-heading {
+  padding: 7px 10px 5px;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.notes-slash-empty {
+  padding: 0.75rem 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.notes-resource-picker {
+  position: absolute;
+  top: 66px;
+  right: 18px;
+  z-index: 62;
+  width: min(350px, calc(100% - 36px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--popover);
+  box-shadow: 0 16px 38px rgba(16, 20, 18, 0.2);
+}
+
+.notes-resource-picker[data-floating="true"] {
+  position: fixed;
+  top: auto;
+  right: auto;
+  width: min(350px, calc(100vw - 24px));
+}
+
+.notes-resource-picker-head {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 7px 8px 5px 12px;
+  font-size: 0.82rem;
+}
+
+.notes-resource-picker-head button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.notes-resource-picker-head button:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+}
+
+.notes-resource-picker-head svg,
+.notes-resource-search svg,
+.notes-resource-row > svg,
+.notes-resource-upload svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-resource-search {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 8px 6px;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.notes-resource-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.notes-resource-results {
+  max-height: 310px;
+  overflow-y: auto;
+  padding: 0 6px 5px;
+}
+
+.notes-resource-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.8rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.notes-resource-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.notes-resource-row:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+}
+
+.notes-resource-kind {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+}
+
+.notes-resource-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.notes-resource-copy strong,
+.notes-resource-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-resource-copy strong {
+  font-size: 0.79rem;
+  font-weight: 600;
+}
+
+.notes-resource-copy small {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.notes-resource-upload {
+  display: flex;
+  width: calc(100% - 12px);
+  min-height: 38px;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 6px 6px;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.notes-editor-welcome {
+  flex-direction: column;
+}
+
+.notes-editor-load-error {
+  flex-direction: column;
+  padding: 2rem;
+  text-align: center;
+}
+
+.notes-editor-load-error > svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  color: var(--danger);
+}
+
+.notes-editor-load-error strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.notes-editor-load-error > span {
+  max-width: 32rem;
+}
+
+.notes-editor-load-error > div {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.notes-load-back {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .notes-page,
+  .notes-page[data-focus-mode="true"] {
+    display: block;
   }
 
-  .notes-ribbon::-webkit-scrollbar { display: none; }
+  .notes-page[data-focus-mode="true"] .notes-list {
+    visibility: visible;
+  }
 
-  .notes-ribbon-btn { min-width: 40px; height: 40px; flex: none; }
+  .notes-list {
+    min-height: 100%;
+  }
 
-  .notes-ribbon-btn svg { width: 1.05rem; height: 1.05rem; }
+  .notes-editor {
+    padding: 0;
+  }
 
-  .notes-editor-bar { flex-wrap: wrap; gap: 0.5rem; }
+  .notes-editor-bar {
+    min-height: 50px;
+    flex-wrap: nowrap;
+    padding: 5px 9px 5px 10px;
+  }
+
+  .notes-editor-bar-lead {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .notes-save-state span {
+    max-width: 6.4rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .notes-editor-actions {
+    flex: none;
+  }
+
+  .notes-title-input,
+  .notes-document-context,
+  .notes-body-shell,
+  .notes-md-shell,
+  .notes-editor-error {
+    width: calc(100% - 36px);
+  }
+
+  .notes-title-input {
+    margin-top: 28px;
+    font-size: 1.45rem;
+  }
+
+  .notes-body-shell,
+  .notes-md-shell {
+    margin-top: 26px;
+  }
+
+  .notes-md-prose {
+    font-size: 16px;
+    line-height: 1.64;
+  }
+
+  .notes-body-input {
+    font-size: 16px;
+  }
+
+  .notes-focus-button {
+    display: none;
+  }
+
+  .notes-mobile-back {
+    min-height: 40px;
+  }
+
+  .notes-load-back {
+    display: inline-flex;
+  }
+
+  .notes-icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .notes-selection-toolbar button,
+  .notes-resource-picker-head button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .notes-table-tools button,
+  .notes-slash-item {
+    min-height: 40px;
+  }
+
+  .notes-resource-picker,
+  .notes-resource-picker[data-floating="true"] {
+    position: fixed;
+    top: 108px !important;
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+  }
+
+  .notes-link-pop-contextual {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+    transform: none;
+  }
+
+  .notes-slash-floating {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+  }
+
+  .notes-table-tools {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notes-page {
+    transition: none;
+  }
 }
 
 @media (max-width: 720px) {

@@ -66,7 +66,7 @@ import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
 import { trailing } from "@milkdown/kit/plugin/trailing";
 import { exitCode } from "@milkdown/kit/prose/commands";
 import type { MarkType, Node as ProseNode } from "@milkdown/kit/prose/model";
-import { Plugin } from "@milkdown/kit/prose/state";
+import { Plugin, TextSelection } from "@milkdown/kit/prose/state";
 import { deleteColumn, deleteRow, deleteTable } from "@milkdown/kit/prose/tables";
 import type { NodeViewConstructor } from "@milkdown/kit/prose/view";
 import { $prose, $useKeymap, $view, callCommand, insert } from "@milkdown/kit/utils";
@@ -113,7 +113,7 @@ export type NotesActiveStates = {
   link: boolean;
   linkHref: string | null;
   block: "h2" | "h3" | "body" | "other";
-  /** Caret inside a table — the ribbon shows the row/column controls. */
+  /** Caret inside a table — the page reveals contextual row/column controls. */
   inTable: boolean;
 };
 
@@ -137,6 +137,17 @@ export type NotesEditorHandle = {
   focus: () => void;
 };
 
+export type NotesEditorAnchor = {
+  left: number;
+  top: number;
+  bottom: number;
+};
+
+export type NotesEditorMenuRequest = {
+  kind: "blocks" | "resources";
+  anchor: NotesEditorAnchor;
+};
+
 export type MarkdownNoteEditorProps = {
   defaultMarkdown: string;
   /** Resolves a Resources file id to its download URL (apiClient-bound). */
@@ -144,6 +155,11 @@ export type MarkdownNoteEditorProps = {
   onMarkdownChange: (markdown: string) => void;
   onBlur: () => void;
   onActiveStatesChange: (states: NotesActiveStates) => void;
+  onSelectionAnchorChange: (anchor: NotesEditorAnchor | null) => void;
+  onCaretAnchorChange: (anchor: NotesEditorAnchor | null) => void;
+  onMenuRequest: (request: NotesEditorMenuRequest) => void;
+  /** Lets the page own keyboard navigation while a contextual menu is open. */
+  onMenuKeyDown: (event: KeyboardEvent) => boolean;
   /** FilePickerBridge pattern: the page captures the imperative surface. */
   bindApi: (api: NotesEditorHandle | null) => void;
 };
@@ -318,12 +334,45 @@ function MarkdownNoteEditorCore({
   onMarkdownChange,
   onBlur,
   onActiveStatesChange,
+  onSelectionAnchorChange,
+  onCaretAnchorChange,
+  onMenuRequest,
+  onMenuKeyDown,
   bindApi,
 }: MarkdownNoteEditorProps) {
   /* The editor is created once per mount (the page keys this component by
      note id); callbacks flow through refs so the factory never goes stale. */
-  const callbacksRef = useRef({ onMarkdownChange, onBlur, onActiveStatesChange, resourceUrl });
-  callbacksRef.current = { onMarkdownChange, onBlur, onActiveStatesChange, resourceUrl };
+  const callbacksRef = useRef({
+    onMarkdownChange,
+    onBlur,
+    onActiveStatesChange,
+    onSelectionAnchorChange,
+    onCaretAnchorChange,
+    onMenuRequest,
+    onMenuKeyDown,
+    resourceUrl,
+  });
+  useEffect(() => {
+    callbacksRef.current = {
+      onMarkdownChange,
+      onBlur,
+      onActiveStatesChange,
+      onSelectionAnchorChange,
+      onCaretAnchorChange,
+      onMenuRequest,
+      onMenuKeyDown,
+      resourceUrl,
+    };
+  }, [
+    onActiveStatesChange,
+    onBlur,
+    onCaretAnchorChange,
+    onMarkdownChange,
+    onMenuKeyDown,
+    onMenuRequest,
+    onSelectionAnchorChange,
+    resourceUrl,
+  ]);
   const initialMarkdownRef = useRef(defaultMarkdown);
   const activeFrameRef = useRef<number | null>(null);
 
@@ -373,25 +422,56 @@ function MarkdownNoteEditorCore({
         .config((ctx) => {
           ctx.set(rootCtx, root);
           ctx.set(defaultValueCtx, initialMarkdownRef.current);
-          ctx.update(editorViewOptionsCtx, (options) => ({
-            ...options,
-            // Pasted chat answers and Word fragments get rewritten toward
-            // plainness (KaTeX → math atoms, code chrome shed, checkbox
-            // inputs → task items) before ProseMirror parses them.
-            transformPastedHTML: sanitizePastedHtml,
-            attributes: {
-              // House reading voice on the editable surface itself — the
-              // styled note IS the editor. pk-markdown carries the list and
-              // measure rules (chat's tables ride React components instead,
-              // so the notes table chrome lives in the notes CSS block).
-              // Prose defaults stay writer-shaped: autocorrect on, sentence
-              // caps (unlike the mono dump surface).
-              class: "pk-message-content pk-markdown notes-md-prose",
-              spellcheck: "true",
-              autocapitalize: "sentences",
-              autocorrect: "on",
-            },
-          }));
+          ctx.update(editorViewOptionsCtx, (options) => {
+            const previousHandleKeyDown = options.handleKeyDown;
+            return {
+              ...options,
+              // Pasted chat answers and Word fragments get rewritten toward
+              // plainness (KaTeX → math atoms, code chrome shed, checkbox
+              // inputs → task items) before ProseMirror parses them.
+              transformPastedHTML: sanitizePastedHtml,
+              attributes: {
+                // House reading voice on the editable surface itself — the
+                // styled note IS the editor. pk-markdown carries the list and
+                // measure rules (chat's tables ride React components instead,
+                // so the notes table chrome lives in the notes CSS block).
+                // Prose defaults stay writer-shaped: autocorrect on, sentence
+                // caps (unlike the mono dump surface).
+                class: "pk-message-content pk-markdown notes-md-prose",
+                spellcheck: "true",
+                autocapitalize: "sentences",
+                autocorrect: "on",
+                "aria-label": "Note body",
+              },
+              handleKeyDown: (view, event) => {
+                if (callbacksRef.current.onMenuKeyDown(event)) {
+                  event.preventDefault();
+                  return true;
+                }
+                if (
+                  (event.key === "/" || event.key === "@") &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  !event.altKey &&
+                  view.state.selection.empty &&
+                  view.state.selection.$from.parentOffset === 0
+                ) {
+                  const coords = view.coordsAtPos(view.state.selection.from);
+                  event.preventDefault();
+                  callbacksRef.current.onMenuRequest({
+                    kind: event.key === "/" ? "blocks" : "resources",
+                    anchor: {
+                      left: coords.left,
+                      top: coords.top,
+                      bottom: coords.bottom,
+                    },
+                  });
+                  return true;
+                }
+                return previousHandleKeyDown?.(view, event) ?? false;
+              },
+            };
+          });
           /* House dialect (shared with the fidelity gate): serialization
              must not restyle untouched notes — see notesDialect.ts. */
           ctx.update(remarkStringifyOptionsCtx, withNotesDialect);
@@ -403,6 +483,8 @@ function MarkdownNoteEditorCore({
               }
             })
             .blur(() => {
+              callbacksRef.current.onSelectionAnchorChange(null);
+              callbacksRef.current.onCaretAnchorChange(null);
               callbacksRef.current.onBlur();
             })
             .selectionUpdated((listenerInnerCtx) => {
@@ -410,16 +492,36 @@ function MarkdownNoteEditorCore({
                 return;
               }
               // A short timeout, not requestAnimationFrame: rAF freezes in
-              // hidden tabs, which would stall ribbon state until the next
+              // hidden tabs, which would stall contextual control state until the next
               // visible frame. A timer coalesces bursts just as well.
               activeFrameRef.current = window.setTimeout(() => {
                 activeFrameRef.current = null;
                 const states = readActiveStates(listenerInnerCtx);
+                const view = listenerInnerCtx.get(editorViewCtx);
+                const selection = view.state.selection;
+                const caretCoords = view.coordsAtPos(selection.from);
+                const caretAnchor: NotesEditorAnchor = {
+                  left: caretCoords.left,
+                  top: caretCoords.top,
+                  bottom: caretCoords.bottom,
+                };
+                let anchor: NotesEditorAnchor | null = null;
+                if (selection instanceof TextSelection && !selection.empty) {
+                  const start = view.coordsAtPos(selection.from);
+                  const end = view.coordsAtPos(selection.to);
+                  anchor = {
+                    left: (Math.min(start.left, end.left) + Math.max(start.right, end.right)) / 2,
+                    top: Math.min(start.top, end.top),
+                    bottom: Math.max(start.bottom, end.bottom),
+                  };
+                }
                 if (import.meta.env.DEV) {
                   // Stress-harness breadcrumb, dev builds only.
                   (window as unknown as { __notesLastStates?: unknown }).__notesLastStates = states;
                 }
                 callbacksRef.current.onActiveStatesChange(states);
+                callbacksRef.current.onSelectionAnchorChange(anchor);
+                callbacksRef.current.onCaretAnchorChange(caretAnchor);
               }, 32);
             });
         })

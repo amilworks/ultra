@@ -1,14 +1,15 @@
 /**
- * Notes dual-mode — two modes, one file.
+ * Notes writing surface — progressive disclosure over one durable file.
  *
  * The contract this suite pins (see the design mock):
  * - Markdown mode edits like a doc over a pure-markdown data structure; the
  *   styling layer is rendering, never hidden data Ultra can't see.
  * - Plaintext mode is the raw mono surface, untouched.
  * - The mode is per-note and sticky (editor_mode on the record, every layer).
- * - The ribbon is pinned to the basics — every button writes plain markdown.
+ * - Formatting is contextual; the document is not permanently crowded by a
+ *   ribbon. Every command still writes plain markdown.
  * - The one highlight is ==content==, shared with the chat renderer.
- * - Mobile is first-class: finger-sized ribbon, no iOS focus-zoom, and the
+ * - Mobile is first-class: finger-sized actions, no iOS focus-zoom, and the
  *   list stays reachable behind a back chip.
  *
  * Engine fidelity (zero-edit ⇒ zero-diff) lives in its own runtime suite:
@@ -36,12 +37,12 @@ const openapi = read("../backend/controlplane/api/openapi.yaml");
 const schema = read("../backend/controlplane/internal/store/schema.sql");
 const notesHandlers = read("../backend/controlplane/internal/httpapi/notes.go");
 
-describe("two modes, one file", () => {
-  it("offers exactly Markdown and Plaintext, as a segmented control", () => {
-    expect(pageSource).toContain('aria-label="Editor mode"');
-    expect(pageSource).toMatch(/switchEditorMode\("markdown"\)/);
-    expect(pageSource).toMatch(/switchEditorMode\("plaintext"\)/);
-    // No third mode, no preview toggle — the styled surface IS the note.
+describe("one file, progressively disclosed source mode", () => {
+  it("keeps formatted writing primary and raw Markdown in the overflow", () => {
+    expect(pageSource).toContain('aria-label="More note actions"');
+    expect(pageSource).toContain("Edit Markdown source");
+    expect(pageSource).toContain("Return to formatted editor");
+    expect(pageSource).not.toContain('aria-label="Editor mode"');
     expect(pageSource).not.toContain("Toggle preview");
   });
 
@@ -51,12 +52,12 @@ describe("two modes, one file", () => {
     );
     // The old page-level plain-⌘E preview handler is gone.
     expect(pageSource).not.toMatch(/!event\.shiftKey && event\.key\.toLowerCase\(\) === "e"/);
-    expect(pageSource).toContain('title="Code (⌘E)"');
+    expect(pageSource).toContain('aria-label="Inline code"');
   });
 
   it("the mode is per-note and sticky at every layer", () => {
     // Draft carries it; the single save channel persists it.
-    expect(pageSource).toMatch(/editor_mode: draft\.editorMode/);
+    expect(pageSource).toMatch(/editor_mode: snapshot\.editorMode/);
     expect(pageSource).toMatch(/editorMode: record\.editor_mode/);
     // API type, mock harness, HTTP validation, and column all agree.
     expect(apiSource).toContain('NoteEditorMode = "markdown" | "plaintext"');
@@ -93,25 +94,16 @@ describe("the zero-rewrite law", () => {
   });
 });
 
-describe("the ribbon — pinned to the basics", () => {
-  it("carries exactly the formalized controls, labeled with their shortcuts", () => {
-    for (const [label, shortcut] of [
-      ["Bold", "⌘B"],
-      ["Italic", "⌘I"],
-      ["Strikethrough", "⌘⇧X"],
-      ["Highlight", "⌘⇧H"],
-      ["Link", "⌘K"],
-      ["Quote", "⌘⇧9"],
-      ["Code", "⌘E"],
-      ["Bulleted list", "⌘⇧8"],
-      ["Numbered list", "⌘⇧7"],
-    ] as const) {
+describe("contextual writing controls", () => {
+  it("puts inline formatting at the selection and blocks behind slash", () => {
+    for (const label of ["Bold", "Italic", "Highlight", "Inline code", "Link"] as const) {
       expect(pageSource).toContain(`aria-label="${label}"`);
-      expect(pageSource).toContain(`(${shortcut})`);
     }
-    expect(pageSource).toContain('aria-label="Text size"');
-    expect(pageSource).toContain('aria-label="Table"');
-    expect(pageSource).toContain('aria-label="Attach image or video"');
+    expect(pageSource).toContain('className="notes-selection-toolbar"');
+    expect(pageSource).not.toContain('className="notes-ribbon"');
+    for (const block of ["Heading", "Quote", "Bulleted list", "Table", "Code"]) {
+      expect(pageSource).toContain(`label: "${block}"`);
+    }
     // Said no to, on purpose: no color palette, no alignment buttons.
     expect(pageSource).not.toMatch(/aria-label="Align/);
     expect(pageSource).not.toMatch(/color-palette|text-color/i);
@@ -187,14 +179,8 @@ describe("bundle discipline", () => {
 
 describe("editor polish — tables, exits, checkboxes, code chip (user findings)", () => {
   it("the caret in a table reveals labeled row/column controls", () => {
-    for (const label of [
-      "Add row below",
-      "Delete row",
-      "Add column right",
-      "Delete column",
-      "Delete table",
-    ]) {
-      expect(pageSource).toContain(`aria-label="${label}"`);
+    for (const label of ["+ Row", "− Row", "+ Column", "− Column", "Delete table"]) {
+      expect(pageSource).toContain(`>${label}</button>`);
     }
     expect(pageSource).toContain("editorActive.inTable ?");
     for (const action of ["rowBelow", "rowDelete", "colRight", "colDelete", "tableDelete"]) {
@@ -249,16 +235,15 @@ describe("mobile is first-class", () => {
     expect(mobile).toMatch(/\.notes-md-prose \{ font-size: 16px; \}/);
   });
 
-  it("the ribbon becomes a finger-sized, sideways-scrolling toolbar", () => {
+  it("keeps visible mobile actions finger-sized without restoring a permanent ribbon", () => {
     const mobile = styles.slice(styles.indexOf('.notes-page { grid-template-columns: 1fr; }'));
-    expect(mobile).toMatch(/\.notes-ribbon \{[^}]*overflow-x: auto;/s);
-    expect(mobile).toMatch(/\.notes-ribbon-btn \{ min-width: 40px; height: 40px;/);
-    // Double-tap zoom is disarmed on the buttons themselves.
-    const ribbonBtn = styles.match(/\.notes-ribbon-btn\s*\{[^}]*\}/s)?.[0];
-    expect(ribbonBtn).toContain("touch-action: manipulation;");
+    expect(mobile).toMatch(/\.notes-icon-button \{[^}]*width: 40px;[^}]*height: 40px;/s);
+    expect(styles).not.toContain(".notes-ribbon");
   });
 
-  it("uploads keep working where drag-drop does not exist — the attach button rides the same picker", () => {
-    expect(pageSource).toMatch(/aria-label="Attach image or video"[\s\S]{0,200}filePickerRef\.current\?\.\(\)/);
+  it("uploads keep working where drag-drop does not exist — overflow rides the same picker", () => {
+    expect(pageSource).toContain("<FilePickerBridge openRef={filePickerRef} />");
+    expect(pageSource).toContain("filePickerRef.current?.()");
+    expect(pageSource).toContain("Upload a file");
   });
 });

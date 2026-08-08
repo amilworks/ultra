@@ -34,7 +34,7 @@ def _layer():
             "scale": "half-log",
             "rotation": "oct-10-10-12",
             "color": "half-display-referred",
-            "clamped_color_fraction": 0.0031,
+            "out_of_range_color_fraction": 0.0031,
         },
     )
 
@@ -59,6 +59,7 @@ def test_manifest_has_exactly_the_contract_keys():
 
     assert set(document) == {
         "schema",
+        "generator_revision",
         "scene_kind",
         "source",
         "world",
@@ -146,7 +147,7 @@ def test_limitations_name_the_sample_size_behind_the_measured_degree():
         declared_sh_degree=3,
         measured_sh_degree=0,
         sh_sample=200000,
-        clamped_color_fraction=0.0031,
+        out_of_range_color_fraction=0.0031,
     )
 
     joined = " ".join(sentences)
@@ -159,10 +160,13 @@ def test_limitations_name_the_sample_size_behind_the_measured_degree():
     assert "No transfer function is applied" in joined
 
 
-def test_a_tiny_but_non_zero_clamp_fraction_never_reads_as_zero_percent():
+def test_a_tiny_but_non_zero_out_of_range_fraction_never_reads_as_zero_percent():
     """Rounding an honest 0.004% to '0.00%' would turn a disclosure into a denial."""
     sentences = manifest.splat_limitations(
-        declared_sh_degree=0, measured_sh_degree=0, sh_sample=10, clamped_color_fraction=4e-5
+        declared_sh_degree=0,
+        measured_sh_degree=0,
+        sh_sample=10,
+        out_of_range_color_fraction=4e-5,
     )
 
     assert "<0.01% of degree-0 colour components" in " ".join(sentences)
@@ -170,10 +174,28 @@ def test_a_tiny_but_non_zero_clamp_fraction_never_reads_as_zero_percent():
 
 def test_no_sh_sentence_when_nothing_was_over_declared_or_dropped():
     sentences = manifest.splat_limitations(
-        declared_sh_degree=0, measured_sh_degree=0, sh_sample=200000, clamped_color_fraction=0.0
+        declared_sh_degree=0,
+        measured_sh_degree=0,
+        sh_sample=200000,
+        out_of_range_color_fraction=0.0,
     )
 
     joined = " ".join(sentences)
     assert "spherical-harmonic degree" not in joined
     assert "view-dependent" not in joined
     assert "0% of degree-0 colour components" in joined
+
+
+def test_wide_position_source_reports_conversion_instead_of_claiming_exact_float32():
+    sentences = manifest.splat_limitations(
+        declared_sh_degree=0,
+        measured_sh_degree=0,
+        sh_sample=10,
+        out_of_range_color_fraction=0.0,
+        position_error=0.125,
+    )
+
+    joined = " ".join(sentences)
+    assert "wider than float32" in joined
+    assert "0.125 source units" in joined
+    assert "centres are exact float32" not in joined

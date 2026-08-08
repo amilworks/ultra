@@ -240,6 +240,49 @@ def test_successful_job_is_acked(monkeypatch):
     assert msg.acked and not msg.naked and not msg.termed
 
 
+def test_scene_derive_job_is_dispatched_instead_of_acknowledged_as_unrelated(monkeypatch):
+    calls: list[dict] = []
+
+    def derive(job):
+        calls.append(dict(job))
+        return {
+            "resource_id": job["resource_id"],
+            "status": "succeeded",
+            "chunk_count": 4,
+        }
+
+    monkeypatch.setattr(worker, "run_scene3d_derive_job", derive, raising=False)
+    msg = FakeMsg(
+        {
+            "job_id": "imgjob_scene_1",
+            "job_type": "scene.derive",
+            "metadata": {
+                "resource_id": "file_scene_1",
+                "src_path": "/in.ply",
+                "dst_dir": "/derived/file_scene_1__scene3d.v3.sha256-" + "b" * 64,
+                "source_sha256": "b" * 64,
+                "source_size_bytes": 456,
+                "splat_delivery": "spark-rad-v1",
+            },
+        }
+    )
+
+    _run(msg)
+
+    assert msg.acked and not msg.naked and not msg.termed
+    assert calls == [
+        {
+            "resource_id": "file_scene_1",
+            "src_path": "/in.ply",
+            "dst_dir": "/derived/file_scene_1__scene3d.v3.sha256-" + "b" * 64,
+            "source_sha256": "b" * 64,
+            "source_size_bytes": 456,
+            "splat_delivery": "spark-rad-v1",
+            "force_id": "imgjob_scene_1",
+        }
+    ]
+
+
 def test_long_conversion_extends_jetstream_ack_deadline(monkeypatch):
     started = threading.Event()
     release = threading.Event()

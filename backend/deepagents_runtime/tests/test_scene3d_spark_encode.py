@@ -207,19 +207,19 @@ def test_unnormalized_and_degenerate_quaternions_do_not_produce_nan():
     assert decoded[2] == pytest.approx([0.0, 0.0, 0.0, 1.0], abs=1e-6)  # -identity, w folded
 
 
-def test_color_clamp_fraction_is_counted_and_non_zero_for_out_of_range_dc():
-    # 0.5 + C0*dc for dc = -3 is -0.346 and for dc = 4 is 1.628: both saturate.
+def test_out_of_range_color_fraction_is_counted_without_clamping_the_wire():
+    # 0.5 + C0*dc for dc = -3 is -0.346 and for dc = 4 is 1.628.
     f_dc = np.array([[-3.0, 0.0, 4.0], [0.0, 0.0, 0.0]], dtype=np.float32)
 
-    base, clamped = encode.dc_to_base_color(f_dc)
+    base, out_of_range = encode.dc_to_base_color(f_dc)
 
-    assert clamped == 2
-    assert base[0, 0] == 0.0
-    assert base[0, 2] == 1.0
+    assert out_of_range == 2
+    assert base[0, 0] < 0.0
+    assert base[0, 2] > 1.0
     assert base[1, 0] == pytest.approx(0.5)
     fixture = _splat_fixture(count=2)
     fixture["f_dc"] = f_dc
-    assert encode.encode_ext_splats(**fixture).clamped_color_components == 2
+    assert encode.encode_ext_splats(**fixture).out_of_range_color_components == 2
 
 
 def test_splat_color_reaches_the_wire_display_referred_not_linearised():
@@ -257,10 +257,10 @@ def test_splat_color_matches_sparks_own_ply_reader(tmp_path):
         [[0.0, 1.0, -1.0], [2.5, -0.6, 0.31], [-3.5834, 7.8135, 0.0454]],
         dtype=np.float32,
     )
-    base, _clamped = encode.dc_to_base_color(f_dc)
+    base, _out_of_range = encode.dc_to_base_color(f_dc)
     # Spark PlyReader: `r = item.f_dc_0 * SH_C0 + 0.5`, then setPackedSplat/encodeExtSplat
-    # clamps into [0,1] via the half conversion of an already-clamped value.
-    spark_ply_value = np.clip(f_dc.astype(np.float64) * encode.SH_C0 + 0.5, 0.0, 1.0)
+    # stores the value directly as float16, including HDR tails outside display gamut.
+    spark_ply_value = f_dc.astype(np.float64) * encode.SH_C0 + 0.5
     assert np.allclose(base, spark_ply_value, atol=1e-7)
 
 
@@ -310,7 +310,7 @@ def test_matches_spark_encode_ext_splat_byte_for_byte(tmp_path):
     """Every word of both planes, against ``encodeExtSplat`` running out of the bundle."""
     fixture = _splat_fixture(count=4096)
     result = encode.encode_ext_splats(**fixture)
-    base, _clamped = encode.dc_to_base_color(fixture["f_dc"])
+    base, _out_of_range = encode.dc_to_base_color(fixture["f_dc"])
 
     reference = _spark_reference(
         tmp_path,

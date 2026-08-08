@@ -722,7 +722,8 @@ def camera_centers(images: Sequence[ColmapImage]) -> np.ndarray:
     renderer performs its own inversion, from the unconverted numbers, exactly once.
     """
     if not images:
-        return np.zeros((0, 3), dtype=np.float64)
+        empty: np.ndarray = np.zeros((0, 3), dtype=np.float64)
+        return empty
     quat = np.asarray([image.qvec_wxyz for image in images], dtype=np.float64)
     tvec = np.asarray([image.tvec for image in images], dtype=np.float64)
     norm = np.linalg.norm(quat, axis=1, keepdims=True)
@@ -743,4 +744,5 @@ def camera_centers(images: Sequence[ColmapImage]) -> np.ndarray:
     rows[:, 2, 0] = 2 * (x * z - y * w)
     rows[:, 2, 1] = 2 * (y * z + x * w)
     rows[:, 2, 2] = 1 - 2 * (x * x + y * y)
-    return -np.einsum("nji,nj->ni", rows, tvec)
+    centers: np.ndarray = -np.einsum("nji,nj->ni", rows, tvec)
+    return centers

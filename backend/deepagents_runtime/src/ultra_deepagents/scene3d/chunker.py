@@ -23,6 +23,7 @@ __all__ = [
     "Chunk",
     "ChunkPlan",
     "build_chunk_plan",
+    "chunk_frame",
     "splat_importance",
 ]
 
@@ -93,7 +94,7 @@ def _pow2_grid(magnitude: float) -> float:
     return float(np.float32(2.0 ** (math.floor(math.log2(magnitude)) - 23)))
 
 
-def _chunk_frame(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+def chunk_frame(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
     """Choose an origin; return ``(origin, local, snapped)`` with ``local + origin == world``.
 
     The origin is the cell's low corner snapped down to a power-of-two grid, per axis.
@@ -252,7 +253,7 @@ def build_chunk_plan(
             selection = cell[tier::tier_count]
             if selection.size == 0:
                 continue
-            origin, local, snapped = _chunk_frame(points[selection])
+            origin, local, snapped = chunk_frame(points[selection])
             zero_origin += int(not snapped)
             chunks.append(
                 Chunk(

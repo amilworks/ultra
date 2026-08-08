@@ -8,14 +8,10 @@ this immutable source will fail identically forever (mark it and stop), a
 again. The runner is pure and injectable so it is unit-tested without a real scene file;
 the NATS worker wraps it.
 
-Two passes over the source, deliberately:
-
-1. positions (and, for splats, the importance inputs) — enough to build the octree;
-2. everything else, encoded and scattered straight into its chunk output row.
-
-The alternative — one pass holding every property in memory — costs 812 MB for the
-measured 14.5M-splat file against 463 MB for the encoded output, and the second read is
-sequential.
+PLY point conversion makes two sequential passes deliberately and writes bounded additive
+density tiers. Gaussian PLY conversion measures the same source independently, then uses
+Spark's pinned quality builder to publish a paged, view-adaptive RAD tree. Unlike uniform
+subsampling, its coarse nodes merge Gaussian distributions and preserve scene coverage.
 
 A COLMAP sparse model (a *directory*, not a file) derives through the same machinery: its
 ``points3D`` feed the unchanged chunker and ``UPC1`` point path, and its posed cameras
@@ -26,14 +22,19 @@ become one extra ``cameras`` layer carrying a single JSON chunk. That chunk is w
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
+import threading
 import zipfile
 from collections.abc import Callable
-from contextlib import suppress
-from dataclasses import dataclass
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -41,9 +42,22 @@ import numpy as np
 from ultra_deepagents.imaging.derivative_manifest import (
     DerivativeJobError,
     DeterministicDerivativeError,
+    StaleDerivativeJobError,
     TransientDerivativeError,
+    _require_source_generation,
+    _verify_catalog_source,
 )
-from ultra_deepagents.scene3d import chunker, colmap, manifest, ply, poster, spark_encode
+from ultra_deepagents.safe_storage import open_directory_chain_no_follow
+from ultra_deepagents.scene3d import (
+    chunker,
+    colmap,
+    manifest,
+    ply,
+    poster,
+    rad_lod,
+    spark_encode,
+    streaming,
+)
 
 __all__ = [
     "CHUNK_NAME",
@@ -67,6 +81,13 @@ POSTER_NAME = "poster.png"
 _SCALE_NAMES = ("scale_0", "scale_1", "scale_2")
 _ROT_NAMES = ("rot_0", "rot_1", "rot_2", "rot_3")
 _DC_NAMES = ("f_dc_0", "f_dc_1", "f_dc_2")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RESOURCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_MIN_CHUNK_ELEMENTS = 256
+_MAX_CHUNK_ELEMENTS = 250_000
+_MAX_TIER_COUNT = 8
+_MAX_SH_SAMPLE = 500_000
+_MAX_POSTER_SAMPLE = 500_000
 
 
 @dataclass
@@ -80,6 +101,12 @@ class Scene3dDeriveJob:
     tier_count: int = chunker.DEFAULT_TIER_COUNT
     sh_sample: int = ply.DEFAULT_SH_SAMPLE
     poster_sample: int = poster.DEFAULT_POSTER_SAMPLE
+    preview_splats: int = streaming.DEFAULT_SPLAT_PREVIEW
+    preview_points: int = streaming.DEFAULT_POINT_PREVIEW
+    splat_delivery: str = "uniform-preview"
+    source_sha256: str | None = None
+    source_size_bytes: int | None = None
+    force_id: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> Scene3dDeriveJob:
@@ -93,7 +120,43 @@ class Scene3dDeriveJob:
             tier_count=int(payload.get("tier_count", chunker.DEFAULT_TIER_COUNT)),
             sh_sample=int(payload.get("sh_sample", ply.DEFAULT_SH_SAMPLE)),
             poster_sample=int(payload.get("poster_sample", poster.DEFAULT_POSTER_SAMPLE)),
+            preview_splats=int(payload.get("preview_splats", streaming.DEFAULT_SPLAT_PREVIEW)),
+            preview_points=int(payload.get("preview_points", streaming.DEFAULT_POINT_PREVIEW)),
+            splat_delivery=str(payload.get("splat_delivery", "uniform-preview")),
+            source_sha256=(
+                str(payload["source_sha256"]) if payload.get("source_sha256") is not None else None
+            ),
+            source_size_bytes=(
+                int(payload["source_size_bytes"])
+                if payload.get("source_size_bytes") is not None
+                else None
+            ),
+            force_id=str(payload.get("force_id", "")),
         )
+
+
+def _validate_job_options(job: Scene3dDeriveJob, *, strict: bool) -> None:
+    """Bound every allocation and queue-controlled file-count multiplier.
+
+    These values arrive over NATS. The control plane publishes fixed production values,
+    but the worker still owns its safety boundary: a hostile or stale producer must not
+    turn ``tier_count * chunk_capacity`` into an allocation bomb or emit millions of
+    one-record files. Direct fixture/developer calls may deliberately use tiny chunks,
+    so only source-identified queue jobs enforce the production file-count floor.
+    """
+
+    min_chunk_elements = _MIN_CHUNK_ELEMENTS if strict else 1
+    valid = (
+        min_chunk_elements <= job.max_splats_per_chunk <= _MAX_CHUNK_ELEMENTS
+        and 1 <= job.tier_count <= _MAX_TIER_COUNT
+        and 1 <= job.sh_sample <= _MAX_SH_SAMPLE
+        and 1 <= job.poster_sample <= _MAX_POSTER_SAMPLE
+        and 1 <= job.preview_splats <= streaming.DEFAULT_SPLAT_PREVIEW
+        and 1 <= job.preview_points <= streaming.DEFAULT_POINT_PREVIEW
+        and job.splat_delivery in {"uniform-preview", "spark-rad-v1"}
+    )
+    if not valid:
+        raise DeterministicDerivativeError("invalid_scene_job")
 
 
 def failure_marker_path(dst_dir: str) -> str:
@@ -129,13 +192,301 @@ def _write_failure_marker(job: Scene3dDeriveJob, exc: DeterministicDerivativeErr
     payload = {
         "schema": FAILURE_SCHEMA,
         "resource_id": job.resource_id,
-        "src_path": job.src_path,
+        "source_sha256": job.source_sha256,
+        "source_size_bytes": job.source_size_bytes,
+        "conversion_spec": {
+            "max_splats_per_chunk": job.max_splats_per_chunk,
+            "tier_count": job.tier_count,
+            "preview_splats": job.preview_splats,
+            "preview_points": job.preview_points,
+            "splat_delivery": job.splat_delivery,
+        },
         "code": exc.code,
     }
     marker = failure_marker_path(job.dst_dir)
     with suppress(OSError):
         os.makedirs(os.path.dirname(marker) or ".", exist_ok=True)
         _atomic_write(marker, json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+class _ScenePublicationLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.references = 0
+
+
+_SCENE_PUBLICATION_LOCKS_GUARD = threading.Lock()
+_SCENE_PUBLICATION_LOCKS: dict[str, _ScenePublicationLockEntry] = {}
+
+
+def _validate_scene_identity(job: Scene3dDeriveJob) -> tuple[Path, dict[str, int]] | None:
+    """Validate a queue job's immutable source identity before reading gigabytes."""
+
+    if job.source_sha256 is None and job.source_size_bytes is None:
+        return None  # local/direct compatibility; the NATS worker rejects this form
+    if (
+        not isinstance(job.source_sha256, str)
+        or _SHA256_RE.fullmatch(job.source_sha256) is None
+        or isinstance(job.source_size_bytes, bool)
+        or not isinstance(job.source_size_bytes, int)
+        or job.source_size_bytes < 0
+    ):
+        raise StaleDerivativeJobError("scene_source_identity_invalid")
+    if (
+        _RESOURCE_ID_RE.fullmatch(job.resource_id) is None
+        or Path(job.resource_id).name != job.resource_id
+    ):
+        raise StaleDerivativeJobError("scene_resource_identity_invalid")
+
+    destination = Path(os.path.abspath(job.dst_dir))
+    # The derivative revision is part of the immutable filesystem identity. It prevents
+    # a worker with new pixel/geometry semantics from reusing a same-shaped generation
+    # produced by the legacy uniform-preview pipeline.
+    expected_name = (
+        f"{job.resource_id}__scene3d.{manifest.DERIVATIVE_REVISION}.sha256-"
+        f"{job.source_sha256}"
+    )
+    if destination.name != expected_name or destination.parent.name != "derived":
+        raise StaleDerivativeJobError("scene_destination_identity_mismatch")
+    source = Path(job.src_path)
+    source_stat = _verify_catalog_source(
+        source,
+        job.source_sha256,
+        job.source_size_bytes,
+    )
+    return destination, source_stat
+
+
+def _scene_resource_tombstoned(upload_root: Path, resource_id: str) -> bool:
+    for marker_kind in ("permanent", "deleted"):
+        try:
+            with open_directory_chain_no_follow(
+                upload_root, (".tombstones", marker_kind)
+            ) as marker_directory:
+                info = os.stat(resource_id, dir_fd=marker_directory, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise TransientDerivativeError("publication_tombstone_unavailable") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise TransientDerivativeError("publication_tombstone_invalid")
+        return True
+    return False
+
+
+@contextmanager
+def _scene_cross_process_lock(
+    destination: Path,
+    resource_id: str,
+    *,
+    lock_name: str,
+    unavailable_code: str,
+):
+    """Acquire one symlink-safe lock shared with the Go lifecycle implementation."""
+
+    upload_root = destination.parent.parent
+    if destination.parent != upload_root / "derived":
+        raise TransientDerivativeError("publication_destination_unavailable")
+    key = f"{(upload_root / resource_id).absolute()}:{lock_name}"
+    with _SCENE_PUBLICATION_LOCKS_GUARD:
+        entry = _SCENE_PUBLICATION_LOCKS.setdefault(key, _ScenePublicationLockEntry())
+        entry.references += 1
+    entry.lock.acquire()
+    descriptor = -1
+    try:
+        if _scene_resource_tombstoned(upload_root, resource_id):
+            raise StaleDerivativeJobError("resource_deleted")
+        try:
+            with open_directory_chain_no_follow(
+                upload_root, (".locks",), create=True
+            ) as lock_directory:
+                descriptor = os.open(
+                    lock_name,
+                    os.O_CREAT
+                    | os.O_RDWR
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=lock_directory,
+                )
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                opened = os.fstat(descriptor)
+                visible = os.stat(lock_name, dir_fd=lock_directory, follow_symlinks=False)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or not stat.S_ISREG(visible.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (visible.st_dev, visible.st_ino)
+                ):
+                    raise TransientDerivativeError("publication_lock_invalid")
+                if _scene_resource_tombstoned(upload_root, resource_id):
+                    raise StaleDerivativeJobError("resource_deleted")
+                yield
+        except DerivativeJobError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise TransientDerivativeError(unavailable_code) from exc
+    finally:
+        if descriptor >= 0:
+            with suppress(OSError):
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+        entry.lock.release()
+        with _SCENE_PUBLICATION_LOCKS_GUARD:
+            entry.references -= 1
+            if entry.references == 0 and _SCENE_PUBLICATION_LOCKS.get(key) is entry:
+                del _SCENE_PUBLICATION_LOCKS[key]
+
+
+@contextmanager
+def _scene_publication_lock(destination: Path, resource_id: str):
+    """Serialize final visibility with source deletion and every other publisher."""
+
+    with _scene_cross_process_lock(
+        destination,
+        resource_id,
+        lock_name=f".{resource_id}__pyramid.lock",
+        unavailable_code="publication_lock_unavailable",
+    ):
+        yield
+
+
+@contextmanager
+def _scene_derivation_lock(destination: Path, resource_id: str):
+    """Serialize expensive scene conversion across workers and redeliveries."""
+
+    with _scene_cross_process_lock(
+        destination,
+        resource_id,
+        lock_name=f".{resource_id}__scene3d.work.lock",
+        unavailable_code="derivation_lock_unavailable",
+    ):
+        yield
+
+
+def _published_scene_matches(destination: Path, job: Scene3dDeriveJob) -> bool:
+    """A digest-named directory is reusable only when its commit record matches."""
+
+    try:
+        info = destination.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return False
+        manifest_path = destination / MANIFEST_NAME
+        manifest_info = manifest_path.lstat()
+        if not stat.S_ISREG(manifest_info.st_mode) or stat.S_ISLNK(manifest_info.st_mode):
+            return False
+        document = json.loads(manifest_path.read_text(encoding="utf-8"))
+        source = document.get("source")
+        layers = document.get("layers")
+        if (
+            document.get("schema") != manifest.SCHEMA
+            or document.get("generator_revision") != manifest.GENERATOR_REVISION
+            or not isinstance(source, dict)
+            or source.get("sha256") != job.source_sha256
+            or source.get("bytes") != job.source_size_bytes
+            or not isinstance(layers, list)
+        ):
+            return False
+        poster_info = (destination / POSTER_NAME).lstat()
+        if (
+            not stat.S_ISREG(poster_info.st_mode)
+            or stat.S_ISLNK(poster_info.st_mode)
+            or poster_info.st_size < 1
+        ):
+            return False
+        for layer in layers:
+            if not isinstance(layer, dict) or not isinstance(layer.get("chunks"), list):
+                return False
+            for chunk in layer["chunks"]:
+                if not isinstance(chunk, dict):
+                    return False
+                index = chunk.get("index")
+                expected_bytes = chunk.get("bytes")
+                if not isinstance(index, int) or not isinstance(expected_bytes, int):
+                    return False
+                chunk_path = destination / CHUNK_NAME.format(index=index)
+                chunk_info = chunk_path.lstat()
+                if (
+                    not stat.S_ISREG(chunk_info.st_mode)
+                    or stat.S_ISLNK(chunk_info.st_mode)
+                    or chunk_info.st_size != expected_bytes
+                ):
+                    return False
+            lod = layer.get("lod")
+            if layer.get("encoding") == "spark-rad-v1":
+                if not isinstance(lod, dict) or lod.get("format") != "spark-rad-v1":
+                    return False
+                lod_chunks = lod.get("chunks")
+                if (
+                    lod.get("paged") is not True
+                    or not isinstance(lod_chunks, list)
+                    or not lod_chunks
+                ):
+                    return False
+                artifacts = [lod.get("header"), *lod_chunks]
+                if (
+                    not isinstance(artifacts[0], dict)
+                    or artifacts[0].get("name") != rad_lod.RAD_HEADER_NAME
+                ):
+                    return False
+                for artifact in artifacts:
+                    if not isinstance(artifact, dict):
+                        return False
+                    name = artifact.get("name")
+                    expected_bytes = artifact.get("bytes")
+                    if (
+                        not isinstance(name, str)
+                        or not rad_lod.is_rad_artifact_name(name)
+                        or not isinstance(expected_bytes, int)
+                    ):
+                        return False
+                    artifact_info = (destination / name).lstat()
+                    if (
+                        not stat.S_ISREG(artifact_info.st_mode)
+                        or stat.S_ISLNK(artifact_info.st_mode)
+                        or artifact_info.st_size != expected_bytes
+                    ):
+                        return False
+            elif lod is not None:
+                return False
+        return True
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def _published_scene_result(destination: Path, job: Scene3dDeriveJob) -> dict[str, Any]:
+    """Return the normal completion envelope for an already-committed generation."""
+
+    document = json.loads((destination / MANIFEST_NAME).read_text(encoding="utf-8"))
+    layers = document.get("layers", [])
+    source = document.get("source", {})
+    chunk_count = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        chunk_count += len(layer.get("chunks", []))
+        lod = layer.get("lod")
+        if isinstance(lod, dict) and isinstance(lod.get("chunks"), list):
+            chunk_count += 1 + len(lod["chunks"])
+    tier_count = max(
+        (len(layer.get("tiers", [])) for layer in layers if isinstance(layer, dict)),
+        default=0,
+    )
+    return {
+        "resource_id": job.resource_id,
+        "dst_dir": str(destination),
+        "status": "succeeded",
+        "scene_kind": document.get("scene_kind", "scene"),
+        "total": source.get("vertex_count", 0),
+        "chunk_count": chunk_count,
+        "tier_count": tier_count,
+        "declared_sh_degree": source.get("declared_sh_degree", 0),
+        "measured_sh_degree": source.get("measured_sh_degree", 0),
+        "stride_bytes": source.get("stride_bytes", 0),
+        "source_bytes": source.get("bytes", job.source_size_bytes or 0),
+        "manifest_path": str(destination / MANIFEST_NAME),
+        "poster_path": str(destination / POSTER_NAME),
+        "reused": True,
+    }
 
 
 # A COLMAP model is small (metadata plus points); an archive far past this is either not
@@ -180,9 +531,7 @@ def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
         if len(entries) > _ZIP_MAX_MEMBERS:
             return None
         wanted = [
-            entry
-            for entry in entries
-            if os.path.basename(entry.filename) in _COLMAP_MEMBER_NAMES
+            entry for entry in entries if os.path.basename(entry.filename) in _COLMAP_MEMBER_NAMES
         ]
         if not wanted:
             return None
@@ -235,7 +584,8 @@ def _read_columns(
 
 
 def _stack(columns: dict[str, np.ndarray], names: tuple[str, ...]) -> np.ndarray:
-    return np.ascontiguousarray(np.stack([columns[name] for name in names], axis=1))
+    stacked: np.ndarray = np.ascontiguousarray(np.stack([columns[name] for name in names], axis=1))
+    return stacked
 
 
 def _robust_bbox(positions: np.ndarray, sample_cap: int = 2_000_000) -> list[float]:
@@ -262,7 +612,7 @@ def _robust_bbox(positions: np.ndarray, sample_cap: int = 2_000_000) -> list[flo
 
 def _chunk_local(positions: np.ndarray, plan: chunker.ChunkPlan) -> np.ndarray:
     """World positions rearranged into chunk-output-row order and made chunk-local."""
-    local = np.empty_like(positions)
+    local: np.ndarray = np.empty_like(positions)
     for chunk in plan.chunks:
         rows = slice(int(plan.starts[chunk.index]), int(plan.starts[chunk.index + 1]))
         local[rows] = positions[chunk.order] - chunk.origin
@@ -318,7 +668,7 @@ def _derive_splats(
     ext_a = np.zeros((total, 4), dtype=np.uint32)
     ext_b = np.zeros((total, 4), dtype=np.uint32)
     drawn: dict[str, list[np.ndarray]] = {"rgb": [], "alpha": [], "radius": []}
-    clamped = 0
+    out_of_range = 0
     offset = 0
     for block in iter_chunks_fn(
         job.src_path, header, names=(*_DC_NAMES, "opacity", *_SCALE_NAMES, *_ROT_NAMES)
@@ -336,11 +686,11 @@ def _derive_splats(
         )
         ext_a[rows] = encoded.ext_a
         ext_b[rows] = encoded.ext_b
-        clamped += encoded.clamped_color_components
+        out_of_range += encoded.out_of_range_color_components
         picked = np.flatnonzero(np.arange(offset, offset + size) % stride == 0)
         if picked.size:
             base, _ = spark_encode.dc_to_base_color(f_dc[picked])
-            drawn["rgb"].append(base)
+            drawn["rgb"].append(np.clip(base, 0.0, 1.0))
             drawn["alpha"].append(spark_encode.sigmoid(block["opacity"][picked]))
             # Footprint of the projected ellipse, approximated by the equal-area circle
             # of its two largest axes.
@@ -352,19 +702,22 @@ def _derive_splats(
 
     def pack(chunk: chunker.Chunk) -> bytes:
         rows = slice(int(plan.starts[chunk.index]), int(plan.starts[chunk.index + 1]))
-        return spark_encode.pack_usx1_chunk(
+        payload: bytes = spark_encode.pack_usx1_chunk(
             spark_encode.ExtSplatEncoding(
-                ext_a=ext_a[rows], ext_b=ext_b[rows], clamped_color_components=0
+                ext_a=ext_a[rows],
+                ext_b=ext_b[rows],
+                out_of_range_color_components=0,
             ),
             sh_degree=measured,
             bbox_min=chunk.bbox_min,
             bbox_max=chunk.bbox_max,
             origin=chunk.origin,
         )
+        return payload
 
-    facts = {
+    facts: dict[str, Any] = {
         "measured_sh_degree": int(measured),
-        "clamped_color_fraction": clamped / (3.0 * total),
+        "out_of_range_color_fraction": out_of_range / (3.0 * total),
     }
     facts["bbox_robust"] = bbox_robust
     sample = {
@@ -408,7 +761,7 @@ def _point_layer_outputs(
 
     def pack(chunk: chunker.Chunk) -> bytes:
         rows = slice(int(plan.starts[chunk.index]), int(plan.starts[chunk.index + 1]))
-        return spark_encode.pack_upc1_chunk(
+        payload: bytes = spark_encode.pack_upc1_chunk(
             positions=local[rows],
             colors_rgba=rgba[rows],
             bbox_min=chunk.bbox_min,
@@ -416,6 +769,7 @@ def _point_layer_outputs(
             origin=chunk.origin,
             has_alpha=has_alpha,
         )
+        return payload
 
     stride = poster.poster_stride(total, job.poster_sample)
     sample = {
@@ -428,7 +782,7 @@ def _point_layer_outputs(
     }
     facts = {
         "measured_sh_degree": 0,
-        "clamped_color_fraction": 0.0,
+        "out_of_range_color_fraction": 0.0,
         "bbox_robust": _robust_bbox(positions),
     }
     return pack, facts, sample
@@ -470,8 +824,12 @@ def _to_byte(values: np.ndarray) -> np.ndarray:
     """Colour channel -> uint8. Float channels are [0,1]; integer channels are bytes."""
     array = np.asarray(values)
     if array.dtype.kind == "f":
-        return np.asarray(np.clip(np.rint(array * 255.0), 0, 255), dtype=np.uint8)
-    return np.clip(array, 0, 255).astype(np.uint8)
+        byte_values: np.ndarray = np.asarray(
+            np.clip(np.rint(array * 255.0), 0, 255), dtype=np.uint8
+        )
+        return byte_values
+    byte_values = np.clip(array, 0, 255).astype(np.uint8)
+    return byte_values
 
 
 @dataclass
@@ -602,7 +960,7 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
 
     plan: chunker.ChunkPlan | None = None
     pack_fn: PackFn | None = None
-    facts: dict[str, Any] = {"measured_sh_degree": 0, "clamped_color_fraction": 0.0}
+    facts: dict[str, Any] = {"measured_sh_degree": 0, "out_of_range_color_fraction": 0.0}
     sample = _camera_poster_sample(model.centers)
     if model.point_count:
         try:
@@ -672,8 +1030,6 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
     except OSError as exc:
         raise TransientDerivativeError("scene_output_unavailable") from exc
 
-    with suppress(OSError):
-        os.remove(failure_marker_path(job.dst_dir))
     return {
         "resource_id": job.resource_id,
         "dst_dir": job.dst_dir,
@@ -799,6 +1155,7 @@ def _build_colmap_manifest(
         up_axis_basis=up_basis,
         layers=layers,
         limitations=limitations,
+        source_sha256=job.source_sha256,
     )
 
 
@@ -839,20 +1196,83 @@ def run_scene3d_derive_job(
     ``measure_sh_fn`` / ``poster_fn`` are injectable so the runner is testable without a
     real scene file.
 
-    Chunks are written first, then the poster, then ``manifest.json`` — the manifest is
-    the commit record, so a reader that sees it sees a complete derive.
+    Queue jobs carry an immutable source digest and publish a complete digest-named
+    directory with one atomic rename. Direct local calls without catalog identity retain
+    their historical destination semantics for fixture generation and developer tools.
     """
     spec = _resolve_job(job, dst_dir, resource_id, options)
+    identity: tuple[Path, dict[str, int]] | None = None
     try:
-        return _run(
-            spec,
-            read_header_fn=read_header_fn,
-            iter_chunks_fn=iter_chunks_fn,
-            measure_sh_fn=measure_sh_fn,
-            poster_fn=poster_fn,
-        )
+        identity = _validate_scene_identity(spec)
+        _validate_job_options(spec, strict=identity is not None)
+        if identity is None:
+            result = _run(
+                spec,
+                read_header_fn=read_header_fn,
+                iter_chunks_fn=iter_chunks_fn,
+                measure_sh_fn=measure_sh_fn,
+                poster_fn=poster_fn,
+            )
+            with suppress(OSError):
+                os.remove(failure_marker_path(spec.dst_dir))
+            return result
+        destination, source_stat = identity
+        upload_root = destination.parent.parent
+        with _scene_derivation_lock(destination, spec.resource_id):
+            _require_source_generation(Path(spec.src_path), source_stat)
+            if _published_scene_matches(destination, spec):
+                return _published_scene_result(destination, spec)
+            try:
+                with open_directory_chain_no_follow(upload_root, ("derived",), create=True):
+                    pass
+                temporary = Path(
+                    tempfile.mkdtemp(prefix=f".{destination.name}.tmp-", dir=destination.parent)
+                )
+            except (OSError, ValueError) as exc:
+                raise TransientDerivativeError("scene_output_unavailable") from exc
+            try:
+                staged_spec = replace(spec, dst_dir=str(temporary))
+                result = _run(
+                    staged_spec,
+                    read_header_fn=read_header_fn,
+                    iter_chunks_fn=iter_chunks_fn,
+                    measure_sh_fn=measure_sh_fn,
+                    poster_fn=poster_fn,
+                )
+                _require_source_generation(Path(spec.src_path), source_stat)
+                with _scene_publication_lock(destination, spec.resource_id):
+                    _require_source_generation(Path(spec.src_path), source_stat)
+                    if destination.exists() or destination.is_symlink():
+                        if not _published_scene_matches(destination, spec):
+                            existing = destination.lstat()
+                            if not stat.S_ISDIR(existing.st_mode) or stat.S_ISLNK(existing.st_mode):
+                                raise TransientDerivativeError("scene_destination_invalid")
+                            shutil.rmtree(destination)
+                        else:
+                            return _published_scene_result(destination, spec)
+                    os.replace(temporary, destination)
+                    directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_descriptor)
+                    finally:
+                        os.close(directory_descriptor)
+                    with suppress(OSError):
+                        os.remove(failure_marker_path(str(destination)))
+                result["dst_dir"] = str(destination)
+                result["manifest_path"] = str(destination / MANIFEST_NAME)
+                result["poster_path"] = str(destination / POSTER_NAME)
+                return result
+            finally:
+                if temporary.exists() and temporary != destination:
+                    shutil.rmtree(temporary, ignore_errors=True)
     except DeterministicDerivativeError as exc:
-        _write_failure_marker(spec, exc)
+        if identity is None:
+            _write_failure_marker(spec, exc)
+        else:
+            destination, source_stat = identity
+            with _scene_publication_lock(destination, spec.resource_id):
+                _require_source_generation(Path(spec.src_path), source_stat)
+                _write_failure_marker(spec, exc)
         raise
 
 
@@ -894,7 +1314,6 @@ def _run(
     try:
         source_bytes = os.path.getsize(job.src_path)
         header = read_header_fn(job.src_path)
-        scene_kind = ply.detect_scene_kind(header)
     except DerivativeJobError:
         raise
     except FileNotFoundError as exc:
@@ -909,14 +1328,89 @@ def _run(
         raise DeterministicDerivativeError("empty_scene_source")
 
     try:
-        if scene_kind == "splat":
-            plan, pack_fn, facts, sample = _derive_splats(
-                job, header, iter_chunks_fn=iter_chunks_fn, measure_sh_fn=measure_sh_fn
+        os.makedirs(job.dst_dir, exist_ok=True)
+        scene_kind = ply.detect_scene_kind(header)
+        if scene_kind == "splat" and job.splat_delivery == "spark-rad-v1":
+            analysis = streaming.analyze_splats(
+                path=job.src_path,
+                header=header,
+                poster_sample=job.poster_sample,
+                sh_sample=job.sh_sample,
+                iter_chunks_fn=iter_chunks_fn,
+                measure_sh_fn=measure_sh_fn,
             )
-        else:
-            plan, pack_fn, facts, sample = _derive_points(
-                job, header, iter_chunks_fn=iter_chunks_fn
+            if analysis.nonfinite:
+                # Spark's native builder reads the original PLY. Unlike Ultra's legacy
+                # preview encoder, it cannot omit invalid rows while preserving a
+                # source-index proof, so publishing that artifact would make its count
+                # and spatial tree disagree with the manifest. Fail closed rather than
+                # present a plausible but scientifically unaccounted-for scene.
+                raise DeterministicDerivativeError("nonfinite_scene_coordinates")
+            # Unlike the bounded provenance sample used by the legacy preview, RAD's
+            # retained degree changes both source semantics and browser residency. Scan
+            # every row before allowing the native builder to omit a band: one non-zero
+            # coefficient anywhere in the source is sufficient to retain it.
+            retained_sh_degree = analysis.measured_sh_degree
+            lod = rad_lod.build_paged_rad(
+                job.src_path,
+                job.dst_dir,
+                retained_sh_degree=retained_sh_degree,
             )
+            rendered = poster_fn(
+                os.path.join(job.dst_dir, POSTER_NAME),
+                positions=analysis.sample["positions"],
+                colors=analysis.sample["colors"],
+                opacities=analysis.sample["opacities"],
+                radii=analysis.sample["radii"],
+                total=analysis.total,
+            )
+            document = _build_rad_manifest(job, header, analysis, lod, rendered, source_bytes)
+            _atomic_write(
+                os.path.join(job.dst_dir, MANIFEST_NAME),
+                json.dumps(document, indent=2, allow_nan=False) + "\n",
+            )
+            return {
+                "resource_id": job.resource_id,
+                "dst_dir": job.dst_dir,
+                "status": "succeeded",
+                "scene_kind": "splat",
+                "total": analysis.total,
+                "chunk_count": len(lod.chunks) + 1,
+                "tier_count": 0,
+                "declared_sh_degree": ply.declared_sh_degree(header),
+                "measured_sh_degree": analysis.measured_sh_degree,
+                "stride_bytes": header.stride,
+                "source_bytes": source_bytes,
+                "manifest_path": os.path.join(job.dst_dir, MANIFEST_NAME),
+                "poster_path": rendered.path,
+            }
+
+        derived = streaming.derive_ply(
+            path=job.src_path,
+            directory=job.dst_dir,
+            header=header,
+            max_per_chunk=job.max_splats_per_chunk,
+            tier_count=job.tier_count,
+            preview_splats=job.preview_splats,
+            preview_points=job.preview_points,
+            poster_sample=job.poster_sample,
+            sh_sample=job.sh_sample,
+            iter_chunks_fn=iter_chunks_fn,
+            measure_sh_fn=measure_sh_fn,
+        )
+        rendered = poster_fn(
+            os.path.join(job.dst_dir, POSTER_NAME),
+            positions=derived.sample["positions"],
+            colors=derived.sample["colors"],
+            opacities=derived.sample["opacities"],
+            radii=derived.sample["radii"],
+            total=derived.total,
+        )
+        document = _build_streamed_manifest(job, header, derived, rendered, source_bytes)
+        _atomic_write(
+            os.path.join(job.dst_dir, MANIFEST_NAME),
+            json.dumps(document, indent=2, allow_nan=False) + "\n",
+        )
     except DerivativeJobError:
         raise
     except NotImplementedError as exc:
@@ -926,50 +1420,18 @@ def _run(
     except MemoryError as exc:
         raise TransientDerivativeError("scene_derive_resources") from exc
     except OSError as exc:
-        raise TransientDerivativeError("scene_source_unavailable") from exc
+        raise TransientDerivativeError("scene_source_or_output_unavailable") from exc
 
-    try:
-        os.makedirs(job.dst_dir, exist_ok=True)
-        entries: list[dict[str, Any]] = []
-        for chunk in plan.chunks:
-            # Packed one at a time: materializing every payload first would hold a second
-            # copy of the whole encoded scene (463 MB for the measured 14.5M-splat file).
-            payload = pack_fn(chunk)
-            _atomic_write(os.path.join(job.dst_dir, CHUNK_NAME.format(index=chunk.index)), payload)
-            entries.append(_chunk_entry(chunk, len(payload)))
-        rendered = poster_fn(
-            os.path.join(job.dst_dir, POSTER_NAME),
-            positions=sample["positions"],
-            colors=sample["colors"],
-            opacities=sample["opacities"],
-            radii=sample["radii"],
-            total=header.count,
-        )
-        document = _build_manifest(
-            job, header, scene_kind, plan, entries, facts, rendered, source_bytes
-        )
-        _atomic_write(
-            os.path.join(job.dst_dir, MANIFEST_NAME),
-            json.dumps(document, indent=2, allow_nan=False) + "\n",
-        )
-    except DerivativeJobError:
-        raise
-    except OSError as exc:
-        raise TransientDerivativeError("scene_output_unavailable") from exc
-
-    # A completed derive clears the backoff marker a previous failure may have left.
-    with suppress(OSError):
-        os.remove(failure_marker_path(job.dst_dir))
     return {
         "resource_id": job.resource_id,
         "dst_dir": job.dst_dir,
         "status": "succeeded",
-        "scene_kind": scene_kind,
-        "total": plan.total,
-        "chunk_count": len(plan.chunks),
-        "tier_count": len(plan.tiers),
+        "scene_kind": derived.scene_kind,
+        "total": derived.total,
+        "chunk_count": len(derived.entries),
+        "tier_count": len(derived.tiers),
         "declared_sh_degree": ply.declared_sh_degree(header),
-        "measured_sh_degree": facts["measured_sh_degree"],
+        "measured_sh_degree": derived.measured_sh_degree,
         "stride_bytes": header.stride,
         "source_bytes": source_bytes,
         "manifest_path": os.path.join(job.dst_dir, MANIFEST_NAME),
@@ -988,6 +1450,185 @@ def _world_bbox(entries: list[dict[str, Any]]) -> list[float]:
     world_min = np.minimum.reduce(corners_min)
     world_max = np.maximum.reduce(corners_max)
     return [*(float(value) for value in world_min), *(float(value) for value in world_max)]
+
+
+def _build_rad_manifest(
+    job: Scene3dDeriveJob,
+    header: ply.PlyHeader,
+    analysis: streaming.SplatAnalysis,
+    lod: rad_lod.RadLodResult,
+    rendered: poster.PosterResult,
+    source_bytes: int,
+) -> dict[str, Any]:
+    """Manifest for the preferred, appearance-preserving Gaussian LoD path."""
+
+    up_axis, up_basis = manifest.infer_up_axis(analysis.bbox)
+    declared = ply.declared_sh_degree(header)
+    retained = analysis.measured_sh_degree
+    layer = manifest.build_layer(
+        layer_type="splats",
+        encoding="spark-rad-v1",
+        total=analysis.total,
+        chunks=[],
+        tiers=[],
+        activation_domain="post",
+        source_frame="source",
+        quantization={
+            "center": "spark-rad-resolved-per-asset",
+            "scale": "spark-rad-resolved-per-asset",
+            "rotation": "spark-rad-resolved-per-asset",
+            "color": "spark-rad-resolved-per-asset",
+            "out_of_range_color_fraction": round(analysis.out_of_range_color_fraction, 6),
+        },
+    )
+    layer["lod"] = {
+        "format": "spark-rad-v1",
+        "method": lod.method,
+        "builder_revision": lod.builder_revision,
+        "paged": True,
+        "source_elements": analysis.total,
+        # `analyze_splats` obtains this from an exact full-source scan. The browser may
+        # therefore budget the texture planes Spark actually stores without risking a
+        # late, spatially-localized view-dependent coefficient being discarded.
+        "max_sh_degree": retained,
+        "header": {"name": lod.header.name, "bytes": lod.header.bytes},
+        "chunks": [{"name": item.name, "bytes": item.bytes} for item in lod.chunks],
+    }
+    limitations: list[str] = []
+    if retained < declared:
+        limitations.append(
+            f"The source declares spherical-harmonic degree {declared}, but every f_rest "
+            f"coefficient above degree {retained} is exactly zero across all "
+            f"{header.count:,} source splats. The RAD artifact retains degree {retained} "
+            "and omits only those proven-empty bands."
+        )
+    limitations.extend(
+        [
+            "The interactive view uses Spark's quality Bhattacharyya-distance Gaussian LoD "
+            "tree. Coarse nodes are merged Gaussian distributions, not a sparse subset of the "
+            "source, and the renderer selects nodes for the current camera within the device "
+            "budget. All finite source splats inform the tree, but they are not all drawn at "
+            "once unless the view and device budget select the finest leaves.",
+            "RAD center, colour, scale, rotation, opacity, and retained spherical-harmonic "
+            "ranges are resolved per asset by the pinned Spark 2.1.0 quality encoder. The "
+            "manifest reports the source gamut measurement independently; display clipping "
+            "still occurs only at the final framebuffer.",
+        ]
+    )
+    limitations.extend(_view_limitations(rendered, up_axis, up_basis))
+    document = manifest.build_manifest(
+        resource_id=job.resource_id,
+        scene_kind="splat",
+        source_format="ply",
+        writer=ply.source_writer(header),
+        vertex_count=analysis.source_total,
+        source_bytes=source_bytes,
+        declared_sh_degree=declared,
+        measured_sh_degree=analysis.measured_sh_degree,
+        stride_bytes=header.stride,
+        bbox=analysis.bbox,
+        bbox_robust=analysis.bbox_robust,
+        up_axis=up_axis,
+        up_axis_basis=up_basis,
+        layers=[layer],
+        limitations=limitations,
+        source_sha256=job.source_sha256,
+    )
+    document["service_urls"]["lod"] = f"/v2/uploads/{job.resource_id}/scene3d/lod/{lod.header.name}"
+    return document
+
+
+def _build_streamed_manifest(
+    job: Scene3dDeriveJob,
+    header: ply.PlyHeader,
+    derived: streaming.StreamedPlyResult,
+    rendered: poster.PosterResult,
+    source_bytes: int,
+) -> dict[str, Any]:
+    """Manifest for the bounded PLY path.
+
+    Tiers are additive partitions: every finite source row appears in exactly one tier,
+    and their cumulative union is the complete source.  Unlike the former global octree,
+    deriving these tiers never allocates arrays proportional to the full vertex count.
+    """
+
+    is_splat = derived.scene_kind == "splat"
+    up_axis, up_basis = manifest.infer_up_axis(derived.bbox)
+    centre_quantization = (
+        "f32-exact"
+        if derived.max_position_error == 0.0
+        else f"f32, max absolute source error {derived.max_position_error:.9g}"
+    )
+    quantization: dict[str, Any] = (
+        {
+            "center": centre_quantization,
+            "scale": "half-log",
+            "rotation": "oct-10-10-12",
+            "color": "half-display-referred",
+            "out_of_range_color_fraction": round(derived.out_of_range_color_fraction, 6),
+        }
+        if is_splat
+        else {"center": centre_quantization, "color": "u8-srgb"}
+    )
+    layer = manifest.build_layer(
+        layer_type="splats" if is_splat else "points",
+        encoding="usx-v1" if is_splat else "upc-v1",
+        total=derived.total,
+        chunks=derived.entries,
+        tiers=derived.tiers,
+        activation_domain="post",
+        source_frame="source",
+        quantization=quantization,
+    )
+
+    limitations: list[str] = []
+    if is_splat:
+        limitations.extend(
+            manifest.splat_limitations(
+                declared_sh_degree=ply.declared_sh_degree(header),
+                measured_sh_degree=derived.measured_sh_degree,
+                sh_sample=min(job.sh_sample, header.count),
+                out_of_range_color_fraction=derived.out_of_range_color_fraction,
+                position_error=derived.max_position_error,
+            )
+        )
+    else:
+        limitations.append(
+            "Point colours are served exactly as the source stores them, in sRGB; the renderer "
+            "performs the single conversion to linear light."
+        )
+    tier_zero = sum(derived.entries[index]["count"] for index in derived.tiers[0])
+    limitations.append(
+        f"Tier 0 is a deterministic uniform sample of {tier_zero:,} of {derived.total:,} "
+        "finite source elements. Each later tier adds another deterministic refinement, and "
+        "the union of every tier contains every finite source element exactly once. The viewer "
+        "reports the exact displayed count whenever its device budget selects less than the "
+        "complete source."
+    )
+    if derived.nonfinite:
+        limitations.append(
+            f"{derived.nonfinite:,} of {derived.source_total:,} source elements carried a NaN or "
+            "infinite coordinate and were not emitted because they cannot be placed in 3D space."
+        )
+    limitations.extend(_view_limitations(rendered, up_axis, up_basis))
+    return manifest.build_manifest(
+        resource_id=job.resource_id,
+        scene_kind=derived.scene_kind,
+        source_format="ply",
+        writer=ply.source_writer(header),
+        vertex_count=derived.source_total,
+        source_bytes=source_bytes,
+        declared_sh_degree=ply.declared_sh_degree(header),
+        measured_sh_degree=derived.measured_sh_degree,
+        stride_bytes=header.stride,
+        bbox=derived.bbox,
+        bbox_robust=derived.bbox_robust,
+        up_axis=up_axis,
+        up_axis_basis=up_basis,
+        layers=[layer],
+        limitations=limitations,
+        source_sha256=job.source_sha256,
+    )
 
 
 def _plan_limitations(job: Scene3dDeriveJob, plan: chunker.ChunkPlan) -> list[str]:
@@ -1047,7 +1688,7 @@ def _build_manifest(
             "scale": "half-log",
             "rotation": "oct-10-10-12",
             "color": "half-display-referred",
-            "clamped_color_fraction": round(float(facts["clamped_color_fraction"]), 6),
+            "out_of_range_color_fraction": round(float(facts["out_of_range_color_fraction"]), 6),
         }
         if is_splat
         else {"center": "f32-exact", "color": "u8-srgb"}
@@ -1070,7 +1711,7 @@ def _build_manifest(
                 declared_sh_degree=declared,
                 measured_sh_degree=int(facts["measured_sh_degree"]),
                 sh_sample=min(job.sh_sample, header.count),
-                clamped_color_fraction=float(facts["clamped_color_fraction"]),
+                out_of_range_color_fraction=float(facts["out_of_range_color_fraction"]),
             )
         )
     else:
@@ -1096,4 +1737,5 @@ def _build_manifest(
         up_axis_basis=up_basis,
         layers=[layer],
         limitations=limitations,
+        source_sha256=job.source_sha256,
     )

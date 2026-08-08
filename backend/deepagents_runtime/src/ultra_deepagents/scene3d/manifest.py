@@ -2,7 +2,7 @@
 
 ``limitations`` is the CIFTI honesty field: plain sentences, rendered verbatim in the
 provenance panel, stating what the viewer is *not* doing. Everything the derive throws
-away — empty SH bands, view-dependent bands it cannot carry, clamped colour, quantized
+away — empty SH bands, view-dependent bands it cannot carry, out-of-gamut colour, quantized
 rotation, the poster's fake render — earns a sentence here. A limitation that is only
 true sometimes is emitted only when it is true; a permanently-true one is unconditional.
 """
@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 
 __all__ = [
+    "DERIVATIVE_REVISION",
+    "GENERATOR_REVISION",
     "SCHEMA",
     "build_layer",
     "build_manifest",
@@ -23,6 +25,8 @@ __all__ = [
 ]
 
 SCHEMA = "ultra.scene3d.v1"
+DERIVATIVE_REVISION = "v3"
+GENERATOR_REVISION = f"scene3d-rad-{DERIVATIVE_REVISION}"
 _AXIS_NAMES = ("x", "y", "z")
 # An axis is only called "up" when it is clearly the thin one. Aerial and corridor scans
 # are wide-wide-thin; a roughly cubic scene has no such evidence and stays "unknown"
@@ -85,7 +89,8 @@ def splat_limitations(
     declared_sh_degree: int,
     measured_sh_degree: int,
     sh_sample: int,
-    clamped_color_fraction: float,
+    out_of_range_color_fraction: float,
+    position_error: float = 0.0,
 ) -> list[str]:
     """The splat-specific honesty sentences."""
     sentences: list[str] = []
@@ -108,13 +113,22 @@ def splat_limitations(
         "the derive or the renderer."
     )
     sentences.append(
-        f"{_percent(clamped_color_fraction)} of degree-0 colour components fell outside [0,1] "
-        "after 0.5 + C0*f_dc and were clamped; that colour detail is not recoverable."
+        f"{_percent(out_of_range_color_fraction)} of degree-0 colour components fall outside "
+        "[0,1] after 0.5 + C0*f_dc. They remain preserved as float16 for Gaussian "
+        "compositing and are clipped only at the final display output."
     )
-    sentences.append(
-        "Splat centres are exact float32. Scale and colour are stored as float16 (~0.05% "
-        "relative) and rotation as a 10-10-12 octahedral quaternion (~0.1 degree)."
-    )
+    if position_error > 0.0:
+        sentences.append(
+            "Source splat centres were wider than float32 and were converted for the GPU; the "
+            f"largest absolute coordinate change was {position_error:.9g} source units. Scale "
+            "and colour are stored as float16 (~0.05% relative) and rotation as a 10-10-12 "
+            "octahedral quaternion (~0.1 degree)."
+        )
+    else:
+        sentences.append(
+            "Splat centres are exact float32. Scale and colour are stored as float16 (~0.05% "
+            "relative) and rotation as a 10-10-12 octahedral quaternion (~0.1 degree)."
+        )
     return sentences
 
 
@@ -191,6 +205,7 @@ def build_manifest(
     layers: list[dict[str, Any]],
     limitations: list[str],
     units: str = "arbitrary",
+    source_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the §6 manifest.
 
@@ -198,18 +213,22 @@ def build_manifest(
     scale comes from COLMAP's arbitrary reconstruction scale, and labelling that "meters"
     would make every measurement drawn on top of it wrong by an unknown factor.
     """
+    source = {
+        "format": source_format,
+        "writer": writer,
+        "vertex_count": int(vertex_count),
+        "bytes": int(source_bytes),
+        "declared_sh_degree": int(declared_sh_degree),
+        "measured_sh_degree": int(measured_sh_degree),
+        "stride_bytes": int(stride_bytes),
+    }
+    if source_sha256 is not None:
+        source["sha256"] = source_sha256
     return {
         "schema": SCHEMA,
+        "generator_revision": GENERATOR_REVISION,
         "scene_kind": scene_kind,
-        "source": {
-            "format": source_format,
-            "writer": writer,
-            "vertex_count": int(vertex_count),
-            "bytes": int(source_bytes),
-            "declared_sh_degree": int(declared_sh_degree),
-            "measured_sh_degree": int(measured_sh_degree),
-            "stride_bytes": int(stride_bytes),
-        },
+        "source": source,
         "world": {
             "units": units,
             "up_axis": up_axis,

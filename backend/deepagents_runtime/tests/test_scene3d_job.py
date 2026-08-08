@@ -6,6 +6,7 @@ The slow test at the bottom runs the real 14,469,103-splat file. It is skipped u
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
@@ -25,9 +26,11 @@ from test_scene3d_ply import (
 )
 from ultra_deepagents.imaging.derivative_manifest import (
     DeterministicDerivativeError,
+    StaleDerivativeJobError,
     TransientDerivativeError,
 )
-from ultra_deepagents.scene3d import ply, spark_encode
+from ultra_deepagents.scene3d import job as scene_job
+from ultra_deepagents.scene3d import ply, rad_lod, spark_encode
 from ultra_deepagents.scene3d.job import (
     MANIFEST_NAME,
     POSTER_NAME,
@@ -42,9 +45,18 @@ REAL_SPLAT_STRIDE = 236
 
 
 def _derive(tmp_path, src, **options):
-    dst = tmp_path / "derived"
+    payload = src.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
     result = run_scene3d_derive_job(
-        {"resource_id": "file-1", "src_path": str(src), "dst_dir": str(dst), **options}
+        {
+            "resource_id": "file-1",
+            "src_path": str(src),
+            "dst_dir": str(dst),
+            "source_sha256": digest,
+            "source_size_bytes": len(payload),
+            **options,
+        }
     )
     document = json.loads((dst / MANIFEST_NAME).read_text())
     return result, document, dst
@@ -76,6 +88,7 @@ def test_splat_derive_emits_the_section_6_manifest(tmp_path):
         "declared_sh_degree": 3,
         "measured_sh_degree": 0,
         "stride_bytes": 236,
+        "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
     }
     assert document["world"]["frame"] == "source"
     assert document["world"]["units"] == "arbitrary"
@@ -95,13 +108,123 @@ def test_splat_derive_emits_the_section_6_manifest(tmp_path):
         "scale",
         "rotation",
         "color",
-        "clamped_color_fraction",
+        "out_of_range_color_fraction",
     }
     assert sum(chunk["count"] for chunk in layer["chunks"]) == 5000
     assert sorted(index for tier in layer["tiers"] for index in tier) == list(
         range(len(layer["chunks"]))
     )
     assert (dst / POSTER_NAME).exists()
+
+
+def test_production_splat_delivery_publishes_paged_quality_rad(tmp_path, monkeypatch):
+    src = write_postshot_splats(tmp_path / "scene.ply", count=5000)
+
+    def fake_build(_source, directory, *, retained_sh_degree):
+        # The fixture declares degree 3 but its full source contains only zero-valued
+        # higher bands, so the exact scan safely strips those empty texture planes.
+        assert retained_sh_degree == 0
+        root = os.fspath(directory)
+        with open(os.path.join(root, "scene-lod.rad"), "wb") as stream:
+            stream.write(b"RAD header")
+        with open(os.path.join(root, "scene-lod-0.radc"), "wb") as stream:
+            stream.write(b"RAD page")
+        return rad_lod.RadLodResult(
+            header=rad_lod.RadArtifact("scene-lod.rad", 10),
+            chunks=[rad_lod.RadArtifact("scene-lod-0.radc", 8)],
+            method="bhatt-lod-quality",
+            builder_revision=rad_lod.RAD_BUILDER_REVISION,
+        )
+
+    monkeypatch.setattr(scene_job.rad_lod, "build_paged_rad", fake_build)
+    result, document, dst = _derive(
+        tmp_path,
+        src,
+        max_splats_per_chunk=800,
+        tier_count=3,
+        splat_delivery="spark-rad-v1",
+    )
+
+    assert result["chunk_count"] == 2
+    assert result["tier_count"] == 0
+    assert document["generator_revision"] == "scene3d-rad-v3"
+    layer = document["layers"][0]
+    assert layer["encoding"] == "spark-rad-v1"
+    assert layer["chunks"] == []
+    assert layer["tiers"] == []
+    assert layer["lod"]["method"] == "bhatt-lod-quality"
+    assert layer["lod"]["max_sh_degree"] == 0
+    assert layer["lod"]["header"] == {"name": "scene-lod.rad", "bytes": 10}
+    assert document["service_urls"]["lod"].endswith("/scene3d/lod/scene-lod.rad")
+    assert (dst / "scene-lod-0.radc").read_bytes() == b"RAD page"
+
+    def unexpected_rad_rederive(*_args, **_kwargs):
+        raise AssertionError("a committed RAD generation was derived twice")
+
+    monkeypatch.setattr(scene_job.rad_lod, "build_paged_rad", unexpected_rad_rederive)
+    payload = src.read_bytes()
+    reused = run_scene3d_derive_job(
+        {
+            "resource_id": "file-1",
+            "src_path": str(src),
+            "dst_dir": str(dst),
+            "source_sha256": hashlib.sha256(payload).hexdigest(),
+            "source_size_bytes": len(payload),
+            "splat_delivery": "spark-rad-v1",
+        }
+    )
+    assert reused["reused"] is True
+    assert reused["chunk_count"] == 2
+
+
+def test_production_splat_delivery_retains_a_band_populated_only_in_the_final_row(
+    tmp_path, monkeypatch
+):
+    count = 512
+    f_rest = np.zeros((count, 45), np.float32)
+    f_rest[-1, 8] = 0.25  # first coefficient in degree 3, outside a tiny sample
+    src = write_postshot_splats(tmp_path / "late-sh.ply", count=count, f_rest=f_rest)
+
+    def fake_build(_source, directory, *, retained_sh_degree):
+        assert retained_sh_degree == 3
+        root = os.fspath(directory)
+        with open(os.path.join(root, "scene-lod.rad"), "wb") as stream:
+            stream.write(b"RAD header")
+        with open(os.path.join(root, "scene-lod-0.radc"), "wb") as stream:
+            stream.write(b"RAD page")
+        return rad_lod.RadLodResult(
+            header=rad_lod.RadArtifact("scene-lod.rad", 10),
+            chunks=[rad_lod.RadArtifact("scene-lod-0.radc", 8)],
+            method="bhatt-lod-quality",
+            builder_revision=rad_lod.RAD_BUILDER_REVISION,
+        )
+
+    monkeypatch.setattr(scene_job.rad_lod, "build_paged_rad", fake_build)
+    result, document, _dst = _derive(
+        tmp_path,
+        src,
+        sh_sample=1,
+        splat_delivery="spark-rad-v1",
+    )
+
+    assert result["measured_sh_degree"] == 3
+    assert document["source"]["measured_sh_degree"] == 3
+    assert document["layers"][0]["lod"]["max_sh_degree"] == 3
+
+
+def test_production_splat_delivery_rejects_nonfinite_coordinates_before_build(
+    tmp_path, monkeypatch
+):
+    rows = splat_rows(32)
+    rows["x"][7] = np.nan
+    src = write_ply(tmp_path / "invalid-scene.ply", props=POSTSHOT_SPLAT_PROPS, rows=rows)
+
+    def unexpected_build(*_args, **_kwargs):
+        raise AssertionError("the RAD builder must not receive non-finite geometry")
+
+    monkeypatch.setattr(scene_job.rad_lod, "build_paged_rad", unexpected_build)
+    with pytest.raises(DeterministicDerivativeError, match="nonfinite_scene_coordinates"):
+        _derive(tmp_path, src, splat_delivery="spark-rad-v1")
 
 
 def test_chunk_bytes_match_their_manifest_entry_and_reconstruct_world_positions(tmp_path):
@@ -165,6 +288,37 @@ def test_point_cloud_derive_emits_upc1_with_source_srgb_colors(tmp_path):
     assert np.array_equal(np.sort(recovered, axis=0), np.sort(colors, axis=0))
 
 
+def test_ply_derivation_does_not_build_a_whole_scene_octree_or_column_table(tmp_path, monkeypatch):
+    """A large scene must stay bounded by its read/chunk size, not vertex count.
+
+    The original implementation allocated full x/y/z columns and a global octree plan.
+    That peaks near 425 MB for the 53 MB real point fixture and exceeds a worker's memory
+    budget for the 3.2 GB splat fixture. The streaming path must not call either helper.
+    """
+
+    src = write_colmap_points(tmp_path / "large-points.ply", count=50_000)
+
+    def whole_scene_allocation(*_args, **_kwargs):
+        raise AssertionError("whole-scene allocation path was used")
+
+    monkeypatch.setattr(scene_job, "_read_columns", whole_scene_allocation)
+    monkeypatch.setattr(scene_job.chunker, "build_chunk_plan", whole_scene_allocation)
+
+    result, document, _dst = _derive(
+        tmp_path,
+        src,
+        max_splats_per_chunk=1_000,
+        tier_count=4,
+        preview_points=5_000,
+    )
+
+    layer = document["layers"][0]
+    assert result["total"] == 50_000
+    assert sum(chunk["count"] for chunk in layer["chunks"]) == 50_000
+    tier_zero_count = sum(layer["chunks"][index]["count"] for index in layer["tiers"][0])
+    assert 0 < tier_zero_count < 50_000
+
+
 def test_limitations_state_the_measured_versus_declared_sh_degree(tmp_path):
     src = write_postshot_splats(tmp_path / "zeros.ply", count=800)
 
@@ -174,7 +328,8 @@ def test_limitations_state_the_measured_versus_declared_sh_degree(tmp_path):
     assert "declares spherical-harmonic degree 3" in joined
     assert "measured degree 0" in joined
     assert "display-referred" in joined
-    assert "clamped" in joined
+    assert "outside [0,1]" in joined
+    assert "remain preserved" in joined
     assert "not the WebGL render" in joined
     assert "Tier 0" in joined
     assert "view hint" in joined
@@ -194,7 +349,7 @@ def test_limitations_state_dropped_bands_when_the_source_really_has_them(tmp_pat
     assert "declares spherical-harmonic degree" not in joined  # nothing was over-declared
 
 
-def test_clamped_color_fraction_is_reported(tmp_path):
+def test_out_of_range_color_fraction_is_reported_without_altering_splat_values(tmp_path):
     rows = splat_rows(400)
     for i in range(3):
         rows[f"f_dc_{i}"] = np.full(400, 6.0, dtype=np.float32)  # 0.5 + C0*6 = 2.19
@@ -202,7 +357,7 @@ def test_clamped_color_fraction_is_reported(tmp_path):
     src = write_ply(tmp_path / "hot.ply", props=POSTSHOT_SPLAT_PROPS, rows=rows)
     _result, document, _dst = _derive(tmp_path, src)
 
-    assert document["layers"][0]["quantization"]["clamped_color_fraction"] == 1.0
+    assert document["layers"][0]["quantization"]["out_of_range_color_fraction"] == 1.0
     assert "100.00%" in " ".join(document["limitations"])
 
 
@@ -277,6 +432,144 @@ def test_truncated_source_is_deterministic(tmp_path):
         run_scene3d_derive_job(str(src), str(tmp_path / "derived"), resource_id="f")
 
     assert caught.value.code == "truncated_scene_source"
+
+
+def test_strict_job_rejects_a_catalog_digest_mismatch_without_publishing(tmp_path):
+    src = write_postshot_splats(tmp_path / "scene.ply", count=64)
+    wrong_digest = "0" * 64
+    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{wrong_digest}"
+
+    with pytest.raises(StaleDerivativeJobError) as caught:
+        run_scene3d_derive_job(
+            {
+                "resource_id": "file-1",
+                "src_path": str(src),
+                "dst_dir": str(dst),
+                "source_sha256": wrong_digest,
+                "source_size_bytes": src.stat().st_size,
+            }
+        )
+
+    assert caught.value.code == "catalog_source_digest_mismatch"
+    assert not dst.exists()
+    assert not os.path.exists(failure_marker_path(str(dst)))
+
+
+@pytest.mark.parametrize("legacy_revision", ("", ".v2"))
+def test_strict_job_rejects_a_legacy_generation_name(tmp_path, legacy_revision):
+    src = write_postshot_splats(tmp_path / "scene.ply", count=64)
+    payload = src.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    legacy_dst = (
+        tmp_path / "derived" / f"file-1__scene3d{legacy_revision}.sha256-{digest}"
+    )
+
+    with pytest.raises(StaleDerivativeJobError) as caught:
+        run_scene3d_derive_job(
+            {
+                "resource_id": "file-1",
+                "src_path": str(src),
+                "dst_dir": str(legacy_dst),
+                "source_sha256": digest,
+                "source_size_bytes": len(payload),
+                "splat_delivery": "spark-rad-v1",
+            }
+        )
+
+    assert caught.value.code == "scene_destination_identity_mismatch"
+    assert not legacy_dst.exists()
+
+
+def test_strict_deterministic_failure_is_atomic_and_does_not_leak_source_path(tmp_path):
+    src = write_postshot_splats(tmp_path / "private-scene-name.ply", count=80)
+    payload = src.read_bytes()[:-236]
+    src.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
+
+    with pytest.raises(DeterministicDerivativeError) as caught:
+        run_scene3d_derive_job(
+            {
+                "resource_id": "file-1",
+                "src_path": str(src),
+                "dst_dir": str(dst),
+                "source_sha256": digest,
+                "source_size_bytes": len(payload),
+            }
+        )
+
+    assert caught.value.code == "truncated_scene_source"
+    marker_path = failure_marker_path(str(dst))
+    marker_text = open(marker_path, encoding="utf-8").read()
+    marker = json.loads(marker_text)
+    assert marker["source_sha256"] == digest
+    assert marker["code"] == "truncated_scene_source"
+    assert "src_path" not in marker_text
+    assert str(src) not in marker_text
+    assert not dst.exists()
+    assert not list(dst.parent.glob(f".{dst.name}.tmp-*"))
+
+
+def test_strict_redelivery_reuses_the_committed_generation_without_rederiving(
+    tmp_path, monkeypatch
+):
+    src = write_postshot_splats(tmp_path / "scene.ply", count=128)
+    first, _document, dst = _derive(tmp_path, src)
+
+    def unexpected_rederive(*_args, **_kwargs):
+        raise AssertionError("a committed immutable generation was derived twice")
+
+    monkeypatch.setattr(scene_job.streaming, "derive_ply", unexpected_rederive)
+    payload = src.read_bytes()
+    second = run_scene3d_derive_job(
+        {
+            "resource_id": "file-1",
+            "src_path": str(src),
+            "dst_dir": str(dst),
+            "source_sha256": hashlib.sha256(payload).hexdigest(),
+            "source_size_bytes": len(payload),
+        }
+    )
+
+    assert first["status"] == second["status"] == "succeeded"
+    assert second["reused"] is True
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("max_splats_per_chunk", 255),
+        ("max_splats_per_chunk", 250_001),
+        ("tier_count", 9),
+        ("sh_sample", 500_001),
+        ("poster_sample", 500_001),
+        ("preview_splats", 100_001),
+        ("preview_points", 280_001),
+    ],
+)
+def test_queue_job_bounds_every_allocation_multiplier(tmp_path, option, value):
+    src = write_postshot_splats(tmp_path / "scene.ply", count=32)
+    payload = src.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
+
+    with pytest.raises(DeterministicDerivativeError) as caught:
+        run_scene3d_derive_job(
+            {
+                "resource_id": "file-1",
+                "src_path": str(src),
+                "dst_dir": str(dst),
+                "source_sha256": digest,
+                "source_size_bytes": len(payload),
+                option: value,
+            }
+        )
+
+    assert caught.value.code == "invalid_scene_job"
+    assert not dst.exists()
+    assert json.loads(open(failure_marker_path(str(dst)), encoding="utf-8").read())["code"] == (
+        "invalid_scene_job"
+    )
 
 
 def test_unreadable_source_is_transient(tmp_path):

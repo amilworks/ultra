@@ -17,10 +17,10 @@ Two transcription details decide whether the scene renders or not:
   ``encodeExtSplat`` takes ``(x,y,z,w)``. Spark's own PLY reader does the same remap
   (``quatW = item.rot_0``), which is the confirming reference.
 
-Colour is where we deliberately diverge from Spark's PLY reader: it writes
-``0.5 + C0*f_dc`` unclamped and un-linearized, while the contract (§4.2) requires a
-clamped, *linear* colour with the clamped fraction reported. The renderer therefore must
-not convert again.
+Colour follows Spark's PLY reader: ``0.5 + C0*f_dc`` stays display-referred and
+un-linearized. Values outside [0,1] remain representable in float16 and are preserved,
+just as Spark's ``encodeExtSplat`` preserves them; applying a transfer function or an
+eager per-Gaussian clamp would make Ultra differ from Spark's direct loader.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ class ExtSplatEncoding:
 
     ext_a: np.ndarray  # (n, 4) uint32
     ext_b: np.ndarray  # (n, 4) uint32
-    clamped_color_components: int  # of 3*n, how many fell outside [0,1] before clamping
+    out_of_range_color_components: int  # of 3*n outside [0,1], preserved on the wire
 
 
 def half_bits(values: np.ndarray) -> np.ndarray:
@@ -96,16 +96,16 @@ def sigmoid(values: np.ndarray) -> np.ndarray:
 
 
 def dc_to_base_color(f_dc: np.ndarray) -> tuple[np.ndarray, int]:
-    """``0.5 + C0*f_dc`` clamped to [0,1], with the clamped *component* count.
+    """Return Spark's raw ``0.5 + C0*f_dc`` and the out-of-range *component* count.
 
-    The measured drone scene runs -0.511 .. 2.704 on ``f_dc_0``, so clamping is not a
-    theoretical concern. The count is per component (of ``3*n``), not per splat: a splat
-    whose red alone saturates has lost less information than one that saturates in all
-    three, and the coarser count would hide that.
+    Spark's own ``encodeExtSplat`` stores these values directly as float16; it does not
+    clamp each Gaussian before alpha compositing. The estate fixture has real HDR tails,
+    so an eager clamp changes overlaps and highlights. Raster outputs such as the poster
+    clamp explicitly at their final display boundary instead.
     """
     base = 0.5 + SH_C0 * np.asarray(f_dc, dtype=np.float64)
-    clamped = int(np.count_nonzero((base < 0.0) | (base > 1.0)))
-    return np.clip(base, 0.0, 1.0), clamped
+    out_of_range = int(np.count_nonzero((base < 0.0) | (base > 1.0)))
+    return base, out_of_range
 
 
 def srgb_to_linear(values: np.ndarray) -> np.ndarray:
@@ -247,7 +247,7 @@ def encode_ext_splats(
     ext_a[:, 0:3] = xyz.view(np.uint32)
     ext_a[:, 3] = half_bits(sigmoid(raw_opacity))
 
-    base, clamped = dc_to_base_color(f_dc)
+    base, out_of_range = dc_to_base_color(f_dc)
     # Display-referred, NOT linearised — see contract 4.2. Spark's shader consumes the
     # raw `0.5 + C0*f_dc`: its PlyReader, SPZ and SOG paths all write exactly that with
     # no transfer function, matching INRIA's reference rasterizer. Linearising here
@@ -263,7 +263,11 @@ def encode_ext_splats(
     ext_b[:, 1] = blue | (wire_ln_scale[:, 0] << np.uint32(16))
     ext_b[:, 2] = wire_ln_scale[:, 1] | (wire_ln_scale[:, 2] << np.uint32(16))
     ext_b[:, 3] = encode_quat_oct_xy1010_r12(quat[:, 1], quat[:, 2], quat[:, 3], quat[:, 0])
-    return ExtSplatEncoding(ext_a=ext_a, ext_b=ext_b, clamped_color_components=clamped)
+    return ExtSplatEncoding(
+        ext_a=ext_a,
+        ext_b=ext_b,
+        out_of_range_color_components=out_of_range,
+    )
 
 
 def pack_chunk_header(

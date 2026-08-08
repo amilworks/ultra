@@ -1,4 +1,4 @@
-"""NATS worker for ``image.derive_pyramid`` jobs.
+"""NATS worker for immutable image and scene derivative jobs.
 
 Consumes convert jobs from a JetStream subject, runs the (tested)
 :func:`~ultra_deepagents.imaging.job.run_derive_pyramid_job` off-thread (the
@@ -29,6 +29,7 @@ from ultra_deepagents.imaging.derivative_manifest import (
     _publication_lock,
 )
 from ultra_deepagents.imaging.job import run_derive_pyramid_job
+from ultra_deepagents.scene3d.job import run_scene3d_derive_job
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,33 @@ def extract_derive_pyramid_payload(envelope: dict[str, Any]) -> dict[str, Any] |
             payload["force_id"] = str(envelope_job_id)
         return payload
     return envelope
+
+
+def _extract_supported_payload(
+    envelope: dict[str, Any],
+) -> tuple[str, dict[str, Any]] | None:
+    """Return ``(job_type, payload)`` for a derivative this worker owns.
+
+    Legacy direct payloads predate typed envelopes and remain image-pyramid jobs. Typed
+    scene jobs use the same JetStream subject and an independent durable consumer; they
+    must therefore be routed here rather than acknowledged as foreign work.
+    """
+
+    job_type = envelope.get("job_type")
+    if job_type in (None, "", "image.derive_pyramid"):
+        payload = extract_derive_pyramid_payload(envelope)
+        return ("image.derive_pyramid", payload) if payload is not None else None
+    if job_type != "scene.derive":
+        return None
+
+    metadata = envelope.get("metadata")
+    if not isinstance(metadata, dict) or "src_path" not in metadata:
+        return None
+    payload = dict(metadata)
+    envelope_job_id = envelope.get("job_id")
+    if envelope_job_id is not None:
+        payload["force_id"] = str(envelope_job_id)
+    return "scene.derive", payload
 
 
 def _delivery_attempt(msg: Any) -> int:
@@ -278,6 +306,7 @@ async def _handle_message(
     ack_progress_interval_seconds: float = DEFAULT_ACK_PROGRESS_INTERVAL_SECONDS,
 ) -> None:
     job: dict[str, Any] | None = None
+    job_type = "unknown"
     progress_task: asyncio.Task | None = None
 
     async def finish_delivery(op: str, *, delay_seconds: float | None = None) -> None:
@@ -291,15 +320,17 @@ async def _handle_message(
 
     try:
         envelope = json.loads(msg.data.decode("utf-8"))
-        job = extract_derive_pyramid_payload(envelope)
-        if job is None:
+        extracted = _extract_supported_payload(envelope)
+        if extracted is None:
             await finish_delivery(
                 "ack"
             )  # not our job type; ack so JetStream stops redelivering it to us
             return
+        job_type, job = extracted
         if not _has_strict_source_identity(job):
             logger.info(
-                "retiring stale derive_pyramid job without immutable source identity: resource=%s",
+                "retiring stale %s job without immutable source identity: resource=%s",
+                job_type,
                 job.get("resource_id"),
             )
             await finish_delivery("ack")
@@ -307,21 +338,21 @@ async def _handle_message(
         progress_task = _start_ack_progress_task(
             msg, interval_seconds=ack_progress_interval_seconds
         )
-        result = await asyncio.to_thread(
-            run_derive_pyramid_job,
-            job,
-            meta_fn=meta_fn,
-            viewer_info_fn=viewer_info_fn,
-            source_viewer_info_fn=source_viewer_info_fn,
-            require_manifest=True,
-        )
-        logger.info(
-            "derive_pyramid done: resource=%s derived=%s levels=%s",
-            result.get("resource_id"),
-            result.get("derived_path"),
-            result.get("levels"),
-        )
+        if job_type == "scene.derive":
+            result = await asyncio.to_thread(run_scene3d_derive_job, job)
+        else:
+            result = await asyncio.to_thread(
+                run_derive_pyramid_job,
+                job,
+                meta_fn=meta_fn,
+                viewer_info_fn=viewer_info_fn,
+                source_viewer_info_fn=source_viewer_info_fn,
+                require_manifest=True,
+            )
+        logger.info("%s done: resource=%s", job_type, result.get("resource_id"))
         await finish_delivery("ack")
+        if job_type == "scene.derive":
+            return
         # Pre-warm the source's viewer-info sidecar so the FIRST viewer open is instant
         # (engine.viewer_info persists it to a shared sidecar). Best-effort; never blocks.
         src = (job or {}).get("src_path")
@@ -353,7 +384,8 @@ async def _handle_message(
         failure_class = _failure_class(exc)
         if failure_class == "stale":
             logger.info(
-                "retiring stale derive_pyramid job: resource=%s code=%s",
+                "retiring stale %s job: resource=%s code=%s",
+                job_type,
                 (job or {}).get("resource_id"),
                 getattr(exc, "code", "stale_job"),
             )
@@ -362,13 +394,14 @@ async def _handle_message(
         attempt = _delivery_attempt(msg)
         if failure_class == "deterministic" or attempt >= max_deliver:
             logger.error(
-                "derive_pyramid permanently failed after %d attempt(s); "
+                "%s permanently failed after %d attempt(s); "
                 "terminating (dead-letter): resource=%s code=%s",
+                job_type,
                 attempt,
                 (job or {}).get("resource_id"),
                 getattr(exc, "code", "retry_limit_exhausted"),
             )
-            if isinstance(exc, DeterministicDerivativeError):
+            if job_type == "image.derive_pyramid" and isinstance(exc, DeterministicDerivativeError):
                 marker_outcome = await asyncio.to_thread(_write_failure_marker, job, exc)
                 if marker_outcome == "stale":
                     await finish_delivery("ack")
@@ -379,7 +412,8 @@ async def _handle_message(
             await finish_delivery("term")
         else:
             logger.warning(
-                "derive_pyramid failed (attempt %d/%d); will retry: resource=%s code=%s",
+                "%s failed (attempt %d/%d); will retry: resource=%s code=%s",
+                job_type,
                 attempt,
                 max_deliver,
                 (job or {}).get("resource_id"),

@@ -1400,6 +1400,47 @@ const normalizeCiftiViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   };
 };
 
+const SCENE3D_STATUSES = new Set(["ready", "deriving", "failed"]);
+const SCENE3D_KINDS = new Set(["splat", "pointcloud", "colmap"]);
+
+const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
+  const fileId = String(source.file_id ?? "");
+  const seg = encodeURIComponent(fileId);
+  const urls = toRecord(source.service_urls);
+  const status = normalizedString(source.status);
+  const sceneKind = normalizedString(source.scene_kind);
+  // Same trick as CIFTI: build a type-complete skeleton with the generic
+  // normalizer, then stamp the scene identity on top. A 3D scene has no
+  // T/C/Z/Y/X grid at all, so the axis sizes stay at their 1×1 defaults and
+  // nothing downstream tries to drive a slice slider from them.
+  const base = normalizeUploadViewerInfo({
+    kind: "image",
+    file_id: fileId,
+    original_name: String(source.original_name ?? "resource"),
+    decodable: true,
+  });
+  return {
+    ...base,
+    kind: "scene3d",
+    modality: "unknown",
+    is_volume: false,
+    is_timeseries: false,
+    is_multichannel: false,
+    message: typeof source.message === "string" ? source.message : undefined,
+    scene3d: {
+      status: SCENE3D_STATUSES.has(status) ? status : "ready",
+      scene_kind: SCENE3D_KINDS.has(sceneKind) ? sceneKind : "pointcloud",
+      element_count: clampNonNegativeInt(source.element_count, 0),
+      message: source.message == null ? null : String(source.message),
+      service_urls: {
+        manifest: String(urls.manifest ?? `/v2/uploads/${seg}/scene3d/manifest`),
+        chunk: String(urls.chunk ?? `/v2/uploads/${seg}/scene3d/chunk`),
+        download: String(urls.download ?? `/v2/resources/${seg}/download`),
+      },
+    },
+  };
+};
+
 export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
   const source = toRecord(raw);
   if (String(source.kind ?? "").trim().toLowerCase() === "hdf5") {
@@ -1407,6 +1448,9 @@ export const normalizeUploadViewerInfo = (raw: unknown): UploadViewerInfo => {
   }
   if (String(source.kind ?? "").trim().toLowerCase() === "cifti") {
     return normalizeCiftiViewerInfo(source);
+  }
+  if (String(source.kind ?? "").trim().toLowerCase() === "scene3d") {
+    return normalizeScene3dViewerInfo(source);
   }
   const metadataSource = toRecord(source.metadata);
   const viewerSource = toRecord(source.viewer);

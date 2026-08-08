@@ -1,8 +1,6 @@
-import {
-  forwardRef,
+import { type MutableRefObject,
   useCallback,
   useEffect,
-  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -107,17 +105,25 @@ const markdownForUpload = (record: { file_id: string; original_name: string; con
   return isMedia ? `![${name}](${ref})` : `[${name}](${ref})`;
 };
 
-type FilePickerHandle = {
-  open: () => void;
-};
-
-/* Exposes the FileUpload context's picker opener to the slash menu, which
+/* Captures the FileUpload context's picker opener for the slash menu, which
    renders outside the place the hook can be called. */
-const FilePickerBridge = forwardRef<FilePickerHandle>(function FilePickerBridge(_, ref) {
+function FilePickerBridge({
+  openRef,
+}: {
+  openRef: MutableRefObject<(() => void) | null>;
+}) {
   const { openFilePicker } = useFileUploadContext();
-  useImperativeHandle(ref, () => ({ open: openFilePicker }), [openFilePicker]);
+  // The ref write lives in an effect, where mutation is legal — the previous
+  // bind-callback shape did the same write but through a useCallback argument,
+  // which react-hooks/immutability rightly cannot prove safe.
+  useEffect(() => {
+    openRef.current = openFilePicker;
+    return () => {
+      openRef.current = null;
+    };
+  }, [openRef, openFilePicker]);
   return null;
-});
+}
 
 const relativeTime = (iso: string): string => {
   const then = new Date(iso).getTime();
@@ -418,7 +424,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         updateDraft({ body: value });
         setActiveNote((current) => (current ? { ...current, body_markdown: value } : current));
         setSlashOpen(false);
-        filePickerRef.current?.open();
+        filePickerRef.current?.();
         return;
       }
       const start = textarea.selectionStart;
@@ -438,7 +444,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   );
 
   const [uploadingCount, setUploadingCount] = useState(0);
-  const filePickerRef = useRef<FilePickerHandle | null>(null);
+  const filePickerRef = useRef<(() => void) | null>(null);
 
   const insertAtCaret = useCallback(
     (text: string) => {
@@ -699,7 +705,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
           multiple
           className="notes-editor-drop"
         >
-          <FilePickerBridge ref={filePickerRef} />
+          <FilePickerBridge openRef={filePickerRef} />
         {activeNote ? (
           <>
             <div className="notes-editor-bar">

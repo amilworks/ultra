@@ -2261,12 +2261,8 @@ const server = http.createServer(async (request, response) => {
     let body = "";
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
-      let payload;
-      try {
-        payload = JSON.parse(body || "{}");
-      } catch {
-        payload = {};
-      }
+      let payload = {};
+      try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
       const note = {
         note_id: `note_mock_${++mockNoteCounter}`,
         title: payload.title || "",
@@ -2295,12 +2291,8 @@ const server = http.createServer(async (request, response) => {
       let body = "";
       request.on("data", (chunk) => { body += chunk; });
       request.on("end", () => {
-        let payload;
-        try {
-          payload = JSON.parse(body || "{}");
-        } catch {
-          payload = {};
-        }
+        let payload = {};
+        try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
         if (typeof payload.title === "string") note.title = payload.title;
         if (typeof payload.body_markdown === "string") note.body_markdown = payload.body_markdown;
         if (typeof payload.pinned === "boolean") note.pinned = payload.pinned;

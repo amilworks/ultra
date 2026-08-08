@@ -197,12 +197,17 @@ CREATE TABLE IF NOT EXISTS control_notes (
   title text NOT NULL DEFAULT '',
   body_markdown text NOT NULL DEFAULT '',
   pinned boolean NOT NULL DEFAULT false,
+  -- How the owner edits this note: 'markdown' (rich surface) or 'plaintext'
+  -- (raw mono). Presentation preference only — the body is always markdown.
+  editor_mode text NOT NULL DEFAULT 'markdown',
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
   ON control_notes(user_id, pinned DESC, updated_at DESC);
+
+ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS editor_mode text NOT NULL DEFAULT 'markdown';
 
 -- Mid-run steering (Phase 1). One row per accepted steering message. The
 -- message_id references the steer's control_thread_messages row AND doubles as

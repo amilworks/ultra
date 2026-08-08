@@ -1358,18 +1358,29 @@ type CreateRunSteerMessageInput struct {
 	CreatedAt time.Time
 }
 
+// The two note editing surfaces. Values are stored verbatim in
+// control_notes.editor_mode.
+const (
+	NoteEditorModeMarkdown  = "markdown"
+	NoteEditorModePlaintext = "plaintext"
+)
+
 // NoteRecord is a user's personal note: markdown as the source of truth,
 // owner-scoped everywhere it is read. Deletion is HARD deletion — a note the
 // user deletes is erased, not concealed.
 type NoteRecord struct {
-	NoteID       string    `json:"note_id"`
-	UserID       string    `json:"user_id,omitempty"`
-	OrgID        string    `json:"org_id,omitempty"`
-	Title        string    `json:"title"`
-	BodyMarkdown string    `json:"body_markdown"`
-	Pinned       bool      `json:"pinned"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	NoteID       string `json:"note_id"`
+	UserID       string `json:"user_id,omitempty"`
+	OrgID        string `json:"org_id,omitempty"`
+	Title        string `json:"title"`
+	BodyMarkdown string `json:"body_markdown"`
+	Pinned       bool   `json:"pinned"`
+	// EditorMode is the owner's editing surface for this note — "markdown"
+	// (rich, doc-style) or "plaintext" (raw mono). Sticky per note; purely a
+	// presentation preference. The body is plain markdown in either mode.
+	EditorMode string    `json:"editor_mode"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 // NoteListItem is the list-pane projection: no full body, just enough to
@@ -1399,6 +1410,7 @@ type NoteUpdateInput struct {
 	Title        *string
 	BodyMarkdown *string
 	Pinned       *bool
+	EditorMode   *string
 }
 
 type WorkerHeartbeatRecord struct {

@@ -36,6 +36,7 @@ type noteWriteRequest struct {
 	Title        *string `json:"title"`
 	BodyMarkdown *string `json:"body_markdown"`
 	Pinned       *bool   `json:"pinned"`
+	EditorMode   *string `json:"editor_mode"`
 }
 
 func (deps ServerDeps) notesCapability(w http.ResponseWriter) (noteCapabilityStore, bool) {
@@ -53,6 +54,11 @@ func validateNoteWrite(req noteWriteRequest) error {
 	}
 	if req.BodyMarkdown != nil && len(*req.BodyMarkdown) > maxNoteBodyBytes {
 		return errors.New("note body exceeds the 2 MB limit — larger documents belong in Resources")
+	}
+	if req.EditorMode != nil &&
+		*req.EditorMode != domain.NoteEditorModeMarkdown &&
+		*req.EditorMode != domain.NoteEditorModePlaintext {
+		return errors.New(`editor_mode must be "markdown" or "plaintext"`)
 	}
 	return nil
 }
@@ -104,10 +110,11 @@ func (deps ServerDeps) handleCreateNote(w http.ResponseWriter, r *http.Request) 
 	}
 	principal := deps.principalFromRequest(r, "")
 	record := domain.NoteRecord{
-		NoteID:    domain.NewID("note"),
-		UserID:    principal.UserID,
-		OrgID:     principal.OrgID,
-		CreatedAt: domain.Now(),
+		NoteID:     domain.NewID("note"),
+		UserID:     principal.UserID,
+		OrgID:      principal.OrgID,
+		EditorMode: domain.NoteEditorModeMarkdown,
+		CreatedAt:  domain.Now(),
 	}
 	if req.Title != nil {
 		record.Title = strings.TrimSpace(*req.Title)
@@ -117,6 +124,9 @@ func (deps ServerDeps) handleCreateNote(w http.ResponseWriter, r *http.Request) 
 	}
 	if req.Pinned != nil {
 		record.Pinned = *req.Pinned
+	}
+	if req.EditorMode != nil {
+		record.EditorMode = *req.EditorMode
 	}
 	created, err := capability.CreateNote(r.Context(), record)
 	if err != nil {
@@ -169,6 +179,7 @@ func (deps ServerDeps) handleUpdateNote(w http.ResponseWriter, r *http.Request) 
 		Title:        title,
 		BodyMarkdown: req.BodyMarkdown,
 		Pinned:       req.Pinned,
+		EditorMode:   req.EditorMode,
 	})
 	if err != nil {
 		writeStoreError(w, err)

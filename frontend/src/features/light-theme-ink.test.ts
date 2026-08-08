@@ -252,7 +252,11 @@ describe("response reading typography", () => {
   it("keeps reading size and leading in the comfortable band", () => {
     expect(lightRoot).toMatch(/--font-size-reading:\s*1rem;/);
     expect(lightRoot).toMatch(/--line-height-reading:\s*1\.62;/);
-    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
+    // 440, not 400: Inter's stem/x-height (0.1609 at w400) sets lighter than the
+    // grotesques this was measured against (Söhne Buch 0.1721). Matching weight
+    // solves to 430 by two independent methods; 440 is one step past, for the
+    // 13–15px text this product is read at. See frontend/font-lab/weight.html.
+    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*440;/);
   });
 
   it("never lets inline emphasis outweigh a heading", () => {
@@ -264,8 +268,12 @@ describe("response reading typography", () => {
     expect(heading).toBe("600");
     expect(strong).toBe("600");
     expect(Number(strong)).toBeLessThanOrEqual(Number(heading));
-    // UI chrome keeps 700 — different job, sparse use.
-    expect(lightRoot).toMatch(/--font-weight-strong:\s*700;/);
+    // UI chrome is 670 — different job, sparse use. Dropped from 700 once body
+    // moved to 440 closed the gap from 300 to 260 and the hero read as a shout.
+    expect(lightRoot).toMatch(/--font-weight-strong:\s*670;/);
+    // Whatever the chrome weight is, it must still outrank a reading heading.
+    const chromeStrong = lightRoot.match(/--font-weight-strong:\s*(\d+);/)?.[1];
+    expect(Number(chromeStrong)).toBeGreaterThan(Number(heading));
   });
 
   it("gives wide equations their own scrollport instead of amputating them", () => {

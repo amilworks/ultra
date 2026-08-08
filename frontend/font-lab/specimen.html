@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ultra Sans — specimen</title>
+<style>
+  @font-face { font-family:"US Stock";     src:url("./build/UltraSans-stock.woff2") format("woff2");     font-weight:100 900; }
+  @font-face { font-family:"US Stock";     src:url("./build/UltraSans-stock-Italic.woff2") format("woff2");     font-weight:100 900; font-style:italic; }
+  @font-face { font-family:"US Calm";      src:url("./build/UltraSans-calm.woff2") format("woff2");      font-weight:100 900; }
+  @font-face { font-family:"US Calm";      src:url("./build/UltraSans-calm-Italic.woff2") format("woff2");      font-weight:100 900; font-style:italic; }
+  @font-face { font-family:"US Geometric"; src:url("./build/UltraSans-geometric.woff2") format("woff2"); font-weight:100 900; }
+  @font-face { font-family:"US Geometric"; src:url("./build/UltraSans-geometric-Italic.woff2") format("woff2"); font-weight:100 900; font-style:italic; }
+
+  :root {
+    --ink:#171b1d; --ink-2:#5b6266; --ink-3:#8b9296; --rule:#e4e7e9; --bg:#fff; --accent:#c2410c;
+    font-optical-sizing:auto; font-synthesis:none;
+  }
+  @media (prefers-color-scheme:dark) {
+    :root { --ink:#dce3ea; --ink-2:#a5abb0; --ink-3:#6f767b; --rule:#2a2f33; --bg:#141719; --accent:#fb923c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:48px 40px 96px; background:var(--bg); color:var(--ink);
+         font-family:"US Stock", system-ui, sans-serif; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:1180px; margin:0 auto; }
+  h1 { font-size:15px; font-weight:600; letter-spacing:-0.01em; margin:0 0 4px; }
+  .sub { font-size:13px; color:var(--ink-2); margin:0 0 40px; max-width:64ch; line-height:1.55; }
+
+  section { border-top:1px solid var(--rule); padding:28px 0 8px; }
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:0.09em; text-transform:uppercase;
+             color:var(--ink-3); margin:0 0 18px; }
+  .row { display:grid; grid-template-columns:104px 1fr; gap:20px; align-items:baseline;
+         padding:9px 0; border-bottom:1px solid var(--rule); }
+  .row:last-child { border-bottom:0; }
+  .tag { font-size:10px; font-weight:600; letter-spacing:0.05em; text-transform:uppercase;
+         color:var(--ink-3); padding-top:.45em; }
+  .stock     { font-family:"US Stock"; }
+  .calm      { font-family:"US Calm"; }
+  .geometric { font-family:"US Geometric"; }
+
+  .pangram   { font-size:27px; letter-spacing:-0.014em; }
+  .pangram.b { font-weight:700; }
+  .big       { font-size:62px; letter-spacing:-0.02em; line-height:1.08; }
+  .glyphs    { font-size:42px; letter-spacing:0.06em; }
+  .body      { font-size:15px; line-height:1.62; max-width:66ch; color:var(--ink); }
+  .digits    { font-size:30px; letter-spacing:0.02em; font-variant-numeric:tabular-nums; }
+  mark { background:none; color:var(--accent); }
+  .note { font-size:12px; color:var(--ink-2); line-height:1.6; margin:14px 0 0; max-width:70ch; }
+  .note b { color:var(--ink); font-weight:600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Ultra Sans — three candidates</h1>
+  <p class="sub">All three are the same Inter v4.1 binary with different glyphs transplanted into
+  the default slots. <b>Stock</b> is the untouched control. Differences are marked
+  <mark>in colour</mark> where a row isolates one glyph.</p>
+
+  <section>
+    <p class="eyebrow">Your pangram — 27px regular</p>
+    <div class="row"><span class="tag">Stock</span><span class="pangram stock">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="pangram calm">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="pangram geometric">The quick brown fox jumped over the lazy dog.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Your pangram — 27px bold</p>
+    <div class="row"><span class="tag">Stock</span><span class="pangram b stock">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="pangram b calm">The quick brown fox jumped over the lazy dog.</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="pangram b geometric">The quick brown fox jumped over the lazy dog.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">The glyphs that actually differ</p>
+    <div class="row"><span class="tag">Stock</span><span class="glyphs stock">a g u t f G I l 1 0 3 4 6 9</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="glyphs calm">a g u t f G <mark>I l</mark> 1 <mark>0 3 4 6 9</mark></span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="glyphs geometric"><mark>a</mark> g <mark>u t f G I l</mark> 1 <mark>0 3 4 6 9</mark></span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Disambiguation — the case for Calm</p>
+    <div class="row"><span class="tag">Stock</span><span class="glyphs stock">Illustrate 1I0O l1 rn/m</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="glyphs calm">Illustrate 1I0O l1 rn/m</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="glyphs geometric">Illustrate 1I0O l1 rn/m</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Numeric — tabular, as tables and readouts render it</p>
+    <div class="row"><span class="tag">Stock</span><span class="digits stock">0123456789 · 3.4691 · 60,934</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="digits calm">0123456789 · 3.4691 · 60,934</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="digits geometric">0123456789 · 3.4691 · 60,934</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Display — 62px, where identity is decided</p>
+    <div class="row"><span class="tag">Stock</span><span class="big stock">BisQue Ultra</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="big calm">BisQue Ultra</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="big geometric">BisQue Ultra</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Body copy — 15px, where you will actually live</p>
+    <div class="row"><span class="tag">Stock</span><span class="body stock">The segmentation run finished in 47 minutes across 1,308 fields of view. Registration drift stayed under 0.6&thinsp;µm for all but three tiles; those are flagged in the report. Ultra staged the outputs to <i>/workspace/run-4192</i> and wrote a figure index alongside them.</span></div>
+    <div class="row"><span class="tag">Calm</span><span class="body calm">The segmentation run finished in 47 minutes across 1,308 fields of view. Registration drift stayed under 0.6&thinsp;µm for all but three tiles; those are flagged in the report. Ultra staged the outputs to <i>/workspace/run-4192</i> and wrote a figure index alongside them.</span></div>
+    <div class="row"><span class="tag">Geometric</span><span class="body geometric">The segmentation run finished in 47 minutes across 1,308 fields of view. Registration drift stayed under 0.6&thinsp;µm for all but three tiles; those are flagged in the report. Ultra staged the outputs to <i>/workspace/run-4192</i> and wrote a figure index alongside them.</span></div>
+    <p class="note">The italic run above is the tell: Inter Italic has no single-storey <b>a</b>,
+    so Geometric's italic falls back to the double-storey form. Roman and italic
+    would not match.</p>
+  </section>
+</div>
+</body>
+</html>

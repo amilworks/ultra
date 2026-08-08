@@ -182,8 +182,14 @@ for (const cssFile of productionCssFiles) {
 }
 
 for (const [token, weight] of [
-  ["body", "400"],
-  ["reading-body", "400"],
+  // 440, not 400. Inter's stroke-to-letter ratio sets lighter than the
+  // grotesques Ultra was measured against: stem/x-height 0.1609 at w400 versus
+  // Söhne Buch's 0.1721, driven by Inter's larger x-height rather than a
+  // thinner stem. The matching weight solves to 430 by two independent
+  // methods (outline geometry and integrated rendered ink); 440 is one step
+  // past, for the 13-15px this product is read at.
+  ["body", "440"],
+  ["reading-body", "440"],
   ["nav", "500"],
   ["action", "500"],
   ["data", "500"],
@@ -191,7 +197,9 @@ for (const [token, weight] of [
   ["panel-heading", "600"],
   ["page-heading", "600"],
   ["reading-heading", "600"],
-  ["strong", "700"],
+  // 670, dropped from 700 once body moved to 440 narrowed the gap to 260 and
+  // the hero title read as a shout. Still outranks reading-heading.
+  ["strong", "670"],
   // 600, matching reading-heading rather than exceeding it. At 700 an inline
   // **emphasis** in an answer outweighed every heading above it (h2/h3/h4 are
   // all 600), and at h4's 16px it beat the heading at identical size. Emphasis

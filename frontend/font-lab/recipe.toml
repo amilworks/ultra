@@ -1,0 +1,61 @@
+# Ultra Sans — typeface recipe
+#
+# A derivative of Inter v4.1 (SIL OFL 1.1, no Reserved Font Name).
+# Each `variants` entry names an OpenType feature in upstream Inter whose
+# alternate glyphs get TRANSPLANTED into the default glyph slots — the shape
+# becomes the default, permanently, with no feature tag needed at runtime.
+#
+# Build:  python frontend/font-lab/build_ultra_sans.py --recipe <name>
+# Look:   open frontend/font-lab/build/specimen.html
+
+[font]
+family          = "Ultra Sans"
+postscript      = "UltraSans"
+vendor          = "ULTR"
+version         = "0.1"
+# Appended to the upstream copyright; the Inter notice is always retained
+# verbatim above it, as OFL 1.1 clause 2 requires.
+derivative_note = "Ultra Sans is a derivative of Inter, created for BisQue Ultra."
+
+
+# ---------------------------------------------------------------------------
+# Recipe: "calm" — conservative. Keeps Inter's skeleton; fixes the glyph
+# collisions that actually bite a scientific workspace (l/I/1, O/0) and opens
+# the digits. This is the safe default: at body size it reads as Inter, but
+# reference strings, IDs, and numeric tables stop being ambiguous.
+# ---------------------------------------------------------------------------
+[recipes.calm]
+description = "Disambiguation + data legibility. Inter's proportions, unambiguous glyphs."
+variants = [
+  "cv05",  # l  — lowercase L gains a tail (vs. the bare stem)
+  "cv08",  # I  — uppercase I gains serifs
+  "zero",  # 0  — slashed zero
+  "ss01",  # 3 4 6 9 — open/straight-tailed digits
+]
+
+# ---------------------------------------------------------------------------
+# Recipe: "geometric" — the identity swing. Single-storey `a` is the single
+# largest change available without drawing new outlines; it pulls the face
+# toward Futura/Avenir territory. Carries the calm set with it.
+# ---------------------------------------------------------------------------
+[recipes.geometric]
+description = "Single-storey a, spurless u, straight t/f. A geometric respin of Inter."
+variants = [
+  "cv11",  # a  — single-storey
+  "cv06",  # u  — no spur/stem
+  "cv13",  # t  — straight bottom
+  "cv12",  # f  — narrower, tailless
+  "cv10",  # G  — spurred
+  "cv05",  # l  — tailed
+  "cv08",  # I  — serifed
+  "zero",  # 0  — slashed
+  "ss01",  # 3 4 6 9 — open digits
+]
+
+# ---------------------------------------------------------------------------
+# Recipe: "stock" — no transplants. A pure rename of Inter, used as the
+# control in the specimen so every comparison is like-for-like.
+# ---------------------------------------------------------------------------
+[recipes.stock]
+description = "Renamed Inter, no glyph changes. Control specimen."
+variants = []

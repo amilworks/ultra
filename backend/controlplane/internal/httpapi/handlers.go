@@ -644,6 +644,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/cifti/connectivity", deps.handleGetUploadCiftiConnectivity)
 			r.Get("/uploads/{file_id}/scene3d/manifest", deps.handleGetUploadScene3dManifest)
 			r.Get("/uploads/{file_id}/scene3d/chunk/{index}", deps.handleGetUploadScene3dChunk)
+			r.Get("/uploads/{file_id}/scene3d/lod/{artifact}", deps.handleGetUploadScene3dLodArtifact)
 			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleServeUploadTiles)
 			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
 			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
@@ -8320,7 +8321,9 @@ func (deps ServerDeps) handleGetUploadViewer(w http.ResponseWriter, r *http.Requ
 	// the image service is unconfigured, so omitting it here would make the
 	// modality work locally and break in production. See scene3d.go.
 	if info, isScene := scene3dPeek(record, path); isScene {
-		deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		if scene3dCanDerive(record, info) {
+			deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		}
 		deps.writeScene3dViewer(w, record, info, path)
 		return
 	}

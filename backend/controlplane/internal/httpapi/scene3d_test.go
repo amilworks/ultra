@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,10 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/runcontrol"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
 )
+
+func scene3dFixtureSHA(payload []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(payload))
+}
 
 // The fixtures below reproduce the property layouts of the two MEASURED reference
 // files (backend/contracts/scene3d/CONTRACT.md Appendix A). Rendered at their real vertex
@@ -339,23 +344,21 @@ func TestPlyPeekAgainstRealReferenceFiles(t *testing.T) {
 func TestScene3dNameClassification(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"scene.ply", "SCENE.PLY", "cloud.splat", "drone.spz", "web.ksplat", "packed.sog"} {
+	for _, name := range []string{"scene.ply", "SCENE.PLY"} {
 		if !isScene3dName(name) {
 			t.Fatalf("isScene3dName(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"scan.tif", "volume.nii.gz", "notes.txt", "plywood.txt", "model.ply.gz"} {
+	for _, name := range []string{"scan.tif", "volume.nii.gz", "notes.txt", "plywood.txt", "model.ply.gz", "cloud.splat", "drone.spz", "web.ksplat", "packed.sog"} {
 		if isScene3dName(name) {
 			t.Fatalf("isScene3dName(%q) = true, want false", name)
 		}
 	}
 
-	// A compact container is classified by extension alone (no cheap header to
-	// sniff); a .ply must additionally parse.
-	compact := resourceRecord{FileID: "f1", OriginalName: "drone.spz"}
-	info, ok := scene3dPeek(compact, filepath.Join(t.TempDir(), "nonexistent.spz"))
-	if !ok || info.sceneKind != "splat" || info.hasPly {
-		t.Fatalf("scene3dPeek(compact) = %+v ok=%t, want a splat with no PLY facts", info, ok)
+	// Compact containers are not advertised until their derive path is implemented;
+	// extension-only classification previously queued them into the PLY parser.
+	if info, ok := scene3dPeek(resourceRecord{FileID: "f1", OriginalName: "drone.spz"}, filepath.Join(t.TempDir(), "nonexistent.spz")); ok {
+		t.Fatalf("scene3dPeek(compact) = %+v ok=%t, want unsupported", info, ok)
 	}
 	notAPly := writePlyFixture(t, "fake.ply", []byte("this is not a PLY file at all"))
 	if resourceIsScene3d(resourceRecord{FileID: "f2", OriginalName: "fake.ply"}, notAPly) {
@@ -859,7 +862,9 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 		arm := arm
 		t.Run(arm.name, func(t *testing.T) {
 			router, _, _, publisher := newScene3dTestRouter(t, arm.imageServiceURL)
-			fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
+			fixture := splatFixtureBytes(6)
+			sourceSHA256 := scene3dFixtureSHA(fixture)
+			fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
 
 			rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil)
 			if rec.Code != http.StatusOK {
@@ -894,6 +899,7 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 			if !urlsOK ||
 				urls["manifest"] != "/v2/uploads/"+fileID+"/scene3d/manifest" ||
 				urls["chunk"] != "/v2/uploads/"+fileID+"/scene3d/chunk/{index}" ||
+				urls["lod"] != "/v2/uploads/"+fileID+"/scene3d/lod/{artifact}" ||
 				urls["download"] != "/v2/resources/"+fileID+"/download" {
 				t.Fatalf("service_urls = %v", payload["service_urls"])
 			}
@@ -911,10 +917,18 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 					sceneJobs++
 					if job.Metadata["max_splats_per_chunk"] != scene3dMaxSplatsPerChunk ||
 						job.Metadata["tier_count"] != scene3dTierCount ||
+						job.Metadata["preview_splats"] != scene3dPreviewSplats ||
+						job.Metadata["preview_points"] != scene3dPreviewPoints ||
+						job.Metadata["splat_delivery"] != "spark-rad-v1" ||
+						job.Metadata["source_sha256"] != sourceSHA256 ||
+						job.Metadata["source_size_bytes"] != int64(len(fixture)) ||
 						job.Metadata["resource_id"] != fileID {
 						t.Fatalf("scene.derive metadata = %+v", job.Metadata)
 					}
-					if !strings.HasSuffix(fmt.Sprint(job.Metadata["dst_dir"]), fileID+"__scene3d") {
+					if !strings.HasSuffix(
+						fmt.Sprint(job.Metadata["dst_dir"]),
+						fileID+"__scene3d.v3.sha256-"+sourceSHA256,
+					) {
 						t.Fatalf("scene.derive dst_dir = %v", job.Metadata["dst_dir"])
 					}
 				}
@@ -929,10 +943,11 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 	}
 }
 
-// A COLMAP DIRECTORY has to produce the descriptor from both dispatch arms, and
-// on the way it must never reach the image service (libbioimage can only return a
-// confusing empty region for a directory) or be queued for an imgcnv pyramid
-// transcode of a folder of camera poses.
+// A COLMAP DIRECTORY is recognized from both dispatch arms so it never reaches
+// libbioimage or imgcnv, but it is not derivable: a mutable directory has no
+// cataloged byte stream the worker can bind to one immutable source digest. The
+// descriptor tells the scientist to upload a zip rather than pretending a job is
+// running forever.
 func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 	var imageServiceCalls atomic.Int64
 	imageService := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -966,8 +981,8 @@ func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatalf("kind/scene_kind/format = %v/%v/%v, want scene3d/colmap/colmap",
 					payload["kind"], payload["scene_kind"], payload["format"])
 			}
-			if payload["status"] != "deriving" || payload["decodable"] != true {
-				t.Fatalf("status/decodable = %v/%v, want deriving/true", payload["status"], payload["decodable"])
+			if payload["status"] != "failed" || payload["decodable"] != true {
+				t.Fatalf("status/decodable = %v/%v, want failed/true", payload["status"], payload["decodable"])
 			}
 			source, sourceOK := payload["source"].(map[string]any)
 			if !sourceOK {
@@ -995,11 +1010,13 @@ func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 			if !urlsOK ||
 				urls["manifest"] != "/v2/uploads/"+fileID+"/scene3d/manifest" ||
 				urls["chunk"] != "/v2/uploads/"+fileID+"/scene3d/chunk/{index}" ||
+				urls["lod"] != "/v2/uploads/"+fileID+"/scene3d/lod/{artifact}" ||
 				urls["download"] != "/v2/resources/"+fileID+"/download" {
 				t.Fatalf("service_urls = %v", payload["service_urls"])
 			}
 			limitations := scene3dLimitationsFromPayload(t, payload)
 			if !containsSubstring(limitations, "recognized from its layout alone") ||
+				!containsSubstring(limitations, "archive this model as a zip") ||
 				!containsSubstring(limitations, "2D feature observations are skipped") ||
 				!containsSubstring(limitations, "source world frame") {
 				t.Fatalf("limitations = %v", limitations)
@@ -1008,24 +1025,13 @@ func TestScene3dColmapDirectoryDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatalf("a structurally-recognized model claimed extension-only classification: %v", limitations)
 			}
 
-			sceneJobs := 0
 			for _, job := range publisher.jobs {
 				if job.JobType == "image.derive_pyramid" {
 					t.Fatalf("a COLMAP model enqueued a pyramid transcode: %+v", job.Metadata)
 				}
 				if job.JobType == "scene.derive" {
-					sceneJobs++
-					if job.Metadata["resource_id"] != fileID ||
-						!strings.HasSuffix(fmt.Sprint(job.Metadata["dst_dir"]), fileID+"__scene3d") {
-						t.Fatalf("scene.derive metadata = %+v", job.Metadata)
-					}
-					if !strings.HasSuffix(fmt.Sprint(job.Metadata["src_path"]), fileID+"__office-scan") {
-						t.Fatalf("scene.derive src_path = %v, want the model directory", job.Metadata["src_path"])
-					}
+					t.Fatalf("a mutable COLMAP directory enqueued a source-bound derive: %+v", job.Metadata)
 				}
-			}
-			if sceneJobs != 1 {
-				t.Fatalf("scene.derive jobs = %d, want exactly 1", sceneJobs)
 			}
 			if imageServiceCalls.Load() != 0 {
 				t.Fatalf("image service calls = %d, want zero for a COLMAP model", imageServiceCalls.Load())
@@ -1063,11 +1069,14 @@ func TestScene3dColmapWithoutPoints3DIsHonestAndServed(t *testing.T) {
 		t.Fatalf("message = %q, want it to name a COLMAP reconstruction", message)
 	}
 
-	// The derived-stream routes resolve for a COLMAP resource exactly as for a PLY:
-	// 202 while the derive is outstanding, not 415.
+	// The derived-stream route recognizes the resource but reports that preparation
+	// is unavailable, rather than polling forever for a job that cannot be source-bound.
 	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/manifest", nil)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("manifest status = %d body=%s, want 202", rec.Code, rec.Body.String())
+	}
+	if response := decodeScene3dJSON(t, rec); response["status"] != "failed" {
+		t.Fatalf("manifest body = %v, want status failed", response)
 	}
 	if chunk := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/chunk/0", nil); chunk.Code != http.StatusNotFound {
 		t.Fatalf("undelivered chunk status = %d, want 404", chunk.Code)
@@ -1077,7 +1086,7 @@ func TestScene3dColmapWithoutPoints3DIsHonestAndServed(t *testing.T) {
 // A zipped model reports the archive variant and says plainly that nothing inside
 // it has been decompressed.
 func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
-	router, mem, root, _ := newScene3dTestRouter(t, "")
+	router, mem, root, publisher := newScene3dTestRouter(t, "")
 	fileID := "file_colmap_zip"
 	storageRelative := filepath.Join("staged", fileID+"__office.zip")
 	archive := filepath.Join(root, storageRelative)
@@ -1090,7 +1099,7 @@ func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
 	}
 	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
 		ResourceID: fileID, OriginalName: "office.zip", ContentType: "application/zip",
-		SizeBytes: int64(len(raw)), StoragePath: storageRelative, SourceType: "upload",
+		SizeBytes: int64(len(raw)), SHA256: scene3dFixtureSHA(raw), StoragePath: storageRelative, SourceType: "upload",
 		ResourceKind: "dataset", OwnerUserID: "field-researcher", OwnerOrgID: "smithsonian", Status: "active",
 	}); err != nil {
 		t.Fatal(err)
@@ -1099,6 +1108,9 @@ func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
 	payload := decodeScene3dJSON(t, getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil))
 	if payload["scene_kind"] != "colmap" {
 		t.Fatalf("scene_kind = %v, want colmap", payload["scene_kind"])
+	}
+	if payload["status"] != "deriving" {
+		t.Fatalf("status = %v, want deriving", payload["status"])
 	}
 	source := payload["source"].(map[string]any)
 	if source["variant"] != "zip" || source["model_path"] != "office/sparse/0" {
@@ -1109,6 +1121,19 @@ func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
 	}
 	if limitations := scene3dLimitationsFromPayload(t, payload); !containsSubstring(limitations, "central directory") {
 		t.Fatalf("limitations = %v, want the archive statement", limitations)
+	}
+	jobs := 0
+	for _, job := range publisher.jobs {
+		if job.JobType == "scene.derive" {
+			jobs++
+			if job.Metadata["source_sha256"] != scene3dFixtureSHA(raw) ||
+				job.Metadata["source_size_bytes"] != int64(len(raw)) {
+				t.Fatalf("scene.derive source identity = %+v", job.Metadata)
+			}
+		}
+	}
+	if jobs != 1 {
+		t.Fatalf("scene.derive jobs = %d, want exactly 1", jobs)
 	}
 }
 
@@ -1156,12 +1181,14 @@ func TestScene3dPointCloudDescriptorReportsItsOwnSpecies(t *testing.T) {
 
 func TestScene3dManifestServesDerivedBytesWithStrongETag(t *testing.T) {
 	router, _, root, _ := newScene3dTestRouter(t, "")
-	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
+	fixture := splatFixtureBytes(6)
+	sourceSHA256 := scene3dFixtureSHA(fixture)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
 	manifest := []byte(`{"schema":"ultra.scene3d.v1","scene_kind":"splat"}`)
-	if err := os.MkdirAll(derivedScene3dDir(root, fileID), 0o755); err != nil {
+	if err := os.MkdirAll(derivedScene3dDir(root, fileID, sourceSHA256), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(scene3dManifestPath(root, fileID), manifest, 0o600); err != nil {
+	if err := os.WriteFile(scene3dManifestPath(root, fileID, sourceSHA256), manifest, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1196,7 +1223,8 @@ func TestScene3dManifestServesDerivedBytesWithStrongETag(t *testing.T) {
 
 func TestScene3dManifestAcceptsMissingDeriveAndHonoursTheFailureMarker(t *testing.T) {
 	router, _, root, publisher := newScene3dTestRouter(t, "")
-	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
+	fixture := splatFixtureBytes(6)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
 
 	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/manifest", nil)
 	if rec.Code != http.StatusAccepted {
@@ -1216,11 +1244,13 @@ func TestScene3dManifestAcceptsMissingDeriveAndHonoursTheFailureMarker(t *testin
 	}
 
 	// A permanent-failure marker suppresses re-enqueueing and is reported honestly.
-	failed := uploadNamedFileForProxyTest(t, router, "broken.ply", splatFixtureBytes(6))
+	failedFixture := splatFixtureBytes(7)
+	failedSHA256 := scene3dFixtureSHA(failedFixture)
+	failed := uploadNamedFileForProxyTest(t, router, "broken.ply", failedFixture)
 	if err := os.MkdirAll(filepath.Join(root, "derived"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(derivedScene3dFailedMarkerPath(root, failed), []byte("permanent"), 0o600); err != nil {
+	if err := os.WriteFile(derivedScene3dFailedMarkerPath(root, failed, failedSHA256), []byte("permanent"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	before := len(publisher.jobs)
@@ -1242,18 +1272,20 @@ func TestScene3dManifestAcceptsMissingDeriveAndHonoursTheFailureMarker(t *testin
 
 	// An expired marker stops suppressing.
 	stale := time.Now().Add(-2 * scene3dFailureBackoff)
-	if err := os.Chtimes(derivedScene3dFailedMarkerPath(root, failed), stale, stale); err != nil {
+	if err := os.Chtimes(derivedScene3dFailedMarkerPath(root, failed, failedSHA256), stale, stale); err != nil {
 		t.Fatal(err)
 	}
-	if recentScene3dFailure(root, failed, time.Now()) {
+	if recentScene3dFailure(root, failed, failedSHA256, time.Now()) {
 		t.Fatal("an expired .failed marker still suppresses re-derivation")
 	}
 }
 
 func TestScene3dChunkIndexValidationRejectsTraversalAndJunk(t *testing.T) {
 	router, _, root, _ := newScene3dTestRouter(t, "")
-	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
-	if err := os.MkdirAll(derivedScene3dDir(root, fileID), 0o755); err != nil {
+	fixture := splatFixtureBytes(6)
+	sourceSHA256 := scene3dFixtureSHA(fixture)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
+	if err := os.MkdirAll(derivedScene3dDir(root, fileID, sourceSHA256), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	secret := "SUPER-SECRET-DERIVED-BYTES"
@@ -1290,14 +1322,17 @@ func TestScene3dChunkIndexValidationRejectsTraversalAndJunk(t *testing.T) {
 	}
 }
 
-func TestScene3dChunkStreamsRangesWithImmutableCaching(t *testing.T) {
+func TestScene3dChunkStreamsRangesWithRevalidatedCaching(t *testing.T) {
 	router, _, root, _ := newScene3dTestRouter(t, "")
-	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
-	if err := os.MkdirAll(derivedScene3dDir(root, fileID), 0o755); err != nil {
+	fixture := splatFixtureBytes(6)
+	sourceSHA256 := scene3dFixtureSHA(fixture)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
+	directory := derivedScene3dDir(root, fileID, sourceSHA256)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	chunk := append([]byte("USX1"), make([]byte, 124)...)
-	chunkPath := filepath.Join(derivedScene3dDir(root, fileID), fmt.Sprintf(scene3dChunkNameFormat, 0))
+	chunkPath := filepath.Join(directory, fmt.Sprintf(scene3dChunkNameFormat, 0))
 	if err := os.WriteFile(chunkPath, chunk, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1306,8 +1341,8 @@ func TestScene3dChunkStreamsRangesWithImmutableCaching(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.Len() != len(chunk) {
 		t.Fatalf("chunk status = %d length = %d, want 200 and %d bytes", rec.Code, rec.Body.Len(), len(chunk))
 	}
-	if cache := rec.Header().Get("Cache-Control"); !strings.Contains(cache, "immutable") {
-		t.Fatalf("chunk Cache-Control = %q, want an immutable directive", cache)
+	if cache := rec.Header().Get("Cache-Control"); !strings.Contains(cache, "private") || strings.Contains(cache, "immutable") {
+		t.Fatalf("chunk Cache-Control = %q, want a private revalidated policy", cache)
 	}
 	etag := rec.Header().Get("ETag")
 	if etag == "" || rec.Header().Get("Content-Type") != "application/octet-stream" {
@@ -1329,17 +1364,63 @@ func TestScene3dChunkStreamsRangesWithImmutableCaching(t *testing.T) {
 	}
 }
 
+func TestScene3dLodArtifactValidationAndRangeDelivery(t *testing.T) {
+	router, _, root, _ := newScene3dTestRouter(t, "")
+	fixture := splatFixtureBytes(6)
+	sourceSHA256 := scene3dFixtureSHA(fixture)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
+	directory := derivedScene3dDir(root, fileID, sourceSHA256)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := []byte("RAD-HEADER-BYTES")
+	page := []byte("RAD-PAGE-ZERO")
+	if err := os.WriteFile(filepath.Join(directory, scene3dLodHeaderName), header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "scene-lod-0.radc"), page, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/lod/scene-lod.rad", nil)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), header) {
+		t.Fatalf("RAD header status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Content-Type") != "application/octet-stream" || rec.Header().Get("ETag") == "" {
+		t.Fatalf("RAD headers content-type=%q etag=%q", rec.Header().Get("Content-Type"), rec.Header().Get("ETag"))
+	}
+
+	partial := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/lod/scene-lod-0.radc", func(req *http.Request) {
+		req.Header.Set("Range", "bytes=0-2")
+	})
+	if partial.Code != http.StatusPartialContent || partial.Body.String() != "RAD" {
+		t.Fatalf("RAD page range status = %d body=%q", partial.Code, partial.Body.String())
+	}
+
+	for _, name := range []string{
+		"scene-lod-00.radc", "scene-lod--1.radc", "scene-lod-1.bin", "manifest.json", "..%2Fsecret.txt",
+	} {
+		invalid := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/lod/"+name, nil)
+		if invalid.Code != http.StatusBadRequest {
+			t.Fatalf("RAD artifact %q status = %d, want 400", name, invalid.Code)
+		}
+	}
+}
+
 func TestScene3dChunkAdmissionBudgetShedsUnderPressure(t *testing.T) {
 	original := scene3dChunkInFlightBudget
 	scene3dChunkInFlightBudget = newByteAdmissionBudget(0)
 	defer func() { scene3dChunkInFlightBudget = original }()
 
 	router, _, root, _ := newScene3dTestRouter(t, "")
-	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
-	if err := os.MkdirAll(derivedScene3dDir(root, fileID), 0o755); err != nil {
+	fixture := splatFixtureBytes(6)
+	sourceSHA256 := scene3dFixtureSHA(fixture)
+	fileID := uploadNamedFileForProxyTest(t, router, "drone.ply", fixture)
+	directory := derivedScene3dDir(root, fileID, sourceSHA256)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	chunkPath := filepath.Join(derivedScene3dDir(root, fileID), fmt.Sprintf(scene3dChunkNameFormat, 0))
+	chunkPath := filepath.Join(directory, fmt.Sprintf(scene3dChunkNameFormat, 0))
 	if err := os.WriteFile(chunkPath, make([]byte, 128), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1355,7 +1436,7 @@ func TestScene3dChunkAdmissionBudgetShedsUnderPressure(t *testing.T) {
 func TestScene3dRoutesRejectNonScenesAndForeignPrincipals(t *testing.T) {
 	router, _, _, _ := newScene3dTestRouter(t, "")
 	notes := uploadNamedFileForProxyTest(t, router, "notes.txt", []byte("not a scene"))
-	for _, route := range []string{"/scene3d/manifest", "/scene3d/chunk/0"} {
+	for _, route := range []string{"/scene3d/manifest", "/scene3d/chunk/0", "/scene3d/lod/scene-lod.rad"} {
 		rec := getAsOwner(t, router, "/v2/uploads/"+notes+route, nil)
 		if rec.Code != http.StatusUnsupportedMediaType {
 			t.Fatalf("%s on a text file = %d, want 415", route, rec.Code)
@@ -1363,7 +1444,7 @@ func TestScene3dRoutesRejectNonScenesAndForeignPrincipals(t *testing.T) {
 	}
 
 	scene := uploadNamedFileForProxyTest(t, router, "drone.ply", splatFixtureBytes(6))
-	for _, route := range []string{"/scene3d/manifest", "/scene3d/chunk/0"} {
+	for _, route := range []string{"/scene3d/manifest", "/scene3d/chunk/0", "/scene3d/lod/scene-lod.rad"} {
 		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+scene+route, nil)
 		req.Header.Set("X-Ultra-User-Id", "other-researcher")
 		req.Header.Set("X-Ultra-Org-Id", "smithsonian")

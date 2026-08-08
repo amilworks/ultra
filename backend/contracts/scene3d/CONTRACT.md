@@ -14,10 +14,18 @@ nominally claim.
 
 | Species | Source | Rendered as |
 | --- | --- | --- |
-| 3D Gaussian splats | INRIA `.ply`, Postshot `.ply`, `.spz`, `.splat`, `.ksplat`, `.sog` | `@sparkjsdev/spark` `SplatMesh` |
-| Dense / sparse point maps | COLMAP `fused.ply`, `points3D.bin`, generic `.ply` with `x,y,z[,rgb]` | `THREE.Points` |
-| Posed cameras | COLMAP `cameras.bin` + `images.bin` | `THREE.LineSegments` frusta |
+| 3D Gaussian splats | Binary INRIA / Postshot `.ply` | `@sparkjsdev/spark` `SplatMesh` |
+| Dense point maps | COLMAP/HLOC `fused.ply`, generic binary `.ply` with `x,y,z[,rgb]` | `THREE.Points` |
+| Sparse point maps + posed cameras | A ZIP containing a COLMAP/HLOC model (`cameras` + `images` + optional `points3D`) | `THREE.Points` + `THREE.LineSegments` frusta |
 | NeRF | — | **Not rendered.** Only its export is. Stated explicitly in `limitations`. |
+
+Compact splat containers (`.spz`, `.splat`, `.ksplat`, `.sog`) are deliberately not
+advertised yet. Spark can consume several of them, but Ultra's server-side, source-bound
+converter does not. Sending one to the PLY parser would be a false support claim and a
+multi-gigabyte browser download. Each format becomes supported only with a bounded,
+fixture-tested converter. A raw COLMAP directory is recognized so it never reaches the
+image service, but it must be archived as ZIP to give the worker one immutable byte
+stream and SHA-256 identity.
 
 ---
 
@@ -42,6 +50,14 @@ camera's orientation basis. It is never applied to a scene-graph node holding sp
 "Up" is a **view hint** applied to the camera controls, carried in the manifest as
 `world.up_axis` with a provenance string. It is never baked into geometry.
 
+`up_axis` is intentionally an unsigned dominant-axis hint in v1. The renderer resolves
+its direction from the source convention: a heuristic Y hint on legacy PLY/COLMAP data
+means **−Y is up** (their common right/down/forward convention), while Z means +Z and
+non-RDF Y-up formats retain +Y. A `declared` or `user` basis is authoritative and is not
+overridden by that file-family fallback. Initial framing and Reset view place the camera
+on the positive side of this resolved up direction; source positions, splat rotations,
+and spherical-harmonic coefficients remain untouched.
+
 ---
 
 ## 3. Activation domains
@@ -50,12 +66,12 @@ PLY stores *raw model parameters*. Other formats store *post-activation* values.
 converter that copies fields across without checking produces a scene that is either
 invisible or a field of giant blurs.
 
-| Field | INRIA/Postshot `.ply` | SPZ | `KHR_gaussian_splatting` | Our wire format |
-| --- | --- | --- | --- | --- |
-| scale | `log` — apply `exp` | linear | linear | **`log`** (Spark re-logs it) |
-| opacity | `logit` — apply `sigmoid` | `[0,1]` | `[0,1]` | **`[0,1]`** |
-| rotation | unnormalized quat | encoded | unit quat | **unit quat** |
-| axes | RDF | **RUB** | RUB | **source frame, declared** |
+| Field | INRIA/Postshot `.ply` | Our wire format |
+| --- | --- | --- |
+| scale | `log` — apply `exp` | **`log`** (Spark re-logs it) |
+| opacity | `logit` — apply `sigmoid` | **`[0,1]`** |
+| rotation | unnormalized quat | **unit quat** |
+| axes | source frame | **source frame, declared** |
 
 Every layer therefore declares `source_frame` and `activation_domain`. Applying the
 handedness flip twice is exactly as broken as never applying it.
@@ -63,6 +79,10 @@ handedness flip twice is exactly as broken as never applying it.
 ---
 
 ## 4. Chunk wire formats
+
+`UPC1` is the production point-cloud path. `USX1` remains the bounded legacy/preview
+path and a fixture-tested fallback, but production Gaussian uploads use the native RAD
+tree in §5.1. A raw uniform subset is not appearance-preserving for Gaussian splats.
 
 Two formats, both **planar** (not interleaved) so the browser constructs typed-array
 views with zero copying and zero per-element JS. Both use a 64-byte header, which keeps
@@ -116,9 +136,10 @@ detaches splats from the surfaces they represent. `ExtSplats` costs 2× the byte
 keeps centres exact. `PackedSplats` may later be offered as an explicit, labelled
 "performance" mode; it is not the default and never silently substituted.
 
-Splat colour is **display-referred and NOT linearised**: `clamp(0.5 + C0*f_dc, 0, 1)`
-with `C0 = 0.28209479177387814`. The clamped fraction is counted and reported in the
-manifest.
+Splat colour is **display-referred and NOT linearised**: `0.5 + C0*f_dc`, with
+`C0 = 0.28209479177387814`. Components outside [0,1] remain representable in float16 and
+are preserved through Gaussian compositing, matching Spark's `encodeExtSplat`. Their
+fraction is counted and reported; raster outputs clamp only at the final display boundary.
 
 > **This is deliberately the opposite of the point path in §4.3, and the asymmetry is
 > the correct answer, not an oversight.** The governing rule is that our derived path
@@ -151,25 +172,58 @@ documented place. `flags` bit 0 set means alpha is meaningful; otherwise alpha i
 
 ---
 
-## 5. Chunking
+## 5. Bounded streaming and level of detail
 
-Chunks are an **octree cell subdivided until it holds at most `max_splats_per_chunk`**
-(default 200 000), with a minimum cell size. Each chunk records its world `origin`;
-coordinates inside are relative to it.
+### 5.1 Gaussian splats: reconstructed spatial LoD
 
-Chunking serves three purposes at once, and the third is not optional:
+Production splats are converted offline with Spark 2.1.0's pinned `build-lod --quality
+--rad-chunked` path. The quality builder merges nearby Gaussian distributions using a
+Bhattacharyya-distance hierarchy. Coarse nodes therefore preserve aggregate coverage,
+colour, opacity, scale, and orientation; they are not holes left by deleting source
+rows. The output is one `scene-lod.rad` header plus relative `scene-lod-N.radc` pages.
 
-1. progressive streaming — the viewer shows something before the whole scene arrives;
-2. frustum culling — off-screen chunks are never uploaded;
-3. **precision** — chunk-local coordinates keep magnitudes small.
+The browser uses Spark's native view-adaptive traversal and a bounded page pool. It
+chooses spatial nodes for the current camera, refines visible regions, and evicts pages
+outside the working set. The readout says `adaptive LoD · N active · M source`; `N`
+counts reconstructed active nodes and must never be described as `N of M` source rows.
 
-Tiers are declared per layer: `tiers[k]` lists the chunk indices needed for level `k`.
-Tier 0 must give **complete spatial coverage** at reduced density, never a spatial
-subset. Within a chunk, elements are ordered by descending importance
-(`opacity × largest-axis scale` for splats) so a prefix of a chunk is a valid decimation.
+Before invoking the native builder, the worker performs a sequential full-source scan of
+every declared `f_rest_*` property. `measured_sh_degree` is therefore the highest band
+with at least one non-zero coefficient anywhere in the immutable source, not a bounded
+sample. Spark receives `--max-sh=measured_sh_degree`; only bands proven zero across every
+source splat are omitted. This exactness is required because even one spatially-localized
+coefficient is view-dependent signal. A source with a non-finite coordinate fails closed
+before the native builder because Ultra cannot otherwise prove which rows the external
+tree contains.
 
-**No silent decimation, ever.** If the viewer renders fewer elements than the source
-holds, the readout says so, the manifest says so, and an exported screenshot says so.
+### 5.2 Points and the explicit legacy preview: additive density tiers
+
+The derive makes two sequential passes over PLY: one to validate the declared record
+count and measure exact/robust bounds, then one to encode. Resident memory is bounded by
+one source read batch plus `tier_count × max_splats_per_chunk`; it never materializes a
+whole-scene table or octree. Production chunks contain at most **50,000** elements.
+
+For point clouds (and only for an explicitly requested legacy splat preview), every
+finite source record is assigned exactly once to an additive density tier by a
+stable SplitMix64 hash of its source row. Tier 0 is a deterministic, uniform sample of
+the whole source (target 100k splats or 280k points), not the first N records or one
+spatial corner. Later tiers refine it; the union of all tiers is the full finite source.
+Non-finite coordinates are counted and reported because they cannot be placed in space.
+
+`tiers[k]` lists the chunks added at level `k`. The browser loads only a **complete
+cumulative tier** whose estimated GPU residency fits its device budget. It never clips
+a chunk, loads half a tier, or calls a partial prefix “the scene.” A desktop budget is
+108 MB estimated residency; a mobile/coarse-pointer budget is 24 MB. The provenance
+readout states the displayed and source counts.
+
+Each output chunk records a float32 world `origin`; encoded positions are chunk-local.
+The origin is chosen on the source float32 grid and verified with the same float32
+addition the shader performs. Axes that cannot round-trip exactly fall back to origin
+zero. Float64 inputs report their measured maximum conversion error in `quantization`.
+
+**No silent decimation, ever.** Every finite point record is present in the full tier
+union, and a reduced-density display is labelled as such. Gaussian RAD displays report
+their adaptive-node count separately, as described above.
 
 ---
 
@@ -180,12 +234,14 @@ holds, the readout says so, the manifest says so, and an exported screenshot say
 ```jsonc
 {
   "schema": "ultra.scene3d.v1",
+  "generator_revision": "scene3d-rad-v3",
   "scene_kind": "splat" | "pointcloud" | "colmap",
   "source": {
     "format": "ply",
     "writer": "postshot",              // parsed from PLY comments when present
     "vertex_count": 14469103,
     "bytes": 3414709820,
+    "sha256": "…",                   // catalog identity used by the derive
     "declared_sh_degree": 3,
     "measured_sh_degree": 0,           // MEASURED. See Appendix A.
     "stride_bytes": 236
@@ -200,24 +256,34 @@ holds, the readout says so, the manifest says so, and an exported screenshot say
   },
   "layers": [{
     "type": "splats" | "points" | "cameras",
-    "encoding": "usx-v1" | "upc-v1" | "json",
+    "encoding": "spark-rad-v1" | "usx-v1" | "upc-v1" | "json",
     "total": 14469103,
-    "chunks": [{ "index": 0, "count": 128340, "bytes": 4106944,
-                 "origin": [x,y,z], "bbox": [ ... ] }],
-    "tiers": [[0,1,2], [3,4,5,6]],
+    "chunks": [],                         // RAD pages are listed under lod.chunks
+    "tiers": [],                          // reconstructed LoD is not an additive subset
     "activation_domain": "post",
     "source_frame": "rdf" | "rub" | "source",
     "quantization": {
-      "center": "f32-exact",
-      "scale": "half-log",             // measured: median 0.064%, p99 0.374% relative
-      "rotation": "oct-10-10-12",      // measured: median 0.136 deg, p95 0.280, max 0.451
-      "color": "half-linear",
-      "clamped_color_fraction": 0.0031
+      "center": "spark-rad-resolved-per-asset",
+      "scale": "spark-rad-resolved-per-asset",
+      "rotation": "spark-rad-resolved-per-asset",
+      "color": "spark-rad-resolved-per-asset",
+      "out_of_range_color_fraction": 0.0031 // preserved for splat compositing
+    },
+    "lod": {
+      "format": "spark-rad-v1",
+      "method": "bhatt-lod-quality",
+      "builder_revision": "spark-build-lod-2.1.0-f22236f",
+      "paged": true,
+      "source_elements": 14469103,
+      "max_sh_degree": 0,                // exact retained degree in the RAD artifact
+      "header": {"name": "scene-lod.rad", "bytes": 1234},
+      "chunks": [{"name": "scene-lod-0.radc", "bytes": 123456}]
     }
   }],
   "limitations": ["..."],              // rendered verbatim in the provenance panel
   "service_urls": {
     "chunk": "/v2/uploads/{id}/scene3d/chunk/{index}",
+    "lod": "/v2/uploads/{id}/scene3d/lod/scene-lod.rad",
     "download": "/v2/resources/{id}/download"
   }
 }
@@ -243,9 +309,12 @@ computes the percentile box (stride-sampled, so it costs nothing) because the vi
 cannot: it would have to download every chunk first. `bbox` is still reported, so the
 outliers remain discoverable and are still drawn when in view.
 
-Depth planes are fitted to the framed radius for the same reason. A near/far ratio in the
-tens of thousands exhausts depth precision — every fragment lands on NDC `z = 1`, points
-occlude each other, and the scene collapses to a few hundred lit pixels.
+The initial camera is fitted to the robust box, but its far plane still contains the
+exact full box so outliers are genuinely discoverable. When that honest near/far ratio
+reaches 10,000, the renderer enables the logarithmic-depth path shared by three.js and
+Spark's splat shaders. Without it, every fragment on the measured corridor lands near
+NDC `z = 1`, points occlude each other, and the scene collapses to a few hundred lit
+pixels; clipping the outliers instead would only hide the error.
 
 ---
 
@@ -254,10 +323,20 @@ occlude each other, and the scene collapses to a few hundred lit pixels.
 Mirrors `image.derive_pyramid` exactly, on the same worker node.
 
 - subject `ultra.image.jobs`, type `scene.derive`
-- payload `{resource_id, src_path, dst_dir, max_splats_per_chunk, tier_count}`
-- output `{dst_dir}/manifest.json` + `{dst_dir}/chunk_{n:05d}.bin` + `poster.png`
+- payload `{resource_id, src_path, dst_dir, source_sha256, source_size_bytes,
+  splat_delivery, max_splats_per_chunk, tier_count, preview_splats, preview_points}`
+- production splat output: `{dst_dir}/manifest.json` + `scene-lod.rad` +
+  `scene-lod-N.radc` + `poster.png`
+- point/legacy output: `{dst_dir}/manifest.json` + `chunk_{n:05d}.bin` + `poster.png`
 - permanent failure writes `{dst_dir}.failed`; the control plane honours it as backoff
 - redelivery capped by the existing `max_deliver`
+
+`dst_dir` is exactly `{resource_id}__scene3d.v3.sha256-{source_sha256}`. The worker verifies
+the catalog digest and byte count before reading, serializes expensive conversion with
+the shared `scene3d.work.lock`, derives into a sibling temporary directory, revalidates
+the source generation, then atomically renames the complete directory while holding the
+resource lifecycle lock. A redelivery reuses a complete matching generation. Failure
+markers contain stable codes and source identity, never local source paths.
 
 The control plane **never parses a scene file in the request path.** It sniffs headers
 (bounded read), enqueues, and serves derived bytes.
@@ -270,15 +349,17 @@ The control plane **never parses a scene file in the request path.** It sniffs h
 | --- | --- |
 | `GET /v2/uploads/{id}/viewer` | existing ladder, new arm emitting `kind:"scene3d"` |
 | `GET /v2/uploads/{id}/scene3d/manifest` | the manifest, `ETag` + `Cache-Control` |
-| `GET /v2/uploads/{id}/scene3d/chunk/{n}` | chunk bytes, `Range`, `ETag`, immutable |
+| `GET /v2/uploads/{id}/scene3d/chunk/{n}` | chunk bytes, `Range`, strong `ETag`, short private revalidation |
+| `GET /v2/uploads/{id}/scene3d/lod/{artifact}` | canonical RAD/RADC bytes, authenticated `Range`, strong `ETag` |
 
 The arm must be added to **both** `handleGetUploadViewerService`
 (`imageservice_viewer.go:296`) and `handleGetUploadViewer` (`handlers.go:8069`) — the
 second runs when the image-service is unconfigured, and missing it means the modality
 works locally and breaks in production.
 
-Chunk responses are served with the existing in-flight byte budget so ten concurrent
-scene opens cannot exhaust the edge node.
+Chunk and RAD responses are served with the same in-flight byte budget so concurrent
+scene opens cannot exhaust the edge node. RAD names accept only `scene-lod.rad` and a
+canonical `scene-lod-N.radc`; the route cannot address an arbitrary derived file.
 
 ---
 
@@ -314,6 +395,12 @@ scene opens cannot exhaust the edge node.
   `THREE.PerspectiveCamera(fov, aspect)` — that is structurally a symmetric frustum and
   cannot represent a principal-point offset.
 - `devicePixelRatio` capped at 2, mirroring `resolveVolumePixelRatio`.
+- Rendering is invalidation-driven. Spark's asynchronous update is awaited at complete
+  tier boundaries; camera, resize and dirty events request one frame. There is no
+  permanent `requestAnimationFrame` loop while the scientist is idle.
+- Production splats use one `PagedSplats` / `SplatMesh`, Spark's global compositing and
+  native view-adaptive traversal. Request headers and credentials are supplied to every
+  RAD range fetch; no API key is placed in a URL.
 
 ---
 
@@ -353,21 +440,23 @@ Three findings that change the implementation:
    properties that INRIA's writer emits. Property offsets **must** be derived from the
    header; a hardcoded layout silently misreads every field.
 
-2. **Declared SH degree 3, measured SH degree 0.** All 45 `f_rest_*` coefficients are
-   exactly `0.0` in 200,000 randomly sampled splats (seed 7) — 100.0000%. The file
-   allocates and zeroes the full degree-3 layout, so 180 of 236 bytes per splat (76% of
-   3.41 GB) is padding. The manifest reports `measured_sh_degree`, and the derive drops
-   the empty bands. *Do not hardcode this conclusion* — real degree-3 files exist and
-   must round-trip.
+2. **Declared SH degree 3, measured SH degree 0.** A sequential scan of all 14,469,103
+   source splats proves every one of the 45 `f_rest_*` coefficients is exactly `0.0`.
+   The file allocates and zeroes the full degree-3 layout, so 180 of 236 bytes per splat
+   (76% of 3.41 GB) is padding. The v3 RAD generation safely passes `--max-sh=0` and does
+   not transmit those proven-empty planes. *Do not hardcode this conclusion* — the same
+   full-source scan retains real degree-1, degree-2, and degree-3 signal, including a
+   coefficient that occurs only in the final source record.
 
 3. **Activation domains confirmed empirically.**
    ```
    opacity   min -4.1553  med  0.6668  max 13.1980   -> logit, sigmoid(med)=0.661
    scale_0   min -10.607  med -4.6392  max  0.5901   -> log,   exp(med)=0.00967
    |quat|    min  1.0000  med  1.0000  max  1.0000   -> already normalized
-   f_dc_0 -> 0.5+C0*dc:  min -0.511  med 0.513  max 2.704  -> needs clamping
+   f_dc_0 -> 0.5+C0*dc:  min -0.511  med 0.513  max 2.704  -> preserve through compositing
    ```
-   Postshot normalises quaternions; INRIA's writer does not. Normalise defensively.
+   Final framebuffer output clamps to its display gamut. Postshot normalises
+   quaternions; INRIA's writer does not. Normalise defensively.
 
 ### Why `ExtSplats` and not `PackedSplats`
 

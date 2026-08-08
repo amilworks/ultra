@@ -604,7 +604,9 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	// pixel geometry, so the engine can only 415 it and the undecodable path would
 	// then enqueue a pointless imgcnv transcode of a multi-gigabyte scene. See scene3d.go.
 	if info, isScene := scene3dPeek(record, path); isScene {
-		deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		if scene3dCanDerive(record, info) {
+			deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		}
 		deps.writeScene3dViewer(w, record, info, path)
 		return
 	}

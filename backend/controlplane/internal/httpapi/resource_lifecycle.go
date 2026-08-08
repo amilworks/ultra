@@ -51,7 +51,7 @@ func resourceDerivationLockName(resourceID, kind string) (string, error) {
 		return "", errors.New("invalid resource derivation lock target")
 	}
 	switch kind {
-	case "pyramid", "nifti":
+	case "pyramid", "nifti", "scene3d":
 		return "." + resourceID + "__" + kind + ".work.lock", nil
 	default:
 		return "", errors.New("invalid resource derivation lock kind")
@@ -942,17 +942,36 @@ func derivativeNameMatcher(resourceID string) (*regexp.Regexp, error) {
 	}
 	pyramidBase := regexp.QuoteMeta(resourceID + "__pyramid")
 	niftiBase := regexp.QuoteMeta(resourceID + "__nifti")
+	scene3dBase := regexp.QuoteMeta(resourceID + "__scene3d")
+	// Match every published scene derivative generation. Old generations remain owned
+	// by the resource after a converter revision bump and must be reclaimed on purge.
+	scene3dRevision := `(?:\.v[1-9][0-9]*)?`
 	token := `[A-Za-z0-9_]{6,64}`
+	digest := `[0-9a-f]{64}`
 	pattern := `^(?:` +
-		pyramidBase + `\.(?:tif(?:\.transcode\.ome\.tif)?|failed|manifest\.json|sha256-[0-9a-f]{64}\.tif)` +
+		pyramidBase + `\.(?:tif(?:\.transcode\.ome\.tif)?|failed|manifest\.json|sha256-` + digest + `\.tif)` +
 		`|\.` + pyramidBase + `\.tmp-` + token + `\.tif(?:\.transcode\.ome\.tif)?` +
 		`|\.` + pyramidBase + `\.manifest\.json\.(?:tmp|rollback)-` + token +
-		`|\.` + pyramidBase + `\.sha256-[0-9a-f]{64}\.tif\.(?:publish|recovery)-[0-9a-f]{24}` +
+		`|\.` + pyramidBase + `\.sha256-` + digest + `\.tif\.(?:publish|recovery)-[0-9a-f]{24}` +
 		`|\.` + pyramidBase + `\.failed\.` + token +
-		`|` + niftiBase + `\.sha256-[0-9a-f]{64}\.nii(?:\.tmp)?` +
+		`|` + niftiBase + `\.sha256-` + digest + `\.nii(?:\.tmp)?` +
 		`|\.` + niftiBase + `\.tmp-` + token + `\.nii` +
-		`|\.` + niftiBase + `\.stage\.nii` + `)$`
+		`|\.` + niftiBase + `\.stage\.nii` +
+		`|` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `(?:\.failed)?` +
+		`|\.` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `\.tmp-` + token +
+		`|\.` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `\.failed\.` + token + `)$`
 	return regexp.Compile(pattern)
+}
+
+func ownedScene3dDerivativeDirectoryName(resourceID, name string) bool {
+	if !safeResourceLifecycleID(resourceID) {
+		return false
+	}
+	digest := `[0-9a-f]{64}`
+	token := `[A-Za-z0-9_]{6,64}`
+	base := regexp.QuoteMeta(resourceID+"__scene3d") + `(?:\.v[1-9][0-9]*)?\.sha256-`
+	pattern := `^(?:` + base + digest + `|\.` + base + digest + `\.tmp-` + token + `)$`
+	return regexp.MustCompile(pattern).MatchString(name)
 }
 
 func analysisStagingNameMatcher(resourceID string) (*regexp.Regexp, error) {
@@ -1208,7 +1227,7 @@ func scanOwnedDerivativeNamesForResources(root *os.Root, resourceIDs []string) (
 			}
 		entryCandidates:
 			for _, candidateName := range candidateNames {
-				for _, marker := range []string{"__pyramid", "__nifti"} {
+				for _, marker := range []string{"__pyramid", "__nifti", "__scene3d"} {
 					searchFrom := 0
 					for searchFrom < len(candidateName) {
 						index := strings.Index(candidateName[searchFrom:], marker)
@@ -1248,7 +1267,7 @@ func removeResourceDerivationLocks(root *os.Root, resourceID string) error {
 		return err
 	}
 	defer locks.Close()
-	for _, kind := range []string{"pyramid", "nifti"} {
+	for _, kind := range []string{"pyramid", "nifti", "scene3d"} {
 		name, nameErr := resourceDerivationLockName(resourceID, kind)
 		if nameErr != nil {
 			return nameErr
@@ -1406,7 +1425,13 @@ func removeOwnedResourceNamespaceCore(
 					errs = append(errs, fmt.Errorf("derivative inventory contains unowned name %q", name))
 					continue
 				}
-				removed, removeErr := removeRootEntry(derived, name, false, accounting, 0)
+				removed, removeErr := removeRootEntry(
+					derived,
+					name,
+					ownedScene3dDerivativeDirectoryName(resourceID, name),
+					accounting,
+					0,
+				)
 				freed += removed
 				if removeErr != nil {
 					errs = append(errs, fmt.Errorf("remove derivative %q: %w", name, removeErr))

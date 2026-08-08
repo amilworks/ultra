@@ -30,9 +30,10 @@ import (
 // engine for nothing. It is served instead from a DERIVED, chunked stream that
 // the imaging worker builds once (see backend/contracts/scene3d/CONTRACT.md §7):
 //
-//	{root}/derived/{file_id}__scene3d/manifest.json      the ultra.scene3d.v1 manifest
-//	{root}/derived/{file_id}__scene3d/chunk_{n:05d}.bin  USX1 (splats) / UPC1 (points)
-//	{root}/derived/{file_id}__scene3d.failed             permanent-failure marker
+//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/manifest.json
+//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/chunk_{n:05d}.bin
+//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}/scene-lod.{rad,radc}
+//	{root}/derived/{file_id}__scene3d.v3.sha256-{digest}.failed
 //
 // The control plane NEVER parses a scene file in the request path. The real
 // files are 3.4 GB with 14.5M splats; everything here is a bounded 64 KiB header
@@ -73,17 +74,23 @@ const (
 
 	scene3dManifestName    = "manifest.json"
 	scene3dChunkNameFormat = "chunk_%05d.bin"
+	scene3dLodHeaderName   = "scene-lod.rad"
+	scene3dLodChunkPrefix  = "scene-lod-"
+	scene3dLodChunkSuffix  = ".radc"
+	scene3dDerivativeRev   = "v3"
 
 	// scene3dMaxChunkIndex caps the addressable chunk space. At the default
-	// 200k elements per chunk this is 2e11 elements — far past any real scene —
+	// 50k elements per chunk this is 5e10 elements — far past any real scene —
 	// so anything larger is a malformed or hostile request, not a deep scene.
 	scene3dMaxChunkIndex = 999_999
 
 	// Derive-job parameters (contract §5/§7). max_splats_per_chunk is the frozen
 	// default; tier_count is not fixed by the contract, and this is the value the
 	// control plane requests.
-	scene3dMaxSplatsPerChunk = 200_000
-	scene3dTierCount         = 3
+	scene3dMaxSplatsPerChunk = 50_000
+	scene3dTierCount         = 4
+	scene3dPreviewSplats     = 100_000
+	scene3dPreviewPoints     = 280_000
 
 	defaultScene3dChunkInFlightBytes = int64(256 << 20)
 
@@ -138,12 +145,9 @@ type plyInfo struct {
 }
 
 // scene3dInfo is the viewer-facing summary of a scene resource: the container
-// format plus, for PLY, the header facts and, for COLMAP, the model layout. The
-// compact splat containers (.spz/.splat/.ksplat/.sog) carry no ASCII header we
-// can sniff cheaply, so they are classified by extension and inspected only by
-// the derive job.
+// format plus, for PLY, the header facts and, for COLMAP, the model layout.
 type scene3dInfo struct {
-	format    string // "ply" | "splat" | "spz" | "ksplat" | "sog" | "colmap"
+	format    string // "ply" | "colmap"
 	sceneKind string // "splat" | "pointcloud" | "colmap"
 	ply       plyInfo
 	hasPly    bool
@@ -716,9 +720,8 @@ func zipCentralDirectoryExtent(file *os.File, size int64) (entries, centralDirec
 }
 
 // isScene3dName reports whether a resource name is one of the 3D scene
-// containers. Extension is the only signal for the compact formats; PLY is
-// additionally header-verified by scene3dPeek. COLMAP is deliberately absent: a
-// reconstruction has no distinguishing name at all (it is a folder, often just
+// containers. PLY is additionally header-verified by scene3dPeek. COLMAP is
+// deliberately absent: a reconstruction has no distinguishing name at all (it is a folder, often just
 // "sparse" or the dataset's own name), so it is recognized STRUCTURALLY by
 // colmapPeek instead.
 func isScene3dName(name string) bool {
@@ -727,10 +730,8 @@ func isScene3dName(name string) bool {
 
 func scene3dFormatFromName(name string) string {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	for _, ext := range []string{".ply", ".splat", ".spz", ".ksplat", ".sog"} {
-		if strings.HasSuffix(lower, ext) {
-			return strings.TrimPrefix(ext, ".")
-		}
+	if strings.HasSuffix(lower, ".ply") {
+		return "ply"
 	}
 	return ""
 }
@@ -754,11 +755,6 @@ func scene3dPeek(record resourceRecord, path string) (scene3dInfo, bool) {
 		}
 		return scene3dInfo{}, false
 	}
-	if format != "ply" {
-		// .spz/.splat/.ksplat/.sog are compact binary splat containers; they are
-		// always splats, and their contents are inspected only by the derive job.
-		return scene3dInfo{format: format, sceneKind: "splat"}, true
-	}
 	ply, ok := plyPeek(path)
 	if !ok {
 		return scene3dInfo{}, false
@@ -771,24 +767,39 @@ func resourceIsScene3d(record resourceRecord, path string) bool {
 	return ok
 }
 
+// scene3dCanDerive is the publication boundary, not merely a format check. The
+// worker can source-bind regular uploads (PLY and zipped COLMAP models) to the
+// catalog's immutable SHA-256 and byte count. A directory has no cataloged byte
+// stream to hash or revalidate, so accepting one here would let a changing tree
+// publish under a stale identity. Directory models remain recognizable — which
+// keeps them away from the image service — but must be archived before deriving.
+func scene3dCanDerive(record resourceRecord, info scene3dInfo) bool {
+	if !isSHA256Hex(strings.ToLower(strings.TrimSpace(record.SHA256))) || record.SizeBytes < 0 {
+		return false
+	}
+	return !info.hasColmap || info.colmap.variant != "directory"
+}
+
 // --- derived artifacts -------------------------------------------------------
 
 // derivedScene3dName is the deterministic destination the derive job writes into,
 // mirroring derivedPyramidName. It is a DIRECTORY (manifest + chunks + poster).
-func derivedScene3dName(fileID string) string { return fileID + "__scene3d" }
+func derivedScene3dName(fileID, sourceSHA256 string) string {
+	return fileID + "__scene3d." + scene3dDerivativeRev + ".sha256-" + strings.ToLower(strings.TrimSpace(sourceSHA256))
+}
 
-func derivedScene3dDir(root, fileID string) string {
-	return filepath.Join(root, "derived", derivedScene3dName(fileID))
+func derivedScene3dDir(root, fileID, sourceSHA256 string) string {
+	return filepath.Join(root, "derived", derivedScene3dName(fileID, sourceSHA256))
 }
 
 // derivedScene3dFailedMarkerPath is "{dst_dir}.failed" (contract §7): the sidecar
 // a permanently-failed derive writes, which the control plane honours as backoff.
-func derivedScene3dFailedMarkerPath(root, fileID string) string {
-	return derivedScene3dDir(root, fileID) + ".failed"
+func derivedScene3dFailedMarkerPath(root, fileID, sourceSHA256 string) string {
+	return derivedScene3dDir(root, fileID, sourceSHA256) + ".failed"
 }
 
-func scene3dManifestPath(root, fileID string) string {
-	return filepath.Join(derivedScene3dDir(root, fileID), scene3dManifestName)
+func scene3dManifestPath(root, fileID, sourceSHA256 string) string {
+	return filepath.Join(derivedScene3dDir(root, fileID, sourceSHA256), scene3dManifestName)
 }
 
 func scene3dFailureBackoffWindow() time.Duration {
@@ -805,12 +816,12 @@ func scene3dFailureBackoffWindow() time.Duration {
 // presence + mtime is all this can honour (the pyramid marker additionally
 // carries a source-bound JSON body). Failure-isolated: any stat error falls
 // through to false and never blocks serving.
-func recentScene3dFailure(root, fileID string, now time.Time) bool {
+func recentScene3dFailure(root, fileID, sourceSHA256 string, now time.Time) bool {
 	window := scene3dFailureBackoffWindow()
 	if window <= 0 {
 		return false
 	}
-	info, err := regularFileInfo(derivedScene3dFailedMarkerPath(root, fileID))
+	info, err := regularFileInfo(derivedScene3dFailedMarkerPath(root, fileID, sourceSHA256))
 	if err != nil {
 		return false
 	}
@@ -819,11 +830,11 @@ func recentScene3dFailure(root, fileID string, now time.Time) bool {
 
 // scene3dDeriveStatus is the descriptor's "status": "ready" once the manifest
 // exists, "failed" while a permanent-failure marker is fresh, "deriving" otherwise.
-func scene3dDeriveStatus(root, fileID string, now time.Time) string {
-	if _, err := regularFileInfo(scene3dManifestPath(root, fileID)); err == nil {
+func scene3dDeriveStatus(root, fileID, sourceSHA256 string, now time.Time) string {
+	if _, err := regularFileInfo(scene3dManifestPath(root, fileID, sourceSHA256)); err == nil {
 		return "ready"
 	}
-	if recentScene3dFailure(root, fileID, now) {
+	if recentScene3dFailure(root, fileID, sourceSHA256, now) {
 		return "failed"
 	}
 	return "deriving"
@@ -839,8 +850,13 @@ func (deps ServerDeps) enqueueScene3dDerivation(ctx context.Context, root string
 	if deps.DataAgentJobs == nil {
 		return
 	}
+	if !isSHA256Hex(strings.ToLower(strings.TrimSpace(record.SHA256))) || record.SizeBytes < 0 {
+		slog.WarnContext(ctx, "scene derivation skipped without immutable source identity",
+			"resource_id", record.FileID, "trigger", trigger)
+		return
+	}
 	now := time.Now()
-	if recentScene3dFailure(root, record.FileID, now) {
+	if recentScene3dFailure(root, record.FileID, record.SHA256, now) {
 		return
 	}
 	if !scene3dDerivationThrottle.reserve(record.FileID, now) {
@@ -856,9 +872,14 @@ func (deps ServerDeps) enqueueScene3dDerivation(ctx context.Context, root string
 		Metadata: domain.JSONMap{
 			"resource_id":          record.FileID,
 			"src_path":             path,
-			"dst_dir":              derivedScene3dDir(root, record.FileID),
+			"dst_dir":              derivedScene3dDir(root, record.FileID, record.SHA256),
 			"max_splats_per_chunk": scene3dMaxSplatsPerChunk,
 			"tier_count":           scene3dTierCount,
+			"preview_splats":       scene3dPreviewSplats,
+			"preview_points":       scene3dPreviewPoints,
+			"splat_delivery":       "spark-rad-v1",
+			"source_sha256":        strings.ToLower(record.SHA256),
+			"source_size_bytes":    record.SizeBytes,
 		},
 	}); err != nil {
 		slog.WarnContext(ctx, "scene derivation enqueue failed; will retry on next view",
@@ -897,10 +918,19 @@ func (deps ServerDeps) handleGetUploadScene3dManifest(w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
-	file, generation, err := openRegularNoFollow(scene3dManifestPath(root, record.FileID))
+	info, _ := scene3dPeek(record, path)
+	if !scene3dCanDerive(record, info) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"status":  "failed",
+			"file_id": record.FileID,
+		})
+		return
+	}
+	file, generation, err := openRegularNoFollow(scene3dManifestPath(root, record.FileID, record.SHA256))
 	if err != nil {
 		status := "deriving"
-		if recentScene3dFailure(root, record.FileID, time.Now()) {
+		if recentScene3dFailure(root, record.FileID, record.SHA256, time.Now()) {
 			// A permanent failure is recorded: report it honestly instead of
 			// telling the viewer to keep polling for something that never lands.
 			status = "failed"
@@ -918,7 +948,7 @@ func (deps ServerDeps) handleGetUploadScene3dManifest(w http.ResponseWriter, r *
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("ETag", scene3dETag(generation))
 	// Short freshness + a strong validator: a re-derive replaces the manifest, and
-	// the chunk URLs it points at are themselves immutable.
+	// every chunk request resolves through the current catalog source digest.
 	w.Header().Set("Cache-Control", "private, max-age=60")
 	http.ServeContent(w, r, scene3dManifestName, time.Unix(0, generation.MtimeNS), file)
 }
@@ -947,6 +977,45 @@ func parseScene3dChunkIndex(raw string) (int, error) {
 	return index, nil
 }
 
+// parseScene3dLodArtifact accepts only the fixed RAD header and the canonical chunk
+// names Spark writes into that header. The filename is later joined to a private,
+// digest-bound directory, so rejecting every other character is the path boundary.
+func parseScene3dLodArtifact(raw string) (string, error) {
+	invalid := errors.New("scene LoD artifact name is invalid")
+	if raw == scene3dLodHeaderName {
+		return raw, nil
+	}
+	if !strings.HasPrefix(raw, scene3dLodChunkPrefix) || !strings.HasSuffix(raw, scene3dLodChunkSuffix) {
+		return "", invalid
+	}
+	middle := strings.TrimSuffix(strings.TrimPrefix(raw, scene3dLodChunkPrefix), scene3dLodChunkSuffix)
+	index, err := parseScene3dChunkIndex(middle)
+	if err != nil || raw != fmt.Sprintf("%s%d%s", scene3dLodChunkPrefix, index, scene3dLodChunkSuffix) {
+		return "", invalid
+	}
+	return raw, nil
+}
+
+func serveScene3dArtifact(w http.ResponseWriter, r *http.Request, path, displayName string) {
+	file, generation, err := openRegularNoFollow(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("scene artifact %q is not derived", displayName))
+		return
+	}
+	defer func() { _ = file.Close() }()
+	if !scene3dChunkInFlightBudget.tryAcquire(generation.SizeBytes) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, errScene3dChunkAdmission)
+		return
+	}
+	defer scene3dChunkInFlightBudget.release(generation.SizeBytes)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("ETag", scene3dETag(generation))
+	w.Header().Set("Cache-Control", "private, max-age=60, must-revalidate")
+	http.ServeContent(w, r, displayName, time.Unix(0, generation.MtimeNS), file)
+}
+
 // handleGetUploadScene3dChunk streams one derived chunk. http.ServeContent gives
 // Range and conditional requests for free, which is what makes a resumed or
 // partially-cached scene load cheap.
@@ -960,7 +1029,7 @@ func (deps ServerDeps) handleGetUploadScene3dChunk(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	directory := derivedScene3dDir(root, record.FileID)
+	directory := derivedScene3dDir(root, record.FileID, record.SHA256)
 	chunkPath := filepath.Join(directory, fmt.Sprintf(scene3dChunkNameFormat, index))
 	// Defense in depth: the name is formatted from a validated integer and cannot
 	// escape, but assert containment anyway so a future format change can never
@@ -969,27 +1038,31 @@ func (deps ServerDeps) handleGetUploadScene3dChunk(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, errors.New("scene chunk index resolves outside the derived scene directory"))
 		return
 	}
-	file, generation, err := openRegularNoFollow(chunkPath)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("scene chunk %d is not derived", index))
-		return
-	}
-	defer func() { _ = file.Close() }()
 	// Admit the whole chunk even for a Range read: the budget bounds concurrent
 	// delivery, and a partial read is a fraction of an admission we already sized.
-	if !scene3dChunkInFlightBudget.tryAcquire(generation.SizeBytes) {
-		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusServiceUnavailable, errScene3dChunkAdmission)
+	serveScene3dArtifact(w, r, chunkPath, filepath.Base(chunkPath))
+}
+
+// handleGetUploadScene3dLodArtifact serves the paged RAD header and the relative RADC
+// files it names. Spark supplies Range requests and the same authenticated headers as
+// the rest of Lens; this handler never serves a filename not admitted above.
+func (deps ServerDeps) handleGetUploadScene3dLodArtifact(w http.ResponseWriter, r *http.Request) {
+	root, record, _, ok := deps.resolveScene3dRequest(w, r)
+	if !ok {
 		return
 	}
-	defer scene3dChunkInFlightBudget.release(generation.SizeBytes)
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("ETag", scene3dETag(generation))
-	// Chunks are write-once artifacts of an immutable source: a re-derive writes a
-	// new manifest, and the viewer re-reads the chunk list from it.
-	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
-	http.ServeContent(w, r, filepath.Base(chunkPath), time.Unix(0, generation.MtimeNS), file)
+	name, err := parseScene3dLodArtifact(chi.URLParam(r, "artifact"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	directory := derivedScene3dDir(root, record.FileID, record.SHA256)
+	artifactPath := filepath.Join(directory, name)
+	if filepath.Dir(artifactPath) != filepath.Clean(directory) {
+		writeError(w, http.StatusBadRequest, errors.New("scene LoD artifact resolves outside the derived scene directory"))
+		return
+	}
+	serveScene3dArtifact(w, r, artifactPath, name)
 }
 
 // writeScene3dViewer returns the kind:"scene3d" descriptor: what the scene is,
@@ -1000,8 +1073,10 @@ func (deps ServerDeps) handleGetUploadScene3dChunk(w http.ResponseWriter, r *htt
 func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resourceRecord, info scene3dInfo, path string) {
 	fileIDSegment := url.PathEscape(record.FileID)
 	status := "deriving"
-	if root, err := deps.resolvedUploadRoot(); err == nil {
-		status = scene3dDeriveStatus(root, record.FileID, time.Now())
+	if !scene3dCanDerive(record, info) {
+		status = "failed"
+	} else if root, err := deps.resolvedUploadRoot(); err == nil {
+		status = scene3dDeriveStatus(root, record.FileID, record.SHA256, time.Now())
 	}
 	// Prefer the size on disk over the catalog's copy: it is the number the derive
 	// job and the manifest report.
@@ -1057,6 +1132,7 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 		"service_urls": map[string]any{
 			"manifest": "/v2/uploads/" + fileIDSegment + "/scene3d/manifest",
 			"chunk":    "/v2/uploads/" + fileIDSegment + "/scene3d/chunk/{index}",
+			"lod":      "/v2/uploads/" + fileIDSegment + "/scene3d/lod/{artifact}",
 			"download": "/v2/resources/" + fileIDSegment + "/download",
 		},
 		"message": scene3dMessage(info, status),
@@ -1076,6 +1152,10 @@ func scene3dMessage(info scene3dInfo, status string) string {
 		return subject + " — streamed as derived, chunked geometry in the source world frame. " +
 			"The original file is never sent to the browser; download it to open it in a desktop tool."
 	case "failed":
+		if info.hasColmap && info.colmap.variant == "directory" {
+			return subject + " — archive the model directory as a zip before uploading it. " +
+				"That gives every camera and point record one immutable source identity for accurate derivation."
+		}
 		return subject + " — preparing the streamable scene failed. Download the original to open it in a desktop tool."
 	default:
 		return subject + " — the streamable scene is still being prepared. It renders as soon as the derived manifest lands."
@@ -1090,10 +1170,9 @@ func scene3dLimitations(info scene3dInfo, status string) []string {
 	case "deriving":
 		limitations = append(limitations, "The streamable scene is still being derived; nothing is rendered until its manifest exists.")
 	case "failed":
-		limitations = append(limitations, "Deriving the streamable scene failed permanently for this file; nothing is rendered.")
-	}
-	if !info.hasPly && !info.hasColmap {
-		limitations = append(limitations, strings.ToUpper(info.format)+" is classified by file extension alone; its contents are inspected only by the derive job.")
+		if !(info.hasColmap && info.colmap.variant == "directory") {
+			limitations = append(limitations, "Deriving the streamable scene failed permanently for this file; nothing is rendered.")
+		}
 	}
 	if info.hasColmap {
 		limitations = append(limitations,
@@ -1101,6 +1180,9 @@ func scene3dLimitations(info scene3dInfo, status string) []string {
 		if info.colmap.variant == "zip" {
 			limitations = append(limitations,
 				"This model is a zip archive: only its central directory was read here, so nothing inside it has been decompressed or validated yet.")
+		} else if info.colmap.variant == "directory" {
+			limitations = append(limitations,
+				"Directory models are not derived because a mutable directory has no single cataloged byte stream to source-bind; archive this model as a zip and upload the archive.")
 		}
 		limitations = append(limitations,
 			"Per-image 2D feature observations are skipped entirely; only camera poses and, where present, the 3D points are used.")

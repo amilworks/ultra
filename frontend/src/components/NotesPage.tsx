@@ -1,4 +1,4 @@
-import {
+import { type MutableRefObject,
   useCallback,
   useEffect,
   useMemo,
@@ -107,11 +107,21 @@ const markdownForUpload = (record: { file_id: string; original_name: string; con
 
 /* Captures the FileUpload context's picker opener for the slash menu, which
    renders outside the place the hook can be called. */
-function FilePickerBridge({ bind }: { bind: (open: () => void) => void }) {
+function FilePickerBridge({
+  openRef,
+}: {
+  openRef: MutableRefObject<(() => void) | null>;
+}) {
   const { openFilePicker } = useFileUploadContext();
+  // The ref write lives in an effect, where mutation is legal — the previous
+  // bind-callback shape did the same write but through a useCallback argument,
+  // which react-hooks/immutability rightly cannot prove safe.
   useEffect(() => {
-    bind(openFilePicker);
-  }, [bind, openFilePicker]);
+    openRef.current = openFilePicker;
+    return () => {
+      openRef.current = null;
+    };
+  }, [openRef, openFilePicker]);
   return null;
 }
 
@@ -436,12 +446,6 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   const [uploadingCount, setUploadingCount] = useState(0);
   const filePickerRef = useRef<(() => void) | null>(null);
 
-  // Invoked from FilePickerBridge's effect (never during render), so the ref
-  // write is safe; hoisting it here keeps the render tree free of mutations.
-  const bindFilePicker = useCallback((open: () => void) => {
-    filePickerRef.current = open;
-  }, []);
-
   const insertAtCaret = useCallback(
     (text: string) => {
       const draft = draftRef.current;
@@ -701,7 +705,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
           multiple
           className="notes-editor-drop"
         >
-          <FilePickerBridge bind={bindFilePicker} />
+          <FilePickerBridge openRef={filePickerRef} />
         {activeNote ? (
           <>
             <div className="notes-editor-bar">

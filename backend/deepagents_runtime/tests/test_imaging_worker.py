@@ -259,7 +259,7 @@ def test_scene_derive_job_is_dispatched_instead_of_acknowledged_as_unrelated(mon
             "metadata": {
                 "resource_id": "file_scene_1",
                 "src_path": "/in.ply",
-                "dst_dir": "/derived/file_scene_1__scene3d.v3.sha256-" + "b" * 64,
+                "dst_dir": "/derived/file_scene_1__scene3d.v4.sha256-" + "b" * 64,
                 "source_sha256": "b" * 64,
                 "source_size_bytes": 456,
                 "splat_delivery": "spark-rad-v1",
@@ -274,7 +274,7 @@ def test_scene_derive_job_is_dispatched_instead_of_acknowledged_as_unrelated(mon
         {
             "resource_id": "file_scene_1",
             "src_path": "/in.ply",
-            "dst_dir": "/derived/file_scene_1__scene3d.v3.sha256-" + "b" * 64,
+            "dst_dir": "/derived/file_scene_1__scene3d.v4.sha256-" + "b" * 64,
             "source_sha256": "b" * 64,
             "source_size_bytes": 456,
             "splat_delivery": "spark-rad-v1",

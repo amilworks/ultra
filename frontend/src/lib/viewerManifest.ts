@@ -1401,7 +1401,7 @@ const normalizeCiftiViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
 };
 
 const SCENE3D_STATUSES = new Set(["ready", "deriving", "failed"]);
-const SCENE3D_KINDS = new Set(["splat", "pointcloud", "colmap"]);
+const SCENE3D_KINDS = new Set(["splat", "pointcloud", "colmap", "unknown"]);
 
 const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   const fileId = String(source.file_id ?? "");
@@ -1417,7 +1417,7 @@ const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => 
     kind: "image",
     file_id: fileId,
     original_name: String(source.original_name ?? "resource"),
-    decodable: true,
+    decodable: source.decodable !== false,
   });
   return {
     ...base,
@@ -1429,7 +1429,7 @@ const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => 
     message: typeof source.message === "string" ? source.message : undefined,
     scene3d: {
       status: SCENE3D_STATUSES.has(status) ? status : "ready",
-      scene_kind: SCENE3D_KINDS.has(sceneKind) ? sceneKind : "pointcloud",
+      scene_kind: SCENE3D_KINDS.has(sceneKind) ? sceneKind : "unknown",
       element_count: clampNonNegativeInt(source.element_count, 0),
       message: source.message == null ? null : String(source.message),
       service_urls: {

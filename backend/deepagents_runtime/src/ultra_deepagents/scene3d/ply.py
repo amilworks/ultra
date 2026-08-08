@@ -26,6 +26,7 @@ __all__ = [
     "DEFAULT_SH_SAMPLE",
     "DEFAULT_SH_SEED",
     "PlyFormatError",
+    "PlyElement",
     "PlyHeader",
     "PlyProperty",
     "declared_sh_degree",
@@ -62,9 +63,9 @@ _BYTE_ORDER = {
     "binary_big_endian": ">",
     "ascii": "|",
 }
-# A header larger than this is malformed or hostile; the real degree-3 splat header
-# is 1512 B and the point-cloud header 248 B.
-MAX_HEADER_BYTES = 1 << 20
+# This is the same bounded admission window used by the Go control plane. The real
+# degree-3 splat header is 1512 B and the measured point-cloud header is 248 B.
+MAX_HEADER_BYTES = 64 << 10
 # 64k records per batch: ~15 MB for the 236 B splat record, small enough to keep the
 # working set in cache and large enough that per-batch numpy overhead disappears.
 DEFAULT_BATCH = 65536
@@ -78,7 +79,22 @@ _F_REST_RE = re.compile(r"^f_rest_(\d+)$")
 # holds ((l+1)^2 - 1) * 3.
 _SH_REST_COUNTS = {0: 0, 9: 1, 24: 2, 45: 3}
 # Properties that, together, prove the element is a 3D Gaussian and not a point.
-_SPLAT_REQUIRED = ("f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "rot_0")
+_SPLAT_REQUIRED = (
+    "x",
+    "y",
+    "z",
+    "f_dc_0",
+    "f_dc_1",
+    "f_dc_2",
+    "opacity",
+    "scale_0",
+    "scale_1",
+    "scale_2",
+    "rot_0",
+    "rot_1",
+    "rot_2",
+    "rot_3",
+)
 _POINT_REQUIRED = ("x", "y", "z")
 
 
@@ -97,6 +113,16 @@ class PlyProperty:
 
 
 @dataclass(frozen=True)
+class PlyElement:
+    """One declared PLY element, retained for omission provenance."""
+
+    name: str
+    count: int
+    properties: tuple[str, ...]
+    has_list: bool
+
+
+@dataclass(frozen=True)
 class PlyHeader:
     """Everything needed to address the records of one PLY element."""
 
@@ -107,6 +133,7 @@ class PlyHeader:
     data_offset: int  # byte offset of this element's first record
     props: tuple[PlyProperty, ...]
     comments: tuple[str, ...]
+    elements: tuple[PlyElement, ...]
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -164,9 +191,9 @@ def _split_header(blob: bytes) -> tuple[str, int]:
 def read_header(path: str | os.PathLike[str]) -> PlyHeader:
     """Parse a PLY header into an ordered property table.
 
-    The element addressed is ``vertex`` when present, else the first element. Any
-    element *before* it must be fixed-width, otherwise its size — and therefore our
-    element's data offset — is not computable without reading the file.
+    The addressed element must be the uniquely named ``vertex`` element. Any element
+    *before* it must be fixed-width, otherwise its size — and therefore the vertex data
+    offset — is not computable without reading the file.
     """
     with open(path, "rb") as stream:
         blob = stream.read(MAX_HEADER_BYTES)
@@ -174,8 +201,8 @@ def read_header(path: str | os.PathLike[str]) -> PlyHeader:
 
     fmt: str | None = None
     comments: list[str] = []
-    # (name, count, props, stride, has_list)
-    elements: list[tuple[str, int, list[PlyProperty], int, bool]] = []
+    # (name, count, props, property names, stride, has_list)
+    elements: list[tuple[str, int, list[PlyProperty], list[str], int, bool]] = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line == "ply":
@@ -183,54 +210,78 @@ def read_header(path: str | os.PathLike[str]) -> PlyHeader:
         parts = line.split()
         keyword = parts[0]
         if keyword == "format":
-            if len(parts) < 2 or parts[1] not in _BYTE_ORDER:
+            if len(parts) != 3 or parts[1] not in _BYTE_ORDER or parts[2] != "1.0":
                 raise PlyFormatError(f"unsupported PLY format line: {line!r}")
             fmt = parts[1]
         elif keyword in ("comment", "obj_info"):
             comments.append(line.split(" ", 1)[1] if " " in line else "")
         elif keyword == "element":
-            if len(parts) < 3:
+            if len(parts) != 3:
                 raise PlyFormatError(f"malformed PLY element line: {line!r}")
+            if fmt is None:
+                raise PlyFormatError("PLY element declared before its format")
             try:
                 count = int(parts[2])
             except ValueError as exc:
                 raise PlyFormatError(f"malformed PLY element count: {line!r}") from exc
             if count < 0:
                 raise PlyFormatError(f"negative PLY element count: {line!r}")
-            elements.append((parts[1], count, [], 0, False))
+            elements.append((parts[1], count, [], [], 0, False))
         elif keyword == "property":
             if not elements:
                 raise PlyFormatError("PLY property declared before any element")
-            name, size, props, stride, has_list = elements[-1]
-            if parts[1] == "list":
+            name, size, props, property_names, stride, has_list = elements[-1]
+            if len(parts) >= 2 and parts[1] == "list":
                 # A list property makes the record variable-width. We never index into
                 # such an element, but we must know it exists to refuse it cleanly.
-                elements[-1] = (name, size, props, stride, True)
+                if len(parts) != 5:
+                    raise PlyFormatError(f"malformed PLY list property line: {line!r}")
+                if parts[2] not in _SCALAR_KINDS or parts[3] not in _SCALAR_KINDS:
+                    raise PlyFormatError(f"unsupported PLY list property type: {line!r}")
+                if parts[4] in property_names:
+                    raise PlyFormatError(f"duplicate PLY property name: {parts[4]!r}")
+                property_names.append(parts[4])
+                elements[-1] = (name, size, props, property_names, stride, True)
                 continue
-            if len(parts) < 3:
+            if len(parts) != 3:
                 raise PlyFormatError(f"malformed PLY property line: {line!r}")
             kind = _SCALAR_KINDS.get(parts[1])
             if kind is None:
                 raise PlyFormatError(f"unsupported PLY property type: {parts[1]!r}")
+            if parts[2] in property_names:
+                raise PlyFormatError(f"duplicate PLY property name: {parts[2]!r}")
             width = int(kind[1:])
             order = _BYTE_ORDER[fmt] if fmt is not None else "<"
             props.append(
                 PlyProperty(name=parts[2], dtype=f"{order}{kind}", offset=stride, size=width)
             )
-            elements[-1] = (name, size, props, stride + width, has_list)
+            property_names.append(parts[2])
+            elements[-1] = (name, size, props, property_names, stride + width, has_list)
     if fmt is None:
         raise PlyFormatError("PLY header has no format line")
     if not elements:
         raise PlyFormatError("PLY header declares no elements")
 
-    target = next((i for i, element in enumerate(elements) if element[0] == "vertex"), 0)
-    for name, count, _props, stride, has_list in elements[:target]:
+    if fmt == "ascii":
+        raise PlyFormatError(
+            "ASCII PLY is not supported; re-export it as binary_little_endian "
+            "or binary_big_endian PLY"
+        )
+
+    vertex_indices = [index for index, element in enumerate(elements) if element[0] == "vertex"]
+    if not vertex_indices:
+        raise PlyFormatError("PLY header declares no vertex element")
+    if len(vertex_indices) > 1:
+        raise PlyFormatError("PLY header declares more than one vertex element")
+
+    target = vertex_indices[0]
+    for name, count, _props, _property_names, stride, has_list in elements[:target]:
         if has_list:
             raise PlyFormatError(
                 f"cannot address the vertex element: preceding element {name!r} is variable-width"
             )
         data_offset += count * stride
-    name, count, props, stride, has_list = elements[target]
+    name, count, props, _property_names, stride, has_list = elements[target]
     if has_list:
         raise PlyFormatError(f"element {name!r} has a list property and is not stride-addressable")
     if not props:
@@ -243,6 +294,22 @@ def read_header(path: str | os.PathLike[str]) -> PlyHeader:
         data_offset=data_offset,
         props=tuple(props),
         comments=tuple(comments),
+        elements=tuple(
+            PlyElement(
+                name=element_name,
+                count=element_count,
+                properties=tuple(element_property_names),
+                has_list=element_has_list,
+            )
+            for (
+                element_name,
+                element_count,
+                _element_props,
+                element_property_names,
+                _element_stride,
+                element_has_list,
+            ) in elements
+        ),
     )
 
 
@@ -291,6 +358,18 @@ def detect_scene_kind(header: PlyHeader) -> str:
     """
     if header.has(*_SPLAT_REQUIRED):
         return "splat"
+    if any(
+        name == "opacity"
+        or name.startswith("f_dc_")
+        or name.startswith("f_rest_")
+        or name.startswith("scale_")
+        or name.startswith("rot_")
+        for name in header.names
+    ):
+        missing = [name for name in _SPLAT_REQUIRED if name not in header.names]
+        raise PlyFormatError(
+            "incomplete Gaussian-splat schema; missing required properties: " + ", ".join(missing)
+        )
     if header.has(*_POINT_REQUIRED):
         return "pointcloud"
     raise PlyFormatError(

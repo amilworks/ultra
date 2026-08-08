@@ -25,7 +25,7 @@ __all__ = [
 ]
 
 SCHEMA = "ultra.scene3d.v1"
-DERIVATIVE_REVISION = "v3"
+DERIVATIVE_REVISION = "v4"
 GENERATOR_REVISION = f"scene3d-rad-{DERIVATIVE_REVISION}"
 _AXIS_NAMES = ("x", "y", "z")
 # An axis is only called "up" when it is clearly the thin one. Aerial and corridor scans
@@ -206,6 +206,7 @@ def build_manifest(
     limitations: list[str],
     units: str = "arbitrary",
     source_sha256: str | None = None,
+    property_provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the §6 manifest.
 
@@ -224,6 +225,8 @@ def build_manifest(
     }
     if source_sha256 is not None:
         source["sha256"] = source_sha256
+    if property_provenance is not None:
+        source["property_provenance"] = property_provenance
     return {
         "schema": SCHEMA,
         "generator_revision": GENERATOR_REVISION,

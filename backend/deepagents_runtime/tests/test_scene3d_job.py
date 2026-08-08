@@ -11,6 +11,7 @@ import json
 import os
 import struct
 import sys
+import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -47,7 +48,7 @@ REAL_SPLAT_STRIDE = 236
 def _derive(tmp_path, src, **options):
     payload = src.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
     result = run_scene3d_derive_job(
         {
             "resource_id": "file-1",
@@ -89,6 +90,27 @@ def test_splat_derive_emits_the_section_6_manifest(tmp_path):
         "measured_sh_degree": 0,
         "stride_bytes": 236,
         "sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+        "property_provenance": {
+            "preserved": [
+                "x",
+                "y",
+                "z",
+                "f_dc_0",
+                "f_dc_1",
+                "f_dc_2",
+                "opacity",
+                "scale_0",
+                "scale_1",
+                "scale_2",
+                "rot_0",
+                "rot_1",
+                "rot_2",
+                "rot_3",
+            ],
+            "synthesized": [],
+            "omitted": [f"f_rest_{index}" for index in range(45)],
+            "omitted_elements": [],
+        },
     }
     assert document["world"]["frame"] == "source"
     assert document["world"]["units"] == "arbitrary"
@@ -115,6 +137,36 @@ def test_splat_derive_emits_the_section_6_manifest(tmp_path):
         range(len(layer["chunks"]))
     )
     assert (dst / POSTER_NAME).exists()
+
+
+def test_colmap_zip_with_multiple_models_fails_before_model_selection(tmp_path):
+    src = tmp_path / "ambiguous.zip"
+    with zipfile.ZipFile(src, "w") as archive:
+        for model in ("sparse/0", "sparse/1"):
+            archive.writestr(f"{model}/cameras.bin", b"")
+            archive.writestr(f"{model}/images.bin", b"")
+
+    with pytest.raises(DeterministicDerivativeError, match="ambiguous_colmap_models"):
+        run_scene3d_derive_job(
+            str(src),
+            str(tmp_path / "derived"),
+            resource_id="file-ambiguous",
+        )
+
+
+def test_colmap_zip_discovery_is_case_insensitive(tmp_path):
+    src = tmp_path / "mixed-case.zip"
+    with zipfile.ZipFile(src, "w") as archive:
+        archive.writestr("Sparse/0/CAMERAS.BIN", b"")
+        archive.writestr("Sparse/0/IMAGES.BIN", b"")
+        archive.writestr("Sparse/0/POINTS3D.BIN", b"")
+
+    destination = tmp_path / "extracted"
+    destination.mkdir()
+
+    assert scene_job._extract_colmap_zip(str(src), str(destination)) == str(
+        destination / "Sparse" / "0"
+    )
 
 
 def test_production_splat_delivery_publishes_paged_quality_rad(tmp_path, monkeypatch):
@@ -147,7 +199,11 @@ def test_production_splat_delivery_publishes_paged_quality_rad(tmp_path, monkeyp
 
     assert result["chunk_count"] == 2
     assert result["tier_count"] == 0
-    assert document["generator_revision"] == "scene3d-rad-v3"
+    assert document["generator_revision"] == "scene3d-rad-v4"
+    assert document["source"]["property_provenance"]["synthesized"] == []
+    assert document["source"]["property_provenance"]["omitted"] == [
+        f"f_rest_{index}" for index in range(45)
+    ]
     layer = document["layers"][0]
     assert layer["encoding"] == "spark-rad-v1"
     assert layer["chunks"] == []
@@ -272,6 +328,12 @@ def test_point_cloud_derive_emits_upc1_with_source_srgb_colors(tmp_path):
     assert layer["type"] == "points"
     assert layer["encoding"] == "upc-v1"
     assert layer["quantization"] == {"center": "f32-exact", "color": "u8-srgb"}
+    assert document["source"]["property_provenance"] == {
+        "preserved": ["x", "y", "z", "red", "green", "blue"],
+        "synthesized": ["alpha=255"],
+        "omitted": ["nx", "ny", "nz"],
+        "omitted_elements": [],
+    }
     seen = []
     for entry in layer["chunks"]:
         blob = (dst / f"chunk_{entry['index']:05d}.bin").read_bytes()
@@ -286,6 +348,53 @@ def test_point_cloud_derive_emits_upc1_with_source_srgb_colors(tmp_path):
     recovered = np.concatenate(seen)
     # Bytes preserved exactly: no linearization on the point path.
     assert np.array_equal(np.sort(recovered, axis=0), np.sort(colors, axis=0))
+
+
+def test_colorless_point_cloud_reports_synthesized_white_display_color(tmp_path):
+    rows = {
+        "x": np.asarray([0.0, 1.0], dtype=np.float32),
+        "y": np.asarray([0.0, 1.0], dtype=np.float32),
+        "z": np.asarray([0.0, 1.0], dtype=np.float32),
+        "confidence": np.asarray([0.9, 0.8], dtype=np.float32),
+    }
+    src = write_ply(tmp_path / "colorless.ply", props=list(rows), rows=rows)
+
+    _result, document, dst = _derive(tmp_path, src, max_splats_per_chunk=256)
+
+    assert document["source"]["property_provenance"] == {
+        "preserved": ["x", "y", "z"],
+        "synthesized": ["red=255", "green=255", "blue=255", "alpha=255"],
+        "omitted": ["confidence"],
+        "omitted_elements": [],
+    }
+    layer = document["layers"][0]
+    blob = (dst / f"chunk_{layer['chunks'][0]['index']:05d}.bin").read_bytes()
+    rgba = np.frombuffer(blob[64 + 2 * 12 :], np.uint8).reshape(2, 4)
+    assert np.all(rgba == 255)
+    assert "no RGB colour" in " ".join(document["limitations"])
+
+
+def test_mesh_ply_discloses_omitted_face_topology(tmp_path):
+    src = tmp_path / "mesh.ply"
+    header = (
+        b"ply\nformat binary_little_endian 1.0\nelement vertex 2\n"
+        b"property float x\nproperty float y\nproperty float z\n"
+        b"element face 1\nproperty list uchar int vertex_indices\nend_header\n"
+    )
+    src.write_bytes(
+        header
+        + struct.pack("<ffffff", 0.0, 0.0, 0.0, 1.0, 1.0, 1.0)
+        + b"\x03"
+        + struct.pack("<iii", 0, 1, 0)
+    )
+
+    _result, document, _dst = _derive(tmp_path, src, max_splats_per_chunk=256)
+
+    assert document["scene_kind"] == "pointcloud"
+    assert document["source"]["property_provenance"]["omitted_elements"] == [
+        {"name": "face", "count": 1}
+    ]
+    assert "face topology" in " ".join(document["limitations"])
 
 
 def test_ply_derivation_does_not_build_a_whole_scene_octree_or_column_table(tmp_path, monkeypatch):
@@ -437,7 +546,7 @@ def test_truncated_source_is_deterministic(tmp_path):
 def test_strict_job_rejects_a_catalog_digest_mismatch_without_publishing(tmp_path):
     src = write_postshot_splats(tmp_path / "scene.ply", count=64)
     wrong_digest = "0" * 64
-    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{wrong_digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{wrong_digest}"
 
     with pytest.raises(StaleDerivativeJobError) as caught:
         run_scene3d_derive_job(
@@ -460,9 +569,7 @@ def test_strict_job_rejects_a_legacy_generation_name(tmp_path, legacy_revision):
     src = write_postshot_splats(tmp_path / "scene.ply", count=64)
     payload = src.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    legacy_dst = (
-        tmp_path / "derived" / f"file-1__scene3d{legacy_revision}.sha256-{digest}"
-    )
+    legacy_dst = tmp_path / "derived" / f"file-1__scene3d{legacy_revision}.sha256-{digest}"
 
     with pytest.raises(StaleDerivativeJobError) as caught:
         run_scene3d_derive_job(
@@ -485,7 +592,7 @@ def test_strict_deterministic_failure_is_atomic_and_does_not_leak_source_path(tm
     payload = src.read_bytes()[:-236]
     src.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
 
     with pytest.raises(DeterministicDerivativeError) as caught:
         run_scene3d_derive_job(
@@ -551,7 +658,7 @@ def test_queue_job_bounds_every_allocation_multiplier(tmp_path, option, value):
     src = write_postshot_splats(tmp_path / "scene.ply", count=32)
     payload = src.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v3.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
 
     with pytest.raises(DeterministicDerivativeError) as caught:
         run_scene3d_derive_job(

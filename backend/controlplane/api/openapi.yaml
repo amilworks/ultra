@@ -2180,7 +2180,7 @@ paths:
                 required: [schema, generator_revision, scene_kind, source, world, layers, service_urls]
                 properties:
                   schema: { type: string, example: ultra.scene3d.v1 }
-                  generator_revision: { type: string, example: scene3d-rad-v3 }
+                  generator_revision: { type: string, example: scene3d-rad-v4 }
                   scene_kind: { type: string, enum: [splat, pointcloud, colmap] }
                   source:
                     type: object
@@ -2194,6 +2194,28 @@ paths:
                       declared_sh_degree: { type: integer }
                       measured_sh_degree: { type: integer }
                       stride_bytes: { type: integer }
+                      property_provenance:
+                        type: object
+                        description: Exact accounting of declared, synthesized, and omitted PLY data.
+                        required: [preserved, synthesized, omitted, omitted_elements]
+                        properties:
+                          preserved:
+                            type: array
+                            items: { type: string }
+                          synthesized:
+                            type: array
+                            items: { type: string }
+                          omitted:
+                            type: array
+                            items: { type: string }
+                          omitted_elements:
+                            type: array
+                            items:
+                              type: object
+                              required: [name, count]
+                              properties:
+                                name: { type: string }
+                                count: { type: integer, format: int64, minimum: 0 }
                   world:
                     type: object
                     description: Source world frame; geometry is never rotated and up_axis is a camera hint only.
@@ -2281,6 +2303,9 @@ paths:
                 properties:
                   status: { type: string, enum: [deriving, failed] }
                   file_id: { type: string }
+                  error:
+                    type: string
+                    description: Stable user-facing reason when status is failed.
         "304":
           description: The client's If-None-Match matches the current manifest.
         "404":
@@ -2289,7 +2314,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "415":
-          description: Resource is not a 3D scene file (or its PLY header could not be described exactly)
+          description: Resource is not a recognized 3D scene container
           content:
             application/json:
               schema: { $ref: "#/components/schemas/V2APIErrorResponse" }

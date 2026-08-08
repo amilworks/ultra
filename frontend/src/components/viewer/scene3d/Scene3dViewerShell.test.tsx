@@ -138,6 +138,12 @@ const READY_MANIFEST: Scene3dManifestResponse = {
     declared_sh_degree: 0,
     measured_sh_degree: 0,
     stride_bytes: 27,
+    property_provenance: {
+      preserved: ["x", "y", "z", "red", "green", "blue"],
+      synthesized: ["alpha=255"],
+      omitted: ["nx", "ny", "nz"],
+      omitted_elements: [],
+    },
   },
   world: {
     units: "arbitrary",
@@ -233,12 +239,15 @@ describe("Scene3dViewerShell", () => {
     // And the quantization block beside them.
     expect(screen.getByText("f32-exact")).toBeInTheDocument();
     expect(screen.getByText("0.31% of colours")).toBeInTheDocument();
+    expect(screen.getByText("x, y, z, red, green, blue")).toBeInTheDocument();
+    expect(screen.getByText("alpha=255")).toBeInTheDocument();
+    expect(screen.getByText("nx, ny, nz")).toBeInTheDocument();
   });
 
   it("preserves the authenticated paged RAD contract through wire normalization", async () => {
     const radManifest: Scene3dManifestResponse = {
       ...READY_MANIFEST,
-      generator_revision: "scene3d-rad-v3",
+      generator_revision: "scene3d-rad-v4",
       scene_kind: "splat",
       source: {
         ...READY_MANIFEST.source!,

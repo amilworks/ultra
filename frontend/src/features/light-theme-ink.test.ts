@@ -280,6 +280,29 @@ describe("response reading typography", () => {
     expect(Number(chromeStrong)).toBeGreaterThan(Number(heading));
   });
 
+  it("pins mono surfaces so static-face rounding cannot re-grade them", () => {
+    // JetBrains Mono ships as static faces, and CSS font-matching rounds a
+    // 400-500 target UP: when body moved 400 -> 430, every mono surface that
+    // inherited body weight silently jumped a full grade to Mono 500. The mono
+    // register is therefore pinned, never inherited. 400 is the measured pick:
+    // stroke/x-height parity with prose@430 solves to ~426 (JBM 400 = 0.1636,
+    // prose = 0.1721, JBM 500 = 0.1964). See frontend/font-lab/mono.html.
+    expect(lightRoot).toMatch(/--font-weight-mono:\s*400;/);
+    const mustPin = [
+      /\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
+      /\.pk-code-render :where\(pre, code\)\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
+    ];
+    for (const pattern of mustPin) expect(stylesSource).toMatch(pattern);
+    // No mono rule may inherit: every JetBrains/ui-monospace font-family rule
+    // must carry a font-weight of its own.
+    const monoRules =
+      stylesSource.match(
+        /[^{}]+\{[^{}]*font-family:[^;]*(?:JetBrains Mono|ui-monospace)[^{}]*\}/g
+      ) ?? [];
+    expect(monoRules.length).toBeGreaterThan(0);
+    for (const rule of monoRules) expect(rule).toMatch(/font-weight/);
+  });
+
   it("gives wide equations their own scrollport instead of amputating them", () => {
     // KaTeX sets `white-space: nowrap` on display math, and html/body are both
     // `overflow-x: clip` so the page never scrolls sideways. `clip` creates NO

@@ -211,6 +211,34 @@ that exists to aid reading. Söhne makes the same compromise by being static.
 Pinning at display only, leaving `auto` for body, keeps the compensation at the
 cost of not being "true Söhne" throughout.
 
+## Mono: the silent grade jump, and the pin
+
+`mono.html` documents the code-typography pass. The finding: **JetBrains Mono is
+static faces, and CSS font-matching rounds a 400–500 target upward** — so when
+body moved 400 → 430, all twenty mono rules that inherited body weight silently
+jumped to Mono 500. `document.fonts` proved it: only the 500 face was fetched.
+
+| | stem (em) | x-height | stem/x | vs prose@430 | ink density | vs prose |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Prose — Inter 430 | 0.0937 | 0.5444 | 0.1721 | — | 111.7 | — |
+| **JBM 400** | 0.0900 | 0.5500 | **0.1636** | **−5%** | 89.9 | −19.5% |
+| JBM 500 | 0.1080 | 0.5500 | 0.1964 | +14% | 103.4 | −7.4% |
+
+Stroke ratio and texture density disagree, and that disagreement is the point:
+mono's fixed 0.6em advance makes any weight read lighter *as a block* while its
+strokes read heavier *as letterforms*. Chips are read as letterforms — stroke
+parity is the criterion — and the parity solve lands at ≈426. 400 is 2.9×
+closer than 500, matches what code editors ship, and stays safe under Night
+bloom. Hence `--font-weight-mono: 400`, pinned at every mono `font-family`
+site; the contract and `light-theme-ink.test.ts` now refuse any mono rule that
+inherits its weight.
+
+Deliberately unchanged: block leading 1.2 (authored in `code-block.tsx`; the
+JetBrains IDE default this face was drawn for — ink pitch 13.4px clears the
+15.6px box), inline `0.88em` (x-height parity would want 0.99em, but the wide
+advance already inflates mono; chip contrast holds at 6.7:1 dark / 5.1:1
+light — both clear of AA), and the nine mono rules that pinned explicit weights at authoring time.
+
 ## Known limitation: italic
 
 **Inter Italic has no single-storey `a`.** The `geometric` recipe transplants

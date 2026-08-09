@@ -8,7 +8,7 @@
 
 :root {
   --font-size-body: 0.9375rem;
-  --font-size-reading: 1rem;
+  --font-size-reading: 0.9375rem;
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
@@ -18,8 +18,9 @@
      8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
      comfortably. Past ~75 the return sweep starts finding the wrong next line and
      the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
-     numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
-     44rem = 83.9, unconstrained (49rem) = 92.9.
+     numbers are comparable — all AT THE THEN-16px READING SIZE, so read them as
+     the calibration record, not as current values: 37.5rem = 72.3 cpl,
+     40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9, unconstrained (49rem) = 92.9.
      44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
      column is a modest share of a wide screen and reads cramped when held to the
      middle of the band. Note 42.5rem and 44rem measured identically here — the
@@ -35,8 +36,14 @@
      different right edges instead of one column. A measure is a property of the
      column, not of the type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
-     full 49rem column. */
-  --reading-measure: 44rem;
+     full 49rem column.
+     RESCALED when reading dropped 16px -> 15px: the measure is in rem, so a
+     smaller font at a fixed rem width buys MORE characters per line, not fewer.
+     Holding 44rem would have stretched the calibrated 83.9 cpl to ~89.5 — most
+     of the way to the unconstrained 92.9 that made readers re-scan. 41.25rem is
+     44 x 15/16, which preserves 83.9 cpl at the new size. The character count is
+     the calibrated quantity here; the rem value is just how it is expressed. */
+  --reading-measure: 41.25rem;
   /* 440, not 400. Inter's 400 sets 4% lighter than the grotesques Ultra is
      measured against — the gap is not stroke width but the ratio of stroke to
      letter. Inter's stem is only 2.7% thinner than Söhne Buch's (0.0876em vs
@@ -46,13 +53,13 @@
      stem/x-height from the outlines gives 431, and integrating rendered ink
      over the x-height band gives 430 — and it holds across the optical range
      because Inter's x-height does not move with weight. 440 is one step past
-     the match, chosen deliberately: this product is read at 13–15px for long
-     stretches, and the extra unit buys density where it is scarcest.
-     Measured in frontend/font-lab/weight.html. */
-  --font-weight-body: 440;
-  --font-weight-reading-body: 440;
+     the match; 430 is the match itself. This product is read at 13–15px for long
+     stretches. Shipped at 440 first and dialled back to the measured match
+     after living with it. Measured in frontend/font-lab/weight.html. */
+  --font-weight-body: 430;
+  --font-weight-reading-body: 430;
   /* 670, not 700. At 700 the hero title read as a shout rather than a heading
-     once body moved to 440 and closed the gap from 300 to 260. Dropping 30
+     once body moved off 400 and closed the gap from 300 to 270. Dropping 30
      restores the step without giving up the contrast. Scattered `font-weight:
      700` on small labels (0.5–0.92rem table headers, section eyebrows) is
      deliberately NOT swept into this token — at those sizes 700 is doing the
@@ -64,7 +71,7 @@
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 440 → 600 is a narrower step than
+     dark blots and cost more than it marked. 430 → 600 is a narrower step than
      the 400 → 600 this was tuned against, but still unmistakable at reading
      size; nothing now outweighs a heading.
      --font-weight-strong (UI chrome) is 670 — different job, sparse use. */

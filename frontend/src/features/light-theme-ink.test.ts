@@ -229,13 +229,17 @@ describe("light theme ink", () => {
 
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
-    // Measured on ONE fixed set of 5 answer paragraphs so the values compare:
-    // 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9,
+    // Measured on ONE fixed set of 5 answer paragraphs so the values compare,
+    // all AT THE THEN-16px READING SIZE — the calibration record, not current
+    // values: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9,
     // unconstrained = 92.9. 44rem sits KNOWINGLY above the 45–75 guideline at
     // ~84 — the column is a modest share of a wide screen and reads cramped when
     // held to the middle of the band. The cap still does real work: the measure
     // that made readers re-scan was the unconstrained 92.9, not 75.
-    expect(lightRoot).toMatch(/--reading-measure:\s*44rem;/);
+    // 41.25rem = 44 x 15/16, rescaled when reading dropped to 15px. The measure
+    // is in rem, so a smaller font at fixed rem width buys MORE characters — 44rem
+    // would have stretched 83.9 cpl to ~89.5. The cpl is the calibrated quantity.
+    expect(lightRoot).toMatch(/--reading-measure:\s*41\.25rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.
@@ -250,13 +254,13 @@ describe("response reading typography", () => {
   });
 
   it("keeps reading size and leading in the comfortable band", () => {
-    expect(lightRoot).toMatch(/--font-size-reading:\s*1rem;/);
+    expect(lightRoot).toMatch(/--font-size-reading:\s*0\.9375rem;/);
     expect(lightRoot).toMatch(/--line-height-reading:\s*1\.62;/);
     // 440, not 400: Inter's stem/x-height (0.1609 at w400) sets lighter than the
     // grotesques this was measured against (Söhne Buch 0.1721). Matching weight
-    // solves to 430 by two independent methods; 440 is one step past, for the
-    // 13–15px text this product is read at. See frontend/font-lab/weight.html.
-    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*440;/);
+    // solves to 430 by two independent methods. Shipped at 440 first, then dialled
+    // back to the measured match. See frontend/font-lab/weight.html.
+    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*430;/);
   });
 
   it("never lets inline emphasis outweigh a heading", () => {

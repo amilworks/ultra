@@ -1,0 +1,2 @@
+# Qualified production worker numerical ABI authority.
+numpy==1.26.4

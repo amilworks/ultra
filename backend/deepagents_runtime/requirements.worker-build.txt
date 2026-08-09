@@ -1,0 +1,3 @@
+# Install the exact PEP 517 backend inside the hash-locked worker environment so
+# local project builds can disable isolation without resolving build requirements.
+hatchling==1.28.0

@@ -9,7 +9,6 @@ ENV PYTHONUNBUFFERED=1
 # ca-certificates for HTTPS; the static docker CLI lets the worker drive the host
 # Docker daemon (mounted socket) to run code in the sandbox image (execute_python).
 ARG DOCKER_CLI_VERSION=27.4.0
-ARG ULTRA_WORKER_NUMPY_VERSION=1.26.4
 # git + ripgrep are worker-side tools: git clones repos for stage_git_repo_for_analysis
 # (host-side; the sandbox stays --network none), and ripgrep is the fast, reliable
 # backend for the filesystem grep tool (the Python fallback skips files >10 MB).
@@ -19,13 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
   && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY . /app/deepagents_runtime
-# Install the numerical ABI and project in one transaction so resolver changes
-# cannot silently float the worker away from the qualified NumPy build.
-RUN pip install --no-cache-dir \
-  "numpy==${ULTRA_WORKER_NUMPY_VERSION}" \
-  /app/deepagents_runtime
-# Build-time production import closure: the agent module must import before any
-# optional imaging or development extra exists.
-RUN python -c "import numpy; assert numpy.__version__ == '${ULTRA_WORKER_NUMPY_VERSION}'; import ultra_deepagents.agent"
+# Install only the qualified Python 3.11/x86_64 worker closure, then add the
+# release-local package without allowing its metadata to re-resolve dependencies.
+RUN pip install --no-cache-dir --only-binary=:all: --require-hashes \
+  -r /app/deepagents_runtime/requirements.worker.lock \
+  && pip install --no-cache-dir --no-build-isolation --no-deps /app/deepagents_runtime
+# Build-time production closure: dependency metadata, the qualified NumPy ABI,
+# and both durable worker entry modules must be valid without imaging/dev extras.
+RUN pip check \
+  && python -c "import numpy; assert numpy.__version__ == '1.26.4'; import ultra_deepagents.agent; import ultra_deepagents.nats_worker"
 # Durable run worker; compose can override `command` for other roles.
 CMD ["python", "-m", "ultra_deepagents.nats_worker"]

@@ -187,9 +187,9 @@ for (const [token, weight] of [
   // Söhne Buch's 0.1721, driven by Inter's larger x-height rather than a
   // thinner stem. The matching weight solves to 430 by two independent
   // methods (outline geometry and integrated rendered ink); 440 is one step
-  // past, for the 13-15px this product is read at.
-  ["body", "440"],
-  ["reading-body", "440"],
+  // past; 430 is the match itself, adopted after living with 440.
+  ["body", "430"],
+  ["reading-body", "430"],
   ["nav", "500"],
   ["action", "500"],
   ["data", "500"],
@@ -215,11 +215,16 @@ for (const [token, weight] of [
 for (const [pattern, message] of [
   [/--font-size-body:\s*0\.9375rem;/, "Desktop body must remain 15px"],
   [/--line-height-body:\s*1\.5;/, "Desktop body line-height must remain 1.5"],
-  [/--font-size-reading:\s*1rem;/, "Desktop chat reading must remain 16px"],
+  // 15px, matching --font-size-body. NOTE the 0.9375rem literal is what scopes
+  // this to the desktop :root — these patterns run over the whole file, and the
+  // phone override below is still 1rem, so a 1rem pattern would match THAT and
+  // pass for the wrong reason.
+  [/--font-size-reading:\s*0\.9375rem;/, "Desktop chat reading must remain 15px"],
   [/--line-height-reading:\s*1\.62;/, "Desktop chat reading line-height must remain 1.62"],
   [/--user-chat-width:\s*49rem;/, "Desktop chat reading measure must remain 49rem"],
   [/@media \(max-width: 640px\)[\s\S]*--line-height-reading:\s*1\.68;/, "Phone reading line-height must remain 1.68"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
+  [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
   [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
 ]) {
   check(pattern.test(stylesCss), message);

@@ -200,6 +200,12 @@ for (const [token, weight] of [
   // 670, dropped from 700 once body moved to 440 narrowed the gap to 260 and
   // the hero title read as a shout. Still outranks reading-heading.
   ["strong", "670"],
+  // 400, and pinned rather than inherited. JetBrains Mono is STATIC faces and
+  // CSS font-matching rounds a 400-500 target UP, so when body moved to 430
+  // every mono surface that inherited body weight silently jumped to Mono 500.
+  // 400 is nearest the stroke/x-height parity solve (~426) and is the grade
+  // code editors ship. See frontend/font-lab/mono.html.
+  ["mono", "400"],
   // 600, matching reading-heading rather than exceeding it. At 700 an inline
   // **emphasis** in an answer outweighed every heading above it (h2/h3/h4 are
   // all 600), and at h4's 16px it beat the heading at identical size. Emphasis
@@ -226,9 +232,21 @@ for (const [pattern, message] of [
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
   [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
+  // Mono surfaces must pin their weight. Static mono faces + CSS rounding turn
+  // an inherited body weight into a silent grade jump (430 -> 500); these two
+  // registers are the reading surfaces where that reads as shouting.
+  [/\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s, "Inline code must pin var(--font-weight-mono)"],
+  [/\.pk-code-render :where\(pre, code\)\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s, "Code blocks must pin var(--font-weight-mono)"],
 ]) {
   check(pattern.test(stylesCss), message);
 }
+
+// The pin is only as real as the face behind it: if the 400 import goes, CSS
+// matching silently substitutes the nearest loaded grade and the pin lies.
+check(
+  /@fontsource\/jetbrains-mono\/latin-400\.css/.test(mainSource),
+  "var(--font-weight-mono): 400 requires the JetBrains Mono latin-400 face import in main.tsx"
+);
 
 check(appSource.includes("<BrandWordmark"), "Sidebar must use the shared BrandWordmark");
 check(authSource.includes("<BrandWordmark"), "Authentication wordmark must use the shared BrandWordmark");

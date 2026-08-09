@@ -82,6 +82,22 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
+  /* Mono is pinned, never inherited. JetBrains Mono ships as STATIC faces
+     (300/400/500/600), and CSS font-matching rounds a 400-500 target UP — so
+     when body moved 400 -> 430, every mono surface that inherited body weight
+     silently jumped a whole grade to Mono 500. Nobody chose that; the loaded
+     face proved it (only the 500 face was fetched).
+     400 is the measured choice, by the same stroke/x-height yardstick that set
+     body to 430: JBM 400 stem/x = 0.1636 vs prose@430 = 0.1721 (-5%); JBM 500
+     = 0.1964 (+14%). The exact parity weight solves to ~426 — 400 is 2.9x
+     closer than 500, it is the grade every code editor ships, and the chip
+     already carries salience from its tint and ink hue; bolder strokes on top
+     of that read as shouting, especially on Night where bloom adds weight.
+     Texture (ink per letter-area) runs lighter than prose either way (-19.5%
+     at 400) because mono's fixed 0.6em advance spends more of each em on air —
+     that is what the chip background is for. Measured in
+     frontend/font-lab/mono.html. */
+  --font-weight-mono: 400;
   /* Optical size for display type. `font-optical-sizing: auto` maps the CSS
      px size onto Inter's opsz axis and clamps at 32, so anything above 32px
      gets Inter's narrowest cut — the axis takes ~8.5% off the round lowercase
@@ -4201,6 +4217,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   bottom: 0.45rem;
   right: 0.45rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.6rem;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -4255,6 +4272,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-thumb-snippet {
   margin: 0;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.66rem;
   line-height: 1.5;
   color: var(--text-muted);
@@ -4910,7 +4928,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 /* Inline code wears a quiet violet chip (user-chosen, GitHub-merged
    reference): code is the one content register that reads better set apart
-   from prose ink, and one desaturated tone in both themes keeps it calm. */
+   from prose ink, and one desaturated tone in both themes keeps it calm.
+   RE-REVIEWED 2026-08-09 against neutral (GitHub-style, ink = body) and a
+   half-saturation slate, live in both themes: KEEP. The violet became
+   load-bearing when the mono register was pinned to 400 — at 0.88em and
+   regular grade, hue is what keeps run IDs, paths, and identifiers spottable
+   at a glance; neutral sank chips into tinted body text, and slate read as
+   neutral with the point removed. It is the only purple in the stylesheet by
+   design: a content register, deliberately outside the chrome accent system
+   (--accent-live stays the sole chrome accent), same layer as the syntax
+   palette inside blocks — whose github themes carry violet tokens it rhymes
+   with. Contrast on the chip tint: 6.7:1 dark, 5.1:1 light — both AA-clear
+   at chip size. */
 :root {
   --inline-code-bg: rgba(103, 88, 220, 0.1);
   --inline-code-ink: #5b4bc4;
@@ -5144,6 +5173,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: transparent;
   resize: none;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.84rem;
   line-height: 1.7;
   font-variant-ligatures: none;
@@ -5242,6 +5272,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    pk-inline-code — one register, both surfaces. */
 .notes-md-prose :not(pre) > code {
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.88em;
   background: var(--inline-code-bg);
   color: var(--inline-code-ink);
@@ -5362,6 +5393,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--bg-panel-strong) 94%, transparent);
   overflow-x: auto;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.82rem;
   line-height: 1.65;
   white-space: pre;
@@ -5430,6 +5462,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .notes-math-editor {
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.84rem;
   color: var(--text-main);
   background: var(--popover);
@@ -7119,6 +7152,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .admin-queue-consumer-heading strong {
   color: var(--text-main);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
@@ -7448,6 +7482,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .admin-org-row span {
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -7594,6 +7629,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .admin-run-event-kind {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.73rem;
   color: var(--text-main);
 }
@@ -10070,6 +10106,7 @@ details {
 .text-viewer-chip {
   flex: 0 0 auto;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.66rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10201,6 +10238,7 @@ details {
   width: max-content;
   min-width: 100%;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 13px;
   line-height: 22px;
 }
@@ -10230,6 +10268,7 @@ details {
 .text-viewer-pre-wrap {
   margin: 0;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -10337,6 +10376,7 @@ details {
   width: 44px;
   text-align: right;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   color: var(--text-muted);
   background: var(--bg-panel-strong);
 }
@@ -10517,6 +10557,7 @@ details {
 .resource-quick-peek-chip {
   flex: 0 0 auto;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.62rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10532,6 +10573,7 @@ details {
   overflow: auto;
   padding: 0.6rem 0.75rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 12px;
   line-height: 1.55;
   white-space: pre;
@@ -12120,6 +12162,7 @@ details {
   margin: 0;
   color: var(--text-main);
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.78rem;
   line-height: 1.3;
 }
@@ -12143,6 +12186,7 @@ details {
   padding-inline: 0.5rem;
   color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.68rem;
   line-height: 1;
 }
@@ -13703,6 +13747,7 @@ details {
 .bisque-link-preview-copy span {
   color: var(--text-soft);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, monospace);
+  font-weight: var(--font-weight-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -13999,6 +14044,7 @@ details {
   border-radius: 0.375rem;
   padding: 0.05rem 0.32rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.88em;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -14027,6 +14073,7 @@ details {
 
 .pk-code-render :where(pre, code) {
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
 }
 
 .pk-code-render :where(code) {

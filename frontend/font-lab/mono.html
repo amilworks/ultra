@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mono colour — JetBrains Mono against Inter at 430</title>
+<style>
+  /* Inter straight from the vendored source; JBM copied into build/ by
+     build_ultra_sans.py (or by hand: node_modules/@fontsource/jetbrains-mono/
+     files/jetbrains-mono-latin-{400,500}-normal.woff2 -> build/jbm-{400,500}.woff2) */
+  @font-face { font-family:"UI"; src:url("../src/assets/fonts/InterVariable-v4.1.woff2") format("woff2"); font-weight:100 900; }
+  @font-face { font-family:"JBM400"; src:url("./build/jbm-400.woff2") format("woff2"); font-weight:400; }
+  @font-face { font-family:"JBM500"; src:url("./build/jbm-500.woff2") format("woff2"); font-weight:400; }
+
+  :root { --ink:#171b1d; --ink2:#5b6266; --ink3:#8b9296; --rule:#e4e7e9; --bg:#fff;
+          --hit:#c2410c; --good:#0f766e; --chipbg:rgba(103,88,220,.1); --chipink:#5b4bc4;
+          font-synthesis:none; }
+  @media (prefers-color-scheme:dark) {
+    :root { --ink:#dce3ea; --ink2:#a5abb0; --ink3:#6f767b; --rule:#2a2f33; --bg:#141719;
+            --hit:#fb923c; --good:#5eead4; --chipbg:rgba(158,146,246,.14); --chipink:#a89ef2; } }
+  *{box-sizing:border-box}
+  body { margin:0; padding:44px 40px 96px; background:var(--bg); color:var(--ink);
+         font-family:"UI",system-ui,sans-serif; font-optical-sizing:auto; }
+  .wrap { max-width:1080px; margin:0 auto; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 5px; letter-spacing:-.01em; }
+  .sub { font-size:13px; color:var(--ink2); line-height:1.62; margin:0 0 34px; max-width:76ch; }
+  .sub b { color:var(--ink); font-weight:600; }
+  section { border-top:1px solid var(--rule); padding:26px 0 10px; }
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase;
+             color:var(--ink3); margin:0 0 18px; }
+  .row { display:grid; grid-template-columns:170px 1fr; gap:22px; align-items:baseline;
+         padding:12px 0; border-bottom:1px solid var(--rule); }
+  .row:last-child { border-bottom:0; }
+  .tag { font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+         color:var(--ink3); padding-top:.4em; line-height:1.55; }
+  .tag i  { font-style:normal; display:block; color:var(--hit); }
+  .tag b  { font-weight:600; display:block; color:var(--good); }
+
+  .prose { font:430 15px/1.62 "UI"; max-width:62ch; }
+  .chip  { border-radius:.375rem; padding:.05rem .32rem; background:var(--chipbg);
+           color:var(--chipink); font-size:.88em; white-space:nowrap; }
+  .c4 .chip { font-family:"JBM400"; }
+  .c5 .chip { font-family:"JBM500"; }
+  pre { margin:8px 0 0; padding:14px 18px; border-radius:10px; border:1px solid var(--rule);
+        background:color-mix(in oklab, var(--ink) 3%, var(--bg));
+        font-size:13px; line-height:1.2; overflow-x:auto; }
+  .c4 pre { font-family:"JBM400"; } .c5 pre { font-family:"JBM500"; }
+
+  table { border-collapse:collapse; font-size:13px; margin-top:4px; }
+  th,td { text-align:right; padding:5px 15px 5px 0; border-bottom:1px solid var(--rule); }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink3); font-weight:600; }
+  td.n { font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); } .gap { color:var(--hit); }
+  .note { font-size:12.5px; color:var(--ink2); line-height:1.65; margin:15px 0 0; max-width:78ch; }
+  .note b { color:var(--ink); font-weight:600; }
+  code.plain { font-family:"JBM400"; font-size:.9em; }
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Mono colour — JetBrains Mono against Inter at 430</h1>
+  <p class="sub">When body moved 400 → 430, every mono surface that inherited body weight
+  <b>silently jumped a full grade</b>. JetBrains Mono ships as static faces (300/400/500/600),
+  and CSS font-matching resolves a target between 400 and 500 by scanning <b>upward</b> first —
+  so an inherited 430 loads <b>Mono 500</b>. The proof was in <code class="plain">document.fonts</code>:
+  only the 500 face was fetched; 400 sat unloaded. Twenty rules inherited; none chose 500.</p>
+
+  <section>
+    <p class="eyebrow">The same paragraph, both grades — chips inside prose at 430</p>
+    <div class="row c5"><span class="tag">JBM 500<i>the accidental state</i></span>
+      <p class="prose">Hover a pooled cell to see its <span class="chip">argmax_rc[..]</span> window;
+      the <span class="chip">window.__POOL.state()</span> hook exposes
+      <span class="chip">max(9, 2, 4, 1) = 9</span> and <span class="chip">resetHighlights</span> live.</p></div>
+    <div class="row c4"><span class="tag">JBM 400<b>the pin</b></span>
+      <p class="prose">Hover a pooled cell to see its <span class="chip">argmax_rc[..]</span> window;
+      the <span class="chip">window.__POOL.state()</span> hook exposes
+      <span class="chip">max(9, 2, 4, 1) = 9</span> and <span class="chip">resetHighlights</span> live.</p></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Block — 13px, leading 1.2, both grades</p>
+    <div class="row c5"><span class="tag">JBM 500</span>
+      <pre>def numpy_max_pool(x, pool=(2, 2), stride=(2, 2)):
+    Ro, Co = (H - ph)//sh + 1, (W - pw)//sw + 1
+    out, arg = np.zeros((Ro, Co)), np.zeros((Ro, Co))</pre></div>
+    <div class="row c4"><span class="tag">JBM 400</span>
+      <pre>def numpy_max_pool(x, pool=(2, 2), stride=(2, 2)):
+    Ro, Co = (H - ph)//sh + 1, (W - pw)//sw + 1
+    out, arg = np.zeros((Ro, Co)), np.zeros((Ro, Co))</pre></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Measured — stroke against texture, and why they disagree</p>
+    <table>
+      <tr><th></th><th>stem (em)</th><th>x-height</th><th>stem / x-height</th><th>vs prose@430</th><th>ink density</th><th>vs prose</th></tr>
+      <tr><td>Prose — Inter 430 @15px</td><td class="n">0.0937</td><td class="n">0.5444</td><td class="n">0.1721</td><td class="n">—</td><td class="n">111.7</td><td class="n">—</td></tr>
+      <tr><td><b>JBM 400</b> @13.2px</td><td class="n">0.0900</td><td class="n">0.5500</td><td class="n win">0.1636</td><td class="n win">−5%</td><td class="n">89.9</td><td class="n gap">−19.5%</td></tr>
+      <tr><td>JBM 500 @13.2px</td><td class="n">0.1080</td><td class="n">0.5500</td><td class="n gap">0.1964</td><td class="n gap">+14%</td><td class="n">103.4</td><td class="n">−7.4%</td></tr>
+    </table>
+    <p class="note"><b>The two measures pull in opposite directions, and that is the finding.</b>
+    Stroke ratio says 500 is far too black: +14% against the prose it sits inside, and in absolute
+    pixels its stem (1.43px) equals full-size prose (1.41px) on a letter 11% shorter. Texture says
+    mono is lighter either way, because the fixed 0.6em advance spends more of every em on air.
+    Strokes are what make a chip look bold; texture is what makes a paragraph look grey. A chip is
+    read as letterforms, not as a paragraph — so stroke parity is the criterion that matches how
+    chips are seen, and the tint background exists precisely to carry the register shift that
+    texture lightness would otherwise cost.</p>
+    <p class="note"><b>The parity solve lands at ≈426</b> — between the static faces. 400 misses by
+    −0.0085; 500 by +0.0243. 400 is 2.9× closer, it is the grade every code editor ships, and Night
+    bloom only pushes rendered weight further up from there. Hence
+    <code class="plain">--font-weight-mono: 400</code>, pinned at all 20 inheriting rules, with the
+    contract refusing any mono rule that inherits again.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">What was deliberately left alone</p>
+    <p class="note"><b>Block leading stays 1.2.</b> It is authored
+    (<code class="plain">leading-[1.2]</code> in code-block.tsx), it is the JetBrains IDE default
+    that this face was drawn for — the tall x-height and generous internal metrics exist so tight
+    leading still reads — and at 13px the ink pitch (13.4px) clears the 15.6px box with no
+    collisions. GitHub's 1.5 optimises skimming unfamiliar code; Ultra's blocks are output read
+    linearly once. Different job, different number.</p>
+    <p class="note"><b>Inline size stays 0.88em.</b> X-height parity with prose would want 0.99em
+    (0.5444 / 0.5500), but mono at full size reads oversized — the wide fixed advance does the
+    inflating. 0.88em keeps chips subordinate to the prose line, and the measured chip contrast
+    holds at 6.7:1 on Night's tint, 5.1:1 on Day's — both clear of AA at chip size.</p>
+    <p class="note"><b>The nine already-pinned mono rules keep their weights.</b> Viewer cues at
+    500/600 and admin labels at 600 were explicit choices at authoring time — micro-type earning
+    its weight — not rounding accidents.</p>
+  </section>
+</div></body></html>

@@ -95,6 +95,7 @@ echo "Writing release manifest"
 export RELEASE_SHA RELEASE_NAME RELEASE_DIR GOOS_VALUE GOARCH_VALUE CGO_ENABLED_VALUE MANIFEST_IN_RELEASE MANIFEST_OUT
 python3 <<'PY'
 import datetime
+import hashlib
 import json
 import os
 import subprocess
@@ -124,33 +125,41 @@ def frontend_versions() -> dict[str, str]:
 
 
 def python_versions() -> dict[str, str]:
-    lock_path = Path("backend/deepagents_runtime/uv.lock")
-    if not lock_path.exists():
-        return {}
+    lock_path = Path("backend/deepagents_runtime/requirements.worker.lock")
     packages: dict[str, str] = {}
-    current_name: str | None = None
     for line in lock_path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped == "[[package]]":
-            current_name = None
+        if not line or line[0].isspace() or line.startswith("#"):
             continue
-        if stripped.startswith("name = "):
-            current_name = json.loads(stripped.split("=", 1)[1].strip())
+        requirement = line.split("\\", 1)[0].strip()
+        if "==" not in requirement:
             continue
-        if current_name and stripped.startswith("version = "):
-            packages[current_name] = json.loads(stripped.split("=", 1)[1].strip())
-            current_name = None
+        name, version = requirement.split("==", 1)
+        packages[name] = version.split(";", 1)[0].strip()
     selected = [
         "deepagents",
+        "hatchling",
         "langchain",
+        "langchain-core",
         "langgraph",
         "langgraph-sdk",
         "nats-py",
+        "numpy",
         "openai",
         "pydantic",
         "websockets",
     ]
     return {name: packages[name] for name in selected if name in packages}
+
+
+def worker_lock_metadata() -> dict[str, str]:
+    lock_path = Path("backend/deepagents_runtime/requirements.worker.lock")
+    payload = lock_path.read_bytes()
+    return {
+        "path": lock_path.as_posix(),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "python_version": "3.11",
+        "python_platform": "x86_64-manylinux_2_28",
+    }
 
 
 def go_versions() -> dict[str, str]:
@@ -203,6 +212,7 @@ manifest = {
     "dependencies": {
         "controlplane_go": go_versions(),
         "deepagents_python": python_versions(),
+        "deepagents_worker_lock": worker_lock_metadata(),
         "frontend": frontend_versions(),
     },
 }

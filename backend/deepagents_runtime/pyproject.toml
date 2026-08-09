@@ -4,15 +4,15 @@ version = "0.1.0"
 description = "Python Deep Agents runtime for BisQue Ultra"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents>=0.6.12,<0.7",
-    "langchain-core>=1.4.8,<2",
+    "deepagents==0.7.5",
+    "langchain-core>=1.5.0,<2",
     "langchain-openai>=1.2.0,<2",
     "langgraph>=1.1.3,<2",
     "langgraph-checkpoint>=4.1.0,<5",
     "httpx>=0.28.0,<1",
     "nats-py>=2.9.0,<3",
     # Imported by first-party reducers in the production worker. Keep it in the
-    # core dependency closure; Dockerfile.worker separately pins the deployed ABI.
+    # core dependency closure; the worker constraints lock pins the deployed ABI.
     "numpy>=1.26.0,<3",
     "pillow>=10.0.0,<13",
     "psycopg[binary]>=3.2.0,<4",
@@ -83,7 +83,7 @@ ngff = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]

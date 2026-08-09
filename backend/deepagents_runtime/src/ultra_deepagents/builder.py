@@ -6,7 +6,7 @@ budget). The Builder OWNS the full build loop for that goal - plan -> implement 
 deep agent (CompiledSubAgent), its own `task` tool + general-purpose worker for context
 isolation. It does not finish until the goal is met or its iteration budget is spent.
 
-Design (verified against deepagents 0.6.8 docs + source):
+Design (verified against deepagents 0.7.5 docs + source):
 - A subagent CAN be a full deep agent via ``CompiledSubAgent(runnable=create_deep_agent(...))``.
 - The "work until a condition is met" loop is a middleware (``GoalLoopMiddleware``) whose
   ``after_agent`` returns ``{messages, jump_to:'model'}`` to continue or a plain dict to
@@ -39,6 +39,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from typing_extensions import NotRequired
 
 from ultra_deepagents.config import RuntimeSettings
+from ultra_deepagents.deepagents_compat import build_deepagents_07_middleware
 from ultra_deepagents.model import build_builder_model, build_builder_worker_model
 
 logger = logging.getLogger(__name__)
@@ -375,7 +376,15 @@ def build_builder_subagent(
     builder_tools = list(tools)
     if builder_is_multimodal:
         builder_tools = [*builder_tools, *vision_tools]
-    middleware: list[Any] = [GoalLoopMiddleware(max_iterations=settings.builder_goal_max_iterations)]
+    middleware: list[Any] = [
+        GoalLoopMiddleware(max_iterations=settings.builder_goal_max_iterations)
+    ]
+    middleware.extend(
+        build_deepagents_07_middleware(
+            backend=backend,
+            permissions=permissions or (),
+        )
+    )
     if not builder_is_multimodal:
         # The fallback/coordinator model is text-only: guarantee no image block ever reaches it.
         middleware.append(StripImagesForTextModelMiddleware())
@@ -402,7 +411,14 @@ def build_builder_subagent(
         # Workers execute the heaviest repeated sub-runs — they carry the shared
         # attempt-ledger middleware too so a fanned-out worker never blindly
         # re-runs a command the run already saw fail.
-        "middleware": [StripImagesForTextModelMiddleware(), *(extra_middleware or [])],
+        "middleware": [
+            *build_deepagents_07_middleware(
+                backend=backend,
+                permissions=permissions or (),
+            ),
+            StripImagesForTextModelMiddleware(),
+            *(extra_middleware or []),
+        ],
     }
     inner = create_deep_agent(
         model=build_builder_model(settings),

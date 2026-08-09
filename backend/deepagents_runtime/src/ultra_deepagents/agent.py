@@ -35,7 +35,6 @@ from ultra_deepagents.code_execution.docker import (
 )
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import (
     build_context_tools,
@@ -43,12 +42,17 @@ from ultra_deepagents.context_tools import (
     build_tool_capability_manifest,
     build_tool_capability_manifest_tool,
 )
+from ultra_deepagents.deepagents_compat import (
+    DEEPAGENTS_WRITE_FILE_DESCRIPTION,
+    build_deepagents_07_middleware,
+)
 from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.evaluation_profiles import (
     evaluation_memory_dir,
     evaluation_policy_dir,
     is_cleanroom_evaluation_profile,
 )
+from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
@@ -1283,6 +1287,10 @@ def ensure_ultra_harness_profile() -> None:
     register_harness_profile(
         "openai",
         HarnessProfile(
+            tool_description_overrides={
+                "write_file": DEEPAGENTS_WRITE_FILE_DESCRIPTION,
+            },
+            excluded_tools=frozenset({"delete"}),
             general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
         ),
     )
@@ -1292,14 +1300,17 @@ def ensure_ultra_harness_profile() -> None:
 def build_subagents(
     paper_tools: Sequence[BaseTool | Any] | None = None,
     *,
+    backend: Any | None = None,
     context: AgentRunContext | None = None,
     context_tools: Sequence[BaseTool | Any] | None = None,
+    permissions: Sequence[FilesystemPermission] = (),
     text_only_model: bool = True,
     skills_sources: Sequence[str] | None = None,
     vision_tools: Sequence[BaseTool | Any] | None = None,
     qwen_coding_model: BaseChatModel | Any | None = None,
 ) -> list[dict[str, Any]]:
     subagents: list[dict[str, Any]] = []
+    resolved_backend = backend if backend is not None else StateBackend()
 
     if paper_tools:
         literature = dict(BASE_SUBAGENTS[0])
@@ -1342,6 +1353,10 @@ def build_subagents(
             subagents.append(qwen)
 
     for subagent in subagents:
+        subagent_middleware: list[Any] = build_deepagents_07_middleware(
+            backend=resolved_backend,
+            permissions=permissions,
+        )
         # Only the computational subagents benefit from the rigor/reporting
         # protocols; literature-reviewer is page-grounded paper review and would
         # just re-pay the per-subagent SkillsMiddleware overhead without ever
@@ -1349,7 +1364,8 @@ def build_subagents(
         if skills_sources and subagent["name"] in _SKILL_BEARING_SUBAGENTS:
             subagent["skills"] = list(skills_sources)
         if text_only_model and subagent["name"] != QWEN_CODE_RUNNER_NAME:
-            subagent["middleware"] = [TextOnlyMultimodalMiddleware()]
+            subagent_middleware.append(TextOnlyMultimodalMiddleware())
+        subagent["middleware"] = subagent_middleware
     return subagents
 
 
@@ -2240,8 +2256,12 @@ def build_research_agent(
             skills_sources = list(SKILLS_SOURCES)
     if resolved_backend is None:
         resolved_backend = StateBackend()
+    resolved_permissions = resolve_memory_permissions(settings)
 
-    middleware: list[Any] = []
+    middleware: list[Any] = build_deepagents_07_middleware(
+        backend=resolved_backend,
+        permissions=resolved_permissions,
+    )
     # OUTERMOST tool-call wrapper: contain a failing/slow `task` subagent to a degraded
     # ToolMessage so one bad subagent in a parallel fan-out cannot cancel its siblings and abort
     # the whole run (langgraph's gather has no return_exceptions; the default handler re-raises).
@@ -2317,8 +2337,10 @@ def build_research_agent(
     )
     subagents = build_subagents(
         paper_tools,
+        backend=resolved_backend,
         context=context,
         context_tools=list(context_tools),
+        permissions=resolved_permissions,
         text_only_model=not settings.model_supports_multimodal,
         skills_sources=skills_sources,
         vision_tools=vision_tools,
@@ -2356,7 +2378,7 @@ def build_research_agent(
         # The Builder is a pre-compiled CompiledSubAgent, so deepagents does NOT inherit
         # the coordinator's permissions onto it — pass the same memory denies explicitly
         # so the Builder lead + its worker cannot write /policies, /skills, /memories.
-        permissions=resolve_memory_permissions(settings),
+        permissions=resolved_permissions,
         extra_middleware=[ledger_middleware] if ledger_middleware is not None else None,
     )
     if builder_subagent is not None:
@@ -2436,7 +2458,7 @@ def build_research_agent(
         skills=skills_sources,
         backend=resolved_backend,
         memory=[] if cleanroom else MEMORY_PATHS,
-        permissions=resolve_memory_permissions(settings),
+        permissions=resolved_permissions,
         middleware=middleware,
         checkpointer=checkpointer,
     )

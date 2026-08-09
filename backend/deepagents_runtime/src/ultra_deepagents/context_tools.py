@@ -21,6 +21,7 @@ from ultra_deepagents.code_execution.git_staging import (
     validate_ref,
 )
 from ultra_deepagents.context import AgentRunContext
+from ultra_deepagents.deepagents_compat import DEEPAGENTS_WRITE_FILE_DESCRIPTION
 
 # Uploads a mid-run steer attached, keyed by run id. AgentRunContext is frozen
 # at run start, so files that arrive later need a second authority source —
@@ -424,7 +425,7 @@ def build_tool_capability_manifest(
         {
             "name": "write_file",
             "category": "filesystem",
-            "purpose": "Write source, reports, and other working files into the active backend.",
+            "purpose": DEEPAGENTS_WRITE_FILE_DESCRIPTION,
         },
         {
             "name": "read_file",

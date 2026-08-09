@@ -31,6 +31,7 @@ esac
 
 CONTROL_DIR="$RELEASE_DIR/backend/controlplane"
 DEEPAGENTS_DIR="$RELEASE_DIR/backend/deepagents_runtime"
+DEEPAGENTS_WORKER_LOCK="$DEEPAGENTS_DIR/requirements.worker.lock"
 SANDBOX_DOCKERFILE="$RELEASE_DIR/deploy/docker/deepagents-sandbox.Dockerfile"
 BIN_DIR="$RELEASE_DIR/bin"
 DEEPAGENTS_VENV_DIR="$ULTRA_DEEPAGENTS_VENV_ROOT/$RELEASE_SHA"
@@ -255,14 +256,28 @@ fi
 
 if [ "$ROLE_WORKERS" = 1 ]; then
 echo "Preparing Deep Agents worker environment"
+if [ ! -f "$DEEPAGENTS_WORKER_LOCK" ]; then
+  echo "Deep Agents worker lock not found: $DEEPAGENTS_WORKER_LOCK" >&2
+  exit 1
+fi
 rm -rf "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 env UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
   "$UV_BIN" python install "$UV_PYTHON_VERSION"
-env UV_PYTHON="$UV_PYTHON_VERSION" \
-  UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
-  UV_PROJECT_ENVIRONMENT="$DEEPAGENTS_VENV_DIR" \
-  UV_LINK_MODE=copy \
-  "$UV_BIN" sync --frozen --project "$DEEPAGENTS_DIR"
+env UV_PYTHON_INSTALL_DIR="$ULTRA_PYTHON_ROOT" \
+  "$UV_BIN" venv --python "$UV_PYTHON_VERSION" "$DEEPAGENTS_VENV_DIR"
+"$UV_BIN" pip sync \
+  --python "$DEEPAGENTS_VENV_DIR/bin/python" \
+  --require-hashes \
+  --only-binary=:all: \
+  "$DEEPAGENTS_WORKER_LOCK"
+"$UV_BIN" pip install \
+  --python "$DEEPAGENTS_VENV_DIR/bin/python" \
+  --no-build-isolation \
+  --no-deps \
+  "$DEEPAGENTS_DIR"
+"$UV_BIN" pip check --python "$DEEPAGENTS_VENV_DIR/bin/python"
+"$DEEPAGENTS_VENV_DIR/bin/python" -c \
+  "import numpy; assert numpy.__version__ == '1.26.4'; import ultra_deepagents.agent; import ultra_deepagents.nats_worker"
 ln -sfn "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"
 
 build_sandbox_image

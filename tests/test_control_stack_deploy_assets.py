@@ -2,11 +2,36 @@ import os
 import subprocess
 from pathlib import Path
 
+import tomllib
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def read_repo_file(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def parse_worker_lock_versions() -> dict[str, str]:
+    packages: dict[str, str] = {}
+    for line in read_repo_file(
+        "backend/deepagents_runtime/requirements.worker.lock"
+    ).splitlines():
+        if not line or line[0].isspace() or line.startswith("#"):
+            continue
+        requirement = line.split("\\", 1)[0].strip()
+        if "==" not in requirement:
+            continue
+        name, version = requirement.split("==", 1)
+        packages[name] = version.split(";", 1)[0].strip()
+    return packages
+
+
+def parse_canonical_lock_versions() -> dict[str, set[str]]:
+    lock = tomllib.loads(read_repo_file("backend/deepagents_runtime/uv.lock"))
+    packages: dict[str, set[str]] = {}
+    for package in lock["package"]:
+        packages.setdefault(package["name"], set()).add(package["version"])
+    return packages
 
 
 def tracked_paths_under(relative_path: str) -> list[str]:
@@ -59,6 +84,98 @@ def test_go_control_stack_deploy_script_targets_primary_runtime() -> None:
     assert "/v2/admin/overview" in script
 
 
+def test_deepagents_worker_dockerfile_installs_only_hash_locked_dependencies() -> None:
+    dockerfile = read_repo_file("backend/deepagents_runtime/Dockerfile.worker")
+
+    assert "requirements.worker.lock" in dockerfile
+    assert "--only-binary=:all:" in dockerfile
+    assert "--require-hashes" in dockerfile
+    assert (
+        "pip install --no-cache-dir --no-build-isolation --no-deps "
+        "/app/deepagents_runtime"
+    ) in dockerfile
+    assert "ARG ULTRA_WORKER_NUMPY_VERSION" not in dockerfile
+    assert "assert numpy.__version__ == '1.26.4'" in dockerfile
+    assert "pip check" in dockerfile
+    assert "import ultra_deepagents.agent" in dockerfile
+    assert "import ultra_deepagents.nats_worker" in dockerfile
+
+
+def test_native_worker_deploy_syncs_hash_locked_release_environment_before_symlink() -> None:
+    script = read_repo_file("scripts/deploy_ultra_control_stack.sh")
+
+    assert 'DEEPAGENTS_WORKER_LOCK="$DEEPAGENTS_DIR/requirements.worker.lock"' in script
+    assert '"$UV_BIN" venv --python "$UV_PYTHON_VERSION" "$DEEPAGENTS_VENV_DIR"' in script
+    assert '"$UV_BIN" pip sync' in script
+    assert "--require-hashes" in script
+    assert "--only-binary=:all:" in script
+    assert '"$UV_BIN" pip install' in script
+    assert "--no-build-isolation" in script
+    assert "--no-deps" in script
+    assert '"$UV_BIN" pip check --python "$DEEPAGENTS_VENV_DIR/bin/python"' in script
+    assert "assert numpy.__version__ == '1.26.4'" in script
+    assert "import ultra_deepagents.agent" in script
+    assert "import ultra_deepagents.nats_worker" in script
+    sync_index = script.index('"$UV_BIN" pip sync')
+    install_index = script.index('"$UV_BIN" pip install')
+    check_index = script.index('"$UV_BIN" pip check')
+    import_index = script.index('"$DEEPAGENTS_VENV_DIR/bin/python" -c')
+    symlink_index = script.index(
+        'ln -sfn "$DEEPAGENTS_VENV_DIR" "$DEEPAGENTS_DIR/.venv"'
+    )
+    restart_index = script.index("systemctl restart ultra-deepagents-worker")
+    assert sync_index < install_index < check_index < import_index < symlink_index
+    assert symlink_index < restart_index
+
+
+def test_worker_lock_is_hashed_and_carries_qualified_runtime_versions() -> None:
+    constraints = read_repo_file(
+        "backend/deepagents_runtime/requirements.worker-constraints.txt"
+    )
+    lock = read_repo_file("backend/deepagents_runtime/requirements.worker.lock")
+
+    assert "numpy==1.26.4" in constraints
+    assert "#    make deepagents-worker-lock" in lock
+    for requirement in (
+        "deepagents==0.7.5",
+        "hatchling==1.28.0",
+        "langchain-core==1.5.2",
+        "numpy==1.26.4",
+    ):
+        start = lock.index(requirement)
+        assert "--hash=sha256:" in lock[start : start + 1000]
+
+
+def test_worker_lock_matches_canonical_runtime_except_qualified_numpy() -> None:
+    canonical = parse_canonical_lock_versions()
+    worker = parse_worker_lock_versions()
+    shared = set(canonical).intersection(worker)
+    mismatches = {
+        name: {"canonical": canonical[name], "worker": {worker[name]}}
+        for name in shared - {"numpy"}
+        if canonical[name] != {worker[name]}
+    }
+
+    assert mismatches == {}
+    assert worker["numpy"] == "1.26.4"
+    assert {version.split(".", 1)[0] for version in canonical["numpy"]} == {"2"}
+
+
+def test_worker_build_backend_is_exact_and_part_of_the_hashed_closure() -> None:
+    build_input = read_repo_file(
+        "backend/deepagents_runtime/requirements.worker-build.txt"
+    )
+    project = tomllib.loads(read_repo_file("backend/deepagents_runtime/pyproject.toml"))
+    worker = parse_worker_lock_versions()
+
+    requirements = [
+        line for line in build_input.splitlines() if line and not line.startswith("#")
+    ]
+    assert requirements == ["hatchling==1.28.0"]
+    assert project["build-system"]["requires"] == ["hatchling==1.28.0"]
+    assert worker["hatchling"] == "1.28.0"
+
+
 def test_deepagents_worker_units_override_mutable_tag_with_verified_image_id() -> None:
     for unit in (
         "deploy/systemd/ultra-deepagents-worker.service",
@@ -93,6 +210,20 @@ def test_release_artifact_script_builds_immutable_control_stack_bundle() -> None
     assert 'head_sha="$(git rev-parse HEAD)"' in script
     assert 'if [ "$RELEASE_SHA" != "$head_sha" ]' in script
     assert "--ignore-submodules=none" in script
+
+
+def test_release_manifest_binds_deepagents_worker_lock_and_versions() -> None:
+    script = read_repo_file("scripts/build_ultra_release_artifact.sh")
+
+    assert 'Path("backend/deepagents_runtime/requirements.worker.lock")' in script
+    assert 'Path("backend/deepagents_runtime/uv.lock")' not in script
+    assert '"hatchling",' in script
+    assert '"numpy",' in script
+    assert '"deepagents_worker_lock": worker_lock_metadata()' in script
+    assert '"sha256": hashlib.sha256(payload).hexdigest()' in script
+    assert '"python_version": "3.11"' in script
+    assert '"python_platform": "x86_64-manylinux_2_28"' in script
+    assert '"schema_version": 1' in script
 
 
 def _release_builder_fixture(tmp_path: Path) -> tuple[Path, str]:
@@ -182,6 +313,79 @@ def test_main_release_workflow_builds_uploadable_release_artifact() -> None:
     assert "actions/upload-artifact@v4" in workflow
     assert "ultra-release-${{ github.sha }}" in workflow
     assert "release-manifest-${{ github.sha }}.json" in workflow
+
+
+def test_only_pr_and_release_ci_check_the_pinned_worker_lock() -> None:
+    makefile = read_repo_file("Makefile")
+    pr_ci = read_repo_file(".github/workflows/pr-ci.yml")
+    release_ci = read_repo_file(".github/workflows/release-artifacts.yml")
+
+    assert "deepagents-worker-lock:" in makefile
+    assert "deepagents-worker-lock-check:" in makefile
+    assert "deepagents-worker-env-check:" in makefile
+    assert "--python-platform x86_64-manylinux_2_28" in makefile
+    assert makefile.count("uv run --frozen --python 3.11 --extra dev pytest") == 3
+    lock_recipe = makefile.split("deepagents-worker-lock:", 1)[1].split(
+        "\ndeepagents-worker-lock-check:", 1
+    )[0]
+    assert "uv lock --check" in lock_recipe
+    assert "uv export --quiet --frozen --no-dev --no-hashes --no-header" in lock_recipe
+    assert "--no-emit-project --no-annotate" in lock_recipe
+    assert "awk" in lock_recipe
+    assert "/^numpy==/" in lock_recipe
+    assert "numpy_count != 1" in lock_recipe
+    assert "pyproject.toml requirements.worker-build.txt" in lock_recipe
+    assert lock_recipe.count("--constraint") == 2
+    assert lock_recipe.count("--no-annotate") == 2
+    assert "requirements.worker-constraints.txt" in lock_recipe
+    assert "--upgrade" not in lock_recipe
+    lock_check_recipe = makefile.split("deepagents-worker-lock-check:", 1)[1].split(
+        "\ndeepagents-worker-env-check:", 1
+    )[0]
+    seed_copy = (
+        "cp backend/deepagents_runtime/requirements.worker.lock "
+        '"$$worker_lock_candidate"'
+    )
+    assert seed_copy in lock_check_recipe
+    assert lock_check_recipe.index(seed_copy) < lock_check_recipe.index(
+        "$(MAKE) deepagents-worker-lock"
+    )
+    assert 'DEEPAGENTS_WORKER_LOCK_OUTPUT="$$worker_lock_candidate"' in lock_check_recipe
+    assert "cmp" in lock_check_recipe
+    assert "--upgrade" not in lock_check_recipe
+    env_check_recipe = makefile.split("deepagents-worker-env-check:", 1)[1].split(
+        "\ndeepagents-test:", 1
+    )[0]
+    assert "mktemp -d /tmp/ultra-worker-env.XXXXXX" in env_check_recipe
+    assert "/tmp/ultra-worker-env.*" in env_check_recipe
+    assert "uv venv --python 3.11" in env_check_recipe
+    assert "uv pip sync" in env_check_recipe
+    assert "--require-hashes" in env_check_recipe
+    assert "--only-binary=:all:" in env_check_recipe
+    assert "uv pip install" in env_check_recipe
+    assert "--no-build-isolation" in env_check_recipe
+    assert "--no-deps" in env_check_recipe
+    assert "uv pip check" in env_check_recipe
+    assert "assert numpy.__version__ == '1.26.4'" in env_check_recipe
+    assert "import ultra_deepagents.agent" in env_check_recipe
+    assert "import ultra_deepagents.nats_worker" in env_check_recipe
+    assert 'rm -rf -- "$$worker_env_dir"' in env_check_recipe
+    for workflow in (pr_ci, release_ci):
+        assert 'version: "0.9.30"' in workflow
+        assert "make deepagents-worker-lock-check" in workflow
+        assert "make deepagents-worker-env-check" in workflow
+        assert workflow.index("make deepagents-worker-lock-check") < workflow.index(
+            "make deepagents-worker-env-check"
+        )
+        assert "docker build" not in workflow
+        assert "docker buildx" not in workflow
+    assert "uv run --frozen --extra dev pytest -q" in release_ci
+    for path in (
+        ".github/workflows/autonomy-gate.yml",
+        ".github/workflows/deploy-ultra-frontend.yml",
+        ".github/workflows/labeler.yml",
+    ):
+        assert "deepagents-worker-lock-check" not in read_repo_file(path)
 
 
 def test_systemd_units_run_go_control_and_deepagents_workers() -> None:

@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import type { ApiClient } from "@/lib/api";
-import type { Scene3dLayer, Scene3dManifest } from "@/types";
+import type { Scene3dCalibration, Scene3dLayer, Scene3dManifest } from "@/types";
 
 import { resolveVolumeScaleBar } from "../volumeScaleBar";
 import {
@@ -42,6 +42,20 @@ export type Scene3dSpecies = "points" | "splats" | "cameras";
 
 export type Scene3dLayerVisibility = Record<Scene3dSpecies, boolean>;
 
+export type Scene3dCameraImagePreview = {
+  artifact_index: number;
+  width: number;
+  height: number;
+  source_width: number;
+  source_height: number;
+};
+
+export type Scene3dCameraCatalogEntry = {
+  index: number;
+  name: string;
+  sourceImage?: Scene3dCameraImagePreview;
+};
+
 type Props = {
   fileId: string;
   manifest: Scene3dManifest;
@@ -51,6 +65,9 @@ type Props = {
   pointSize: number;
   /** Bumped by the shell's "Reset view" button to re-frame the camera. */
   resetToken: number;
+  calibration?: Scene3dCalibration | null;
+  onCameraCatalog?: (entries: Scene3dCameraCatalogEntry[]) => void;
+  cameraViewRequest?: { index: number; token: number } | null;
 };
 
 /** What the readout reports per species: uploaded so far, and what the source holds. */
@@ -75,9 +92,11 @@ type ScaleBarState = {
  * world-to-camera quaternion in **wxyz** order.
  */
 type Scene3dCameraPose = {
+  name: string;
   qvec: number[];
   tvec: number[];
   camera: ColmapCamera;
+  sourceImage?: Scene3dCameraImagePreview;
 };
 
 /** Frustum ray length as a fraction of the scene radius — long enough to read the pose. */
@@ -95,6 +114,42 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const numbers = (value: unknown): number[] =>
   Array.isArray(value) ? value.map((entry) => Number(entry)) : [];
+
+const finiteNumbers = (value: unknown): number[] => {
+  const parsed = numbers(value);
+  return parsed.every(Number.isFinite) ? parsed : [];
+};
+
+const positiveInteger = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : null;
+};
+
+const cameraImagePreview = (value: unknown): Scene3dCameraImagePreview | undefined => {
+  if (!isRecord(value)) return undefined;
+  const artifactIndex = Number(value.artifact_index);
+  const width = positiveInteger(value.width);
+  const height = positiveInteger(value.height);
+  const sourceWidth = positiveInteger(value.source_width);
+  const sourceHeight = positiveInteger(value.source_height);
+  if (
+    !Number.isFinite(artifactIndex) ||
+    artifactIndex < 0 ||
+    width === null ||
+    height === null ||
+    sourceWidth === null ||
+    sourceHeight === null
+  ) {
+    return undefined;
+  }
+  return {
+    artifact_index: Math.floor(artifactIndex),
+    width,
+    height,
+    source_width: sourceWidth,
+    source_height: sourceHeight,
+  };
+};
 
 // `navigator.deviceMemory` is not in the DOM lib and is absent on Safari; the budget
 // treats absent as "assume the baseline", so an undefined read is the correct input.
@@ -121,23 +176,47 @@ const readCameraPoses = (payload: unknown): Scene3dCameraPose[] => {
       continue;
     }
     const intrinsics = isRecord(row.camera) ? row.camera : row;
-    const qvec = numbers(row.qvec ?? row.qvec_wxyz);
-    const tvec = numbers(row.tvec);
+    const qvec = finiteNumbers(row.qvec ?? row.qvec_wxyz);
+    const tvec = finiteNumbers(row.tvec);
     const width = Number(intrinsics.width);
     const height = Number(intrinsics.height);
-    if (qvec.length !== 4 || tvec.length !== 3 || !(width > 0) || !(height > 0)) {
+    const params = finiteNumbers(intrinsics.params);
+    if (
+      qvec.length !== 4 ||
+      tvec.length !== 3 ||
+      Math.hypot(...qvec) <= 0 ||
+      !Number.isFinite(width) ||
+      !Number.isFinite(height) ||
+      !(width > 0) ||
+      !(height > 0) ||
+      params.length === 0
+    ) {
       continue;
     }
-    poses.push({
+    const pose: Scene3dCameraPose = {
+      name: String(row.name ?? `Camera ${poses.length + 1}`),
       qvec,
       tvec,
       camera: {
         model: String(intrinsics.model ?? ""),
         width,
         height,
-        params: numbers(intrinsics.params),
+        params,
       },
-    });
+      sourceImage: cameraImagePreview(row.source_image),
+    };
+    try {
+      // Validate the complete model contract before advertising this as a viewable
+      // camera. A non-empty params array is not enough: every COLMAP model has an
+      // exact parameter count, and an unsupported/malformed model must be omitted
+      // instead of crashing when the scientist selects it.
+      projectionMatrixFor(pose.camera, 1, 2);
+      cameraCentreFromColmap(pose.qvec, pose.tvec);
+      cameraBasisFromColmap(pose.qvec, pose.tvec);
+    } catch {
+      continue;
+    }
+    poses.push(pose);
   }
   return poses;
 };
@@ -204,6 +283,9 @@ export function Scene3dCanvas({
   visibility,
   pointSize,
   resetToken,
+  calibration,
+  onCameraCatalog,
+  cameraViewRequest,
 }: Props) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -222,9 +304,15 @@ export function Scene3dCanvas({
     setVisibility: (next: Scene3dLayerVisibility) => void;
     setPointSize: (next: number) => void;
     reframe: () => void;
+    viewCamera: (index: number) => void;
   } | null>(null);
 
-  const unitLabel = manifest.world.units === "meters" ? "m" : "unit";
+  const unitLabel = calibration?.units === "um"
+    ? "µm"
+    : calibration?.units === "arbitrary"
+      ? "unit"
+      : calibration?.units ?? (manifest.world.units === "meters" ? "m" : "unit");
+  const unitsPerSourceUnit = calibration?.units_per_source_unit ?? 1;
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -238,7 +326,7 @@ export function Scene3dCanvas({
     const mobileDevice = isMobileDevice();
     const initialWidth = Math.max(1, stage.clientWidth || 1);
     const initialHeight = Math.max(1, stage.clientHeight || 1);
-    const up = resolveSceneUpVector(manifest);
+    const up = resolveSceneUpVector(manifest, calibration);
     const depthPlan = resolveSceneDepthPlan(
       manifest.world.bbox_robust ?? manifest.world.bbox,
       manifest.world.bbox,
@@ -320,7 +408,9 @@ export function Scene3dCanvas({
     groups.cameras.visible = visibility.cameras;
     scene.add(groups.points, groups.splats, groups.cameras);
 
+    let exactCameraView = false;
     const reframe = () => {
+      exactCameraView = false;
       const currentPlan = resolveSceneDepthPlan(
         manifest.world.bbox_robust ?? manifest.world.bbox,
         manifest.world.bbox,
@@ -338,17 +428,22 @@ export function Scene3dCanvas({
 
     let lastScaleBarKey = "";
     const publishScaleBar = () => {
+      if (exactCameraView) {
+        setScaleBar(null);
+        return;
+      }
       const widthPx = Math.max(1, stage.clientWidth || 1);
       const distance = camera.position.distanceTo(controls.target);
       const worldHeight = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
-      const worldWidth = worldHeight * (camera.aspect || 1);
-      const bar = resolveVolumeScaleBar({ worldWidth, unit: unitLabel });
+      const sourceWorldWidth = worldHeight * (camera.aspect || 1);
+      const calibratedWorldWidth = sourceWorldWidth * unitsPerSourceUnit;
+      const bar = resolveVolumeScaleBar({ worldWidth: calibratedWorldWidth, unit: unitLabel });
       if (!bar.visible || disposed) {
         return;
       }
       // Bar pixels come from the SAME world width the label states, so the drawn length
       // always means what it says.
-      const barPx = Math.max(1, Math.round((bar.length / worldWidth) * widthPx));
+      const barPx = Math.max(1, Math.round((bar.length / calibratedWorldWidth) * widthPx));
       const key = `${bar.label}|${barPx}`;
       if (key === lastScaleBarKey) {
         return;
@@ -401,7 +496,9 @@ export function Scene3dCanvas({
       const height = Math.max(1, stage.clientHeight || 1);
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      if (!exactCameraView) {
+        camera.updateProjectionMatrix();
+      }
       requestRender();
     };
     const observer = new ResizeObserver(() => resize());
@@ -428,6 +525,7 @@ export function Scene3dCanvas({
     const splatLayer = layerOfType(manifest, "splats");
     const pointLayer = layerOfType(manifest, "points");
     const cameraLayer = layerOfType(manifest, "cameras");
+    let loadedCameraPoses: Scene3dCameraPose[] = [];
     const species: Scene3dSpecies[] = [];
     if (splatLayer) {
       species.push("splats");
@@ -791,6 +889,14 @@ export function Scene3dCanvas({
       if (disposed || poses.length === 0) {
         return;
       }
+      loadedCameraPoses = poses;
+      onCameraCatalog?.(
+        poses.map((pose, index) => ({
+          index,
+          name: pose.name,
+          sourceImage: pose.sourceImage,
+        }))
+      );
       const length = frame.radius * FRUSTUM_SCALE;
       const vertices: number[] = [];
       for (const pose of poses) {
@@ -833,6 +939,30 @@ export function Scene3dCanvas({
         reframe();
         requestRender();
       },
+      viewCamera: (index) => {
+        const pose = loadedCameraPoses[index];
+        if (!pose) return;
+        const centre = cameraCentreFromColmap(pose.qvec, pose.tvec);
+        const basis = cameraBasisFromColmap(pose.qvec, pose.tvec);
+        const cameraUp = applyMat3(basis, [0, 1, 0]);
+        const forward = applyMat3(basis, [0, 0, -1]);
+        camera.position.fromArray(centre);
+        camera.up.fromArray(cameraUp);
+        controls.target.set(
+          centre[0] + forward[0] * frame.radius,
+          centre[1] + forward[1] * frame.radius,
+          centre[2] + forward[2] * frame.radius
+        );
+        camera.lookAt(controls.target);
+        camera.projectionMatrix.fromArray(
+          projectionMatrixFor(pose.camera, depthPlan.near, depthPlan.far)
+        );
+        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+        exactCameraView = true;
+        setScaleBar(null);
+        controls.update();
+        requestRender();
+      },
     };
 
     const run = async () => {
@@ -860,6 +990,7 @@ export function Scene3dCanvas({
       abort.abort();
       interactionController.dispose();
       rigRef.current = null;
+      onCameraCatalog?.([]);
       observer.disconnect();
       if (animationFrame) {
         window.cancelAnimationFrame(animationFrame);
@@ -881,7 +1012,7 @@ export function Scene3dCanvas({
     // Visibility, point size and reset are applied incrementally by the effects below;
     // the initial values are read once here to seed the scene graph.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiClient, fileId, manifest, unitLabel]);
+  }, [apiClient, calibration, fileId, manifest, unitLabel, unitsPerSourceUnit]);
 
   useEffect(() => {
     rigRef.current?.setVisibility(visibility);
@@ -897,6 +1028,12 @@ export function Scene3dCanvas({
   useEffect(() => {
     rigRef.current?.reframe();
   }, [resetToken]);
+
+  useEffect(() => {
+    if (cameraViewRequest) {
+      rigRef.current?.viewCamera(cameraViewRequest.index);
+    }
+  }, [cameraViewRequest]);
 
   const readout = useMemo(
     () =>

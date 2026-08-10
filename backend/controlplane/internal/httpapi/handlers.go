@@ -644,6 +644,7 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/cifti/connectivity", deps.handleGetUploadCiftiConnectivity)
 			r.Get("/uploads/{file_id}/scene3d/manifest", deps.handleGetUploadScene3dManifest)
 			r.Get("/uploads/{file_id}/scene3d/chunk/{index}", deps.handleGetUploadScene3dChunk)
+			r.Get("/uploads/{file_id}/scene3d/image/{index}", deps.handleGetUploadScene3dCameraImage)
 			r.Get("/uploads/{file_id}/scene3d/lod/{artifact}", deps.handleGetUploadScene3dLodArtifact)
 			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleServeUploadTiles)
 			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
@@ -2187,6 +2188,7 @@ type patchResourceRequest struct {
 	Metadata                              domain.JSONMap `json:"metadata"`
 	CalibrationExpectedSourceSHA256       string         `json:"-"`
 	CalibrationSelectionExpectedRevisions map[string]int `json:"-"`
+	Scene3dCalibrationExpectedRevision    *int           `json:"-"`
 }
 
 type bulkLifecycleResourcesRequest struct {
@@ -7335,6 +7337,31 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		req.CalibrationExpectedSourceSHA256 = resource.SHA256
 		req.CalibrationSelectionExpectedRevisions = expectedRevisions
 	}
+	rawSceneCalibration, sceneCalibrationPatch := req.Metadata["ultra_scene3d_calibration_v1"]
+	if sceneCalibrationPatch {
+		sourcePath, pathErr := resolveCatalogResourcePath(root, resource)
+		if pathErr != nil {
+			writeStoreError(w, pathErr)
+			return
+		}
+		record := deps.resourceRecordFromCatalog(root, resource)
+		info, isScene := scene3dPeek(record, sourcePath)
+		if !isScene || !scene3dCanDerive(record, info) {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("3D scene calibration is unsupported for this source"))
+			return
+		}
+		sanitized, expectedRevision, validationErr := validateScene3dCalibrationMetadata(
+			rawSceneCalibration,
+			resource.SHA256,
+		)
+		if validationErr != nil {
+			writeError(w, http.StatusBadRequest, validationErr)
+			return
+		}
+		req.Metadata["ultra_scene3d_calibration_v1"] = sanitized
+		req.CalibrationExpectedSourceSHA256 = resource.SHA256
+		req.Scene3dCalibrationExpectedRevision = &expectedRevision
+	}
 	now := domain.Now()
 	updated := resource
 	if len(req.Metadata) > 0 {
@@ -7351,6 +7378,7 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 			Patch:                      req.Metadata,
 			ExpectedSourceSHA256:       req.CalibrationExpectedSourceSHA256,
 			SelectionExpectedRevisions: req.CalibrationSelectionExpectedRevisions,
+			Scene3dExpectedRevision:    req.Scene3dCalibrationExpectedRevision,
 			UpdatedAt:                  now,
 		})
 		if err != nil {
@@ -7374,6 +7402,22 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 					http.StatusInternalServerError,
 					errors.New("viewer calibration persisted but its audit event could not be recorded"),
 				)
+				return
+			}
+		}
+		if sceneCalibrationPatch {
+			if _, recorded := deps.appendResourceEvent(
+				r.Context(),
+				updated.ResourceID,
+				principal,
+				"resource.scene3d_calibration_updated",
+				domain.JSONMap{
+					"source_sha256": resource.SHA256,
+					"calibration":   req.Metadata["ultra_scene3d_calibration_v1"],
+					"updated_at":    now.UTC().Format(time.RFC3339Nano),
+				},
+			); !recorded {
+				writeError(w, http.StatusInternalServerError, errors.New("3D scene calibration persisted but its audit event could not be recorded"))
 				return
 			}
 		}

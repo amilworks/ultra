@@ -4019,6 +4019,9 @@ FOR UPDATE`, resourceID, userID, orgID))
 	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
 		return domain.ResourceRecord{}, err
 	}
+	if err := validateScene3dCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
+	}
 	updatedAt := input.UpdatedAt
 	if updatedAt.IsZero() {
 		updatedAt = domain.Now()

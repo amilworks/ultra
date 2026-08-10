@@ -17,6 +17,7 @@ nominally claim.
 | 3D Gaussian splats | Binary INRIA / Postshot `.ply` | `@sparkjsdev/spark` `SplatMesh` |
 | Dense point maps | COLMAP/HLOC `fused.ply`, generic binary `.ply` with `x,y,z[,rgb]` | `THREE.Points` |
 | Sparse point maps + posed cameras | A ZIP containing exactly one COLMAP/HLOC model (`cameras` + `images` + optional `points3D`) | `THREE.Points` + `THREE.LineSegments` frusta |
+| Reconstruction bundle | A ZIP containing exactly one COLMAP/HLOC model, exactly one Gaussian-splat PLY, and optional source images | `SplatMesh` + exact camera frusta + bounded source-image references |
 | NeRF | — | **Not rendered.** Only its export is. Stated explicitly in `limitations`. |
 
 Compact splat containers (`.spz`, `.splat`, `.ksplat`, `.sog`) are deliberately not
@@ -66,6 +67,16 @@ non-RDF Y-up formats retain +Y. A `declared` or `user` basis is authoritative an
 overridden by that file-family fallback. Initial framing and Reset view place the camera
 on the positive side of this resolved up direction; source positions, splat rotations,
 and spherical-harmonic coefficients remain untouched.
+
+PLY and COLMAP do not reliably declare physical scale, signed up, or handedness. A user
+may therefore persist `ultra_scene3d_calibration_v1` against the immutable source SHA-256:
+`{version, source_sha256, revision, signed_up_axis, handedness, units,
+units_per_source_unit}`. Writes use `expected_revision` compare-and-swap and fail with 409
+when stale. Calibration changes camera-up and the scale-bar label only. Handedness is
+documented, never used to mirror geometry; positions, splat rotations, spherical-harmonic
+coefficients, and COLMAP poses remain byte-for-byte in the source frame. A calibration
+whose digest does not match the active source is ignored rather than inherited by a
+replacement upload.
 
 ---
 
@@ -210,10 +221,13 @@ tree contains.
 
 ### 5.2 Points and the explicit legacy preview: additive density tiers
 
-The derive makes two sequential passes over PLY: one to validate the declared record
-count and measure exact/robust bounds, then one to encode. Resident memory is bounded by
-one source read batch plus `tier_count × max_splats_per_chunk`; it never materializes a
-whole-scene table or octree. Production chunks contain at most **50,000** elements.
+The derive makes bounded sequential passes over PLY or COLMAP `points3D`: one to validate
+the declared record count, measure exact/robust bounds, and choose a deterministic
+bottom-k poster sample, then one to encode additive tiers. Binary and text COLMAP readers
+yield fixed-size blocks and skip variable-width tracks without retaining them. Resident
+memory is bounded by one source block plus `tier_count × max_splats_per_chunk`; it never
+materializes a whole-scene float64 table, duplicate float32 table, or octree. Production
+chunks contain at most **50,000** elements.
 
 For point clouds (and only for an explicitly requested legacy splat preview), every
 finite source record is assigned exactly once to an additive density tier by a
@@ -246,8 +260,8 @@ their adaptive-node count separately, as described above.
 ```jsonc
 {
   "schema": "ultra.scene3d.v1",
-  "generator_revision": "scene3d-rad-v4",
-  "scene_kind": "splat" | "pointcloud" | "colmap",
+  "generator_revision": "scene3d-rad-v5",
+  "scene_kind": "splat" | "pointcloud" | "colmap" | "reconstruction",
   "source": {
     "format": "ply",
     "writer": "postshot",              // parsed from PLY comments when present
@@ -257,6 +271,10 @@ their adaptive-node count separately, as described above.
     "declared_sh_degree": 3,
     "measured_sh_degree": 0,           // MEASURED. See Appendix A.
     "stride_bytes": 236,
+    "geometry_member": "geometry.ply", // reconstruction bundle only
+    "geometry_bytes": 3414709820,
+    "colmap_model_path": "sparse/0",
+    "container_bytes": 3500000000,
     "property_provenance": {
       "preserved": ["x", "y", "z", "f_dc_0", "..."],
       "synthesized": [],
@@ -299,9 +317,18 @@ their adaptive-node count separately, as described above.
     }
   }],
   "limitations": ["..."],              // rendered verbatim in the provenance panel
+  "reconstruction": {                   // bundle-only, measured publication facts
+    "registered_images": 183,
+    "matched_images": 181,
+    "preview_images": 64,
+    "preview_limit": 64,
+    "ambiguous_images": 0,
+    "unreadable_images": 2
+  },
   "service_urls": {
     "chunk": "/v2/uploads/{id}/scene3d/chunk/{index}",
     "lod": "/v2/uploads/{id}/scene3d/lod/scene-lod.rad",
+    "camera_image": "/v2/uploads/{id}/scene3d/image/{index}",
     "download": "/v2/resources/{id}/download"
   }
 }
@@ -316,6 +343,21 @@ display values absent from the source; `omitted` enumerates declared vertex prop
 not transmitted; and `omitted_elements` records whole non-vertex tables such as mesh
 faces. A PLY mesh is therefore disclosed as vertices rendered as points, never implied
 to be a surface.
+
+A reconstruction bundle is accepted only when both tiers see exactly one COLMAP model
+root and exactly one PLY geometry member. Nothing is selected by path depth or lexical
+order. The PLY must be a complete Gaussian-splat schema; a point/mesh PLY does not become
+primary reconstruction geometry by accident. Source images are never bulk-extracted.
+`matched_images` counts exact unique archive-member matches across the complete registered
+image table. Pixel decoding continues only until `preview_limit` previews have published;
+`unreadable_images` therefore counts candidates rejected while filling that bounded budget,
+not files that Lens deliberately never opened after the budget was full.
+The worker publishes at most 64 bounded JPEG previews, each only after one registered
+COLMAP image name resolves to one exact archive member. Duplicate or suffix-ambiguous
+matches are counted and omitted. Preview pixels are display references: they are not
+resampled into the reconstruction, and EXIF orientation is not applied. The camera chunk
+retains source `qvec`, `tvec`, intrinsics, and registered image name so Lens can place the
+viewer at the exact COLMAP pose and show the matched preview beside it.
 
 ### Why `bbox_robust` exists
 
@@ -356,7 +398,7 @@ Mirrors `image.derive_pyramid` exactly, on the same worker node.
 - permanent failure writes `{dst_dir}.failed`; the control plane honours it as backoff
 - redelivery capped by the existing `max_deliver`
 
-`dst_dir` is exactly `{resource_id}__scene3d.v4.sha256-{source_sha256}`. The worker verifies
+`dst_dir` is exactly `{resource_id}__scene3d.v5.sha256-{source_sha256}`. The worker verifies
 the catalog digest and byte count before reading, serializes expensive conversion with
 the shared `scene3d.work.lock`, derives into a sibling temporary directory, revalidates
 the source generation, then atomically renames the complete directory while holding the
@@ -376,6 +418,7 @@ The control plane **never parses a scene file in the request path.** It sniffs h
 | `GET /v2/uploads/{id}/scene3d/manifest` | the manifest, `ETag` + `Cache-Control` |
 | `GET /v2/uploads/{id}/scene3d/chunk/{n}` | chunk bytes, `Range`, strong `ETag`, short private revalidation |
 | `GET /v2/uploads/{id}/scene3d/lod/{artifact}` | canonical RAD/RADC bytes, authenticated `Range`, strong `ETag` |
+| `GET /v2/uploads/{id}/scene3d/image/{index}` | one bounded, source-bound camera JPEG preview (indices 0..63) |
 
 The arm must be added to **both** `handleGetUploadViewerService`
 (`imageservice_viewer.go:296`) and `handleGetUploadViewer` (`handlers.go:8069`) — the
@@ -419,6 +462,10 @@ canonical `scene-lod-N.radc`; the route cannot address an arbitrary derived file
 - Camera frusta are built from an explicit projection matrix, never
   `THREE.PerspectiveCamera(fov, aspect)` — that is structurally a symmetric frustum and
   cannot represent a principal-point offset.
+- Reconstruction bundles expose an opt-in camera-validation panel. "View from camera"
+  uses the exact COLMAP centre, orientation basis, and intrinsic projection. The ordinary
+  scale bar is hidden in that mode because a symmetric-FOV scale computation would be
+  false for an asymmetric calibrated projection; Reset view restores scientific framing.
 - `devicePixelRatio` capped at 2, mirroring `resolveVolumePixelRatio`.
 - Rendering is invalidation-driven. Spark's asynchronous update is awaited at complete
   tier boundaries; camera, resize and dirty events request one frame. There is no

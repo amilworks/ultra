@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 import os
 import tempfile
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
@@ -34,7 +35,9 @@ __all__ = [
     "StreamedPlyResult",
     "analyze_splats",
     "derive_ply",
+    "derive_points",
     "scan_ply",
+    "scan_points",
     "tier_rates",
 ]
 
@@ -88,6 +91,80 @@ class SplatAnalysis:
     out_of_range_color_fraction: float
     nonfinite: int
     sample: dict[str, Any]
+
+
+PointBlocks = Callable[[], Iterable[tuple[np.ndarray, np.ndarray]]]
+
+
+def _point_block(
+    block: tuple[np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    xyz = np.asarray(block[0], dtype=np.float64)
+    rgb = np.asarray(block[1], dtype=np.uint8)
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        raise DeterministicDerivativeError("unsupported_scene_source")
+    if rgb.shape != xyz.shape:
+        raise DeterministicDerivativeError("unsupported_scene_source")
+    return xyz, rgb
+
+
+def scan_points(iter_blocks: PointBlocks, *, sample_cap: int = ROBUST_SAMPLE_CAP) -> PlyScan:
+    """Measure a generic coloured point stream with bounded resident memory.
+
+    The robust box is a deterministic bottom-k hash sample of finite source rows.  It
+    stays uniform without knowing the record count in advance, which is important for
+    COLMAP text models that have no count header.
+    """
+
+    if sample_cap < 1:
+        raise ValueError("sample_cap must be positive")
+    seen = 0
+    valid = 0
+    low = np.full(3, np.inf, dtype=np.float64)
+    high = np.full(3, -np.inf, dtype=np.float64)
+    sample_xyz = np.empty((0, 3), dtype=np.float64)
+    sample_hash = np.empty(0, dtype=np.uint64)
+    for raw in iter_blocks():
+        xyz, _rgb = _point_block(raw)
+        count = int(xyz.shape[0])
+        finite = np.isfinite(xyz).all(axis=1)
+        kept = xyz[finite]
+        if kept.size:
+            low = np.minimum(low, kept.min(axis=0))
+            high = np.maximum(high, kept.max(axis=0))
+            rows = np.arange(seen, seen + count, dtype=np.uint64)[finite]
+            hashes = _splitmix64(rows)
+            candidate_xyz = np.concatenate((sample_xyz, kept), axis=0)
+            candidate_hash = np.concatenate((sample_hash, hashes), axis=0)
+            if candidate_hash.size > sample_cap:
+                selected = np.argpartition(candidate_hash, sample_cap - 1)[:sample_cap]
+                sample_xyz = candidate_xyz[selected].copy()
+                sample_hash = candidate_hash[selected].copy()
+            else:
+                sample_xyz = candidate_xyz
+                sample_hash = candidate_hash
+            valid += int(kept.shape[0])
+        seen += count
+    if valid < 1:
+        return PlyScan(
+            source_total=seen,
+            valid_total=0,
+            nonfinite=seen,
+            bbox=[0.0] * 6,
+            bbox_robust=[0.0] * 6,
+        )
+    robust_low = np.percentile(sample_xyz, 1.0, axis=0)
+    robust_high = np.percentile(sample_xyz, 99.0, axis=0)
+    return PlyScan(
+        source_total=seen,
+        valid_total=valid,
+        nonfinite=seen - valid,
+        bbox=[*(float(value) for value in low), *(float(value) for value in high)],
+        bbox_robust=[
+            *(float(value) for value in robust_low),
+            *(float(value) for value in robust_high),
+        ],
+    )
 
 
 def _positions(block: np.ndarray) -> np.ndarray:
@@ -454,6 +531,79 @@ def _to_byte(values: np.ndarray) -> np.ndarray:
         return byte_values
     byte_values = np.clip(array, 0, 255).astype(np.uint8)
     return byte_values
+
+
+def derive_points(
+    *,
+    directory: str,
+    iter_blocks: PointBlocks,
+    scan: PlyScan,
+    max_per_chunk: int,
+    tier_count: int,
+    preview_points: int = DEFAULT_POINT_PREVIEW,
+    poster_sample: int,
+) -> StreamedPlyResult:
+    """Emit a generic coloured point stream into deterministic bounded LoD tiers."""
+
+    if max_per_chunk < 1 or max_per_chunk > 250_000:
+        raise ValueError("max_per_chunk must be between 1 and 250000")
+    if scan.valid_total < 1:
+        raise DeterministicDerivativeError("empty_scene_source")
+    rates = tier_rates(scan.valid_total, preview_points, tier_count)
+    os.makedirs(directory, exist_ok=True)
+    chunks = _ChunkSet(
+        directory,
+        scene_kind="pointcloud",
+        tier_count=len(rates),
+        max_per_chunk=max_per_chunk,
+        measured_sh_degree=0,
+        has_alpha=False,
+    )
+    sample = _PosterSample(scan.valid_total, poster_sample)
+    source_seen = 0
+    valid_seen = 0
+    for raw in iter_blocks():
+        xyz, rgb = _point_block(raw)
+        source_count = int(xyz.shape[0])
+        finite = np.isfinite(xyz).all(axis=1)
+        world64 = xyz[finite]
+        source_rows = np.arange(source_seen, source_seen + source_count, dtype=np.uint64)[finite]
+        source_seen += source_count
+        if world64.size == 0:
+            continue
+        rgba = np.full((world64.shape[0], 4), 255, dtype=np.uint8)
+        rgba[:, :3] = rgb[finite]
+        levels = _levels(source_rows, rates)
+        poster_rows = sample.take(int(world64.shape[0]))
+        for level in range(len(rates)):
+            selected = levels == level
+            if np.any(selected):
+                chunks.append_points(level, world64[selected], rgba[selected])
+        if np.any(poster_rows):
+            sample.positions.append(np.asarray(world64[poster_rows], dtype=np.float32))
+            sample.colors.append(rgba[poster_rows, :3].astype(np.float32) / np.float32(255.0))
+        valid_seen += int(world64.shape[0])
+    if source_seen != scan.source_total:
+        raise DeterministicDerivativeError("scene_source_changed")
+    if valid_seen != scan.valid_total:
+        raise DeterministicDerivativeError("scene_source_changed")
+    chunks.finish()
+    if sum(entry["count"] for entry in chunks.entries) != scan.valid_total:
+        raise RuntimeError("streaming derive lost source records")
+    return StreamedPlyResult(
+        scene_kind="pointcloud",
+        source_total=scan.source_total,
+        total=scan.valid_total,
+        entries=chunks.entries,
+        tiers=chunks.tiers,
+        bbox=scan.bbox,
+        bbox_robust=scan.bbox_robust,
+        measured_sh_degree=0,
+        out_of_range_color_fraction=0.0,
+        nonfinite=scan.nonfinite,
+        max_position_error=chunks.max_position_error,
+        sample=sample.result(splat=False),
+    )
 
 
 def derive_ply(

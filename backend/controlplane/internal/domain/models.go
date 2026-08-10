@@ -284,6 +284,7 @@ type MergeResourceMetadataInput struct {
 	Patch                      JSONMap
 	ExpectedSourceSHA256       string
 	SelectionExpectedRevisions map[string]int
+	Scene3dExpectedRevision    *int
 	UpdatedAt                  time.Time
 }
 

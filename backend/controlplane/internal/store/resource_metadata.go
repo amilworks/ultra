@@ -16,6 +16,13 @@ func mergeResourceMetadata(existing domain.JSONMap, patch domain.JSONMap) domain
 		merged = cloneResourceMetadataValue(existing).(domain.JSONMap)
 	}
 	for key, value := range patch {
+		// Scene frame calibration is one exact source-bound snapshot. Deep-merging a
+		// newer calibration into an older one could retain a stale axis or scale, so
+		// this reserved record is always replaced atomically.
+		if key == "ultra_scene3d_calibration_v1" {
+			merged[key] = cloneResourceMetadataValue(value)
+			continue
+		}
 		// Viewer calibration is a versioned, SHA-bound snapshot, not an open-ended
 		// metadata namespace. Preserve independently saved C/T entries only when
 		// the patch names the same exact source SHA; each patched selection replaces
@@ -117,6 +124,42 @@ func validateViewerCalibrationPrecondition(
 		if revision != expectedRevision {
 			return ErrConflict
 		}
+	}
+	return nil
+}
+
+func validateScene3dCalibrationPrecondition(
+	resource domain.ResourceRecord,
+	input domain.MergeResourceMetadataInput,
+) error {
+	if input.Scene3dExpectedRevision == nil {
+		return nil
+	}
+	expectedRevision := *input.Scene3dExpectedRevision
+	expectedSHA := strings.TrimSpace(input.ExpectedSourceSHA256)
+	if expectedRevision < 0 ||
+		expectedSHA == "" ||
+		expectedSHA != strings.TrimSpace(resource.SHA256) ||
+		strings.TrimSpace(resource.Status) != "active" ||
+		!resource.DeletedAt.IsZero() {
+		return ErrConflict
+	}
+	patch, patchOK := resourceMetadataMap(input.Patch["ultra_scene3d_calibration_v1"])
+	patchSHA, patchSHAOK := patch["source_sha256"].(string)
+	if !patchOK || !patchSHAOK || strings.TrimSpace(patchSHA) != expectedSHA {
+		return ErrConflict
+	}
+	revision := 0
+	if existing, ok := resourceMetadataMap(resource.Metadata["ultra_scene3d_calibration_v1"]); ok {
+		existingSHA, _ := existing["source_sha256"].(string)
+		parsed, valid := resourceMetadataInteger(existing["revision"])
+		if strings.TrimSpace(existingSHA) != expectedSHA || !valid || parsed <= 0 {
+			return ErrConflict
+		}
+		revision = parsed
+	}
+	if revision != expectedRevision {
+		return ErrConflict
 	}
 	return nil
 }

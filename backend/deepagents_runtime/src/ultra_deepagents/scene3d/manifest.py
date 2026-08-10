@@ -25,7 +25,7 @@ __all__ = [
 ]
 
 SCHEMA = "ultra.scene3d.v1"
-DERIVATIVE_REVISION = "v4"
+DERIVATIVE_REVISION = "v5"
 GENERATOR_REVISION = f"scene3d-rad-{DERIVATIVE_REVISION}"
 _AXIS_NAMES = ("x", "y", "z")
 # An axis is only called "up" when it is clearly the thin one. Aerial and corridor scans
@@ -214,7 +214,7 @@ def build_manifest(
     scale comes from COLMAP's arbitrary reconstruction scale, and labelling that "meters"
     would make every measurement drawn on top of it wrong by an unknown factor.
     """
-    source = {
+    source: dict[str, Any] = {
         "format": source_format,
         "writer": writer,
         "vertex_count": int(vertex_count),

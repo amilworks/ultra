@@ -5341,6 +5341,30 @@ export class ApiClient {
     return response.arrayBuffer();
   }
 
+  async fetchScene3dCameraImage(
+    fileId: string,
+    index: number,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Blob> {
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new Error(`scene3d camera image index must be a non-negative integer, got ${index}`);
+    }
+    const safeFileId = encodeURIComponent(fileId);
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/image/${index}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: options.signal,
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return response.blob();
+  }
+
   // Spark's PagedSplats performs its own Range requests for the RAD header and the
   // relative RADC pages named inside it. Give that loader the same authenticated
   // request context as every ordinary API call; handing it a bare URL would work for

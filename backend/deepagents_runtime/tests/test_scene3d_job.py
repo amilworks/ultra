@@ -48,7 +48,7 @@ REAL_SPLAT_STRIDE = 236
 def _derive(tmp_path, src, **options):
     payload = src.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v5.sha256-{digest}"
     result = run_scene3d_derive_job(
         {
             "resource_id": "file-1",
@@ -199,7 +199,7 @@ def test_production_splat_delivery_publishes_paged_quality_rad(tmp_path, monkeyp
 
     assert result["chunk_count"] == 2
     assert result["tier_count"] == 0
-    assert document["generator_revision"] == "scene3d-rad-v4"
+    assert document["generator_revision"] == "scene3d-rad-v5"
     assert document["source"]["property_provenance"]["synthesized"] == []
     assert document["source"]["property_provenance"]["omitted"] == [
         f"f_rest_{index}" for index in range(45)
@@ -546,7 +546,7 @@ def test_truncated_source_is_deterministic(tmp_path):
 def test_strict_job_rejects_a_catalog_digest_mismatch_without_publishing(tmp_path):
     src = write_postshot_splats(tmp_path / "scene.ply", count=64)
     wrong_digest = "0" * 64
-    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{wrong_digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v5.sha256-{wrong_digest}"
 
     with pytest.raises(StaleDerivativeJobError) as caught:
         run_scene3d_derive_job(
@@ -592,7 +592,7 @@ def test_strict_deterministic_failure_is_atomic_and_does_not_leak_source_path(tm
     payload = src.read_bytes()[:-236]
     src.write_bytes(payload)
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v5.sha256-{digest}"
 
     with pytest.raises(DeterministicDerivativeError) as caught:
         run_scene3d_derive_job(
@@ -642,6 +642,41 @@ def test_strict_redelivery_reuses_the_committed_generation_without_rederiving(
     assert second["reused"] is True
 
 
+def test_reconstruction_commit_requires_every_advertised_camera_preview(tmp_path):
+    payload = b"immutable reconstruction archive"
+    digest = hashlib.sha256(payload).hexdigest()
+    source = tmp_path / "scene.zip"
+    source.write_bytes(payload)
+    destination = tmp_path / "derived" / f"file-1__scene3d.v5.sha256-{digest}"
+    destination.mkdir(parents=True)
+    (destination / POSTER_NAME).write_bytes(b"poster")
+    (destination / MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "schema": "ultra.scene3d.v1",
+                "generator_revision": "scene3d-rad-v5",
+                "scene_kind": "reconstruction",
+                "source": {"sha256": digest, "bytes": len(payload)},
+                "layers": [],
+                "reconstruction": {"preview_images": 1},
+            }
+        )
+    )
+    job = Scene3dDeriveJob.from_dict(
+        {
+            "resource_id": "file-1",
+            "src_path": str(source),
+            "dst_dir": str(destination),
+            "source_sha256": digest,
+            "source_size_bytes": len(payload),
+        }
+    )
+
+    assert scene_job._published_scene_matches(destination, job) is False
+    (destination / "camera-image_00000.jpg").write_bytes(b"jpeg")
+    assert scene_job._published_scene_matches(destination, job) is True
+
+
 @pytest.mark.parametrize(
     ("option", "value"),
     [
@@ -658,7 +693,7 @@ def test_queue_job_bounds_every_allocation_multiplier(tmp_path, option, value):
     src = write_postshot_splats(tmp_path / "scene.ply", count=32)
     payload = src.read_bytes()
     digest = hashlib.sha256(payload).hexdigest()
-    dst = tmp_path / "derived" / f"file-1__scene3d.v4.sha256-{digest}"
+    dst = tmp_path / "derived" / f"file-1__scene3d.v5.sha256-{digest}"
 
     with pytest.raises(DeterministicDerivativeError) as caught:
         run_scene3d_derive_job(

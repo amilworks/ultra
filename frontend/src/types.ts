@@ -1928,6 +1928,19 @@ export type Scene3dSource = {
   measured_sh_degree: number;
   stride_bytes: number;
   property_provenance?: Scene3dPropertyProvenance;
+  geometry_member?: string;
+  geometry_bytes?: number;
+  colmap_model_path?: string;
+  container_bytes?: number;
+};
+
+export type Scene3dReconstructionInfo = {
+  registered_images: number;
+  matched_images: number;
+  preview_images: number;
+  preview_limit: number;
+  ambiguous_images: number;
+  unreadable_images: number;
 };
 
 /** A resolved, ready-to-render scene3d manifest (contract §6). */
@@ -1940,7 +1953,8 @@ export type Scene3dManifest = {
   layers: Scene3dLayer[];
   /** The CIFTI honesty field: plain sentences saying what the viewer is NOT doing. */
   limitations: string[];
-  service_urls: { chunk?: string; lod?: string; download?: string };
+  reconstruction?: Scene3dReconstructionInfo;
+  service_urls: { chunk?: string; lod?: string; camera_image?: string; download?: string };
 };
 
 /**
@@ -1957,6 +1971,17 @@ export type Scene3dManifestResponse = Partial<Scene3dManifest> & {
   error?: string | null;
 };
 
+export type Scene3dCalibration = {
+  version: 1;
+  source_sha256: string;
+  revision: number;
+  signed_up_axis: "+x" | "-x" | "+y" | "-y" | "+z" | "-z";
+  handedness: "right" | "left";
+  units: "arbitrary" | "m" | "cm" | "mm" | "um" | "nm";
+  /** Display units represented by one immutable source-coordinate unit. */
+  units_per_source_unit: number;
+};
+
 /** Present for kind:"scene3d" — the slot the viewer ladder stamps on the /viewer response. */
 export type Scene3dViewerData = {
   /** Derive-job state at the moment /viewer was served; the shell re-checks by polling. */
@@ -1965,7 +1990,14 @@ export type Scene3dViewerData = {
   /** Source element count if the header sniff found one; 0 when unknown. */
   element_count: number;
   message?: string | null;
-  service_urls: { manifest?: string; chunk?: string; lod?: string; download?: string };
+  calibration?: Scene3dCalibration | null;
+  service_urls: {
+    manifest?: string;
+    chunk?: string;
+    lod?: string;
+    camera_image?: string;
+    download?: string;
+  };
 };
 
 export type UploadViewerInfo = {

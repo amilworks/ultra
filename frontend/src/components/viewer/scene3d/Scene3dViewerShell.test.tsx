@@ -247,7 +247,7 @@ describe("Scene3dViewerShell", () => {
   it("preserves the authenticated paged RAD contract through wire normalization", async () => {
     const radManifest: Scene3dManifestResponse = {
       ...READY_MANIFEST,
-      generator_revision: "scene3d-rad-v4",
+      generator_revision: "scene3d-rad-v5",
       scene_kind: "splat",
       source: {
         ...READY_MANIFEST.source!,
@@ -338,5 +338,75 @@ describe("Scene3dViewerShell", () => {
     expect(points).toHaveAttribute("aria-pressed", "false");
 
     fireEvent.click(screen.getByRole("button", { name: /reset view/i }));
+  });
+
+  it("keeps reconstruction camera validation opt-in and names the exact registered image", async () => {
+    const cameraPayload = new TextEncoder().encode(JSON.stringify({ cameras: [
+      {
+        qvec: [1, 0, 0, 0],
+        tvec: [0, 0, 2],
+        name: "images/frame-0042.jpg",
+        camera: {
+          model: "PINHOLE",
+          width: 1920,
+          height: 1080,
+          params: [1000, 1000, 960, 540],
+        },
+      },
+      {
+        qvec: [1, 0, 0, 0],
+        tvec: [0, 0, 4],
+        name: "images/unsupported.jpg",
+        camera: {
+          model: "FUTURE_CAMERA_MODEL",
+          width: 1920,
+          height: 1080,
+          params: [1000, 1000, 960, 540],
+        },
+      },
+    ] })).buffer as ArrayBuffer;
+    const reconstruction: Scene3dManifestResponse = {
+      ...READY_MANIFEST,
+      scene_kind: "reconstruction",
+      source: {
+        ...READY_MANIFEST.source!,
+        format: "reconstruction_bundle",
+        sha256: "c".repeat(64),
+        geometry_member: "geometry.ply",
+        geometry_bytes: 1234,
+        colmap_model_path: "sparse/0",
+        container_bytes: 4321,
+      },
+      layers: [{
+        type: "cameras",
+        encoding: "json",
+        total: 1,
+        chunks: [{ index: 0, count: 1, bytes: cameraPayload.byteLength, origin: [0, 0, 0], bbox: [] }],
+        tiers: [[0]],
+        activation_domain: "post",
+        source_frame: "rdf",
+        quantization: {},
+      }],
+      reconstruction: {
+        registered_images: 2,
+        matched_images: 0,
+        preview_images: 0,
+        preview_limit: 64,
+        ambiguous_images: 0,
+        unreadable_images: 0,
+      },
+    };
+    const apiClient = clientWith([reconstruction], cameraPayload);
+
+    render(<Scene3dViewerShell viewerInfo={VIEWER_INFO} apiClient={apiClient} />);
+
+    const summary = await screen.findByText("Camera validation");
+    expect(summary.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText(/2 registered · 1 viewable · 0 previews/i)).toBeInTheDocument();
+    expect(await screen.findByText("images/frame-0042.jpg")).toBeInTheDocument();
+    expect(screen.queryByText("images/unsupported.jpg")).not.toBeInTheDocument();
+    expect(screen.getByText(/No uniquely matched source image/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /view from camera/i }));
+    expect(screen.getByText(/pose and intrinsic projection are applied exactly/i)).toBeInTheDocument();
   });
 });

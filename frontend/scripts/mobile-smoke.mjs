@@ -371,12 +371,15 @@ function assertTypographyMetrics(typography, testCase) {
   );
 
   const expectedWeights = {
-    body: "400",
-    composer: "400",
+    // The calibrated variable body and reading registers intentionally use
+    // 430. Keep this browser-level assertion aligned with the source contract
+    // checked by check-typography-contract.mjs and light-theme-ink.test.ts.
+    body: "430",
+    composer: "430",
     invitation: "400",
     action: "500",
-    reading: "400",
-    readingItalic: "400",
+    reading: "430",
+    readingItalic: "430",
     // 600, matching the reading heading rather than exceeding it. At 700 an
     // inline **emphasis** rendered HEAVIER than every heading above it (h2/h3/h4
     // are all 600), and at h4's 16px it beat the heading at identical size.
@@ -409,7 +412,11 @@ function assertTypographyMetrics(typography, testCase) {
       `${testCase.name}: ${role} weight ${style.weight} != ${expectedWeight}`
     );
     assert(style.synthesis === "none", `${testCase.name}: ${role} permits font synthesis`);
-    assert(style.opticalSizing === "auto", `${testCase.name}: ${role} lost optical sizing`);
+    const expectedOpticalSizing = role === "invitation" ? "none" : "auto";
+    assert(
+      style.opticalSizing === expectedOpticalSizing,
+      `${testCase.name}: ${role} optical sizing ${style.opticalSizing} != ${expectedOpticalSizing}`
+    );
   }
   assert(
     typography.roles.readingItalic.style === "italic",

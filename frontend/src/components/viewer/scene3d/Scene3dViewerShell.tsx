@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { ApiClient } from "@/lib/api";
 import type {
+  Scene3dCalibration,
   Scene3dChunkInfo,
   Scene3dLayer,
   Scene3dManifest,
@@ -11,8 +12,13 @@ import type {
 } from "@/types";
 import { Download, RotateCcw } from "lucide-react";
 
-import { Scene3dCanvas, type Scene3dLayerVisibility, type Scene3dSpecies } from "./Scene3dCanvas";
-import { describeSceneUpDirection } from "./sceneOrientation";
+import {
+  Scene3dCanvas,
+  type Scene3dCameraCatalogEntry,
+  type Scene3dLayerVisibility,
+  type Scene3dSpecies,
+} from "./Scene3dCanvas";
+import { describeSceneUpDirection, inferredSignedUpAxis } from "./sceneOrientation";
 import "./scene3d-viewer.css";
 
 type Props = {
@@ -21,6 +27,11 @@ type Props = {
 };
 
 type SceneStatus = "loading" | "deriving" | "ready" | "failed";
+
+type SceneCalibrationDraft = Pick<
+  Scene3dCalibration,
+  "signed_up_axis" | "handedness" | "units" | "units_per_source_unit"
+>;
 
 type ResolvedScene = {
   status: SceneStatus;
@@ -181,6 +192,9 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
     ? source.property_provenance
     : null;
   const world: Record<string, unknown> = isRecord(raw.world) ? raw.world : {};
+  const reconstruction: Record<string, unknown> | null = isRecord(raw.reconstruction)
+    ? raw.reconstruction
+    : null;
   const urls: Record<string, unknown> = isRecord(raw.service_urls) ? raw.service_urls : {};
   return {
     status,
@@ -200,6 +214,16 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
         declared_sh_degree: toNonNegativeInt(source.declared_sh_degree, 0),
         measured_sh_degree: toNonNegativeInt(source.measured_sh_degree, 0),
         stride_bytes: toNonNegativeInt(source.stride_bytes, 0),
+        geometry_member:
+          source.geometry_member == null ? undefined : String(source.geometry_member),
+        geometry_bytes:
+          source.geometry_bytes == null ? undefined : toNonNegativeInt(source.geometry_bytes, 0),
+        colmap_model_path:
+          source.colmap_model_path == null ? undefined : String(source.colmap_model_path),
+        container_bytes:
+          source.container_bytes == null
+            ? undefined
+            : toNonNegativeInt(source.container_bytes, 0),
         property_provenance: propertyProvenance
           ? {
             preserved: toStringArray(propertyProvenance.preserved),
@@ -231,9 +255,21 @@ const resolveScene = (raw: Scene3dManifestResponse | null): ResolvedScene => {
       },
       layers,
       limitations: Array.isArray(raw.limitations) ? raw.limitations.map((item) => String(item)) : [],
+      reconstruction: reconstruction
+        ? {
+          registered_images: toNonNegativeInt(reconstruction.registered_images, 0),
+          matched_images: toNonNegativeInt(reconstruction.matched_images, 0),
+          preview_images: toNonNegativeInt(reconstruction.preview_images, 0),
+          preview_limit: toNonNegativeInt(reconstruction.preview_limit, 0),
+          ambiguous_images: toNonNegativeInt(reconstruction.ambiguous_images, 0),
+          unreadable_images: toNonNegativeInt(reconstruction.unreadable_images, 0),
+        }
+        : undefined,
       service_urls: {
         chunk: urls.chunk == null ? undefined : String(urls.chunk),
         lod: urls.lod == null ? undefined : String(urls.lod),
+        camera_image:
+          urls.camera_image == null ? undefined : String(urls.camera_image),
         download: urls.download == null ? undefined : String(urls.download),
       },
     },
@@ -268,6 +304,27 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
     useState<Partial<Scene3dLayerVisibility> | null>(null);
   const [pointSize, setPointSize] = useState(1.6);
   const [resetToken, setResetToken] = useState(0);
+  const [calibration, setCalibration] = useState<Scene3dCalibration | null>(null);
+  const [calibrationDraft, setCalibrationDraft] = useState<SceneCalibrationDraft>({
+    signed_up_axis: "+y",
+    handedness: "right",
+    units: "arbitrary",
+    units_per_source_unit: 1,
+  });
+  const calibrationIdentityRef = useRef<string | null>(null);
+  const [calibrationSaving, setCalibrationSaving] = useState(false);
+  const [calibrationError, setCalibrationError] = useState<string | null>(null);
+  const [cameraCatalog, setCameraCatalog] = useState<Scene3dCameraCatalogEntry[]>([]);
+  const [selectedCameraIndex, setSelectedCameraIndex] = useState(0);
+  const [cameraViewRequest, setCameraViewRequest] = useState<{
+    index: number;
+    token: number;
+  } | null>(null);
+  const [cameraPreviewState, setCameraPreviewState] = useState<{
+    key: string;
+    url: string | null;
+    error: string | null;
+  }>({ key: "", url: null, error: null });
 
   const scene = useMemo(() => resolveScene(response), [response]);
   const settled = scene.status === "ready" || scene.status === "failed";
@@ -291,6 +348,26 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
         const manifest = await apiClient.getScene3dManifest(fileId);
         if (!cancelled) {
           setResponse(manifest);
+          const ready = resolveScene(manifest).manifest;
+          if (ready) {
+            const sourceSHA = ready.source.sha256;
+            const identity = `${fileId}:${sourceSHA ?? "unbound"}`;
+            if (calibrationIdentityRef.current !== identity) {
+              const saved = viewerInfo.scene3d?.calibration;
+              const current =
+                saved && sourceSHA && saved.source_sha256 === sourceSHA ? saved : null;
+              calibrationIdentityRef.current = identity;
+              setCalibration(current);
+              setCalibrationDraft(
+                current ?? {
+                  signed_up_axis: inferredSignedUpAxis(ready),
+                  handedness: "right",
+                  units: "arbitrary",
+                  units_per_source_unit: 1,
+                }
+              );
+            }
+          }
         }
       } catch (cause: unknown) {
         if (!cancelled) {
@@ -302,7 +379,7 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [apiClient, fileId, attempt, settled]);
+  }, [apiClient, fileId, attempt, settled, viewerInfo.scene3d?.calibration]);
 
   // Poll while the derive job runs. Backoff, not a hot loop.
   useEffect(() => {
@@ -318,6 +395,59 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
     setResponse(null);
     setAttempt((value) => value + 1);
   }, []);
+
+  const updateCameraCatalog = useCallback((entries: Scene3dCameraCatalogEntry[]) => {
+    setCameraCatalog(entries);
+    setSelectedCameraIndex((current) =>
+      entries.some((entry) => entry.index === current) ? current : (entries[0]?.index ?? 0)
+    );
+  }, []);
+
+  const selectedCamera = useMemo(
+    () => cameraCatalog.find((entry) => entry.index === selectedCameraIndex) ?? null,
+    [cameraCatalog, selectedCameraIndex]
+  );
+  const previewCount = useMemo(
+    () => cameraCatalog.filter((entry) => entry.sourceImage !== undefined).length,
+    [cameraCatalog]
+  );
+  const registeredCameraCount =
+    scene.manifest?.reconstruction?.registered_images ?? cameraCatalog.length;
+  const cameraPreviewKey = selectedCamera?.sourceImage
+    ? `${selectedCamera.index}:${selectedCamera.sourceImage.artifact_index}`
+    : "";
+  const cameraPreviewUrl =
+    cameraPreviewState.key === cameraPreviewKey ? cameraPreviewState.url : null;
+  const cameraPreviewError =
+    cameraPreviewState.key === cameraPreviewKey ? cameraPreviewState.error : null;
+
+  useEffect(() => {
+    const preview = selectedCamera?.sourceImage;
+    if (!preview) return;
+    const key = `${selectedCamera.index}:${preview.artifact_index}`;
+    const abort = new AbortController();
+    let objectUrl: string | null = null;
+    void apiClient
+      .fetchScene3dCameraImage(fileId, preview.artifact_index, { signal: abort.signal })
+      .then((blob) => {
+        if (abort.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setCameraPreviewState({ key, url: objectUrl, error: null });
+      })
+      .catch((previewError: unknown) => {
+        if (abort.signal.aborted) return;
+        setCameraPreviewState({
+          key,
+          url: null,
+          error:
+            previewError instanceof Error ? previewError.message : "Could not load this preview.",
+        });
+      });
+    return () => {
+      abort.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [apiClient, fileId, selectedCamera]);
 
   const totals = useMemo(() => layerTotals(scene.manifest), [scene.manifest]);
   const present = useMemo(
@@ -347,7 +477,43 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
     scene.manifest?.service_urls?.download ?? viewerInfo.scene3d?.service_urls?.download;
   const measuredSh = scene.manifest?.source.measured_sh_degree;
   const declaredSh = scene.manifest?.source.declared_sh_degree;
-  const upDirection = scene.manifest ? describeSceneUpDirection(scene.manifest) : "unknown";
+  const upDirection = scene.manifest
+    ? describeSceneUpDirection(scene.manifest, calibration)
+    : "unknown";
+
+  const saveCalibration = useCallback(async () => {
+    const sourceSHA = scene.manifest?.source.sha256;
+    const scale = calibrationDraft.units_per_source_unit;
+    if (!sourceSHA || !Number.isFinite(scale) || scale < 1e-12 || scale > 1e12) {
+      setCalibrationError("Enter a positive scale and wait for source identity to resolve.");
+      return;
+    }
+    setCalibrationSaving(true);
+    setCalibrationError(null);
+    try {
+      await apiClient.patchResourceMetadata(fileId, {
+        ultra_scene3d_calibration_v1: {
+          version: 1,
+          source_sha256: sourceSHA,
+          expected_revision: calibration?.revision ?? 0,
+          ...calibrationDraft,
+        },
+      });
+      setCalibration({
+        version: 1,
+        source_sha256: sourceSHA,
+        revision: (calibration?.revision ?? 0) + 1,
+        ...calibrationDraft,
+      });
+      setResetToken((value) => value + 1);
+    } catch (saveError) {
+      setCalibrationError(
+        saveError instanceof Error ? saveError.message : "Could not save this calibration."
+      );
+    } finally {
+      setCalibrationSaving(false);
+    }
+  }, [apiClient, calibration, calibrationDraft, fileId, scene.manifest?.source.sha256]);
 
   const downloadButton = downloadUrl ? (
     <Button asChild variant="outline" size="sm">
@@ -455,6 +621,87 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
                 />
               </div>
             ) : null}
+            <details className="scene3d-calibration-control">
+              <summary
+                title="Calibrate view-up and physical scale without changing source coordinates"
+              >
+                Frame &amp; scale
+              </summary>
+              <div className="scene3d-calibration-panel">
+                <div className="scene3d-calibration-grid">
+                  <label>
+                    <span>Up axis</span>
+                    <select
+                      value={calibrationDraft.signed_up_axis}
+                      onChange={(event) => setCalibrationDraft((current) => ({
+                        ...current,
+                        signed_up_axis: event.target.value as Scene3dCalibration["signed_up_axis"],
+                      }))}
+                    >
+                      <option value="+x">+X</option><option value="-x">−X</option>
+                      <option value="+y">+Y</option><option value="-y">−Y</option>
+                      <option value="+z">+Z</option><option value="-z">−Z</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Handedness</span>
+                    <select
+                      value={calibrationDraft.handedness}
+                      title="Documents the source coordinate frame; it does not mirror geometry"
+                      onChange={(event) => setCalibrationDraft((current) => ({
+                        ...current,
+                        handedness: event.target.value as Scene3dCalibration["handedness"],
+                      }))}
+                    >
+                      <option value="right">Right-handed</option>
+                      <option value="left">Left-handed</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Unit</span>
+                    <select
+                      value={calibrationDraft.units}
+                      onChange={(event) => setCalibrationDraft((current) => ({
+                        ...current,
+                        units: event.target.value as Scene3dCalibration["units"],
+                      }))}
+                    >
+                      <option value="arbitrary">Arbitrary</option>
+                      <option value="m">m</option><option value="cm">cm</option>
+                      <option value="mm">mm</option><option value="um">µm</option>
+                      <option value="nm">nm</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Per source unit</span>
+                    <input
+                      type="number"
+                      min="0.000000000001"
+                      max="1000000000000"
+                      step="any"
+                      value={calibrationDraft.units_per_source_unit}
+                      onChange={(event) => setCalibrationDraft((current) => ({
+                        ...current,
+                        units_per_source_unit: Number(event.target.value),
+                      }))}
+                    />
+                  </label>
+                </div>
+                <p>
+                  View-up and the scale bar change. Geometry, splat orientation, and
+                  COLMAP poses stay in the source frame.
+                </p>
+                {calibrationError ? <small role="alert">{calibrationError}</small> : null}
+                <button
+                  type="button"
+                  className="scene3d-btn"
+                  disabled={calibrationSaving || !scene.manifest.source.sha256}
+                  onClick={() => void saveCalibration()}
+                >
+                  {calibrationSaving ? "Saving…" : calibration ? "Update" : "Save"}
+                </button>
+              </div>
+            </details>
             <button
               type="button"
               className="scene3d-btn scene3d-reset"
@@ -481,8 +728,103 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
               visibility={visibility}
               pointSize={pointSize}
               resetToken={resetToken}
+              calibration={calibration}
+              onCameraCatalog={updateCameraCatalog}
+              cameraViewRequest={cameraViewRequest}
             />
           </div>
+
+          {cameraCatalog.length > 0 ? (
+            <details className="scene3d-camera-validation">
+              <summary>
+                <span>Camera validation</span>
+                <span>
+                  {count(registeredCameraCount)} registered · {count(cameraCatalog.length)} viewable ·{" "}
+                  {count(previewCount)} previews
+                </span>
+              </summary>
+              <div className="scene3d-camera-panel">
+                <div className="scene3d-camera-controls">
+                  <div className="scene3d-section-title">Registered image</div>
+                  <div className="scene3d-camera-stepper">
+                    <button
+                      type="button"
+                      className="scene3d-btn"
+                      aria-label="Previous registered camera"
+                      disabled={selectedCameraIndex <= 0}
+                      onClick={() => setSelectedCameraIndex((value) => Math.max(0, value - 1))}
+                    >
+                      Previous
+                    </button>
+                    <label>
+                      <span className="sr-only">Registered camera number</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={cameraCatalog.length}
+                        value={selectedCameraIndex + 1}
+                        onChange={(event) => {
+                          const next = Math.floor(Number(event.target.value));
+                          if (Number.isFinite(next)) {
+                            setSelectedCameraIndex(
+                              Math.min(cameraCatalog.length - 1, Math.max(0, next - 1))
+                            );
+                          }
+                        }}
+                      />
+                      <span>of {count(cameraCatalog.length)}</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="scene3d-btn"
+                      aria-label="Next registered camera"
+                      disabled={selectedCameraIndex >= cameraCatalog.length - 1}
+                      onClick={() => setSelectedCameraIndex((value) =>
+                        Math.min(cameraCatalog.length - 1, value + 1)
+                      )}
+                    >
+                      Next
+                    </button>
+                  </div>
+                  <div className="scene3d-camera-name" title={selectedCamera?.name}>
+                    {selectedCamera?.name}
+                  </div>
+                  <button
+                    type="button"
+                    className="scene3d-btn"
+                    title="Place the viewer at this exact COLMAP pose and intrinsic projection"
+                    onClick={() => setCameraViewRequest((current) => ({
+                      index: selectedCameraIndex,
+                      token: (current?.token ?? 0) + 1,
+                    }))}
+                  >
+                    View from camera
+                  </button>
+                  <p className="scene3d-note">
+                    The pose and intrinsic projection are applied exactly. The source scene
+                    remains in its original coordinate frame.
+                  </p>
+                </div>
+                <div className="scene3d-camera-preview">
+                  {cameraPreviewUrl ? (
+                    <img src={cameraPreviewUrl} alt={`Source preview for ${selectedCamera?.name}`} />
+                  ) : cameraPreviewError ? (
+                    <p role="alert">{cameraPreviewError}</p>
+                  ) : selectedCamera?.sourceImage ? (
+                    <p>Loading source preview…</p>
+                  ) : (
+                    <p>No uniquely matched source image was published for this camera.</p>
+                  )}
+                  {selectedCamera?.sourceImage ? (
+                    <small>
+                      Source {count(selectedCamera.sourceImage.source_width)} ×{" "}
+                      {count(selectedCamera.sourceImage.source_height)} px · bounded preview
+                    </small>
+                  ) : null}
+                </div>
+              </div>
+            </details>
+          ) : null}
 
           <details className="scene3d-details">
             <summary>
@@ -508,10 +850,22 @@ export function Scene3dViewerShell({ viewerInfo, apiClient }: Props) {
                   <dt>frame</dt>
                   <dd>
                     {scene.manifest.world.frame} · up {upDirection} (
-                    {scene.manifest.world.up_axis_basis})
+                    {calibration ? "user calibration" : scene.manifest.world.up_axis_basis})
                   </dd>
                   <dt>units</dt>
-                  <dd>{scene.manifest.world.units}</dd>
+                  <dd>
+                    {calibration
+                      ? `${calibration.units_per_source_unit.toLocaleString("en-US", {
+                        maximumSignificantDigits: 6,
+                      })} ${calibration.units} / source unit`
+                      : scene.manifest.world.units}
+                  </dd>
+                  {calibration ? (
+                    <>
+                      <dt>handedness</dt>
+                      <dd>{calibration.handedness}-handed · documented, not mirrored</dd>
+                    </>
+                  ) : null}
                   {typeof measuredSh === "number" && typeof declaredSh === "number" ? (
                     <>
                       <dt>SH degree</dt>

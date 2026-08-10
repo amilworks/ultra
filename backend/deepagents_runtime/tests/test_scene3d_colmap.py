@@ -21,13 +21,17 @@ import json
 import os
 import struct
 import sys
+import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import numpy as np
 import pytest
+from PIL import Image
+from test_scene3d_ply import write_postshot_splats
 from ultra_deepagents.imaging.derivative_manifest import DeterministicDerivativeError
 from ultra_deepagents.scene3d import colmap
+from ultra_deepagents.scene3d import job as scene3d_job
 from ultra_deepagents.scene3d.job import MANIFEST_NAME, POSTER_NAME, run_scene3d_derive_job
 
 # ---------------------------------------------------------------------------
@@ -385,6 +389,25 @@ def test_points_cross_the_flush_block_boundary_intact(tmp_path, monkeypatch):
     assert np.array_equal(rgb, np.asarray([point[2] for point in points], dtype=np.uint8))
 
 
+def test_points_iterator_is_bounded_and_preserves_binary_source_order(tmp_path):
+    points = sample_points(23, seed=11)
+    write_model(tmp_path / "sparse", points=points)
+
+    blocks = list(colmap.iter_points3d(tmp_path / "sparse", block_size=7))
+
+    assert [xyz.shape[0] for xyz, _rgb in blocks] == [7, 7, 7, 2]
+    assert all(xyz.dtype == np.float64 for xyz, _rgb in blocks)
+    assert all(rgb.dtype == np.uint8 for _xyz, rgb in blocks)
+    assert np.array_equal(
+        np.concatenate([xyz for xyz, _rgb in blocks]),
+        np.asarray([point[1] for point in points], dtype=np.float64),
+    )
+    assert np.array_equal(
+        np.concatenate([rgb for _xyz, rgb in blocks]),
+        np.asarray([point[2] for point in points], dtype=np.uint8),
+    )
+
+
 # ---------------------------------------------------------------------------
 # .txt parity
 # ---------------------------------------------------------------------------
@@ -679,6 +702,125 @@ def _layer(document, layer_type):
     return next(layer for layer in document["layers"] if layer["type"] == layer_type)
 
 
+def _write_reconstruction_bundle(tmp_path, *, duplicate_geometry=False):
+    model_dir = write_model(
+        tmp_path / "bundle-source" / "sparse" / "0",
+        cameras=[PINHOLE_CAMERA],
+        images=[(1, (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 2.0), 1, "images/frame.jpg", 0)],
+        points=sample_points(8),
+    )
+    geometry = write_postshot_splats(tmp_path / "bundle-source" / "geometry.ply", count=96)
+    photograph = tmp_path / "bundle-source" / "images" / "frame.jpg"
+    photograph.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (48, 32), (19, 97, 173)).save(photograph, format="JPEG")
+    archive_path = tmp_path / "reconstruction.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for record in sorted(model_dir.iterdir()):
+            archive.write(record, f"sparse/0/{record.name}")
+        archive.write(geometry, "geometry.ply")
+        if duplicate_geometry:
+            archive.write(geometry, "alternate.ply")
+        archive.write(photograph, "images/frame.jpg")
+    return archive_path
+
+
+def test_reconstruction_bundle_keeps_splats_cameras_and_unique_source_preview_together(tmp_path):
+    archive_path = _write_reconstruction_bundle(tmp_path)
+
+    result, document, dst = _derive(
+        tmp_path,
+        archive_path,
+        max_splats_per_chunk=32,
+        tier_count=2,
+        preview_splats=48,
+    )
+
+    assert result["scene_kind"] == "reconstruction"
+    assert result["camera_count"] == 1
+    assert result["camera_image_count"] == 1
+    assert document["scene_kind"] == "reconstruction"
+    assert [layer["type"] for layer in document["layers"]] == ["splats", "cameras"]
+    assert document["source"]["format"] == "reconstruction_bundle"
+    assert document["source"]["geometry_member"] == "geometry.ply"
+    assert document["source"]["colmap_model_path"] == "sparse/0"
+    assert document["source"]["bytes"] == archive_path.stat().st_size
+    geometry_size = (tmp_path / "bundle-source" / "geometry.ply").stat().st_size
+    assert document["source"]["geometry_bytes"] == geometry_size
+    assert document["source"]["container_bytes"] == archive_path.stat().st_size
+    assert geometry_size > 0
+    assert document["reconstruction"] == {
+        "registered_images": 1,
+        "matched_images": 1,
+        "preview_images": 1,
+        "preview_limit": 64,
+        "ambiguous_images": 0,
+        "unreadable_images": 0,
+    }
+
+    camera_chunk = _layer(document, "cameras")["chunks"][0]
+    payload = json.loads((dst / f"chunk_{camera_chunk['index']:05d}.bin").read_text())
+    row = payload["cameras"][0]
+    assert row["name"] == "images/frame.jpg"
+    assert row["source_image"] == {
+        "artifact_index": 0,
+        "width": 48,
+        "height": 32,
+        "source_width": 48,
+        "source_height": 32,
+    }
+    with Image.open(dst / "camera-image_00000.jpg") as preview:
+        assert preview.size == (48, 32)
+    assert "no alignment transform is inferred" in " ".join(document["limitations"])
+
+
+def test_reconstruction_bundle_counts_all_exact_matches_after_preview_budget_is_full(tmp_path):
+    photograph = tmp_path / "frame.jpg"
+    Image.new("RGB", (8, 6), (19, 97, 173)).save(photograph, format="JPEG")
+    payload = photograph.read_bytes()
+    archive_path = tmp_path / "many-images.zip"
+    images = []
+    members = []
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for index in range(65):
+            name = f"images/frame-{index:03d}.jpg"
+            archive.writestr(name, payload)
+            members.append((name, name))
+            images.append(
+                colmap.ColmapImage(
+                    image_id=index + 1,
+                    qvec_wxyz=(1.0, 0.0, 0.0, 0.0),
+                    tvec=(0.0, 0.0, 2.0),
+                    camera_id=1,
+                    name=name,
+                )
+            )
+    output = tmp_path / "previews"
+    output.mkdir()
+
+    artifacts, stats = scene3d_job._derive_bundle_camera_previews(
+        str(archive_path), tuple(members), images, str(output)
+    )
+
+    assert len(artifacts) == 64
+    assert stats == {
+        "registered": 65,
+        "matched": 65,
+        "published": 64,
+        "ambiguous": 0,
+        "unreadable": 0,
+    }
+    assert len(list(output.glob("camera-image_*.jpg"))) == 64
+
+
+def test_reconstruction_bundle_refuses_ambiguous_primary_geometry(tmp_path):
+    archive_path = _write_reconstruction_bundle(tmp_path, duplicate_geometry=True)
+
+    with pytest.raises(DeterministicDerivativeError) as caught:
+        _derive(tmp_path, archive_path)
+
+    assert caught.value.code == "ambiguous_reconstruction_geometry"
+
+
 def test_a_colmap_model_derives_points_plus_a_cameras_layer(tmp_path):
     points = sample_points(400)
     images = sample_images(5)
@@ -732,6 +874,57 @@ def test_a_colmap_model_derives_points_plus_a_cameras_layer(tmp_path):
     recovered = np.concatenate(recovered)
     world = np.asarray([point[1] for point in points], dtype=np.float32)
     assert np.array_equal(recovered[np.lexsort(recovered.T)], world[np.lexsort(world.T)])
+
+
+def test_zipped_colmap_manifest_identity_uses_the_archive_bytes(tmp_path):
+    model_dir = write_model(
+        tmp_path / "archive-source" / "sparse" / "0",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=sample_points(12),
+    )
+    archive_path = tmp_path / "sparse-model.zip"
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for record in sorted(model_dir.iterdir()):
+            archive.write(record, f"sparse/0/{record.name}")
+
+    result, document, _dst = _derive(tmp_path, archive_path)
+
+    assert result["source_bytes"] == archive_path.stat().st_size
+    assert document["source"]["bytes"] == archive_path.stat().st_size
+    assert document["source"]["format"] == "colmap"
+
+
+def test_colmap_derivation_never_materializes_the_complete_point_table(tmp_path, monkeypatch):
+    """Both scan and emission must stay on the bounded iterator path."""
+
+    points = sample_points(257, seed=19)
+    model_dir = write_model(
+        tmp_path / "sparse",
+        cameras=[PINHOLE_CAMERA],
+        images=sample_images(2),
+        points=points,
+    )
+
+    def whole_scene_allocation(*_args, **_kwargs):
+        raise AssertionError("whole COLMAP point table was materialized")
+
+    monkeypatch.setattr(colmap, "read_points3d", whole_scene_allocation)
+    monkeypatch.setattr(colmap, "_POINT_BLOCK", 7)
+
+    result, document, _dst = _derive(
+        tmp_path,
+        model_dir,
+        max_splats_per_chunk=16,
+        tier_count=3,
+        preview_points=40,
+    )
+
+    layer = _layer(document, "points")
+    assert result["total"] == 257
+    assert sum(chunk["count"] for chunk in layer["chunks"]) == 257
+    assert sum(layer["chunks"][index]["count"] for tier in layer["tiers"] for index in tier) == 257
+    assert "deterministic uniform sample" in " ".join(document["limitations"])
 
 
 def test_the_cameras_chunk_comes_after_every_point_chunk_and_decodes_as_json(tmp_path):

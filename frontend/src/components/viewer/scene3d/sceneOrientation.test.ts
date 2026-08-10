@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Scene3dManifest } from "@/types";
+import type { Scene3dCalibration, Scene3dManifest } from "@/types";
 
 import { describeSceneUpDirection, resolveSceneUpVector } from "./sceneOrientation";
 
@@ -67,5 +67,23 @@ describe("scene orientation", () => {
 
     expect(resolveSceneUpVector(manifest)).toEqual([0, 1, 0]);
     expect(describeSceneUpDirection(manifest)).toBe("unknown");
+  });
+
+  it("uses a source-bound signed calibration as a camera hint without changing the manifest", () => {
+    const manifest = manifestFor("ply", "y");
+    const before = structuredClone(manifest);
+    const calibration: Scene3dCalibration = {
+      version: 1,
+      source_sha256: "a".repeat(64),
+      revision: 2,
+      signed_up_axis: "-z",
+      handedness: "left",
+      units: "mm",
+      units_per_source_unit: 0.25,
+    };
+
+    expect(resolveSceneUpVector(manifest, calibration)).toEqual([0, 0, -1]);
+    expect(describeSceneUpDirection(manifest, calibration)).toBe("−Z");
+    expect(manifest).toEqual(before);
   });
 });

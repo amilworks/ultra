@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -31,10 +32,10 @@ import (
 // engine for nothing. It is served instead from a DERIVED, chunked stream that
 // the imaging worker builds once (see backend/contracts/scene3d/CONTRACT.md §7):
 //
-//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/manifest.json
-//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/chunk_{n:05d}.bin
-//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}/scene-lod.{rad,radc}
-//	{root}/derived/{file_id}__scene3d.v4.sha256-{digest}.failed
+//	{root}/derived/{file_id}__scene3d.v5.sha256-{digest}/manifest.json
+//	{root}/derived/{file_id}__scene3d.v5.sha256-{digest}/chunk_{n:05d}.bin
+//	{root}/derived/{file_id}__scene3d.v5.sha256-{digest}/scene-lod.{rad,radc}
+//	{root}/derived/{file_id}__scene3d.v5.sha256-{digest}.failed
 //
 // The control plane NEVER parses a scene file in the request path. The real
 // files are 3.4 GB with 14.5M splats; everything here is a bounded 64 KiB header
@@ -78,7 +79,8 @@ const (
 	scene3dLodHeaderName   = "scene-lod.rad"
 	scene3dLodChunkPrefix  = "scene-lod-"
 	scene3dLodChunkSuffix  = ".radc"
-	scene3dDerivativeRev   = "v4"
+	scene3dCameraImageName = "camera-image_%05d.jpg"
+	scene3dDerivativeRev   = "v5"
 
 	// scene3dMaxChunkIndex caps the addressable chunk space. At the default
 	// 50k elements per chunk this is 5e10 elements — far past any real scene —
@@ -468,17 +470,20 @@ func plyPeekDetailed(path string) (plyInfo, error) {
 // sits, whether the records are binary or text, and which optional products are
 // present. Nothing here is parsed from a record — see the file header for why.
 type colmapInfo struct {
-	variant      string // "directory" | "zip"
-	modelPath    string // slash-separated model root relative to the resource ("" = at the root)
-	modelCount   int
-	modelPaths   []string
-	recordFormat string // "bin" | "txt" | "mixed"
-	camerasName  string // the member name as it actually appears
-	imagesName   string
-	points3DName string
-	hasPoints3D  bool
-	hasRigs      bool // modern COLMAP writes rigs/frames; a legacy model has neither
-	hasFrames    bool
+	variant        string // "directory" | "zip" | "bundle"
+	modelPath      string // slash-separated model root relative to the resource ("" = at the root)
+	modelCount     int
+	modelPaths     []string
+	recordFormat   string // "bin" | "txt" | "mixed"
+	camerasName    string // the member name as it actually appears
+	imagesName     string
+	points3DName   string
+	hasPoints3D    bool
+	hasRigs        bool // modern COLMAP writes rigs/frames; a legacy model has neither
+	hasFrames      bool
+	bundlePlyPath  string
+	bundlePlyCount int
+	imageMembers   int
 }
 
 // colmapModelRoots are the four places COLMAP itself puts a model, in the order
@@ -633,12 +638,20 @@ func colmapZipPeek(path string, size int64) (colmapInfo, bool) {
 	}
 	// Names only. Nothing below reads, decompresses or even opens a member.
 	members := map[string]map[string]string{}
+	plyPaths := []string{}
+	imageMembers := 0
 	for _, entry := range reader.File {
 		directory, base, valid := colmapZipEntryPath(entry.Name)
 		if !valid {
 			continue
 		}
 		lower := strings.ToLower(base)
+		if strings.HasSuffix(lower, ".ply") {
+			plyPaths = append(plyPaths, pathpkg.Join(directory, base))
+		}
+		if scene3dBundleImageName(lower) {
+			imageMembers++
+		}
 		if !colmapMemberNames[lower] {
 			continue
 		}
@@ -661,7 +674,25 @@ func colmapZipPeek(path string, size int64) (colmapInfo, bool) {
 		}
 		models = append(models, info)
 	}
-	return summarizeColmapModels("zip", models)
+	info, recognized := summarizeColmapModels("zip", models)
+	if !recognized || len(plyPaths) == 0 {
+		return info, recognized
+	}
+	sort.Strings(plyPaths)
+	info.variant = "bundle"
+	info.bundlePlyCount = len(plyPaths)
+	info.bundlePlyPath = plyPaths[0]
+	info.imageMembers = imageMembers
+	return info, true
+}
+
+func scene3dBundleImageName(lowerBase string) bool {
+	switch filepath.Ext(lowerBase) {
+	case ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp":
+		return true
+	default:
+		return false
+	}
 }
 
 // summarizeColmapModels preserves every candidate root. A unique model exposes
@@ -870,6 +901,12 @@ func scene3dPeek(record resourceRecord, path string) (scene3dInfo, bool) {
 	format := scene3dFormatFromName(record.OriginalName)
 	if format == "" {
 		if colmap, isColmap := colmapPeek(path); isColmap {
+			if colmap.variant == "bundle" {
+				return scene3dInfo{
+					format: "reconstruction_bundle", sceneKind: "reconstruction",
+					colmap: colmap, hasColmap: true,
+				}, true
+			}
 			return scene3dInfo{format: "colmap", sceneKind: "colmap", colmap: colmap, hasColmap: true}, true
 		}
 		return scene3dInfo{}, false
@@ -915,6 +952,9 @@ func scene3dCanDerive(record resourceRecord, info scene3dInfo) bool {
 		return false
 	}
 	if info.hasColmap {
+		if info.colmap.variant == "bundle" {
+			return info.colmap.modelCount == 1 && info.colmap.bundlePlyCount == 1
+		}
 		return info.colmap.variant != "directory" && info.colmap.modelCount == 1
 	}
 	return true
@@ -1150,7 +1190,11 @@ func serveScene3dArtifact(w http.ResponseWriter, r *http.Request, path, displayN
 		return
 	}
 	defer scene3dChunkInFlightBudget.release(generation.SizeBytes)
-	w.Header().Set("Content-Type", "application/octet-stream")
+	contentType := "application/octet-stream"
+	if strings.HasSuffix(strings.ToLower(displayName), ".jpg") {
+		contentType = "image/jpeg"
+	}
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("ETag", scene3dETag(generation))
 	w.Header().Set("Cache-Control", "private, max-age=60, must-revalidate")
@@ -1182,6 +1226,25 @@ func (deps ServerDeps) handleGetUploadScene3dChunk(w http.ResponseWriter, r *htt
 	// Admit the whole chunk even for a Range read: the budget bounds concurrent
 	// delivery, and a partial read is a fraction of an admission we already sized.
 	serveScene3dArtifact(w, r, chunkPath, filepath.Base(chunkPath))
+}
+
+func (deps ServerDeps) handleGetUploadScene3dCameraImage(w http.ResponseWriter, r *http.Request) {
+	root, record, _, ok := deps.resolveScene3dRequest(w, r)
+	if !ok {
+		return
+	}
+	index, err := parseScene3dChunkIndex(chi.URLParam(r, "index"))
+	if err != nil || index >= 64 {
+		writeError(w, http.StatusBadRequest, errors.New("scene camera image index is invalid"))
+		return
+	}
+	directory := derivedScene3dDir(root, record.FileID, record.SHA256)
+	imagePath := filepath.Join(directory, fmt.Sprintf(scene3dCameraImageName, index))
+	if filepath.Dir(imagePath) != filepath.Clean(directory) {
+		writeError(w, http.StatusBadRequest, errors.New("scene camera image resolves outside the derived scene directory"))
+		return
+	}
+	serveScene3dArtifact(w, r, imagePath, filepath.Base(imagePath))
 }
 
 // handleGetUploadScene3dLodArtifact serves the paged RAD header and the relative RADC
@@ -1263,9 +1326,14 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 			source["has_rigs"] = info.colmap.hasRigs
 			source["has_frames"] = info.colmap.hasFrames
 		}
+		if info.colmap.variant == "bundle" {
+			source["geometry_member"] = info.colmap.bundlePlyPath
+			source["geometry_member_count"] = info.colmap.bundlePlyCount
+			source["image_member_count"] = info.colmap.imageMembers
+		}
 	}
 	decodable := scene3dCanDerive(record, info)
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"kind":          "scene3d",
 		"decodable":     decodable,
 		"file_id":       record.FileID,
@@ -1277,13 +1345,116 @@ func (deps ServerDeps) writeScene3dViewer(w http.ResponseWriter, record resource
 		"source":        source,
 		"limitations":   scene3dLimitations(info, status),
 		"service_urls": map[string]any{
-			"manifest": "/v2/uploads/" + fileIDSegment + "/scene3d/manifest",
-			"chunk":    "/v2/uploads/" + fileIDSegment + "/scene3d/chunk/{index}",
-			"lod":      "/v2/uploads/" + fileIDSegment + "/scene3d/lod/{artifact}",
-			"download": "/v2/resources/" + fileIDSegment + "/download",
+			"manifest":     "/v2/uploads/" + fileIDSegment + "/scene3d/manifest",
+			"chunk":        "/v2/uploads/" + fileIDSegment + "/scene3d/chunk/{index}",
+			"lod":          "/v2/uploads/" + fileIDSegment + "/scene3d/lod/{artifact}",
+			"camera_image": "/v2/uploads/" + fileIDSegment + "/scene3d/image/{index}",
+			"download":     "/v2/resources/" + fileIDSegment + "/download",
 		},
 		"message": scene3dMessage(info, status),
-	})
+	}
+	if calibration, ok := scene3dCalibrationForViewer(record); ok {
+		response["calibration"] = calibration
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func validateScene3dCalibrationMetadata(value any, sourceSHA string) (map[string]any, int, error) {
+	raw, ok := jsonObject(value)
+	if !ok || !hasOnlyJSONKeys(
+		raw,
+		"version",
+		"source_sha256",
+		"expected_revision",
+		"signed_up_axis",
+		"handedness",
+		"units",
+		"units_per_source_unit",
+	) {
+		return nil, 0, errors.New("3D scene calibration metadata is malformed")
+	}
+	version, versionOK := jsonInt(raw["version"])
+	expectedRevision, revisionOK := jsonInt(raw["expected_revision"])
+	calibrationSHA, shaOK := raw["source_sha256"].(string)
+	axis, axisOK := raw["signed_up_axis"].(string)
+	handedness, handednessOK := raw["handedness"].(string)
+	units, unitsOK := raw["units"].(string)
+	scale, scaleOK := jsonFiniteFloat(raw["units_per_source_unit"])
+	if !versionOK || version != 1 || !revisionOK || expectedRevision < 0 ||
+		!shaOK || strings.TrimSpace(calibrationSHA) != strings.TrimSpace(sourceSHA) ||
+		!axisOK || !scene3dSignedAxisAllowed(axis) ||
+		!handednessOK || (handedness != "right" && handedness != "left") ||
+		!unitsOK || !scene3dUnitAllowed(units) ||
+		!scaleOK || scale < 1e-12 || scale > 1e12 {
+		return nil, 0, errors.New("3D scene calibration metadata is invalid for this source")
+	}
+	return map[string]any{
+		"version":               1,
+		"source_sha256":         strings.TrimSpace(calibrationSHA),
+		"revision":              expectedRevision + 1,
+		"signed_up_axis":        axis,
+		"handedness":            handedness,
+		"units":                 units,
+		"units_per_source_unit": scale,
+	}, expectedRevision, nil
+}
+
+func scene3dCalibrationForViewer(record resourceRecord) (map[string]any, bool) {
+	raw, ok := jsonObject(record.Metadata["ultra_scene3d_calibration_v1"])
+	if !ok || !hasOnlyJSONKeys(
+		raw,
+		"version",
+		"source_sha256",
+		"revision",
+		"signed_up_axis",
+		"handedness",
+		"units",
+		"units_per_source_unit",
+	) {
+		return nil, false
+	}
+	version, versionOK := jsonInt(raw["version"])
+	revision, revisionOK := jsonInt(raw["revision"])
+	calibrationSHA, shaOK := raw["source_sha256"].(string)
+	axis, axisOK := raw["signed_up_axis"].(string)
+	handedness, handednessOK := raw["handedness"].(string)
+	units, unitsOK := raw["units"].(string)
+	scale, scaleOK := jsonFiniteFloat(raw["units_per_source_unit"])
+	if !versionOK || version != 1 || !revisionOK || revision < 1 ||
+		!shaOK || strings.TrimSpace(calibrationSHA) != strings.TrimSpace(record.SHA256) ||
+		!axisOK || !scene3dSignedAxisAllowed(axis) ||
+		!handednessOK || (handedness != "right" && handedness != "left") ||
+		!unitsOK || !scene3dUnitAllowed(units) ||
+		!scaleOK || scale < 1e-12 || scale > 1e12 {
+		return nil, false
+	}
+	return map[string]any{
+		"version":               1,
+		"source_sha256":         strings.TrimSpace(calibrationSHA),
+		"revision":              revision,
+		"signed_up_axis":        axis,
+		"handedness":            handedness,
+		"units":                 units,
+		"units_per_source_unit": scale,
+	}, true
+}
+
+func scene3dSignedAxisAllowed(value string) bool {
+	switch value {
+	case "+x", "-x", "+y", "-y", "+z", "-z":
+		return true
+	default:
+		return false
+	}
+}
+
+func scene3dUnitAllowed(value string) bool {
+	switch value {
+	case "arbitrary", "m", "cm", "mm", "um", "nm":
+		return true
+	default:
+		return false
+	}
 }
 
 func scene3dMessage(info scene3dInfo, status string) string {
@@ -1296,6 +1467,8 @@ func scene3dMessage(info scene3dInfo, status string) string {
 		subject = "3D Gaussian-splat scene"
 	case "colmap":
 		subject = "COLMAP reconstruction"
+	case "reconstruction":
+		subject = "3D reconstruction bundle"
 	}
 	switch status {
 	case "ready":
@@ -1305,6 +1478,9 @@ func scene3dMessage(info scene3dInfo, status string) string {
 		if info.hasColmap && info.colmap.modelCount > 1 {
 			return subject + " — this archive contains multiple COLMAP models, so Lens does not choose one. " +
 				"Export or upload one reconstruction per archive."
+		}
+		if info.hasColmap && info.colmap.variant == "bundle" && info.colmap.bundlePlyCount != 1 {
+			return subject + " — this archive must contain exactly one primary PLY geometry member."
 		}
 		if info.hasColmap && info.colmap.variant == "directory" {
 			return subject + " — archive the model directory as a zip before uploading it. " +
@@ -1341,7 +1517,18 @@ func scene3dLimitations(info scene3dInfo, status string) []string {
 		}
 		limitations = append(limitations,
 			"The reconstruction is recognized from its layout alone; no camera, image or point record is read until the derive job runs.")
-		if info.colmap.variant == "zip" {
+		if info.colmap.variant == "bundle" {
+			limitations = append(limitations,
+				"This reconstruction bundle was recognized from one COLMAP model and one PLY geometry member; member bytes are validated only by the derive job.",
+				"Source-image previews are published only when an archive member uniquely matches a registered COLMAP image name; ambiguous names are never guessed.",
+			)
+			if info.colmap.bundlePlyCount != 1 {
+				limitations = append(limitations,
+					fmt.Sprintf("The archive contains %d PLY geometry members. Lens requires exactly one and does not choose among them.", info.colmap.bundlePlyCount),
+				)
+				return limitations
+			}
+		} else if info.colmap.variant == "zip" {
 			limitations = append(limitations,
 				"This model is a zip archive: only its central directory was read here, so nothing inside it has been decompressed or validated yet.")
 		} else if info.colmap.variant == "directory" {

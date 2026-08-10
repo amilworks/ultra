@@ -77,6 +77,7 @@
 }
 
 .scene3d-toolbar {
+  position: relative;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -184,9 +185,88 @@
 .scene3d-layer-toggles button:focus-visible,
 .scene3d-point-control input:focus-visible,
 .scene3d-btn:focus-visible,
+.scene3d-calibration-control summary:focus-visible,
+.scene3d-calibration-control select:focus-visible,
+.scene3d-calibration-control input:focus-visible,
+.scene3d-camera-validation input:focus-visible,
+.scene3d-camera-validation button:focus-visible,
+.scene3d-camera-validation summary:focus-visible,
 .scene3d-details summary:focus-visible {
   outline: 2px solid var(--accent, #2f6df6);
   outline-offset: 2px;
+}
+
+.scene3d-calibration-control {
+  position: relative;
+}
+.scene3d-calibration-control > summary {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  cursor: pointer;
+  font-size: 0.78rem;
+  list-style: none;
+}
+.scene3d-calibration-control > summary::-webkit-details-marker {
+  display: none;
+}
+.scene3d-calibration-control > summary::after {
+  content: "⌄";
+  margin-left: 0.45rem;
+  color: var(--text-muted);
+}
+.scene3d-calibration-control[open] > summary::after {
+  content: "⌃";
+}
+.scene3d-calibration-panel {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 0.45rem);
+  right: 0;
+  width: min(23rem, calc(100vw - 3rem));
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-panel);
+  box-shadow: 0 14px 34px rgb(0 0 0 / 22%);
+}
+.scene3d-calibration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+.scene3d-calibration-grid label {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.scene3d-calibration-grid select,
+.scene3d-calibration-grid input {
+  min-width: 0;
+  padding: 0.42rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font: inherit;
+}
+.scene3d-calibration-panel p {
+  margin: 0.7rem 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+.scene3d-calibration-panel small {
+  display: block;
+  margin: -0.25rem 0 0.65rem;
+  color: var(--danger, #b42318);
+}
+.scene3d-calibration-panel > .scene3d-btn {
+  margin-left: auto;
+  display: block;
 }
 
 .scene3d-stage {
@@ -275,6 +355,127 @@
   color: var(--text-main);
   font-size: 0.74rem;
   line-height: 1.45;
+}
+
+.scene3d-camera-validation {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-panel);
+}
+.scene3d-camera-validation > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.55rem 0.72rem;
+  color: var(--text-main);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 500;
+  list-style: none;
+}
+.scene3d-camera-validation > summary::-webkit-details-marker {
+  display: none;
+}
+.scene3d-camera-validation > summary::after {
+  content: "+";
+  color: var(--text-muted);
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1;
+}
+.scene3d-camera-validation[open] > summary::after {
+  content: "−";
+}
+.scene3d-camera-validation > summary span:nth-child(2) {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+.scene3d-camera-panel {
+  display: grid;
+  grid-template-columns: minmax(14rem, 0.75fr) minmax(18rem, 1.25fr);
+  gap: 0.7rem;
+  padding: 0 0.7rem 0.7rem;
+}
+.scene3d-camera-controls,
+.scene3d-camera-preview {
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-main);
+}
+.scene3d-camera-controls {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 0.65rem;
+}
+.scene3d-camera-stepper {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.scene3d-camera-stepper label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+.scene3d-camera-stepper input {
+  width: 5.2rem;
+  padding: 0.38rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg-panel);
+  color: var(--text-main);
+  font: inherit;
+}
+.scene3d-camera-name {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--text-main);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scene3d-camera-preview {
+  position: relative;
+  display: grid;
+  min-height: 12rem;
+  place-items: center;
+  overflow: hidden;
+  background: #0b0d10;
+  color: #a7adb7;
+  font-size: 0.74rem;
+  text-align: center;
+}
+.scene3d-camera-preview img {
+  display: block;
+  width: 100%;
+  height: min(34vh, 25rem);
+  object-fit: contain;
+}
+.scene3d-camera-preview p {
+  margin: 1rem;
+}
+.scene3d-camera-preview small {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  padding: 0.25rem 0.42rem;
+  border-radius: 6px;
+  background: rgb(11 13 16 / 78%);
+  color: #c7ccd4;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.64rem;
 }
 
 /* Provenance is opt-in. The collapsed summary stays one calm row; opening it
@@ -433,6 +634,9 @@
   .scene3d-details-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+  .scene3d-camera-panel {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 640px) {
@@ -457,7 +661,22 @@
   .scene3d-reset {
     align-self: flex-end;
   }
+  .scene3d-calibration-control {
+    width: 100%;
+  }
+  .scene3d-calibration-control > summary {
+    width: fit-content;
+    margin-left: auto;
+  }
+  .scene3d-calibration-panel {
+    position: static;
+    width: 100%;
+    margin-top: 0.45rem;
+  }
   .scene3d-details summary span:nth-child(2) {
+    display: none;
+  }
+  .scene3d-camera-validation > summary span:nth-child(2) {
     display: none;
   }
   .scene3d-details-grid {

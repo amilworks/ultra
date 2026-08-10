@@ -141,6 +141,56 @@ describe("normalizeUploadViewerInfo Scene3D admission", () => {
     expect(viewer.scene3d?.status).toBe("failed");
     expect(viewer.message).toContain("ASCII PLY");
   });
+
+  it("retains only a complete finite source-bound frame and scale calibration", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-calibrated",
+      original_name: "scene.ply",
+      decodable: true,
+      scene_kind: "splat",
+      status: "ready",
+      calibration: {
+        version: 1,
+        source_sha256: "b".repeat(64),
+        revision: 4,
+        signed_up_axis: "+z",
+        handedness: "right",
+        units: "um",
+        units_per_source_unit: 0.125,
+      },
+      service_urls: {},
+    });
+
+    expect(viewer.scene3d?.calibration).toEqual({
+      version: 1,
+      source_sha256: "b".repeat(64),
+      revision: 4,
+      signed_up_axis: "+z",
+      handedness: "right",
+      units: "um",
+      units_per_source_unit: 0.125,
+    });
+
+    const malformed = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-malformed",
+      original_name: "scene.ply",
+      scene_kind: "splat",
+      status: "ready",
+      calibration: {
+        version: 1,
+        source_sha256: "b".repeat(64),
+        revision: 4,
+        signed_up_axis: "+z",
+        handedness: "right",
+        units: "um",
+        units_per_source_unit: Number.POSITIVE_INFINITY,
+      },
+      service_urls: {},
+    });
+    expect(malformed.scene3d?.calibration).toBeNull();
+  });
 });
 
 describe("normalizeUploadViewerInfo scalar medical defaults", () => {

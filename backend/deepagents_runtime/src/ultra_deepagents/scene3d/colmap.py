@@ -13,7 +13,7 @@ Three properties of the binary layout drive every decision here:
 2. **The 2D observations are useless to us and enormous.** 1000 images x 8000 keypoints
    is ~192 MB of ``(x, y, point3D_id)`` triples that no part of the viewer consumes.
    :func:`read_images` steps over them with ``seek``; it never reads them.
-3. **The point record's fixed part is 43 bytes and is not 8-byte aligned** (``u64`` id,
+3. **The point record's fixed part is 51 bytes and is not 8-byte aligned** (``u64`` id,
    3x ``f64`` xyz, 3x ``u8`` rgb, ``f64`` error). A typed-array view over the file is
    therefore wrong at every record; fields are unpacked individually and accumulated in
    bounded blocks, so a 20M-point model costs its two output arrays and nothing else.
@@ -38,7 +38,7 @@ import os
 import re
 import struct
 from array import array
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, BinaryIO
 
@@ -57,6 +57,7 @@ __all__ = [
     "detect_model_dir",
     "detect_model_dirs",
     "has_distortion",
+    "iter_points3d",
     "model_bytes",
     "model_files",
     "read_cameras",
@@ -601,6 +602,53 @@ def read_points3d(model_dir: str | os.PathLike[str]) -> tuple[np.ndarray, np.nda
         return _read_points3d_bin(stream, limit)
 
 
+def iter_points3d(
+    model_dir: str | os.PathLike[str], *, block_size: int | None = None
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield bounded ``(xyz float64, rgb uint8)`` point blocks in source order.
+
+    This is the production path for large reconstructions.  It never allocates an
+    array proportional to the complete model; callers that need a complete table may
+    still use :func:`read_points3d` explicitly.  A fresh call opens a fresh stream, so
+    the scene derive can make one exact scan pass and one deterministic emission pass.
+    """
+
+    size = _POINT_BLOCK if block_size is None else int(block_size)
+    if size < 1:
+        raise ValueError("block_size must be positive")
+    path = _require(model_dir, "points3d")
+    if path.endswith(".txt"):
+        yield from _iter_points3d_txt(path, size)
+        return
+    limit = os.path.getsize(path)
+    with open(path, "rb", buffering=_READ_BUFFER) as stream:
+        yield from _iter_points3d_bin(stream, limit, size)
+
+
+def _iter_points3d_bin(
+    stream: BinaryIO, limit: int, block_size: int
+) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    count = _read_count(stream, limit, _POINT_MIN_BYTES, "points3D")
+    block_xyz = np.empty((block_size, 3), dtype=np.float64)
+    block_rgb = np.empty((block_size, 3), dtype=np.uint8)
+    filled = 0
+    read = 0
+    for _ in range(count):
+        fields = _POINT_HEAD.unpack(_read_exact(stream, _POINT_HEAD.size, "points3D"))
+        block_xyz[filled] = fields[1:4]
+        block_rgb[filled] = fields[4:7]
+        _skip(stream, int(fields[8]) * _TRACK_ENTRY_BYTES, limit, "points3D (track)")
+        filled += 1
+        read += 1
+        if filled == block_size:
+            yield block_xyz.copy(), block_rgb.copy()
+            filled = 0
+    if filled:
+        yield block_xyz[:filled].copy(), block_rgb[:filled].copy()
+    if read != count:  # pragma: no cover - guarded by _read_exact above
+        raise ColmapFormatError(f"COLMAP points3D declared {count} points, read {read}")
+
+
 def _read_points3d_bin(stream: BinaryIO, limit: int) -> tuple[np.ndarray, np.ndarray]:
     count = _read_count(stream, limit, _POINT_MIN_BYTES, "points3D")
     xyz = np.empty((count, 3), dtype=np.float64)
@@ -662,6 +710,27 @@ def _read_points3d_txt(path: str) -> tuple[np.ndarray, np.ndarray]:
     return xyz, rgb
 
 
+def _iter_points3d_txt(path: str, block_size: int) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    block_xyz = np.empty((block_size, 3), dtype=np.float64)
+    block_rgb = np.empty((block_size, 3), dtype=np.uint8)
+    filled = 0
+    for line in _text_lines(path):
+        parts = line.split(maxsplit=8)
+        if len(parts) < 8:
+            raise ColmapFormatError(f"malformed COLMAP points3D.txt line: {line!r}")
+        try:
+            block_xyz[filled] = (float(parts[1]), float(parts[2]), float(parts[3]))
+            block_rgb[filled] = _byte(parts[4:7])
+        except ValueError as exc:
+            raise ColmapFormatError(f"malformed COLMAP points3D.txt line: {line!r}") from exc
+        filled += 1
+        if filled == block_size:
+            yield block_xyz.copy(), block_rgb.copy()
+            filled = 0
+    if filled:
+        yield block_xyz[:filled].copy(), block_rgb[:filled].copy()
+
+
 # ---------------------------------------------------------------------------
 # the cameras layer
 # ---------------------------------------------------------------------------
@@ -686,7 +755,9 @@ def has_distortion(camera: ColmapCamera) -> bool:
 
 
 def camera_layer_json(
-    cameras: Mapping[int, ColmapCamera], images: Sequence[ColmapImage]
+    cameras: Mapping[int, ColmapCamera],
+    images: Sequence[ColmapImage],
+    image_artifacts: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The ``cameras`` layer payload, exactly as the renderer parses it.
 
@@ -704,19 +775,20 @@ def camera_layer_json(
         camera = cameras.get(image.camera_id)
         if camera is None:
             continue
-        rows.append(
-            {
-                "qvec": [float(value) for value in image.qvec_wxyz],
-                "tvec": [float(value) for value in image.tvec],
-                "name": image.name,
-                "camera": {
-                    "model": camera.model,
-                    "width": int(camera.width),
-                    "height": int(camera.height),
-                    "params": [float(value) for value in camera.params],
-                },
-            }
-        )
+        row: dict[str, Any] = {
+            "qvec": [float(value) for value in image.qvec_wxyz],
+            "tvec": [float(value) for value in image.tvec],
+            "name": image.name,
+            "camera": {
+                "model": camera.model,
+                "width": int(camera.width),
+                "height": int(camera.height),
+                "params": [float(value) for value in camera.params],
+            },
+        }
+        if image_artifacts is not None and image.name in image_artifacts:
+            row["source_image"] = dict(image_artifacts[image.name])
+        rows.append(row)
     return {"cameras": rows}
 
 

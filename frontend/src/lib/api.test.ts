@@ -79,6 +79,39 @@ describe("ApiClient browser auth hardening", () => {
     expect(new URL(source.url).searchParams.has("api_key")).toBe(false);
   });
 
+  it("fetches an exact reconstruction camera preview and rejects malformed indices", async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(jpeg, {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org", apiKey: "dev-secret" });
+
+    await expect(client.fetchScene3dCameraImage("file/with spaces", 7)).resolves.toHaveProperty(
+      "type",
+      "image/jpeg"
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://ultra.example.org/v2/uploads/file%2Fwith%20spaces/scene3d/image/7",
+      expect.objectContaining({
+        method: "GET",
+        credentials: "include",
+        headers: expect.objectContaining({ "X-API-Key": "dev-secret" }),
+      })
+    );
+    await expect(client.fetchScene3dCameraImage("file-123", -1)).rejects.toThrow(
+      /non-negative integer/
+    );
+    await expect(client.fetchScene3dCameraImage("file-123", 1.5)).rejects.toThrow(
+      /non-negative integer/
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("honors same-origin advertised thumbnail URLs only when capability is ready", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org/control" });
 

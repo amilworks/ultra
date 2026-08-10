@@ -13,9 +13,9 @@ density tiers. Gaussian PLY conversion measures the same source independently, t
 Spark's pinned quality builder to publish a paged, view-adaptive RAD tree. Unlike uniform
 subsampling, its coarse nodes merge Gaussian distributions and preserve scene coverage.
 
-A COLMAP sparse model (a *directory*, not a file) derives through the same machinery: its
-``points3D`` feed the unchanged chunker and ``UPC1`` point path, and its posed cameras
-become one extra ``cameras`` layer carrying a single JSON chunk. That chunk is written
+A COLMAP sparse model (a *directory*, not a file) derives through the same bounded
+two-pass point stream as PLY and emits ``UPC1`` tiers; its posed cameras become one
+extra ``cameras`` layer carrying a single JSON chunk. That chunk is written
 **after** every point chunk so point chunk indices — and therefore every cached chunk URL
 — are identical whether or not the model has cameras.
 """
@@ -23,8 +23,10 @@ become one extra ``cameras`` layer carrying a single JSON chunk. That chunk is w
 from __future__ import annotations
 
 import fcntl
+import io
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -38,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from PIL import Image, UnidentifiedImageError
 
 from ultra_deepagents.imaging.derivative_manifest import (
     DerivativeJobError,
@@ -447,6 +450,28 @@ def _published_scene_matches(destination: Path, job: Scene3dDeriveJob) -> bool:
                         return False
             elif lod is not None:
                 return False
+        reconstruction = document.get("reconstruction")
+        if document.get("scene_kind") == "reconstruction":
+            if not isinstance(reconstruction, dict):
+                return False
+            preview_images = reconstruction.get("preview_images")
+            if (
+                not isinstance(preview_images, int)
+                or isinstance(preview_images, bool)
+                or preview_images < 0
+                or preview_images > _BUNDLE_MAX_PREVIEWS
+            ):
+                return False
+            for index in range(preview_images):
+                image_info = (destination / f"camera-image_{index:05d}.jpg").lstat()
+                if (
+                    not stat.S_ISREG(image_info.st_mode)
+                    or stat.S_ISLNK(image_info.st_mode)
+                    or image_info.st_size < 1
+                ):
+                    return False
+        elif reconstruction is not None:
+            return False
         return True
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return False
@@ -470,6 +495,17 @@ def _published_scene_result(destination: Path, job: Scene3dDeriveJob) -> dict[st
         (len(layer.get("tiers", [])) for layer in layers if isinstance(layer, dict)),
         default=0,
     )
+    camera_count = sum(
+        int(chunk.get("count", 0))
+        for layer in layers
+        if isinstance(layer, dict) and layer.get("type") == "cameras"
+        for chunk in layer.get("chunks", [])
+        if isinstance(chunk, dict) and isinstance(chunk.get("count"), int)
+    )
+    reconstruction = document.get("reconstruction")
+    camera_image_count = (
+        reconstruction.get("preview_images", 0) if isinstance(reconstruction, dict) else 0
+    )
     return {
         "resource_id": job.resource_id,
         "dst_dir": str(destination),
@@ -482,14 +518,17 @@ def _published_scene_result(destination: Path, job: Scene3dDeriveJob) -> dict[st
         "measured_sh_degree": source.get("measured_sh_degree", 0),
         "stride_bytes": source.get("stride_bytes", 0),
         "source_bytes": source.get("bytes", job.source_size_bytes or 0),
+        "camera_count": camera_count,
+        "camera_image_count": camera_image_count,
         "manifest_path": str(destination / MANIFEST_NAME),
         "poster_path": str(destination / POSTER_NAME),
         "reused": True,
     }
 
 
-# A COLMAP model is small (metadata plus points); an archive far past this is either not
-# a reconstruction or is carrying the source photographs, which we never read.
+# Bound the model records plus optional primary PLY extracted for derivation. Source
+# photographs are not bulk-extracted; at most the separately bounded preview candidates
+# are decoded directly from the archive.
 _ZIP_MAX_TOTAL_BYTES = 8 << 30
 _ZIP_MAX_MEMBERS = 20_000
 # Only these are worth extracting. Source images are the bulk of a real archive and
@@ -508,6 +547,19 @@ _COLMAP_MEMBER_NAMES = frozenset(
         "frames.txt",
     }
 )
+_BUNDLE_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"})
+_BUNDLE_MAX_PREVIEWS = 64
+_BUNDLE_MAX_IMAGE_BYTES = 256 << 20
+_BUNDLE_MAX_IMAGE_PIXELS = 80_000_000
+
+
+@dataclass(frozen=True)
+class _ExtractedSceneArchive:
+    model_dir: str
+    model_member_path: str
+    ply_path: str | None
+    geometry_member: str | None
+    image_members: tuple[tuple[str, str], ...]  # (normalized path, actual zip member)
 
 
 def _looks_like_zip(path: str) -> bool:
@@ -518,39 +570,54 @@ def _looks_like_zip(path: str) -> bool:
         return False
 
 
-def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
-    """Extract just the COLMAP model records from an archive; return the model dir.
+def _safe_zip_member(name: str) -> str | None:
+    if not name or name.startswith("/") or "\\" in name or "\x00" in name:
+        return None
+    parts = name.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return None
+    normalized = posixpath.normpath(name)
+    if normalized.startswith("../") or normalized == ".." or normalized.startswith("/"):
+        return None
+    return normalized
 
-    Only the recognised record names are written, and only after the central directory's
-    declared sizes are checked — so a zip bomb, an absolute path, or a `..` traversal is
-    rejected before anything is decompressed.
+
+def _extract_scene3d_zip(src_path: str, dest_dir: str) -> _ExtractedSceneArchive | None:
+    """Extract one strict COLMAP model and an optional primary PLY geometry.
+
+    Source photographs are catalogued by safe member name but never bulk-extracted.
+    Individual bounded previews are decoded later only after their names match registered
+    COLMAP images exactly and unambiguously.
     """
     with zipfile.ZipFile(src_path) as archive:
         entries = [entry for entry in archive.infolist() if not entry.is_dir()]
         if len(entries) > _ZIP_MAX_MEMBERS:
             return None
-        wanted = [
-            entry
-            for entry in entries
-            if os.path.basename(entry.filename).lower() in _COLMAP_MEMBER_NAMES
-        ]
-        if not wanted:
-            return None
-        if sum(entry.file_size for entry in wanted) > _ZIP_MAX_TOTAL_BYTES:
-            return None
-
         safe_members: list[tuple[zipfile.ZipInfo, str, str, str]] = []
         members_by_directory: dict[str, set[str]] = {}
-        for entry in wanted:
-            if entry.filename.startswith("/") or "\\" in entry.filename or "\x00" in entry.filename:
-                continue
-            directory, _, basename = entry.filename.rpartition("/")
-            if not basename or any(segment in {".", ".."} for segment in directory.split("/")):
-                continue
-            relative = os.path.normpath(entry.filename).lstrip("/")
+        ply_members: list[tuple[zipfile.ZipInfo, str]] = []
+        image_members: list[tuple[str, str]] = []
+        normalized_seen: set[str] = set()
+        for entry in entries:
+            normalized = _safe_zip_member(entry.filename)
+            if normalized is None:
+                raise DeterministicDerivativeError("unsafe_scene_archive_member")
+            if normalized in normalized_seen:
+                raise DeterministicDerivativeError("duplicate_scene_archive_member")
+            normalized_seen.add(normalized)
+            directory, _, basename = normalized.rpartition("/")
             normalized_name = basename.lower()
-            safe_members.append((entry, directory, normalized_name, relative))
-            members_by_directory.setdefault(directory, set()).add(normalized_name)
+            suffix = posixpath.splitext(normalized_name)[1]
+            if normalized_name in _COLMAP_MEMBER_NAMES:
+                safe_members.append((entry, directory, normalized_name, normalized))
+                members_by_directory.setdefault(directory, set()).add(normalized_name)
+            elif suffix == ".ply":
+                ply_members.append((entry, normalized))
+            elif suffix in _BUNDLE_IMAGE_SUFFIXES:
+                image_members.append((normalized, entry.filename))
+
+        if not safe_members:
+            return None
 
         camera_names = {"cameras.bin", "cameras.txt"}
         image_names = {"images.bin", "images.txt"}
@@ -566,13 +633,21 @@ def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
             raise DeterministicDerivativeError("ambiguous_colmap_models")
         if not model_roots:
             return None
+        if len(ply_members) > 1:
+            raise DeterministicDerivativeError("ambiguous_reconstruction_geometry")
 
         selected_root = model_roots[0]
+        wanted_records = [member for member in safe_members if member[1] == selected_root]
+        extracted_bytes = sum(member[0].file_size for member in wanted_records)
+        if ply_members:
+            extracted_bytes += ply_members[0][0].file_size
+        if extracted_bytes > _ZIP_MAX_TOTAL_BYTES:
+            return None
         root = os.path.realpath(dest_dir)
         model_dir = root if not selected_root else os.path.join(root, selected_root)
         extracted_names: set[str] = set()
-        for entry, directory, normalized_name, relative in safe_members:
-            if directory != selected_root or normalized_name in extracted_names:
+        for entry, _directory, normalized_name, relative in wanted_records:
+            if normalized_name in extracted_names:
                 continue
             target = os.path.realpath(os.path.join(root, relative))
             if not (target == root or target.startswith(root + os.sep)):
@@ -581,7 +656,31 @@ def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
             with archive.open(entry) as source, open(target, "wb") as sink:
                 shutil.copyfileobj(source, sink)
             extracted_names.add(normalized_name)
-    return model_dir if colmap.model_files(model_dir).is_model else None
+        ply_path: str | None = None
+        geometry_member: str | None = None
+        if ply_members:
+            entry, geometry_member = ply_members[0]
+            ply_path = os.path.realpath(os.path.join(root, geometry_member))
+            if not ply_path.startswith(root + os.sep):
+                raise DeterministicDerivativeError("unsafe_scene_archive_member")
+            os.makedirs(os.path.dirname(ply_path), exist_ok=True)
+            with archive.open(entry) as source, open(ply_path, "wb") as sink:
+                shutil.copyfileobj(source, sink)
+    if not colmap.model_files(model_dir).is_model:
+        return None
+    return _ExtractedSceneArchive(
+        model_dir=model_dir,
+        model_member_path=selected_root or ".",
+        ply_path=ply_path,
+        geometry_member=geometry_member,
+        image_members=tuple(sorted(image_members)),
+    )
+
+
+def _extract_colmap_zip(src_path: str, dest_dir: str) -> str | None:
+    """Compatibility seam for callers that only need the unique model directory."""
+    extracted = _extract_scene3d_zip(src_path, dest_dir)
+    return extracted.model_dir if extracted is not None else None
 
 
 def _require(header: ply.PlyHeader, names: tuple[str, ...], code: str) -> None:
@@ -961,10 +1060,7 @@ class _ColmapModel:
     model_dir: str
     files: colmap.ColmapModelFiles
     source_bytes: int
-    xyz: np.ndarray  # (n, 3) float64, world — finite rows only
-    rgb: np.ndarray  # (n, 3) uint8, sRGB
-    points_total: int  # points the file declared, before the finite filter
-    nonfinite_points: int  # rows dropped because a coordinate was NaN or infinite
+    cameras: dict[int, colmap.ColmapCamera]
     images_total: int  # every registered image, including any we cannot draw
     drawn: list[colmap.ColmapImage]  # images whose camera_id is calibrated
     centers: np.ndarray  # (k, 3) float64 — bounds/poster only, never emitted
@@ -973,16 +1069,12 @@ class _ColmapModel:
     distorted_count: int
 
     @property
-    def point_count(self) -> int:
-        return int(self.xyz.shape[0])
-
-    @property
     def camera_count(self) -> int:
         return len(self.drawn)
 
 
 def _read_colmap_model(model_dir: str) -> _ColmapModel:
-    """Read the model into memory and pre-serialize its cameras layer.
+    """Read bounded camera metadata and pre-serialize its cameras layer.
 
     The JSON is built here, inside the *parsing* phase, so a non-finite pose surfaces as
     a deterministic parse failure rather than an ``OSError``-shaped one during the write.
@@ -990,23 +1082,6 @@ def _read_colmap_model(model_dir: str) -> _ColmapModel:
     files = colmap.model_files(model_dir)
     cameras = colmap.read_cameras(model_dir) if files.cameras else {}
     images = colmap.read_images(model_dir) if files.images else []
-    if files.points3d:
-        xyz, rgb = colmap.read_points3d(model_dir)
-    else:
-        xyz = np.zeros((0, 3), dtype=np.float64)
-        rgb = np.zeros((0, 3), dtype=np.uint8)
-    points_total = int(xyz.shape[0])
-
-    # A point with a NaN or infinite coordinate cannot be placed in space, and it is not
-    # merely useless: the octree splits on midpoints, every NaN comparison is False, so
-    # such a point lands in the same child forever and the subdivision never terminates.
-    # Dropped here, counted, and stated in `limitations` — never silently.
-    finite = np.isfinite(xyz).all(axis=1)
-    nonfinite_points = points_total - int(np.count_nonzero(finite))
-    if nonfinite_points:
-        xyz = np.ascontiguousarray(xyz[finite])
-        rgb = np.ascontiguousarray(rgb[finite])
-
     drawn = [image for image in images if image.camera_id in cameras]
     payload = colmap.camera_layer_json(cameras, drawn)
     distorted = tuple(
@@ -1023,10 +1098,7 @@ def _read_colmap_model(model_dir: str) -> _ColmapModel:
         model_dir=model_dir,
         files=files,
         source_bytes=colmap.model_bytes(model_dir),
-        xyz=xyz,
-        rgb=rgb,
-        points_total=points_total,
-        nonfinite_points=nonfinite_points,
+        cameras=cameras,
         images_total=len(images),
         drawn=drawn,
         centers=colmap.camera_centers(drawn),
@@ -1065,7 +1137,234 @@ def _camera_poster_sample(centers: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -> dict[str, Any]:
+def _registered_image_name(value: str) -> str | None:
+    if not value or value.startswith("/") or "\\" in value or "\x00" in value:
+        return None
+    normalized = posixpath.normpath(value)
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        return None
+    return normalized
+
+
+def _derive_bundle_camera_previews(
+    archive_path: str,
+    members: tuple[tuple[str, str], ...],
+    images: list[colmap.ColmapImage],
+    directory: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Publish bounded previews for unique archive/image-name matches."""
+
+    artifacts: dict[str, dict[str, Any]] = {}
+    stats = {
+        "registered": len(images),
+        "matched": 0,
+        "published": 0,
+        "ambiguous": 0,
+        "unreadable": 0,
+    }
+    name_counts: dict[str, int] = {}
+    for image in images:
+        normalized = _registered_image_name(image.name)
+        if normalized is not None:
+            name_counts[normalized] = name_counts.get(normalized, 0) + 1
+    wanted = {name for name, count in name_counts.items() if count == 1}
+    matches_by_name: dict[str, list[str]] = {name: [] for name in wanted}
+    # One archive pass, proportional to path components rather than
+    # registered-images × archive-members. A suffix is admitted only at a slash
+    # boundary, preserving the prior exact matching contract.
+    for normalized, actual in members:
+        suffixes = {normalized}
+        suffixes.update(
+            normalized[offset + 1 :] for offset, char in enumerate(normalized) if char == "/"
+        )
+        for suffix in suffixes & wanted:
+            matches_by_name[suffix].append(actual)
+    with zipfile.ZipFile(archive_path) as archive:
+        by_actual = {entry.filename: entry for entry in archive.infolist()}
+        for image in sorted(images, key=lambda item: (item.name, item.image_id)):
+            normalized_name = _registered_image_name(image.name)
+            if normalized_name is None or name_counts[normalized_name] != 1:
+                stats["ambiguous"] += 1
+                continue
+            matches = matches_by_name.get(normalized_name, [])
+            if len(matches) != 1:
+                if len(matches) > 1:
+                    stats["ambiguous"] += 1
+                continue
+            stats["matched"] += 1
+            # Match accounting covers the complete registration table. Pixel decode
+            # stays deliberately bounded: after the deterministic preview budget is
+            # full, remaining exact matches are catalog facts rather than hidden I/O.
+            if len(artifacts) >= _BUNDLE_MAX_PREVIEWS:
+                continue
+            entry = by_actual.get(matches[0])
+            if entry is None or entry.file_size < 1 or entry.file_size > _BUNDLE_MAX_IMAGE_BYTES:
+                stats["unreadable"] += 1
+                continue
+            try:
+                with archive.open(entry) as source, Image.open(source) as opened:
+                    source_width, source_height = opened.size
+                    if (
+                        source_width < 1
+                        or source_height < 1
+                        or source_width * source_height > _BUNDLE_MAX_IMAGE_PIXELS
+                    ):
+                        stats["unreadable"] += 1
+                        continue
+                    opened.thumbnail((640, 640), Image.Resampling.LANCZOS)
+                    display = opened.convert("RGB")
+                    buffer = io.BytesIO()
+                    display.save(buffer, format="JPEG", quality=88, optimize=True)
+                    width, height = display.size
+            except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+                stats["unreadable"] += 1
+                continue
+            index = len(artifacts)
+            _atomic_write(
+                os.path.join(directory, f"camera-image_{index:05d}.jpg"),
+                buffer.getvalue(),
+            )
+            artifacts[image.name] = {
+                "artifact_index": index,
+                "width": width,
+                "height": height,
+                "source_width": source_width,
+                "source_height": source_height,
+            }
+            stats["published"] += 1
+    return artifacts, stats
+
+
+def _next_manifest_chunk_index(document: dict[str, Any]) -> int:
+    indices = [
+        int(chunk["index"])
+        for layer in document.get("layers", [])
+        if isinstance(layer, dict)
+        for chunk in layer.get("chunks", [])
+        if isinstance(chunk, dict) and isinstance(chunk.get("index"), int)
+    ]
+    return max(indices, default=-1) + 1
+
+
+def _run_reconstruction_bundle(
+    job: Scene3dDeriveJob,
+    extracted: _ExtractedSceneArchive,
+    *,
+    read_header_fn: ReadHeaderFn,
+    iter_chunks_fn: IterChunksFn,
+    measure_sh_fn: MeasureShFn,
+    poster_fn: PosterFn,
+) -> dict[str, Any]:
+    if extracted.ply_path is None or extracted.geometry_member is None:
+        raise DeterministicDerivativeError("reconstruction_geometry_missing")
+    geometry_job = replace(job, src_path=extracted.ply_path)
+    result = _run(
+        geometry_job,
+        read_header_fn=read_header_fn,
+        iter_chunks_fn=iter_chunks_fn,
+        measure_sh_fn=measure_sh_fn,
+        poster_fn=poster_fn,
+    )
+    manifest_path = os.path.join(job.dst_dir, MANIFEST_NAME)
+    with open(manifest_path, encoding="utf-8") as stream:
+        document = json.load(stream)
+    if document.get("scene_kind") != "splat":
+        raise DeterministicDerivativeError("reconstruction_geometry_not_splat")
+
+    model = _read_colmap_model(extracted.model_dir)
+    if model.camera_count < 1:
+        raise DeterministicDerivativeError("reconstruction_cameras_missing")
+    image_artifacts, image_stats = _derive_bundle_camera_previews(
+        job.src_path,
+        extracted.image_members,
+        model.drawn,
+        job.dst_dir,
+    )
+    camera_payload = json.dumps(
+        colmap.camera_layer_json(model.cameras, model.drawn, image_artifacts),
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    camera_index = _next_manifest_chunk_index(document)
+    _atomic_write(
+        os.path.join(job.dst_dir, CHUNK_NAME.format(index=camera_index)),
+        camera_payload,
+    )
+    camera_bbox = _bbox_of(model.centers)
+    camera_entry = {
+        "index": camera_index,
+        "count": model.camera_count,
+        "bytes": len(camera_payload),
+        "origin": [0.0, 0.0, 0.0],
+        "bbox": camera_bbox,
+    }
+    document["layers"].append(
+        manifest.build_layer(
+            layer_type="cameras",
+            encoding="json",
+            total=model.images_total,
+            chunks=[camera_entry],
+            tiers=[[camera_index]],
+            activation_domain="post",
+            source_frame="rdf",
+            quantization={
+                "rotation": "f64-exact quaternion, (w, x, y, z), world-to-camera",
+                "center": "not transmitted — tvec is the world-to-camera translation",
+            },
+        )
+    )
+    world = document["world"]
+    world["bbox"] = _union_bbox(list(world["bbox"]), camera_bbox)
+    document["scene_kind"] = "reconstruction"
+    source = document["source"]
+    source["format"] = "reconstruction_bundle"
+    source["geometry_member"] = extracted.geometry_member
+    source["colmap_model_path"] = extracted.model_member_path
+    source["geometry_bytes"] = source["bytes"]
+    source["container_bytes"] = job.source_size_bytes or os.path.getsize(job.src_path)
+    source["bytes"] = source["container_bytes"]
+    document["reconstruction"] = {
+        "registered_images": image_stats["registered"],
+        "matched_images": image_stats["matched"],
+        "preview_images": image_stats["published"],
+        "preview_limit": _BUNDLE_MAX_PREVIEWS,
+        "ambiguous_images": image_stats["ambiguous"],
+        "unreadable_images": image_stats["unreadable"],
+    }
+    document["limitations"].extend(
+        [
+            "The Gaussian geometry and COLMAP cameras remain in their shared source world frame; no alignment transform is inferred or applied.",
+            f"{image_stats['published']:,} of {model.images_total:,} registered camera images have bounded previews. A preview is published only for one exact, unique archive-member match.",
+            "Camera previews are display references only. They are not resampled into the reconstruction and EXIF orientation is not applied, so camera pixel coordinates remain auditable.",
+        ]
+    )
+    if model.files.points3d:
+        document["limitations"].append(
+            "The bundle's COLMAP points3D table is not drawn because the Gaussian PLY is the declared primary geometry; camera calibration remains available for alignment checks."
+        )
+    document["service_urls"]["camera_image"] = (
+        f"/v2/uploads/{job.resource_id}/scene3d/image/{{index}}"
+    )
+    _atomic_write(manifest_path, json.dumps(document, indent=2, allow_nan=False) + "\n")
+    result.update(
+        {
+            "scene_kind": "reconstruction",
+            "camera_count": model.camera_count,
+            "camera_image_count": image_stats["published"],
+            "chunk_count": int(result.get("chunk_count", 0)) + 1,
+            "source_bytes": job.source_size_bytes or os.path.getsize(job.src_path),
+        }
+    )
+    return result
+
+
+def _run_colmap(
+    job: Scene3dDeriveJob,
+    model_dir: str,
+    *,
+    poster_fn: PosterFn,
+    source_bytes_override: int | None = None,
+) -> dict[str, Any]:
     """Derive a COLMAP sparse model: points through the normal path, cameras beside it."""
     try:
         model = _read_colmap_model(model_dir)
@@ -1077,24 +1376,35 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
         raise TransientDerivativeError("scene_derive_resources") from exc
     except OSError as exc:
         raise TransientDerivativeError("scene_source_unavailable") from exc
-    if model.point_count < 1 and model.camera_count < 1:
+    point_scan = streaming.PlyScan(0, 0, 0, [0.0] * 6, [0.0] * 6)
+    if model.files.points3d:
+        try:
+            point_scan = streaming.scan_points(lambda: colmap.iter_points3d(model.model_dir))
+        except ValueError as exc:
+            raise DeterministicDerivativeError("unsupported_scene_source") from exc
+        except MemoryError as exc:
+            raise TransientDerivativeError("scene_derive_resources") from exc
+        except OSError as exc:
+            raise TransientDerivativeError("scene_source_unavailable") from exc
+    if point_scan.valid_total < 1 and model.camera_count < 1:
         raise DeterministicDerivativeError("empty_scene_source")
 
-    plan: chunker.ChunkPlan | None = None
-    pack_fn: PackFn | None = None
+    derived: streaming.StreamedPlyResult | None = None
     facts: dict[str, Any] = {"measured_sh_degree": 0, "out_of_range_color_fraction": 0.0}
     sample = _camera_poster_sample(model.centers)
-    if model.point_count:
+    if point_scan.valid_total:
         try:
-            positions = np.ascontiguousarray(model.xyz, dtype=np.float32)
-            plan = _plan_points(job, positions)
-            rgba = np.full((model.point_count, 4), 255, dtype=np.uint8)
-            # Scatter source-order colours into chunk-output-row order, the same shape
-            # the PLY point path produces.
-            rgba[plan.dest, 0:3] = model.rgb
-            pack_fn, facts, sample = _point_layer_outputs(
-                job, positions, plan, rgba, has_alpha=False
+            derived = streaming.derive_points(
+                directory=job.dst_dir,
+                iter_blocks=lambda: colmap.iter_points3d(model.model_dir),
+                scan=point_scan,
+                max_per_chunk=job.max_splats_per_chunk,
+                tier_count=job.tier_count,
+                preview_points=job.preview_points,
+                poster_sample=job.poster_sample,
             )
+            facts["bbox_robust"] = derived.bbox_robust
+            sample = derived.sample
         except DerivativeJobError:
             raise
         except ValueError as exc:
@@ -1104,14 +1414,7 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
 
     try:
         os.makedirs(job.dst_dir, exist_ok=True)
-        entries: list[dict[str, Any]] = []
-        if plan is not None and pack_fn is not None:
-            for chunk in plan.chunks:
-                payload = pack_fn(chunk)
-                _atomic_write(
-                    os.path.join(job.dst_dir, CHUNK_NAME.format(index=chunk.index)), payload
-                )
-                entries.append(_chunk_entry(chunk, len(payload)))
+        entries = derived.entries if derived is not None else []
         camera_entry: dict[str, Any] | None = None
         if model.camera_count:
             # After every point chunk, so a model's point chunk indices do not move when
@@ -1134,9 +1437,26 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
             colors=sample["colors"],
             opacities=sample["opacities"],
             radii=sample["radii"],
-            total=model.point_count or model.camera_count,
+            total=point_scan.valid_total or model.camera_count,
         )
-        document = _build_colmap_manifest(job, model, plan, entries, camera_entry, facts, rendered)
+        source_bytes = (
+            source_bytes_override
+            if source_bytes_override is not None
+            else (
+                job.source_size_bytes if job.source_size_bytes is not None else model.source_bytes
+            )
+        )
+        document = _build_colmap_manifest(
+            job,
+            model,
+            derived,
+            point_scan,
+            entries,
+            camera_entry,
+            facts,
+            rendered,
+            source_bytes=source_bytes,
+        )
         _atomic_write(
             os.path.join(job.dst_dir, MANIFEST_NAME),
             json.dumps(document, indent=2, allow_nan=False) + "\n",
@@ -1157,14 +1477,14 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
         "dst_dir": job.dst_dir,
         "status": "succeeded",
         "scene_kind": "colmap",
-        "total": model.point_count,
+        "total": point_scan.valid_total,
         "camera_count": model.camera_count,
         "chunk_count": len(entries) + (1 if camera_entry else 0),
-        "tier_count": len(plan.tiers) if plan is not None else 0,
+        "tier_count": len(derived.tiers) if derived is not None else 0,
         "declared_sh_degree": 0,
         "measured_sh_degree": 0,
         "stride_bytes": 0,
-        "source_bytes": model.source_bytes,
+        "source_bytes": source_bytes,
         "model_dir": model.model_dir,
         "manifest_path": os.path.join(job.dst_dir, MANIFEST_NAME),
         "poster_path": rendered.path,
@@ -1174,14 +1494,17 @@ def _run_colmap(job: Scene3dDeriveJob, model_dir: str, *, poster_fn: PosterFn) -
 def _build_colmap_manifest(
     job: Scene3dDeriveJob,
     model: _ColmapModel,
-    plan: chunker.ChunkPlan | None,
+    derived: streaming.StreamedPlyResult | None,
+    point_scan: streaming.PlyScan,
     entries: list[dict[str, Any]],
     camera_entry: dict[str, Any] | None,
     facts: dict[str, Any],
     rendered: poster.PosterResult,
+    *,
+    source_bytes: int,
 ) -> dict[str, Any]:
     """The §6 manifest for a COLMAP model: a point layer, a cameras layer, or both."""
-    point_bbox = _world_bbox(entries) if entries else None
+    point_bbox = derived.bbox if derived is not None else None
     camera_bbox = _bbox_of(model.centers) if model.camera_count else None
     if point_bbox is None:
         bbox = camera_bbox or [0.0] * 6
@@ -1196,14 +1519,14 @@ def _build_colmap_manifest(
 
     layers: list[dict[str, Any]] = []
     limitations: list[str] = []
-    if plan is not None:
+    if derived is not None:
         layers.append(
             manifest.build_layer(
                 layer_type="points",
                 encoding="upc-v1",
-                total=plan.total,
+                total=derived.total,
                 chunks=entries,
-                tiers=[list(tier) for tier in plan.tiers],
+                tiers=[list(tier) for tier in derived.tiers],
                 activation_domain="post",
                 source_frame="source",
                 quantization={"center": "f32-exact", "color": "u8-srgb"},
@@ -1217,9 +1540,9 @@ def _build_colmap_manifest(
             "COLMAP point positions are stored as float64 and are served as float32 relative to "
             "each chunk's origin, which is the precision the GPU consumes."
         )
-    if model.nonfinite_points:
+    if point_scan.nonfinite:
         limitations.append(
-            f"{model.nonfinite_points:,} of {model.points_total:,} points carried a non-finite "
+            f"{point_scan.nonfinite:,} of {point_scan.source_total:,} points carried a non-finite "
             "coordinate (NaN or infinity) and were dropped: they cannot be placed in space. "
             "Every other point was kept."
         )
@@ -1250,12 +1573,18 @@ def _build_colmap_manifest(
                 drawn_count=model.camera_count,
                 distorted_count=model.distorted_count,
                 distorted_models=model.distorted,
-                has_points=model.point_count > 0,
+                has_points=point_scan.valid_total > 0,
                 has_rig_metadata=model.files.has_rig_metadata,
             )
         )
-    if plan is not None:
-        limitations.extend(_plan_limitations(job, plan))
+    if derived is not None:
+        tier_zero = sum(derived.entries[index]["count"] for index in derived.tiers[0])
+        limitations.append(
+            f"Tier 0 is a deterministic uniform sample of {tier_zero:,} of "
+            f"{derived.total:,} finite COLMAP points. Each later tier adds another "
+            "deterministic refinement, and the union of every tier contains every finite "
+            "source point exactly once."
+        )
     limitations.extend(_view_limitations(rendered, up_axis, up_basis))
     return manifest.build_manifest(
         resource_id=job.resource_id,
@@ -1264,8 +1593,8 @@ def _build_colmap_manifest(
         writer=None,
         # What the source declares, not what survived: the layer's `total` carries the
         # kept count, and the difference is spelled out in `limitations`.
-        vertex_count=model.points_total,
-        source_bytes=model.source_bytes,
+        vertex_count=point_scan.source_total,
+        source_bytes=source_bytes,
         declared_sh_degree=0,
         measured_sh_degree=0,
         # COLMAP records are variable-width by construction — a name of arbitrary length
@@ -1426,14 +1755,28 @@ def _run(
     if _looks_like_zip(job.src_path):
         with tempfile.TemporaryDirectory(prefix="scene3d-zip-") as staged:
             try:
-                extracted = _extract_colmap_zip(job.src_path, staged)
+                extracted = _extract_scene3d_zip(job.src_path, staged)
             except zipfile.BadZipFile as exc:
                 raise DeterministicDerivativeError("unsupported_scene_source") from exc
             except OSError as exc:
                 raise TransientDerivativeError("scene_source_unavailable") from exc
             if extracted is None:
                 raise DeterministicDerivativeError("unsupported_scene_source")
-            return _run_colmap(job, extracted, poster_fn=poster_fn)
+            if extracted.ply_path is not None:
+                return _run_reconstruction_bundle(
+                    job,
+                    extracted,
+                    read_header_fn=read_header_fn,
+                    iter_chunks_fn=iter_chunks_fn,
+                    measure_sh_fn=measure_sh_fn,
+                    poster_fn=poster_fn,
+                )
+            return _run_colmap(
+                job,
+                extracted.model_dir,
+                poster_fn=poster_fn,
+                source_bytes_override=os.path.getsize(job.src_path),
+            )
 
     try:
         source_bytes = os.path.getsize(job.src_path)

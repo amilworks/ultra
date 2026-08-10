@@ -942,7 +942,7 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 					}
 					if !strings.HasSuffix(
 						fmt.Sprint(job.Metadata["dst_dir"]),
-						fileID+"__scene3d.v4.sha256-"+sourceSHA256,
+						fileID+"__scene3d.v5.sha256-"+sourceSHA256,
 					) {
 						t.Fatalf("scene.derive dst_dir = %v", job.Metadata["dst_dir"])
 					}
@@ -955,6 +955,98 @@ func TestScene3dViewerDescriptorFromBothDispatchArms(t *testing.T) {
 				t.Fatalf("image service calls = %d, want zero for a 3D scene", imageServiceCalls.Load())
 			}
 		})
+	}
+}
+
+func TestScene3dCalibrationIsSourceBoundRevisionedAndReturnedByViewer(t *testing.T) {
+	router, mem, _, _ := newScene3dTestRouter(t, "")
+	fixture := splatFixtureBytes(6)
+	fileID := uploadNamedFileForProxyTest(t, router, "calibrated-scene.ply", fixture)
+	resource, err := mem.GetResourceForUser(
+		context.Background(), fileID, "field-researcher", "smithsonian",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	patch := func(expectedRevision int, scale float64) *httptest.ResponseRecorder {
+		body, marshalErr := json.Marshal(map[string]any{
+			"metadata": map[string]any{
+				"ultra_scene3d_calibration_v1": map[string]any{
+					"version":               1,
+					"source_sha256":         resource.SHA256,
+					"expected_revision":     expectedRevision,
+					"signed_up_axis":        "+z",
+					"handedness":            "right",
+					"units":                 "mm",
+					"units_per_source_unit": scale,
+				},
+			},
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		req := httptest.NewRequest(
+			http.MethodPatch, "/v2/resources/"+fileID, bytes.NewReader(body),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		setProxyOwnerHeaders(req)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := patch(0, 0.5)
+	if first.Code != http.StatusOK {
+		t.Fatalf("calibration PATCH status=%d body=%s", first.Code, first.Body.String())
+	}
+	var patched resourceResponse
+	if err := json.Unmarshal(first.Body.Bytes(), &patched); err != nil {
+		t.Fatal(err)
+	}
+	saved, ok := jsonObject(patched.Resource.Metadata["ultra_scene3d_calibration_v1"])
+	if !ok || saved["revision"] != float64(1) || saved["units_per_source_unit"] != 0.5 {
+		t.Fatalf("saved calibration = %#v", saved)
+	}
+	if _, exists := saved["expected_revision"]; exists {
+		t.Fatalf("write-only expected revision leaked: %#v", saved)
+	}
+
+	viewer := getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil)
+	if viewer.Code != http.StatusOK {
+		t.Fatalf("viewer status=%d body=%s", viewer.Code, viewer.Body.String())
+	}
+	payload := decodeScene3dJSON(t, viewer)
+	calibration, ok := payload["calibration"].(map[string]any)
+	if !ok || calibration["source_sha256"] != resource.SHA256 ||
+		calibration["signed_up_axis"] != "+z" || calibration["units"] != "mm" {
+		t.Fatalf("viewer calibration = %#v", payload["calibration"])
+	}
+
+	stale := patch(0, 2)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale calibration status=%d body=%s", stale.Code, stale.Body.String())
+	}
+}
+
+func TestScene3dViewerHidesCalibrationBoundToAnotherSource(t *testing.T) {
+	record := resourceRecord{
+		SHA256: strings.Repeat("a", 64),
+		Metadata: domain.JSONMap{
+			"ultra_scene3d_calibration_v1": domain.JSONMap{
+				"version":               1,
+				"source_sha256":         strings.Repeat("b", 64),
+				"revision":              3,
+				"signed_up_axis":        "+z",
+				"handedness":            "right",
+				"units":                 "mm",
+				"units_per_source_unit": 0.5,
+			},
+		},
+	}
+
+	if calibration, ok := scene3dCalibrationForViewer(record); ok || calibration != nil {
+		t.Fatalf("stale source calibration reached viewer: %#v", calibration)
 	}
 }
 
@@ -1231,6 +1323,83 @@ func TestScene3dColmapZipDescriptorReportsTheArchiveVariant(t *testing.T) {
 	}
 	if jobs != 1 {
 		t.Fatalf("scene.derive jobs = %d, want exactly 1", jobs)
+	}
+}
+
+func TestScene3dReconstructionBundleDescriptorAndCameraPreviewDelivery(t *testing.T) {
+	router, _, root, publisher := newScene3dTestRouter(t, "")
+	raw := colmapZipBytes(t,
+		"capture/sparse/0/cameras.bin",
+		"capture/sparse/0/images.bin",
+		"capture/sparse/0/points3D.bin",
+		"capture/geometry.ply",
+		"capture/images/frame.jpg",
+	)
+	fileID := uploadNamedFileForProxyTest(t, router, "capture.zip", raw)
+	payload := decodeScene3dJSON(t, getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil))
+	if payload["scene_kind"] != "reconstruction" || payload["format"] != "reconstruction_bundle" ||
+		payload["status"] != "deriving" || payload["decodable"] != true {
+		t.Fatalf("bundle descriptor = %v", payload)
+	}
+	source, ok := payload["source"].(map[string]any)
+	if !ok || source["variant"] != "bundle" ||
+		source["model_path"] != "capture/sparse/0" ||
+		source["geometry_member"] != "capture/geometry.ply" ||
+		source["geometry_member_count"] != float64(1) ||
+		source["image_member_count"] != float64(1) {
+		t.Fatalf("bundle source inventory = %v", payload["source"])
+	}
+	urls, ok := payload["service_urls"].(map[string]any)
+	if !ok || urls["camera_image"] != "/v2/uploads/"+fileID+"/scene3d/image/{index}" {
+		t.Fatalf("bundle camera URL = %v", payload["service_urls"])
+	}
+	queued := 0
+	for _, job := range publisher.jobs {
+		if job.JobType == "scene.derive" {
+			queued++
+		}
+	}
+	if queued != 1 {
+		t.Fatalf("bundle scene.derive jobs = %d, want 1", queued)
+	}
+
+	directory := derivedScene3dDir(root, fileID, scene3dFixtureSHA(raw))
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preview := []byte{0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0xff, 0xd9}
+	if err := os.WriteFile(filepath.Join(directory, fmt.Sprintf(scene3dCameraImageName, 0)), preview, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/image/0", nil)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), preview) ||
+		rec.Header().Get("Content-Type") != "image/jpeg" || rec.Header().Get("ETag") == "" {
+		t.Fatalf("camera preview status=%d type=%q etag=%q body=%x",
+			rec.Code, rec.Header().Get("Content-Type"), rec.Header().Get("ETag"), rec.Body.Bytes())
+	}
+	if invalid := getAsOwner(t, router, "/v2/uploads/"+fileID+"/scene3d/image/64", nil); invalid.Code != http.StatusBadRequest {
+		t.Fatalf("camera preview index 64 status=%d, want 400", invalid.Code)
+	}
+}
+
+func TestScene3dReconstructionBundleRefusesAmbiguousPrimaryGeometry(t *testing.T) {
+	router, _, _, publisher := newScene3dTestRouter(t, "")
+	raw := colmapZipBytes(t,
+		"sparse/0/cameras.bin", "sparse/0/images.bin",
+		"geometry-a.ply", "geometry-b.ply",
+	)
+	fileID := uploadNamedFileForProxyTest(t, router, "ambiguous-bundle.zip", raw)
+	payload := decodeScene3dJSON(t, getAsOwner(t, router, "/v2/uploads/"+fileID+"/viewer", nil))
+	if payload["scene_kind"] != "reconstruction" || payload["status"] != "failed" || payload["decodable"] != false {
+		t.Fatalf("ambiguous bundle descriptor = %v", payload)
+	}
+	if !strings.Contains(fmt.Sprint(payload["message"]), "exactly one primary PLY") {
+		t.Fatalf("ambiguous bundle message = %v", payload["message"])
+	}
+	for _, job := range publisher.jobs {
+		if job.JobType == "scene.derive" || job.JobType == "image.derive_pyramid" {
+			t.Fatalf("ambiguous bundle queued %q: %+v", job.JobType, job.Metadata)
+		}
 	}
 }
 

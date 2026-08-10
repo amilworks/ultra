@@ -1401,7 +1401,9 @@ const normalizeCiftiViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
 };
 
 const SCENE3D_STATUSES = new Set(["ready", "deriving", "failed"]);
-const SCENE3D_KINDS = new Set(["splat", "pointcloud", "colmap", "unknown"]);
+const SCENE3D_KINDS = new Set(["splat", "pointcloud", "colmap", "reconstruction", "unknown"]);
+const SCENE3D_AXES = new Set(["+x", "-x", "+y", "-y", "+z", "-z"]);
+const SCENE3D_UNITS = new Set(["arbitrary", "m", "cm", "mm", "um", "nm"]);
 
 const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => {
   const fileId = String(source.file_id ?? "");
@@ -1409,6 +1411,33 @@ const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => 
   const urls = toRecord(source.service_urls);
   const status = normalizedString(source.status);
   const sceneKind = normalizedString(source.scene_kind);
+  const rawCalibration = toRecord(source.calibration);
+  const calibrationScale = Number(rawCalibration.units_per_source_unit);
+  const calibrationAxis = String(rawCalibration.signed_up_axis ?? "");
+  const calibrationHandedness = String(rawCalibration.handedness ?? "");
+  const calibrationUnits = String(rawCalibration.units ?? "");
+  const calibrationRevision = clampNonNegativeInt(rawCalibration.revision, 0);
+  const calibration =
+    Number(rawCalibration.version) === 1 &&
+    typeof rawCalibration.source_sha256 === "string" &&
+    rawCalibration.source_sha256.length > 0 &&
+    calibrationRevision > 0 &&
+    SCENE3D_AXES.has(calibrationAxis) &&
+    (calibrationHandedness === "right" || calibrationHandedness === "left") &&
+    SCENE3D_UNITS.has(calibrationUnits) &&
+    Number.isFinite(calibrationScale) &&
+    calibrationScale >= 1e-12 &&
+    calibrationScale <= 1e12
+      ? {
+        version: 1 as const,
+        source_sha256: rawCalibration.source_sha256,
+        revision: calibrationRevision,
+        signed_up_axis: calibrationAxis as "+x" | "-x" | "+y" | "-y" | "+z" | "-z",
+        handedness: calibrationHandedness as "right" | "left",
+        units: calibrationUnits as "arbitrary" | "m" | "cm" | "mm" | "um" | "nm",
+        units_per_source_unit: calibrationScale,
+      }
+      : null;
   // Same trick as CIFTI: build a type-complete skeleton with the generic
   // normalizer, then stamp the scene identity on top. A 3D scene has no
   // T/C/Z/Y/X grid at all, so the axis sizes stay at their 1×1 defaults and
@@ -1432,9 +1461,13 @@ const normalizeScene3dViewerInfo = (source: UnknownRecord): UploadViewerInfo => 
       scene_kind: SCENE3D_KINDS.has(sceneKind) ? sceneKind : "unknown",
       element_count: clampNonNegativeInt(source.element_count, 0),
       message: source.message == null ? null : String(source.message),
+      calibration,
       service_urls: {
         manifest: String(urls.manifest ?? `/v2/uploads/${seg}/scene3d/manifest`),
         chunk: String(urls.chunk ?? `/v2/uploads/${seg}/scene3d/chunk`),
+        camera_image: String(
+          urls.camera_image ?? `/v2/uploads/${seg}/scene3d/image/{index}`
+        ),
         download: String(urls.download ?? `/v2/resources/${seg}/download`),
       },
     },

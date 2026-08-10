@@ -53,10 +53,10 @@ func TestDerivativeNameMatcherUsesExactOwnedGrammar(t *testing.T) {
 		"file_a__scene3d.v3.sha256-" + digest + ".failed",
 		".file_a__scene3d.v3.sha256-" + digest + ".tmp-abcdefgh",
 		".file_a__scene3d.v3.sha256-" + digest + ".failed.abcdefgh",
-		"file_a__scene3d.v4.sha256-" + digest,
-		"file_a__scene3d.v4.sha256-" + digest + ".failed",
-		".file_a__scene3d.v4.sha256-" + digest + ".tmp-abcdefgh",
-		".file_a__scene3d.v4.sha256-" + digest + ".failed.abcdefgh",
+		"file_a__scene3d.v5.sha256-" + digest,
+		"file_a__scene3d.v5.sha256-" + digest + ".failed",
+		".file_a__scene3d.v5.sha256-" + digest + ".tmp-abcdefgh",
+		".file_a__scene3d.v5.sha256-" + digest + ".failed.abcdefgh",
 	}
 	for _, name := range positives {
 		if !matcher.MatchString(name) {
@@ -620,7 +620,7 @@ func TestScanOwnedDerivativeNamesForResourcesInventoriesBatchOnce(t *testing.T) 
 			"file_a__scene3d.sha256-" + digest,
 			"file_a__scene3d.v2.sha256-" + digest,
 			"file_a__scene3d.v3.sha256-" + digest,
-			"file_a__scene3d.v4.sha256-" + digest,
+			"file_a__scene3d.v5.sha256-" + digest,
 		},
 		"file_a__pyramid_beta": {
 			"file_a__pyramid_beta__pyramid.manifest.json",

@@ -142,27 +142,40 @@ class SubagentFailureIsolationMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
+        deadline: asyncio.Timeout | None = None
         try:
             if self._deadline_applies(request):
-                async with asyncio.timeout(self._timeout):
+                deadline = asyncio.timeout(self._timeout)
+                async with deadline:
                     return await handler(request)
             return await handler(request)
         except GraphBubbleUp:
             raise
         except (KeyboardInterrupt, asyncio.CancelledError):
             raise
-        except TimeoutError:
-            # asyncio.timeout converts its own cancellation into TimeoutError at the boundary;
-            # an EXTERNAL cancel surfaces as CancelledError above and is re-raised, not caught here.
-            logger.warning(
-                "Subagent '%s' exceeded the %.0fs per-task deadline; isolating it",
-                _target_subagent(request),
-                self._timeout or 0.0,
-            )
-            return _degraded_message(
-                request, f"exceeded the {self._timeout:.0f}s per-task wall-clock deadline"
-            )
         except Exception as exc:  # noqa: BLE001
+            if (
+                isinstance(exc, TimeoutError)
+                and deadline is not None
+                and deadline.expired()
+                and self._timeout is not None
+            ):
+                # asyncio.timeout converts its own cancellation into TimeoutError at the boundary;
+                # an EXTERNAL cancel surfaces as CancelledError above and is re-raised, not caught.
+                logger.warning(
+                    "Subagent '%s' exceeded the %.0fs per-task deadline; isolating it",
+                    _target_subagent(request),
+                    self._timeout,
+                )
+                return _degraded_message(
+                    request, f"exceeded the {self._timeout:.0f}s per-task wall-clock deadline"
+                )
+            if isinstance(exc, TimeoutError):
+                logger.warning(
+                    "Isolated a failed '%s' tool call: TimeoutError",
+                    _tool_name(request) or "?",
+                )
+                return _degraded_message(request, "TimeoutError")
             logger.warning(
                 "Isolated a failed '%s' tool call: %s",
                 _tool_name(request) or "?",

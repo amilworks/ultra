@@ -142,13 +142,10 @@ class SubagentFailureIsolationMiddleware(AgentMiddleware[Any, Any, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        deadline = (
-            asyncio.timeout(self._timeout)
-            if self._deadline_applies(request) and self._timeout is not None
-            else None
-        )
+        deadline: asyncio.Timeout | None = None
         try:
-            if deadline is not None:
+            if self._deadline_applies(request):
+                deadline = asyncio.timeout(self._timeout)
                 async with deadline:
                     return await handler(request)
             return await handler(request)
@@ -156,10 +153,15 @@ class SubagentFailureIsolationMiddleware(AgentMiddleware[Any, Any, Any]):
             raise
         except (KeyboardInterrupt, asyncio.CancelledError):
             raise
-        except TimeoutError as exc:
-            # asyncio.timeout converts its own cancellation into TimeoutError at the boundary;
-            # an EXTERNAL cancel surfaces as CancelledError above and is re-raised, not caught here.
-            if deadline is not None and deadline.expired() and self._timeout is not None:
+        except Exception as exc:  # noqa: BLE001
+            if (
+                isinstance(exc, TimeoutError)
+                and deadline is not None
+                and deadline.expired()
+                and self._timeout is not None
+            ):
+                # asyncio.timeout converts its own cancellation into TimeoutError at the boundary;
+                # an EXTERNAL cancel surfaces as CancelledError above and is re-raised, not caught.
                 logger.warning(
                     "Subagent '%s' exceeded the %.0fs per-task deadline; isolating it",
                     _target_subagent(request),
@@ -168,14 +170,12 @@ class SubagentFailureIsolationMiddleware(AgentMiddleware[Any, Any, Any]):
                 return _degraded_message(
                     request, f"exceeded the {self._timeout:.0f}s per-task wall-clock deadline"
                 )
-            logger.warning(
-                "Isolated a failed '%s' tool call: %s",
-                _tool_name(request) or "?",
-                exc,
-                exc_info=True,
-            )
-            return _degraded_message(request, f"{type(exc).__name__}: {exc}")
-        except Exception as exc:  # noqa: BLE001
+            if isinstance(exc, TimeoutError):
+                logger.warning(
+                    "Isolated a failed '%s' tool call: TimeoutError",
+                    _tool_name(request) or "?",
+                )
+                return _degraded_message(request, "TimeoutError")
             logger.warning(
                 "Isolated a failed '%s' tool call: %s",
                 _tool_name(request) or "?",

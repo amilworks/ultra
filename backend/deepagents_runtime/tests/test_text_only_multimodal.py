@@ -172,6 +172,50 @@ def test_bounded_image_middleware_preserves_non_image_blocks_in_place() -> None:
     assert "base64,old" not in str(bounded.content[1])
 
 
+def test_bounded_image_middleware_replaces_unsupported_file_blocks() -> None:
+    message = ToolMessage(
+        content_blocks=[
+            {
+                "type": "file",
+                "base64": "checkpoint-bytes",
+                "mime_type": "application/octet-stream",
+                "filename": "yolov5n.pt",
+            },
+            {"type": "image", "base64": "image-bytes", "mime_type": "image/png"},
+        ],
+        tool_call_id="call-read-checkpoint",
+        name="read_file",
+        additional_kwargs={
+            "read_file_path": "/workspace/staged_uploads/yolov5n.pt",
+            "read_file_media_type": "application/octet-stream",
+        },
+    )
+    middleware = BoundedImageMultimodalMiddleware(max_images=4)
+    captured: list[Any] = []
+
+    def handler(request: ModelRequest[Any]) -> ModelResponse[Any]:
+        captured.extend(request.messages)
+        return ModelResponse(result=[AIMessage(content="ok")])
+
+    request = ModelRequest(
+        model=cast(BaseChatModel, object()),
+        messages=[message],
+        runtime=cast(Any, None),
+    )
+    middleware.wrap_model_call(request, handler)
+
+    bounded = captured[0]
+    assert bounded.tool_call_id == "call-read-checkpoint"
+    assert isinstance(bounded.content, list)
+    assert [block["type"] for block in bounded.content] == ["text", "image"]
+    notice = bounded.content[0]["text"]
+    assert "yolov5n.pt" in notice
+    assert "/workspace/staged_uploads/yolov5n.pt" in notice
+    assert "application/octet-stream" in notice
+    assert "checkpoint-bytes" not in str(bounded.content)
+    assert bounded.content[1] == message.content[1]
+
+
 def test_bounded_image_middleware_enforces_async_model_call_timeout() -> None:
     middleware = BoundedImageMultimodalMiddleware(
         max_images=4,

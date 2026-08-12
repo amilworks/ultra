@@ -127,6 +127,37 @@ def test_timeout_becomes_degraded_message_for_bounded_subagent():
     assert "deadline" in out.content.lower()
 
 
+@pytest.mark.parametrize(
+    ("timeout_seconds", "tool_name", "subagent"),
+    [
+        pytest.param(0.0, "search_resources", None, id="deadline-disabled"),
+        pytest.param(0.05, "task", "code-runner", id="deadline-excluded"),
+        pytest.param(1.0, "task", "vision-reasoner", id="bounded-before-expiry"),
+    ],
+)
+def test_handler_timeout_error_uses_generic_isolation(
+    timeout_seconds: float,
+    tool_name: str,
+    subagent: str | None,
+    caplog: pytest.LogCaptureFixture,
+):
+    mw = SubagentFailureIsolationMiddleware(timeout_seconds=timeout_seconds)
+    sensitive_detail = "handler timed out at https://private.example/run/secret-resource"
+
+    async def handler(_req):
+        raise TimeoutError(sensitive_detail)
+
+    out = _run(mw.awrap_tool_call(_req(name=tool_name, subagent=subagent), handler))
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "TimeoutError" in out.content
+    assert "isolated" in out.content.lower() and "retry" in out.content.lower()
+    assert "deadline" not in out.content.lower()
+    assert sensitive_detail not in out.content
+    assert "TimeoutError" in caplog.text
+    assert sensitive_detail not in caplog.text
+    assert "Traceback" not in caplog.text
+
+
 def test_deadline_excluded_for_compute_subagent():
     """code-runner/builder legitimately run 30-67 min — the per-task deadline must NOT apply to
     them (only to bounded subagents), or it would false-kill real training/sim work."""
@@ -161,16 +192,18 @@ def test_qwen_model_timeout_is_isolated_without_false_task_deadline(timeout_seco
     assert "per-task wall-clock deadline" not in out.content
 
 
-def test_disabled_deadline_isolates_downstream_timeout_without_formatting_error():
+def test_disabled_deadline_isolates_qwen_timeout_without_leaking_detail():
     mw = SubagentFailureIsolationMiddleware(timeout_seconds=0.0)
+    sensitive_detail = "provider timed out at https://private.example/run/secret-resource"
 
     async def handler(_req):
-        raise TimeoutError("provider read timed out")
+        raise TimeoutError(sensitive_detail)
 
     out = _run(mw.awrap_tool_call(_req(subagent="qwen-code-runner"), handler))
 
     assert isinstance(out, ToolMessage) and out.status == "error"
-    assert "TimeoutError: provider read timed out" in out.content
+    assert "TimeoutError" in out.content
+    assert sensitive_detail not in out.content
     assert "deadline" not in out.content.lower()
 
 

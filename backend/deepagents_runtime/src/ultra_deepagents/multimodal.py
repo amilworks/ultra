@@ -9,6 +9,7 @@ from langchain_core.messages import BaseMessage
 
 _MULTIMODAL_BLOCK_TYPES = {"image", "image_url", "audio", "video", "file"}
 _IMAGE_BLOCK_TYPES = {"image", "image_url", "input_image"}
+_FILE_BLOCK_TYPES = {"file", "input_file"}
 
 
 class QwenModelCallTimeoutError(RuntimeError):
@@ -50,11 +51,11 @@ class TextOnlyMultimodalMiddleware(AgentMiddleware[Any, Any, Any]):
 class BoundedImageMultimodalMiddleware(AgentMiddleware[Any, Any, Any]):
     """Keep only the newest images in a multimodal model request.
 
-    Older image bytes are replaced in place with a small path-preserving text
-    breadcrumb. Message order, message identity fields, and every non-image
-    block are preserved. The optional async timeout bounds the entire downstream
-    model call; it is used for the Qwen coding delegate because provider request
-    timeouts do not bound all async client failure modes.
+    Older image bytes and unsupported file blocks are replaced in place with a
+    small path-preserving text breadcrumb. Message order and message identity
+    fields are preserved. The optional async timeout bounds the entire
+    downstream model call; it is used for the Qwen coding delegate because
+    provider request timeouts do not bound all async client failure modes.
     """
 
     tools = ()
@@ -134,7 +135,12 @@ def _bound_image_request(
         if isinstance(block, dict) and _is_image_block(block)
     )
     images_to_replace = max(0, image_count - max_images)
-    if images_to_replace == 0:
+    has_file_blocks = any(
+        isinstance(message.content, list)
+        and any(isinstance(block, dict) and _is_file_block(block) for block in message.content)
+        for message in ordered_messages
+    )
+    if images_to_replace == 0 and not has_file_blocks:
         return request
 
     bounded_messages: list[BaseMessage] = []
@@ -145,6 +151,7 @@ def _bound_image_request(
             count=remaining,
             max_images=max_images,
         )
+        bounded_message = _replace_file_blocks(bounded_message)
         bounded_messages.append(bounded_message)
         remaining -= replaced
 
@@ -186,6 +193,51 @@ def _is_image_block(block: dict[str, Any]) -> bool:
         return True
     mime_type = str(block.get("mime_type") or block.get("media_type") or "").lower()
     return bool("base64" in block and mime_type.startswith("image/"))
+
+
+def _is_file_block(block: dict[str, Any]) -> bool:
+    return str(block.get("type") or "").strip().lower() in _FILE_BLOCK_TYPES
+
+
+def _replace_file_blocks(message: BaseMessage) -> BaseMessage:
+    if not isinstance(message.content, list):
+        return message
+    changed = False
+    content: list[Any] = []
+    for block in message.content:
+        if isinstance(block, dict) and _is_file_block(block):
+            content.append(_bounded_file_notice(message, block))
+            changed = True
+        else:
+            content.append(block)
+    if not changed:
+        return message
+    return message.model_copy(update={"content": content})
+
+
+def _bounded_file_notice(message: BaseMessage, block: dict[str, Any]) -> dict[str, str]:
+    path = str(
+        message.additional_kwargs.get("read_file_path")
+        or block.get("path")
+        or block.get("file_path")
+        or ""
+    ).strip()
+    filename = str(block.get("filename") or "").strip()
+    mime_type = (
+        str(message.additional_kwargs.get("read_file_media_type") or "").strip()
+        or str(block.get("mime_type") or block.get("media_type") or "").strip()
+    )
+    source = f" Source path: {path}." if path else ""
+    name = f" Filename: {filename}." if filename else ""
+    mime = f" MIME type: {mime_type}." if mime_type else ""
+    return {
+        "type": "text",
+        "text": (
+            "[File bytes omitted because this model endpoint does not accept file "
+            f"content blocks.{source}{name}{mime} Use the source path and inspect "
+            "the file with sandbox tools instead.]"
+        ),
+    }
 
 
 def _bounded_image_notice(

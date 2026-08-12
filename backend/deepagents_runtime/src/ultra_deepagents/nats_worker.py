@@ -1896,14 +1896,17 @@ class NATSDeepAgentsWorker:
             task.cancel()
 
     async def _publish_event(self, js: Any, event: dict[str, Any]) -> None:
+        storage_safe_event = _storage_safe_event_value(event)
+        if not isinstance(storage_safe_event, dict):
+            raise EventPublishError("run event must be a mapping")
         headers = {}
-        message_id = _event_message_id(event)
+        message_id = _event_message_id(storage_safe_event)
         if message_id:
             headers["Nats-Msg-Id"] = message_id
         try:
             await js.publish(
-                _event_publish_subject(self.settings, event),
-                json.dumps(event, default=str).encode("utf-8"),
+                _event_publish_subject(self.settings, storage_safe_event),
+                json.dumps(storage_safe_event, default=str).encode("utf-8"),
                 headers=headers or None,
             )
         except Exception as exc:
@@ -2065,6 +2068,30 @@ def _event_message_id(event: dict[str, Any]) -> str:
     if run_id and sequence is not None:
         return f"event:{run_id}:{sequence}"
     return ""
+
+
+def _storage_safe_event_value(value: Any) -> Any:
+    """Replace NULs that PostgreSQL text/JSONB cannot represent.
+
+    Shell tools legitimately emit NUL-delimited output (for example grep -Z
+    and find -print0). JSON can carry those characters as ``\\u0000``, but
+    PostgreSQL rejects them after JSON decoding. Keep a visible two-character
+    marker so the trace remains useful without allowing one progress line to
+    poison a strict ordered event partition.
+    """
+
+    if isinstance(value, str):
+        return value.replace("\x00", r"\0")
+    if isinstance(value, dict):
+        return {
+            _storage_safe_event_value(key): _storage_safe_event_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_storage_safe_event_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_storage_safe_event_value(item) for item in value)
+    return value
 
 
 async def _reconcile_consumer(

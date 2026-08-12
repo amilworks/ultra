@@ -827,10 +827,50 @@ func runEventMessageDisposition(ctx context.Context, data []byte, handler func(c
 }
 
 func runEventInputDisposition(ctx context.Context, input domain.AppendRunEventInput, handler func(context.Context, domain.AppendRunEventInput) error) (runEventMessageAction, error) {
+	input.Message = storageSafeRunEventText(input.Message)
+	input.Payload = storageSafeRunEventPayload(input.Payload)
 	if err := handler(ctx, input); err != nil {
 		return runEventMessageNak, err
 	}
 	return runEventMessageAck, nil
+}
+
+func storageSafeRunEventText(value string) string {
+	return strings.ReplaceAll(value, "\x00", `\0`)
+}
+
+func storageSafeRunEventPayload(payload domain.JSONMap) domain.JSONMap {
+	if payload == nil {
+		return nil
+	}
+	return storageSafeRunEventJSONMap(payload)
+}
+
+func storageSafeRunEventJSONMap(value map[string]any) domain.JSONMap {
+	safe := make(domain.JSONMap, len(value))
+	for key, item := range value {
+		safe[storageSafeRunEventText(key)] = storageSafeRunEventJSONValue(item)
+	}
+	return safe
+}
+
+func storageSafeRunEventJSONValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return storageSafeRunEventText(typed)
+	case domain.JSONMap:
+		return storageSafeRunEventJSONMap(typed)
+	case map[string]any:
+		return storageSafeRunEventJSONMap(typed)
+	case []any:
+		safe := make([]any, len(typed))
+		for index, item := range typed {
+			safe[index] = storageSafeRunEventJSONValue(item)
+		}
+		return safe
+	default:
+		return value
+	}
 }
 
 func (b *NATSBus) publish(ctx context.Context, subject string, value any, messageID string) error {

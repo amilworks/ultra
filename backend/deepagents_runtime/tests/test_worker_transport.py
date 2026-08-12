@@ -3930,6 +3930,43 @@ def test_worker_publishes_events_with_deterministic_jetstream_message_id():
     assert _published_headers(js)[0]["Nats-Msg-Id"] == "event:evt-run-1-started"
 
 
+def test_worker_sanitizes_nul_bytes_before_publishing_run_events():
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="test-model",
+            nats_url="nats://example.test:4222",
+            nats_events_subject="ultra.runs.events",
+        )
+        worker = NATSDeepAgentsWorker(settings)
+        js = CapturingJetStream()
+        await worker._publish_event(
+            js,
+            {
+                "event_id": "evt-run-nul-progress",
+                "run_id": "run-nul-progress",
+                "sequence": 1,
+                "event_kind": "tool_call.progress",
+                "message": "/workspace/train.py\x00155:def train():",
+                "payload": {
+                    "text": "/workspace/train.py\x00155:def train():",
+                    "nested": ["safe", {"key\x00suffix": "value\x00suffix"}],
+                },
+            },
+        )
+        return js
+
+    js = asyncio.run(scenario())
+
+    raw_payload = js.published[0][1].decode("utf-8")
+    event = _published_events(js)[0]
+    assert "\\u0000" not in raw_payload
+    assert "\x00" not in raw_payload
+    assert event["message"] == "/workspace/train.py\\0155:def train():"
+    assert event["payload"]["text"] == "/workspace/train.py\\0155:def train():"
+    assert event["payload"]["nested"][1] == {"key\\0suffix": "value\\0suffix"}
+
+
 def test_worker_publishes_run_events_to_deterministic_partition_subject():
     async def scenario():
         settings = RuntimeSettings(

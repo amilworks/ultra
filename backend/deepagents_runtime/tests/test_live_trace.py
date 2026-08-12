@@ -3075,6 +3075,45 @@ def test_control_plane_client_paginates_run_events_with_cursor():
     ]
 
 
+def test_control_plane_client_paginates_when_server_caps_below_requested_limit():
+    client = ControlPlaneClient("http://control.test")
+    calls: list[str] = []
+    pages = {
+        "/v2/runs/run-1/events?limit=5&after_sequence=0": {
+            "events": [
+                {"event_kind": "run.started", "sequence": 1},
+                {"event_kind": "message.delta", "sequence": 2},
+            ],
+        },
+        "/v2/runs/run-1/events?limit=5&after_sequence=2": {
+            "events": [
+                {"event_kind": "run.completed", "sequence": 3},
+            ],
+        },
+        "/v2/runs/run-1/events?limit=5&after_sequence=3": {"events": []},
+    }
+
+    def fake_request(method, path, payload=None, *, headers=None):
+        assert method == "GET"
+        assert payload is None
+        assert headers is None
+        calls.append(path)
+        return pages[path]
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    assert client.list_run_events("run-1", limit=5) == [
+        {"event_kind": "run.started", "sequence": 1},
+        {"event_kind": "message.delta", "sequence": 2},
+        {"event_kind": "run.completed", "sequence": 3},
+    ]
+    assert calls == [
+        "/v2/runs/run-1/events?limit=5&after_sequence=0",
+        "/v2/runs/run-1/events?limit=5&after_sequence=2",
+        "/v2/runs/run-1/events?limit=5&after_sequence=3",
+    ]
+
+
 def test_control_plane_client_uploads_files_and_returns_file_ids(tmp_path):
     upload = tmp_path / "paper.pdf"
     upload.write_bytes(b"%PDF-1.4\nfixture")

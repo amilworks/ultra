@@ -3110,13 +3110,49 @@ def test_run_job_ignores_leading_whitespace_and_falls_back_to_saved_outputs(tmp_
 
     result, events = asyncio.run(scenario())
 
-    assert result == "Saved durable outputs:\n- Code: Plot X Squared (`outputs/plot_x_squared.py`)"
+    assert result == (
+        "Saved durable outputs:\n- Code: Plot X Squared "
+        "([`outputs/plot_x_squared.py`]"
+        "(/v2/artifacts/artifact_run_1_5d21e99b3940252f/download))"
+    )
     assert [event["event_kind"] for event in events] == [
         "run.started",
         "artifact.created",
         "run.completed",
     ]
     assert events[-1]["payload"]["response_text"] == result
+
+
+def test_link_response_artifact_paths_uses_unique_download_ids():
+    from ultra_deepagents.runner import _link_response_artifact_paths
+
+    response = (
+        "Download `/outputs/results/report.md` and `predictions.jsonl`; "
+        "leave `/outputs/results/` as a directory reference and `report.md` ambiguous."
+    )
+    artifacts = [
+        {
+            "payload": {
+                "artifact_id": "artifact-run-report",
+                "path": "results/report.md",
+            }
+        },
+        {
+            "payload": {
+                "artifact_id": "artifact-run-predictions",
+                "path": "results/predictions.jsonl",
+            }
+        },
+        {"payload": {"artifact_id": "artifact-run-report-2", "path": "other/report.md"}},
+        {"payload": {"artifact_id": "artifact-run-report-3", "path": "third/report.md"}},
+    ]
+
+    assert _link_response_artifact_paths(response, artifacts) == (
+        "Download [`/outputs/results/report.md`]"
+        "(/v2/artifacts/artifact-run-report/download) and "
+        "[`predictions.jsonl`](/v2/artifacts/artifact-run-predictions/download); "
+        "leave `/outputs/results/` as a directory reference and `report.md` ambiguous."
+    )
 
 
 def test_run_job_publishes_artifacts_from_explicit_outputs_directory(tmp_path: Path):
@@ -3177,7 +3213,7 @@ def test_run_job_publishes_artifacts_from_explicit_outputs_directory(tmp_path: P
     assert not (tmp_path / "artifacts" / "run-1" / "frame_007.png").exists()
 
 
-def test_run_job_normalizes_collected_plot_artifacts_to_publication_ppi(tmp_path: Path):
+def test_run_job_preserves_collected_plot_bytes_and_reports_source_ppi(tmp_path: Path):
     async def scenario():
         settings = RuntimeSettings(
             openai_base_url="http://example.test/v1",
@@ -3212,15 +3248,20 @@ def test_run_job_normalizes_collected_plot_artifacts_to_publication_ppi(tmp_path
         event["payload"] for event in events if event["event_kind"] == "artifact.created"
     )
     copied = tmp_path / "artifacts" / "run-1" / artifact_payload["path"]
+    source = tmp_path / "workspaces" / "run-1" / "outputs" / "low_dpi_plot.png"
     with Image.open(copied) as image:
         dpi = image.info.get("dpi")
 
     assert dpi is not None
-    assert dpi[0] >= 299.5
-    assert dpi[1] >= 299.5
+    assert dpi[0] == pytest.approx(72.0, abs=0.5)
+    assert dpi[1] == pytest.approx(72.0, abs=0.5)
+    assert copied.read_bytes() == source.read_bytes()
     quality = artifact_payload["metadata"]["figure_quality"]
     assert quality["minimum_ppi"] == 300
-    assert quality["dpi_metadata_normalized"] is True
+    assert quality["dpi_metadata_normalized"] is False
+    assert quality["meets_minimum_ppi"] is False
+    assert quality["original_ppi"] == pytest.approx([72.0, 72.0], abs=0.5)
+    assert quality["final_ppi"] == pytest.approx([72.0, 72.0], abs=0.5)
 
 
 def test_run_job_collects_markdown_reports_with_markdown_mime_type(tmp_path: Path):
@@ -7075,6 +7116,28 @@ def normalize_rows(rows):
 Please answer with findings and a corrected implementation."""
 
     assert _requested_artifact_kinds(prompt) == []
+
+
+def test_requested_artifacts_do_not_treat_inference_inputs_or_tool_names_as_outputs():
+    from ultra_deepagents.runner import _requested_artifact_kinds
+
+    prompt = """Run bulk inference using the attached user-trained YOLO model checkpoint.
+Provide a report, predictions, summary, verification, and annotated-image archive as durable
+outputs. Delegate implementation review to qwen-code-runner if available, but continue locally
+if that tool is unavailable. Do not copy the input checkpoint into the outputs."""
+
+    assert _requested_artifact_kinds(prompt) == []
+
+
+def test_requested_artifacts_require_direct_durable_code_and_model_requests():
+    from ultra_deepagents.runner import _requested_artifact_kinds
+
+    prompt = (
+        "Train a UNet, save the training code, and return the trained model weights "
+        "as durable outputs."
+    )
+
+    assert _requested_artifact_kinds(prompt) == ["code", "model"]
 
 
 def test_completion_continuation_prompt_renders_rigor_requirements():

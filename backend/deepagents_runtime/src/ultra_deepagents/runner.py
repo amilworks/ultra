@@ -1015,9 +1015,8 @@ async def run_job(
             post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
             artifact_events=artifact_events,
         )
-        response_text = _stitch_continuation_answers(
-            continuation_answer_parts, response_text
-        )
+        response_text = _stitch_continuation_answers(continuation_answer_parts, response_text)
+        response_text = _link_response_artifact_paths(response_text, artifact_events)
         for artifact_event in artifact_events:
             await publish_event(sequencer.stamp(artifact_event))
     except asyncio.CancelledError:
@@ -1697,7 +1696,7 @@ def _collect_output_artifacts(
             copied = source.resolve() != target.resolve()
             if copied:
                 shutil.copy2(source, target)
-            figure_quality = _ensure_publication_figure_ppi(target)
+            figure_quality = _publication_figure_quality(target)
             content_hash = _file_sha256(target)
             if content_hash in seen_hashes:
                 if copied:
@@ -1776,37 +1775,29 @@ def _artifact_event_for_path(
     )
 
 
-def _ensure_publication_figure_ppi(path: Path) -> dict[str, Any] | None:
+def _publication_figure_quality(path: Path) -> dict[str, Any] | None:
+    """Inspect publication metadata without changing authored artifact bytes.
+
+    Artifacts are durable, hash-addressed outputs. Re-encoding an image here to
+    add DPI metadata invalidates manifests and makes an annotated-image archive
+    disagree with the separately downloadable files. Figure-generation prompts
+    and the sandbox matplotlib configuration request publication DPI upstream;
+    collection only reports whether the authored file met that requirement.
+    """
+
     if path.suffix.lower() not in _DPI_CAPABLE_FIGURE_SUFFIXES:
         return None
     if not _artifact_mime_type(path).startswith("image/"):
         return None
     try:
         with Image.open(path) as image:
-            image_format = image.format
             original_ppi = _image_ppi(image)
-            if _ppi_meets_minimum(original_ppi):
-                return _figure_quality_metadata(
-                    original_ppi=original_ppi,
-                    final_ppi=original_ppi,
-                    normalized=False,
-                )
-            image.load()
-            save_image = image
-            save_kwargs: dict[str, Any] = {"dpi": (_MINIMUM_FIGURE_PPI, _MINIMUM_FIGURE_PPI)}
-            if image_format == "JPEG":
-                save_kwargs["quality"] = 95
-                if image.mode in {"P", "LA", "RGBA"}:
-                    save_image = image.convert("RGB")
-            save_image.save(path, format=image_format, **save_kwargs)
-        with Image.open(path) as updated_image:
-            final_ppi = _image_ppi(updated_image)
     except (OSError, UnidentifiedImageError):
         return None
     return _figure_quality_metadata(
         original_ppi=original_ppi,
-        final_ppi=final_ppi,
-        normalized=True,
+        final_ppi=original_ppi,
+        normalized=False,
     )
 
 
@@ -1838,6 +1829,7 @@ def _figure_quality_metadata(
     metadata: dict[str, Any] = {
         "minimum_ppi": _MINIMUM_FIGURE_PPI,
         "dpi_metadata_normalized": normalized,
+        "meets_minimum_ppi": _ppi_meets_minimum(final_ppi),
     }
     if original_ppi is not None:
         metadata["original_ppi"] = [round(original_ppi[0], 3), round(original_ppi[1], 3)]
@@ -1958,6 +1950,71 @@ def _fallback_response_from_artifacts(artifact_events: list[dict[str, Any]]) -> 
     return "\n".join(lines)
 
 
+_INLINE_CODE_SPAN_RE = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
+
+
+def _link_response_artifact_paths(
+    response_text: str,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    """Turn referenced collected-file paths into durable download links.
+
+    The model writes its answer before the output collector assigns artifact
+    IDs, so it can only cite workspace paths. At terminal assembly the IDs are
+    known and deterministic; linking exact inline-code path references here
+    gives the user real downloads without asking the model to guess URLs.
+    """
+
+    aliases: dict[str, str | None] = {}
+
+    def register(alias: str, artifact_id: str) -> None:
+        normalized = alias.strip()
+        if not normalized:
+            return
+        if normalized not in aliases:
+            aliases[normalized] = artifact_id
+        elif aliases[normalized] != artifact_id:
+            aliases[normalized] = None
+
+    for event in artifact_events:
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        artifact_id = str(payload.get("artifact_id") or "").strip()
+        path = str(payload.get("path") or payload.get("relative_path") or "").strip()
+        if not artifact_id or not path:
+            continue
+        path = path.removeprefix("./")
+        register(path, artifact_id)
+        register(f"/{path}", artifact_id)
+        if path.startswith("outputs/"):
+            relative_output = path.removeprefix("outputs/")
+            register(relative_output, artifact_id)
+            register(f"/outputs/{relative_output}", artifact_id)
+            register(f"/workspace/outputs/{relative_output}", artifact_id)
+        else:
+            register(f"outputs/{path}", artifact_id)
+            register(f"/outputs/{path}", artifact_id)
+            register(f"/workspace/outputs/{path}", artifact_id)
+        register(Path(path).name, artifact_id)
+
+    def replace(match: re.Match[str]) -> str:
+        # Preserve an explicit link the model already supplied.
+        if (
+            match.start() > 0
+            and response_text[match.start() - 1] == "["
+            and response_text[match.end() :].startswith("](")
+        ):
+            return match.group(0)
+        label = match.group(1)
+        artifact_id = aliases.get(label.strip())
+        if not artifact_id:
+            return match.group(0)
+        return f"[`{label}`](/v2/artifacts/{artifact_id}/download)"
+
+    return _INLINE_CODE_SPAN_RE.sub(replace, response_text)
+
+
 _FIGURE_REQUEST_RE = re.compile(
     r"\b("
     r"plot|plots|figure|figures|visuali[sz]e|visuali[sz]ation|graph|graphs|"
@@ -1965,12 +2022,26 @@ _FIGURE_REQUEST_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-_CODE_REQUEST_RE = re.compile(r"\b(code|script|notebook|python)\b", re.IGNORECASE)
-_MODEL_REQUEST_RE = re.compile(
-    r"\b("
-    r"weights?|model\s+weights?|trained\s+model|saved\s+model|"
-    r"checkpoints?|ckpt|safetensors|onnx"
-    r")\b",
+_DIRECT_CODE_OUTPUT_REQUEST_RE = re.compile(
+    r"\b(?:save|return|provide|download|export|include|deliver|attach)\b"
+    r"(?:\s+(?:me|a|an|the|your|my|generated|final|training|inference|downloadable|source))*"
+    r"\s+(?:code|script|notebook|python\s+file)\b"
+    r"|\b(?:source\s+)?(?:code|script|notebook|python\s+file)\b"
+    r"(?:\s+(?:file|artifact|output|deliverable))?"
+    r"\s+(?:(?:must|should|needs?\s+to|is\s+to)\s+)?(?:be\s+)?"
+    r"(?:saved|returned|provided|downloadable|exported|included|delivered|attached)\b",
+    re.IGNORECASE,
+)
+_DIRECT_MODEL_OUTPUT_REQUEST_RE = re.compile(
+    r"\b(?:save|return|provide|download|export|include|deliver|attach)\b"
+    r"(?:\s+(?:me|a|an|the|your|my|generated|final|best|resulting|trained|fine[- ]?tuned))*"
+    r"\s+(?:trained\s+|fine[- ]?tuned\s+|saved\s+)?"
+    r"(?:model(?:\s+weights?)?|weights?|checkpoints?|ckpt|safetensors|onnx)\b"
+    r"|\b(?:trained\s+|fine[- ]?tuned\s+|saved\s+)?"
+    r"(?:model(?:\s+weights?)?|weights?|checkpoints?|ckpt|safetensors|onnx)\b"
+    r"(?:\s+(?:file|artifact|output|deliverable))?"
+    r"\s+(?:(?:must|should|needs?\s+to|is\s+to)\s+)?(?:be\s+)?"
+    r"(?:saved|returned|provided|downloadable|exported|included|delivered|attached)\b",
     re.IGNORECASE,
 )
 _RESPONSE_REQUEST_RE = re.compile(
@@ -1978,10 +2049,6 @@ _RESPONSE_REQUEST_RE = re.compile(
     r"briefly|explain|explanation|summari[sz]e|summary|interpret|interpretation|"
     r"compare|comparison|discuss|describe|walk\s+through|takeaways?|conclusions?|report"
     r")\b",
-    re.IGNORECASE,
-)
-_DURABLE_OUTPUT_REQUEST_RE = re.compile(
-    r"\b(save|saved|return|provide|download|durable|outputs?|artifacts?|deliverables?)\b",
     re.IGNORECASE,
 )
 
@@ -2607,9 +2674,9 @@ def _requested_artifact_kinds(text: str) -> list[str]:
     requested: list[str] = []
     if _FIGURE_REQUEST_RE.search(text):
         requested.append("figure")
-    if _CODE_REQUEST_RE.search(text) and _DURABLE_OUTPUT_REQUEST_RE.search(text):
+    if _DIRECT_CODE_OUTPUT_REQUEST_RE.search(text):
         requested.append("code")
-    if _MODEL_REQUEST_RE.search(text) and _DURABLE_OUTPUT_REQUEST_RE.search(text):
+    if _DIRECT_MODEL_OUTPUT_REQUEST_RE.search(text):
         requested.append("model")
     return requested
 
@@ -3756,10 +3823,7 @@ def _response_text_from_final_state(state: dict[str, Any] | None) -> str:
             if text.strip():
                 segments.append(text)
             continue
-        if (
-            _is_tool_message(message)
-            and _tool_message_name(message) in _BOOKKEEPING_TOOL_NAMES
-        ):
+        if _is_tool_message(message) and _tool_message_name(message) in _BOOKKEEPING_TOOL_NAMES:
             continue
         if segments:
             break

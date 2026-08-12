@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -7,6 +8,11 @@ from langchain.agents.middleware.types import AgentMiddleware, ModelRequest
 from langchain_core.messages import BaseMessage
 
 _MULTIMODAL_BLOCK_TYPES = {"image", "image_url", "audio", "video", "file"}
+_IMAGE_BLOCK_TYPES = {"image", "image_url", "input_image"}
+
+
+class QwenModelCallTimeoutError(RuntimeError):
+    """The local Qwen model-call wall clock expired."""
 
 
 def sanitize_messages_for_text_only_model(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -41,17 +47,174 @@ class TextOnlyMultimodalMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(_sanitize_request(request))
 
 
+class BoundedImageMultimodalMiddleware(AgentMiddleware[Any, Any, Any]):
+    """Keep only the newest images in a multimodal model request.
+
+    Older image bytes are replaced in place with a small path-preserving text
+    breadcrumb. Message order, message identity fields, and every non-image
+    block are preserved. The optional async timeout bounds the entire downstream
+    model call; it is used for the Qwen coding delegate because provider request
+    timeouts do not bound all async client failure modes.
+    """
+
+    tools = ()
+
+    def __init__(
+        self,
+        *,
+        max_images: int,
+        async_timeout_seconds: float | None = None,
+    ) -> None:
+        if max_images < 0:
+            raise ValueError("max_images must be non-negative")
+        self.max_images = int(max_images)
+        self.async_timeout_seconds = (
+            float(async_timeout_seconds)
+            if async_timeout_seconds is not None and async_timeout_seconds > 0
+            else None
+        )
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Any],
+    ) -> Any:
+        return handler(_bound_image_request(request, max_images=self.max_images))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[[ModelRequest[Any]], Awaitable[Any]],
+    ) -> Any:
+        bounded_request = _bound_image_request(request, max_images=self.max_images)
+        if self.async_timeout_seconds is None:
+            return await handler(bounded_request)
+        timeout = asyncio.timeout(self.async_timeout_seconds)
+        try:
+            async with timeout:
+                return await handler(bounded_request)
+        except TimeoutError as exc:
+            if not timeout.expired():
+                raise
+            raise QwenModelCallTimeoutError(
+                f"Qwen model call exceeded {self.async_timeout_seconds:g}s."
+            ) from exc
+
+
 def _sanitize_request(request: ModelRequest[Any]) -> ModelRequest[Any]:
     sanitized_messages = sanitize_messages_for_text_only_model(request.messages)
     sanitized_system_message = (
         _sanitize_message(request.system_message) if request.system_message is not None else None
     )
-    if sanitized_messages is request.messages and sanitized_system_message is request.system_message:
+    if (
+        sanitized_messages is request.messages
+        and sanitized_system_message is request.system_message
+    ):
         return request
     return request.override(
         messages=sanitized_messages,
         system_message=sanitized_system_message,
     )
+
+
+def _bound_image_request(
+    request: ModelRequest[Any],
+    *,
+    max_images: int,
+) -> ModelRequest[Any]:
+    ordered_messages = [
+        *([request.system_message] if request.system_message is not None else []),
+        *request.messages,
+    ]
+    image_count = sum(
+        1
+        for message in ordered_messages
+        if isinstance(message.content, list)
+        for block in message.content
+        if isinstance(block, dict) and _is_image_block(block)
+    )
+    images_to_replace = max(0, image_count - max_images)
+    if images_to_replace == 0:
+        return request
+
+    bounded_messages: list[BaseMessage] = []
+    remaining = images_to_replace
+    for message in ordered_messages:
+        bounded_message, replaced = _replace_oldest_images(
+            message,
+            count=remaining,
+            max_images=max_images,
+        )
+        bounded_messages.append(bounded_message)
+        remaining -= replaced
+
+    offset = 1 if request.system_message is not None else 0
+    bounded_system_message = bounded_messages[0] if offset else request.system_message
+    return request.override(
+        messages=bounded_messages[offset:],
+        system_message=bounded_system_message,
+    )
+
+
+def _replace_oldest_images(
+    message: BaseMessage,
+    *,
+    count: int,
+    max_images: int,
+) -> tuple[BaseMessage, int]:
+    if count <= 0 or not isinstance(message.content, list):
+        return message, 0
+
+    content: list[Any] = []
+    replaced = 0
+    for block in message.content:
+        if replaced < count and isinstance(block, dict) and _is_image_block(block):
+            content.append(_bounded_image_notice(message, block, max_images=max_images))
+            replaced += 1
+        else:
+            content.append(block)
+    if replaced == 0:
+        return message, 0
+    return message.model_copy(update={"content": content}), replaced
+
+
+def _is_image_block(block: dict[str, Any]) -> bool:
+    block_type = str(block.get("type") or "").strip().lower()
+    if block_type in _IMAGE_BLOCK_TYPES:
+        return True
+    if "image_url" in block:
+        return True
+    mime_type = str(block.get("mime_type") or block.get("media_type") or "").lower()
+    return bool("base64" in block and mime_type.startswith("image/"))
+
+
+def _bounded_image_notice(
+    message: BaseMessage,
+    block: dict[str, Any],
+    *,
+    max_images: int,
+) -> dict[str, str]:
+    path = str(
+        message.additional_kwargs.get("read_file_path")
+        or block.get("path")
+        or block.get("file_path")
+        or ""
+    ).strip()
+    mime_type = (
+        str(message.additional_kwargs.get("read_file_media_type") or "").strip()
+        or str(block.get("mime_type") or block.get("media_type") or "").strip()
+        or _mime_type_from_image_url(block)
+    )
+    source = f" Source path: {path}." if path else ""
+    mime = f" MIME type: {mime_type}." if mime_type else ""
+    return {
+        "type": "text",
+        "text": (
+            f"[Older image bytes omitted to keep this model request at most "
+            f"{max_images} images.{source}{mime} Re-read the source path if the "
+            "older image is needed.]"
+        ),
+    }
 
 
 def _sanitize_message(message: BaseMessage) -> BaseMessage:

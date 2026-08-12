@@ -34,7 +34,10 @@ from ultra_deepagents.context_tools import (
     stage_uploaded_files,
     stage_uploaded_files_for_analysis_text,
 )
-from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
+from ultra_deepagents.multimodal import (
+    BoundedImageMultimodalMiddleware,
+    TextOnlyMultimodalMiddleware,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -782,9 +785,7 @@ def test_research_agent_registers_configured_async_subagents_and_manifest(monkey
         "list_async_tasks",
     }.issubset(builtin_names)
     assert "task" in builtin_names  # built-in general-purpose always exists
-    assert [entry["name"] for entry in manifest["available_subagents"]] == [
-        "general-purpose"
-    ]
+    assert [entry["name"] for entry in manifest["available_subagents"]] == ["general-purpose"]
     assert manifest["available_async_subagents"] == [
         {
             "name": "remote-training-runner",
@@ -1214,6 +1215,8 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
         qwen_vlm_base_url="http://tesla.test:8000/v1",
         qwen_vlm_model="Qwen3.6-27B",
         qwen_vlm_api_key="test-key",
+        qwen_vlm_max_images_per_call=3,
+        qwen_vlm_request_timeout_seconds=10.0,
     )
     context = AgentRunContext(
         assistant_id="ultra-research-agent",
@@ -1244,6 +1247,18 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
     assert all(
         not isinstance(item, TextOnlyMultimodalMiddleware)
         for item in by_name["qwen-code-runner"].get("middleware", [])
+    )
+    qwen_image_middleware = [
+        item
+        for item in by_name["qwen-code-runner"].get("middleware", [])
+        if isinstance(item, BoundedImageMultimodalMiddleware)
+    ]
+    assert len(qwen_image_middleware) == 1
+    assert qwen_image_middleware[0].max_images == 3
+    assert qwen_image_middleware[0].async_timeout_seconds == 15.0
+    assert all(
+        not isinstance(item, BoundedImageMultimodalMiddleware)
+        for item in by_name["code-runner"].get("middleware", [])
     )
     qwen_tool_names = {getattr(tool, "name", "") for tool in by_name["qwen-code-runner"]["tools"]}
     assert qwen_tool_names == {

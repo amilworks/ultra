@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from unittest import mock
 
 import pytest
 from deepagents.backends.protocol import ExecuteResponse
@@ -43,8 +44,6 @@ from longhorizon_nats import (
     start_worker,
     stop_worker,
 )
-from unittest import mock
-
 from ultra_deepagents.schemas import RunJobEnvelope
 
 pytestmark = [
@@ -95,7 +94,7 @@ def test_job_flows_through_real_jetstream_and_completes(tmp_path, nats_server) -
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -158,7 +157,7 @@ def test_worker_death_redelivery_and_fresh_worker_resume(tmp_path, nats_server) 
     async def scenario() -> None:
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
 
         worker_one = ChaosWorker(
             settings,
@@ -244,7 +243,7 @@ def test_duplicate_delivery_parried_and_post_completion_redelivery_skipped(
     async def scenario() -> None:
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -371,7 +370,7 @@ def test_nats_server_restart_mid_run_recovers_and_completes(tmp_path, nats_serve
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -431,7 +430,7 @@ def test_cancel_subject_aborts_run_and_publishes_canceled(tmp_path, nats_server)
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,

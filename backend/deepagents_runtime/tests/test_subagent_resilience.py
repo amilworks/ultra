@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
+from ultra_deepagents.multimodal import QwenModelCallTimeoutError
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
 
 
@@ -79,7 +80,9 @@ def test_non_task_tool_has_no_deadline():
         await asyncio.sleep(0.2)  # longer than the timeout; must NOT be cut off for a non-task tool
         return sentinel
 
-    assert _run(mw.awrap_tool_call(_req(name="search_resources", subagent=None), handler)) is sentinel
+    assert (
+        _run(mw.awrap_tool_call(_req(name="search_resources", subagent=None), handler)) is sentinel
+    )
 
 
 def test_graph_interrupt_propagates_not_swallowed():
@@ -135,12 +138,40 @@ def test_deadline_excluded_for_compute_subagent():
         return sentinel
 
     assert _run(mw.awrap_tool_call(_req(subagent="code-runner"), handler)) is sentinel
+
     # ...but isolation of an actual CRASH still applies to compute subagents:
     async def crashing(_req):
         raise RuntimeError("real crash")
 
     out = _run(mw.awrap_tool_call(_req(subagent="code-runner"), crashing))
     assert isinstance(out, ToolMessage) and out.status == "error" and "RuntimeError" in out.content
+
+
+@pytest.mark.parametrize("timeout_seconds", [1800.0, 0.0])
+def test_qwen_model_timeout_is_isolated_without_false_task_deadline(timeout_seconds):
+    mw = SubagentFailureIsolationMiddleware(timeout_seconds=timeout_seconds)
+
+    async def handler(_req):
+        raise QwenModelCallTimeoutError("Qwen model call exceeded 270s.")
+
+    out = _run(mw.awrap_tool_call(_req(subagent="qwen-code-runner"), handler))
+
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "QwenModelCallTimeoutError: Qwen model call exceeded 270s" in out.content
+    assert "per-task wall-clock deadline" not in out.content
+
+
+def test_disabled_deadline_isolates_downstream_timeout_without_formatting_error():
+    mw = SubagentFailureIsolationMiddleware(timeout_seconds=0.0)
+
+    async def handler(_req):
+        raise TimeoutError("provider read timed out")
+
+    out = _run(mw.awrap_tool_call(_req(subagent="qwen-code-runner"), handler))
+
+    assert isinstance(out, ToolMessage) and out.status == "error"
+    assert "TimeoutError: provider read timed out" in out.content
+    assert "deadline" not in out.content.lower()
 
 
 def test_no_timeout_when_disabled():

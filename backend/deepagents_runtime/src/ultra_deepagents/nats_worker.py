@@ -8,6 +8,7 @@ import fcntl
 import importlib.metadata
 import json
 import logging
+import random
 import socket
 import threading
 import time
@@ -90,7 +91,13 @@ class RunLeaseConflict(RuntimeError):
 
 
 class RunLeaseUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+class RunAuthorityUnavailableError(RuntimeError):
+    """Durable run authority could not be established safely."""
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,76 @@ _JOB_FETCH_MAX_WAIT_SECONDS = 2.0
 # delivery until AckWait expires (5 minutes at production settings) — measured
 # in tests/longhorizon/test_tier2_chaos_nats.py.
 _SHUTDOWN_NAK_DELAY_SECONDS = _JOB_FETCH_MAX_WAIT_SECONDS + 1.0
+# A resume floor is durable authority, so a transient events-page failure must
+# hold the current JetStream delivery instead of starting fresh or burning the
+# consumer's MaxDeliver budget. Ack progress, lease keepalive, and the status
+# monitor remain active while this retry sleeps.
+_RUN_EVENTS_SNAPSHOT_RETRY_BASE_SECONDS = 5.0
+_RUN_EVENTS_SNAPSHOT_RETRY_MAX_SECONDS = 30.0
+_RUN_EVENTS_SNAPSHOT_RETRY_JITTER_RATIO = 0.2
+_RUN_AUTHORITY_WAIT_BUDGET_SECONDS = 300.0
+_authority_monotonic = time.monotonic
+
+
+def _run_events_snapshot_retry_delay(attempt: int) -> float:
+    exponent = max(0, min(attempt - 1, 8))
+    bounded = min(
+        _RUN_EVENTS_SNAPSHOT_RETRY_MAX_SECONDS,
+        _RUN_EVENTS_SNAPSHOT_RETRY_BASE_SECONDS * (2**exponent),
+    )
+    jitter = bounded * _RUN_EVENTS_SNAPSHOT_RETRY_JITTER_RATIO
+    return random.uniform(max(0.0, bounded - jitter), bounded + jitter)
+
+
+async def _finish_task_despite_cancellation(task: asyncio.Task[Any]) -> Any:
+    """Wait for compensating authority work despite repeated cancellation.
+
+    ``Task.cancel()`` can be called more than once during worker shutdown. Each
+    call may interrupt the next await even after the first cancellation was
+    caught, while a shielded ``asyncio.to_thread`` HTTP call keeps running.
+    Drain every such cancellation until the retained task has settled, then
+    return (or raise) its real result so callers can release a late lease.
+    """
+
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    return task.result()
+
+
+def _snapshot_failure_is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, urllib_error.HTTPError):
+        return exc.code == 404 or exc.code == 429 or 500 <= exc.code < 600
+    if isinstance(exc, (ValueError, TypeError)):
+        return False
+    return isinstance(exc, (urllib_error.URLError, OSError, TimeoutError))
+
+
+def _lease_http_failure_is_retryable(status_code: int) -> bool:
+    return status_code == 404 or status_code == 429 or 500 <= status_code < 600
+
+
+def _validated_run_lease(
+    lease: ControlPlaneRunLease,
+    *,
+    run_id: str,
+    worker_id: str,
+) -> ControlPlaneRunLease:
+    if (
+        not isinstance(lease.run_id, str)
+        or not isinstance(lease.worker_id, str)
+        or not isinstance(lease.lease_token, str)
+        or not lease.lease_token.strip()
+        or lease.run_id != run_id
+        or lease.worker_id != worker_id
+    ):
+        raise RunLeaseUnavailable(
+            "control plane returned a malformed or mismatched run lease",
+            retryable=False,
+        )
+    return lease
 
 
 def build_job_consumer_config(settings: RuntimeSettings) -> ConsumerConfig:
@@ -273,11 +350,13 @@ async def fetch_control_plane_run_events_snapshot(
     settings: RuntimeSettings,
 ) -> tuple[int, dict[str, Any] | None]:
     """One pagination pass over the run's persisted control-plane events that
-    simultaneously computes the highest event sequence (resume floor) and the
-    deduped run.token_usage summary, so job start pages the (potentially huge)
-    event history once instead of twice. Returns ``(0, None)`` when the run has
-    no events or does not exist. The usage half requires a request identity;
-    the max sequence is computed regardless."""
+    simultaneously computes the highest positive producer ``source_sequence``
+    (resume floor) and the deduped run.token_usage summary, so job start pages
+    the (potentially huge) event history once instead of twice. The reader-side
+    ``sequence`` is only the pagination cursor: control-plane-authored events can
+    have a NULL source sequence and must not advance the worker producer floor.
+    Returns ``(0, None)`` only when the run has no events. The usage half
+    requires a request identity; the producer floor is computed regardless."""
     base_url = settings.control_base_url.rstrip("/")
     if not base_url:
         return 0, None
@@ -297,68 +376,90 @@ async def fetch_control_plane_run_events_snapshot(
         with urllib_request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         if not isinstance(payload, dict):
-            return []
+            raise ValueError("run events snapshot response must be an object")
         events = payload.get("events")
-        return [event for event in events if isinstance(event, dict)] if isinstance(events, list) else []
+        if not isinstance(events, list):
+            raise ValueError("run events snapshot response must contain an events list")
+        if not all(isinstance(event, dict) for event in events):
+            raise ValueError("run events snapshot events must be objects")
+        return events
 
     def fetch_snapshot() -> tuple[int, dict[str, Any] | None]:
-        after_sequence = 0
+        pagination_cursor = 0
+        producer_floor = 0
         seen_usage_ids: set[str] = set()
         summary = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
         model = ""
-        try:
-            while True:
-                events = fetch_page(after_sequence)
-                if not events:
-                    break
-                page_max = after_sequence
-                for event in events:
-                    sequence = _event_sequence(event) or 0
-                    if sequence > page_max:
-                        page_max = sequence
-                    if not include_usage:
-                        continue
-                    if str(event.get("event_kind") or event.get("event_type") or "") != "run.token_usage":
-                        continue
-                    payload = event.get("payload")
-                    if not isinstance(payload, dict):
-                        continue
-                    usage_event_id = str(
-                        payload.get("usage_event_id") or event.get("event_id") or ""
-                    ).strip()
-                    if not usage_event_id or usage_event_id in seen_usage_ids:
-                        continue
-                    seen_usage_ids.add(usage_event_id)
-                    input_tokens = _positive_int(payload.get("input_tokens"))
-                    output_tokens = _positive_int(payload.get("output_tokens"))
-                    total_tokens = _positive_int(payload.get("total_tokens"))
-                    if total_tokens <= 0:
-                        total_tokens = input_tokens + output_tokens
-                    if input_tokens <= 0 and output_tokens <= 0 and total_tokens <= 0:
-                        continue
-                    summary["input_tokens"] += input_tokens
-                    summary["output_tokens"] += output_tokens
-                    summary["total_tokens"] += total_tokens
-                    if not model:
-                        model = str(payload.get("model") or "").strip()
-                if page_max <= after_sequence:
-                    break
-                after_sequence = page_max
-                if len(events) < page_limit:
-                    break
-        except urllib_error.HTTPError as exc:
-            if exc.code == 404:
-                return 0, None
-            raise
+        while True:
+            events = fetch_page(pagination_cursor)
+            if not events:
+                break
+            page_cursor = pagination_cursor
+            for event in events:
+                raw_sequence = event.get("sequence")
+                if (
+                    not isinstance(raw_sequence, int)
+                    or isinstance(raw_sequence, bool)
+                    or raw_sequence <= 0
+                ):
+                    raise ValueError("run events snapshot sequence must be a positive integer")
+                sequence = raw_sequence
+                if sequence > page_cursor:
+                    page_cursor = sequence
+                raw_source_sequence = event.get("source_sequence")
+                if raw_source_sequence is not None:
+                    if (
+                        not isinstance(raw_source_sequence, int)
+                        or isinstance(raw_source_sequence, bool)
+                        or raw_source_sequence <= 0
+                    ):
+                        raise ValueError(
+                            "run events snapshot source_sequence must be a positive integer or null"
+                        )
+                    if raw_source_sequence > producer_floor:
+                        producer_floor = raw_source_sequence
+                if not include_usage:
+                    continue
+                if (
+                    str(event.get("event_kind") or event.get("event_type") or "")
+                    != "run.token_usage"
+                ):
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                usage_event_id = str(
+                    payload.get("usage_event_id") or event.get("event_id") or ""
+                ).strip()
+                if not usage_event_id or usage_event_id in seen_usage_ids:
+                    continue
+                seen_usage_ids.add(usage_event_id)
+                input_tokens = _positive_int(payload.get("input_tokens"))
+                output_tokens = _positive_int(payload.get("output_tokens"))
+                total_tokens = _positive_int(payload.get("total_tokens"))
+                if total_tokens <= 0:
+                    total_tokens = input_tokens + output_tokens
+                if input_tokens <= 0 and output_tokens <= 0 and total_tokens <= 0:
+                    continue
+                summary["input_tokens"] += input_tokens
+                summary["output_tokens"] += output_tokens
+                summary["total_tokens"] += total_tokens
+                if not model:
+                    model = str(payload.get("model") or "").strip()
+            if page_cursor <= pagination_cursor:
+                raise ValueError("run events snapshot page did not advance its sequence cursor")
+            pagination_cursor = page_cursor
+            if len(events) < page_limit:
+                break
         if not include_usage or (
             summary["input_tokens"] <= 0
             and summary["output_tokens"] <= 0
             and summary["total_tokens"] <= 0
         ):
-            return after_sequence, None
+            return producer_floor, None
         if model:
             summary["model"] = model
-        return after_sequence, summary
+        return producer_floor, summary
 
     return await asyncio.to_thread(fetch_snapshot)
 
@@ -367,8 +468,12 @@ async def fetch_control_plane_run_max_sequence(
     run_id: str,
     settings: RuntimeSettings,
 ) -> int:
-    """Return the run's highest persisted event sequence in the control plane,
-    or 0 when none/unreachable. Pages forward from the last seen cursor."""
+    """Return the run's highest positive persisted producer source sequence.
+
+    Reader-side store sequence remains the pagination cursor and never becomes
+    the producer floor. Raises when the authoritative event history is
+    unavailable; callers must not resume with a guessed floor.
+    """
     max_sequence, _ = await fetch_control_plane_run_events_snapshot(run_id, settings)
     return max_sequence
 
@@ -666,9 +771,10 @@ def _request_control_plane_run_lease(
     except urllib_error.HTTPError as exc:
         if exc.code == 409:
             raise RunLeaseConflict("control plane run lease is already held") from exc
-        if settings.control_run_lease_required:
+        if method == "POST" or settings.control_run_lease_required:
             raise RunLeaseUnavailable(
-                f"control plane run lease request failed with HTTP {exc.code}"
+                f"control plane run lease request failed with HTTP {exc.code}",
+                retryable=_lease_http_failure_is_retryable(exc.code),
             ) from exc
         logger.warning(
             "Control-plane run lease request returned HTTP error; proceeding without durable lease.",
@@ -676,19 +782,39 @@ def _request_control_plane_run_lease(
         )
         return None
     except Exception as exc:
-        if settings.control_run_lease_required:
-            raise RunLeaseUnavailable("control plane run lease request failed") from exc
+        if method == "POST" or settings.control_run_lease_required:
+            raise RunLeaseUnavailable(
+                "control plane run lease request failed",
+                retryable=isinstance(
+                    exc,
+                    (urllib_error.URLError, OSError, TimeoutError),
+                ),
+            ) from exc
         logger.warning(
             "Control-plane run lease request failed; proceeding without durable lease.",
             exc_info=True,
         )
         return None
     if not isinstance(data, dict):
-        return None
+        raise RunLeaseUnavailable(
+            "control plane returned a malformed run lease",
+            retryable=False,
+        )
+    response_run_id = data.get("run_id")
+    response_worker_id = data.get("worker_id")
+    response_lease_token = data.get("lease_token")
+    if not all(
+        isinstance(value, str)
+        for value in (response_run_id, response_worker_id, response_lease_token)
+    ):
+        raise RunLeaseUnavailable(
+            "control plane returned malformed run lease fields",
+            retryable=False,
+        )
     return ControlPlaneRunLease(
-        run_id=str(data.get("run_id") or ""),
-        worker_id=str(data.get("worker_id") or ""),
-        lease_token=str(data.get("lease_token") or ""),
+        run_id=response_run_id,
+        worker_id=response_worker_id,
+        lease_token=response_lease_token,
     )
 
 
@@ -793,6 +919,10 @@ class NATSDeepAgentsWorker:
         ] = fetch_control_plane_user_profile,
     ) -> None:
         self.settings = settings or RuntimeSettings.from_env()
+        if self.settings.control_run_lease_required and not self.settings.control_base_url.rstrip(
+            "/"
+        ):
+            raise ValueError("control_run_lease_required needs a configured control_base_url")
         self._run_job = run_job_func
         self._run_status = run_status_func
         self._run_lease = run_lease_func
@@ -853,6 +983,7 @@ class NATSDeepAgentsWorker:
             await self._reap_sandbox_containers_once()
             if self.settings.sandbox_reaper_interval_seconds > 0:
                 reaper_task = asyncio.create_task(self._sandbox_reaper_loop())
+
             async def handle_cancel_message(message: Any) -> None:
                 await self._handle_cancel_message(message)
 
@@ -892,7 +1023,9 @@ class NATSDeepAgentsWorker:
                         await asyncio.sleep(0.2)
                     continue
                 for message in messages:
-                    active_message_tasks.add(asyncio.create_task(self._process_message(message, js)))
+                    active_message_tasks.add(
+                        asyncio.create_task(self._process_message(message, js))
+                    )
         finally:
             self._shutting_down = True
             if reaper_task is not None:
@@ -980,9 +1113,7 @@ class NATSDeepAgentsWorker:
                 logger.exception("Discarding malformed Deep Agents job payload.")
                 await _ack_message(message)
                 return
-            user_context_token = _control_plane_user_id.set(
-                str(job.user_id or "").strip() or None
-            )
+            user_context_token = _control_plane_user_id.set(str(job.user_id or "").strip() or None)
 
             # One sequencer for the whole run. Streamed events (via run_job) and
             # worker lifecycle events (heartbeats, terminal events, skips) all
@@ -1009,7 +1140,9 @@ class NATSDeepAgentsWorker:
                         event_sequence = _event_sequence(event)
                         if event_sequence is not None and event_sequence > run_sequencer.sequence:
                             run_sequencer.sequence = event_sequence
-                    event_kind = str(event.get("event_kind") or event.get("event_type") or "").strip()
+                    event_kind = str(
+                        event.get("event_kind") or event.get("event_type") or ""
+                    ).strip()
                     if event_kind in WORKER_TERMINAL_EVENT_KINDS:
                         terminal_event_published = True
 
@@ -1031,9 +1164,7 @@ class NATSDeepAgentsWorker:
                     await self._publish_event(
                         js,
                         {
-                            "event_id": (
-                                f"evt_{job.run_id}_worker_heartbeat_{heartbeat_index:06d}"
-                            ),
+                            "event_id": (f"evt_{job.run_id}_worker_heartbeat_{sequence:06d}"),
                             "sequence": sequence,
                             "run_id": job.run_id,
                             "thread_id": job.thread_id,
@@ -1112,41 +1243,11 @@ class NATSDeepAgentsWorker:
                     delay_seconds=active_duplicate_redelivery_delay(self.settings),
                 )
                 return
-            try:
-                control_lease = await self._run_lease(job.run_id, self.settings)
-            except RunLeaseConflict:
-                logger.warning(
-                    "Received duplicate delivery for control-plane leased Deep Agents run; redelivering later.",
-                    extra={"run_id": job.run_id},
-                )
-                await _nak_message(
-                    message,
-                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
-                )
-                run_lock.release()
-                run_lock = None
-                return
-            except RunLeaseUnavailable:
-                logger.warning(
-                    "Control-plane run lease is required but unavailable; redelivering job.",
-                    extra={"run_id": job.run_id},
-                    exc_info=True,
-                )
-                await _nak_message(
-                    message,
-                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
-                )
-                run_lock.release()
-                run_lock = None
-                return
             if current_task is not None:
                 self._active_tasks[job.run_id] = current_task
-            await self._post_worker_heartbeat(
-                "busy",
-                current_run_id=job.run_id,
-                metadata={"active_tasks": len(self._active_tasks)},
-            )
-            should_ack = True
+            # Retain the checkpoint and delivery by default. Only a durable
+            # terminal/skip outcome below may opt into ACK + checkpoint delete.
+            should_ack = False
             status_monitor_task: asyncio.Task | None = None
             heartbeat_task: asyncio.Task | None = None
             lease_keepalive: _LeaseKeepalive | None = None
@@ -1161,7 +1262,111 @@ class NATSDeepAgentsWorker:
                 nonlocal control_lease_lost
                 control_lease_lost = True
 
+            def _abort_run_on_lease_lost() -> None:
+                # Scheduled onto this loop via call_soon_threadsafe by the
+                # keepalive thread, so touching the run task and the nonlocal
+                # flag here is loop-safe.
+                mark_control_lease_lost()
+                if current_task is not None and not current_task.done():
+                    current_task.cancel()
+
+            async def settle_cancelled_delivery() -> None:
+                nonlocal should_ack
+                logger.warning(
+                    "Deep Agents run task cancelled; classifying for terminal handling.",
+                    extra={
+                        "run_id": job.run_id,
+                        "control_lease_lost": control_lease_lost,
+                        "shutting_down": self._shutting_down,
+                        "control_terminal_status": control_terminal_status,
+                        "explicitly_canceled": job.run_id in self._canceled_run_reasons,
+                        "terminal_event_published": terminal_event_published,
+                    },
+                )
+                if control_lease_lost:
+                    await _nak_message(
+                        message,
+                        delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                    )
+                    return
+                if self._shutting_down and job.run_id not in self._canceled_run_reasons:
+                    await _nak_message(
+                        message,
+                        delay_seconds=_SHUTDOWN_NAK_DELAY_SECONDS,
+                    )
+                    return
+                if (
+                    control_terminal_status
+                    in CONTROL_PLANE_STATUSES_WITH_AUTHORITATIVE_TERMINAL_EVENT
+                ):
+                    await self._publish_skipped_event(
+                        js,
+                        job,
+                        control_status=control_terminal_status,
+                        stage="status_monitor",
+                        sequence=run_sequencer.next_sequence(),
+                    )
+                    should_ack = True
+                    return
+                if control_terminal_status == "canceled":
+                    await self._publish_canceled_event(
+                        js,
+                        job,
+                        reason=self._canceled_run_reasons.get(
+                            job.run_id,
+                            "canceled by control plane",
+                        ),
+                        sequence=run_sequencer.next_sequence(),
+                    )
+                    should_ack = True
+                    return
+                if job.run_id in self._canceled_run_reasons:
+                    await self._publish_canceled_event(
+                        js,
+                        job,
+                        reason=self._canceled_run_reasons[job.run_id],
+                        sequence=run_sequencer.next_sequence(),
+                    )
+                    should_ack = True
+                    return
+                # An unclassified external cancellation carries no durable
+                # terminal authority. Never invent a low-sequence canceled or
+                # failed event; retain the checkpoint and redeliver instead.
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
+
             try:
+                # Once the lease is acquired, start every liveness guard before
+                # reading the authoritative resume floor. Snapshot failures can
+                # then retry within this same JetStream delivery without
+                # expiring the lease or consuming MaxDeliver. Confirmed lease
+                # loss and terminal status still cancel this task through the
+                # existing delayed-NAK/terminal cleanup paths.
+                status_monitor_task = _start_control_status_monitor_task(
+                    job.run_id,
+                    self.settings,
+                    self._run_status,
+                    current_task,
+                    on_terminal_status=mark_control_terminal_status,
+                )
+                control_lease = await self._acquire_run_lease_for_delivery(job.run_id)
+                if control_lease is not None:
+                    lease_keepalive = _LeaseKeepalive(
+                        control_lease,
+                        self.settings,
+                        loop=loop,
+                        interval_seconds=lease_keepalive_interval(self.settings),
+                        on_lost=_abort_run_on_lease_lost,
+                        renew_func=self._lease_renew_sync,
+                    )
+                    lease_keepalive.start()
+                await self._post_worker_heartbeat(
+                    "busy",
+                    current_run_id=job.run_id,
+                    metadata={"active_tasks": len(self._active_tasks)},
+                )
                 try:
                     control_status = await self._safe_run_status(job.run_id)
                     if control_status in SKIP_CONTROL_PLANE_RUN_STATUSES:
@@ -1176,6 +1381,7 @@ class NATSDeepAgentsWorker:
                             stage="pre_compute_recheck",
                             sequence=run_sequencer.next_sequence(),
                         )
+                        should_ack = True
                         return
                     if job.run_id in self._canceled_run_reasons:
                         await self._publish_canceled_event(
@@ -1184,14 +1390,8 @@ class NATSDeepAgentsWorker:
                             reason=self._canceled_run_reasons[job.run_id],
                             sequence=run_sequencer.next_sequence(),
                         )
+                        should_ack = True
                         return
-                    status_monitor_task = _start_control_status_monitor_task(
-                        job.run_id,
-                        self.settings,
-                        self._run_status,
-                        current_task,
-                        on_terminal_status=mark_control_terminal_status,
-                    )
                     resume_kwargs: dict[str, Any] = {}
                     checkpointer = await self._ensure_checkpointer()
                     if checkpointer is not None:
@@ -1214,25 +1414,6 @@ class NATSDeepAgentsWorker:
                         worker_task=current_task,
                         on_lease_lost=mark_control_lease_lost,
                     )
-                    if control_lease is not None:
-
-                        def _abort_run_on_lease_lost() -> None:
-                            # Scheduled onto this loop via call_soon_threadsafe by
-                            # the keepalive thread, so touching the run task and
-                            # the nonlocal flag here is loop-safe.
-                            mark_control_lease_lost()
-                            if current_task is not None and not current_task.done():
-                                current_task.cancel()
-
-                        lease_keepalive = _LeaseKeepalive(
-                            control_lease,
-                            self.settings,
-                            loop=loop,
-                            interval_seconds=lease_keepalive_interval(self.settings),
-                            on_lost=_abort_run_on_lease_lost,
-                            renew_func=self._lease_renew_sync,
-                        )
-                        lease_keepalive.start()
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
                     if _should_load_user_profile(job):
@@ -1263,58 +1444,18 @@ class NATSDeepAgentsWorker:
                             response_text=response_text,
                             sequence=run_sequencer.next_sequence(),
                         )
+                    should_ack = True
                 except asyncio.CancelledError:
-                    # Cancellation is otherwise handled silently below, which makes an
-                    # orphaned "running" run (terminal event never published) impossible to
-                    # diagnose. Record which branch fires and the deciding state so a stuck
-                    # run's cause is visible in the worker log (stderr).
-                    logger.warning(
-                        "Deep Agents run task cancelled; classifying for terminal handling.",
-                        extra={
-                            "run_id": job.run_id,
-                            "control_lease_lost": control_lease_lost,
-                            "shutting_down": self._shutting_down,
-                            "control_terminal_status": control_terminal_status,
-                            "explicitly_canceled": job.run_id in self._canceled_run_reasons,
-                            "terminal_event_published": terminal_event_published,
-                        },
-                    )
-                    if control_lease_lost:
-                        should_ack = False
-                        await _nak_message(
-                            message,
-                            delay_seconds=active_duplicate_redelivery_delay(self.settings),
-                        )
-                        return
-                    if self._shutting_down and job.run_id not in self._canceled_run_reasons:
-                        should_ack = False
-                        # Delayed past the serve loop's outstanding pull request
-                        # so the redelivery reaches a LIVE worker, not this
-                        # dying one's buffer (see _SHUTDOWN_NAK_DELAY_SECONDS).
-                        await _nak_message(
-                            message,
-                            delay_seconds=_SHUTDOWN_NAK_DELAY_SECONDS,
-                        )
-                        return
-                    if control_terminal_status in CONTROL_PLANE_STATUSES_WITH_AUTHORITATIVE_TERMINAL_EVENT:
-                        await self._publish_skipped_event(
-                            js,
-                            job,
-                            control_status=control_terminal_status,
-                            stage="status_monitor",
-                            sequence=run_sequencer.next_sequence(),
-                        )
-                        return
-                    await self._publish_canceled_event(
-                        js,
-                        job,
-                        reason=self._canceled_run_reasons.get(job.run_id, "canceled"),
-                        sequence=run_sequencer.next_sequence(),
-                    )
+                    await settle_cancelled_delivery()
+                    return
                 except EventPublishError:
                     raise
+                except RunAuthorityUnavailableError:
+                    raise
                 except Exception as exc:
-                    logger.exception("Deep Agents job failed; terminal event should already be published.")
+                    logger.exception(
+                        "Deep Agents job failed; terminal event should already be published."
+                    )
                     if not terminal_event_published:
                         await self._publish_failed_event(
                             js,
@@ -1322,8 +1463,39 @@ class NATSDeepAgentsWorker:
                             exc,
                             sequence=run_sequencer.next_sequence(),
                         )
+                    should_ack = True
+            except asyncio.CancelledError:
+                await settle_cancelled_delivery()
+            except RunLeaseConflict:
+                logger.warning(
+                    "Received duplicate delivery for control-plane leased Deep Agents run; redelivering later.",
+                    extra={"run_id": job.run_id},
+                )
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
+            except RunLeaseUnavailable:
+                logger.warning(
+                    "Control-plane run lease is required but unavailable; redelivering job.",
+                    extra={"run_id": job.run_id},
+                    exc_info=True,
+                )
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
+            except RunAuthorityUnavailableError:
+                logger.error(
+                    "Durable run authority unavailable; redelivering job without compute.",
+                    extra={"run_id": job.run_id},
+                    exc_info=True,
+                )
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
             except EventPublishError:
-                should_ack = False
                 logger.exception("Deep Agents event publish failed; redelivering job.")
                 await _nak_message(
                     message,
@@ -1349,9 +1521,7 @@ class NATSDeepAgentsWorker:
                 # target. No-op on a clean completion (the container already exited via
                 # --rm). Best-effort + off the event loop; a docker hiccup only logs.
                 with contextlib.suppress(Exception):
-                    killed = await asyncio.to_thread(
-                        kill_sandbox_containers_for_run, job.run_id
-                    )
+                    killed = await asyncio.to_thread(kill_sandbox_containers_for_run, job.run_id)
                     if killed:
                         logger.info(
                             "Killed %d orphaned sandbox container(s) for ended run.",
@@ -1447,20 +1617,191 @@ class NATSDeepAgentsWorker:
             )
 
     async def _run_events_snapshot(self, run_id: str) -> tuple[int, dict[str, Any] | None]:
-        """Single-pass fetch of the run's max persisted event sequence (used to
-        seed the worker sequencer so resumed events append without colliding
-        with the original partial run's already-persisted events) and its
-        best-effort prior token usage for final payload continuity. Degrades to
-        (0, None) — fresh floor, no prior usage — when unreadable."""
-        try:
-            return await fetch_control_plane_run_events_snapshot(run_id, self.settings)
-        except Exception:
-            logger.warning(
-                "Could not read run events snapshot; using sequence floor 0 and no prior usage.",
-                extra={"run_id": run_id},
-                exc_info=True,
-            )
-            return 0, None
+        """Read the authoritative producer floor before any resumed compute.
+
+        The job remains on its current JetStream delivery while transient HTTP
+        failures retry. Ack progress, the run lease keepalive, and status monitor
+        are already active, so this neither burns MaxDeliver nor permits a fresh
+        sequence-0 restart. Task cancellation remains the disposition for worker
+        shutdown, terminal status, or confirmed lease loss.
+        """
+        attempts = 0
+        started_at = _authority_monotonic()
+        while True:
+            try:
+                return await fetch_control_plane_run_events_snapshot(run_id, self.settings)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                attempts += 1
+                elapsed = _authority_monotonic() - started_at
+                retryable = isinstance(exc, Exception) and _snapshot_failure_is_retryable(exc)
+                if not retryable or elapsed >= _RUN_AUTHORITY_WAIT_BUDGET_SECONDS:
+                    logger.error(
+                        "Run events authority unavailable; redelivering without compute.",
+                        extra={
+                            "run_id": run_id,
+                            "classification": "retry_budget_exhausted"
+                            if retryable
+                            else "non_retryable",
+                            "attempts": attempts,
+                            "elapsed_seconds": round(elapsed, 3),
+                        },
+                        exc_info=True,
+                    )
+                    raise RunAuthorityUnavailableError(
+                        "authoritative run events snapshot unavailable"
+                    ) from exc
+                if attempts == 1 or attempts % 12 == 0:
+                    logger.warning(
+                        "Run events snapshot unavailable; retrying before compute.",
+                        extra={
+                            "run_id": run_id,
+                            "classification": "transient",
+                            "attempt": attempts,
+                            "elapsed_seconds": round(elapsed, 3),
+                        },
+                        exc_info=True,
+                    )
+                await asyncio.sleep(_run_events_snapshot_retry_delay(attempts))
+
+    async def _acquire_run_lease_for_delivery(
+        self,
+        run_id: str,
+    ) -> ControlPlaneRunLease | None:
+        """Acquire durable run ownership before snapshot or compute.
+
+        An explicitly blank control-plane URL is local/in-process mode and has
+        no lease authority, so ``None`` is valid there. When a control plane is
+        configured, an optional lease client's transient ``None`` is not
+        permission to run lease-free: retain this JetStream delivery and retry
+        until a lease is acquired, status/shutdown cancels the task, or the
+        lease service returns an explicit conflict/unavailable disposition.
+        """
+        if not self.settings.control_base_url.rstrip("/"):
+            if self.settings.control_run_lease_required:
+                raise RunAuthorityUnavailableError(
+                    "control_run_lease_required needs a configured control_base_url"
+                )
+            return None
+        attempts = 0
+        started_at = _authority_monotonic()
+        while True:
+            acquisition = asyncio.create_task(self._run_lease(run_id, self.settings))
+            try:
+                lease = await asyncio.shield(acquisition)
+            except asyncio.CancelledError:
+                # asyncio.to_thread keeps running after its awaiting task is
+                # cancelled. Retain the task despite repeated task.cancel()
+                # calls, wait for the HTTP call to settle, and release a late
+                # lease before propagating cancellation; otherwise the next
+                # delivery is fenced out for the full TTL.
+                try:
+                    late_lease = await _finish_task_despite_cancellation(acquisition)
+                except asyncio.CancelledError:
+                    late_lease = None
+                except Exception:
+                    late_lease = None
+                if late_lease is not None:
+                    try:
+                        late_lease = _validated_run_lease(
+                            late_lease,
+                            run_id=run_id,
+                            worker_id=self.settings.worker_id,
+                        )
+                    except RunLeaseUnavailable:
+                        logger.error(
+                            "Late control-plane lease acquisition returned malformed authority.",
+                            extra={"run_id": run_id},
+                            exc_info=True,
+                        )
+                    else:
+                        try:
+                            release = asyncio.create_task(
+                                self._release_run_lease(late_lease, self.settings)
+                            )
+                            await _finish_task_despite_cancellation(release)
+                        except asyncio.CancelledError:
+                            logger.error(
+                                "Late lease release task was cancelled before completion.",
+                                extra={"run_id": run_id},
+                            )
+                        except Exception:
+                            logger.error(
+                                "Failed to release a lease that completed after cancellation.",
+                                extra={"run_id": run_id},
+                                exc_info=True,
+                            )
+                raise
+            except RunLeaseConflict:
+                raise
+            except RunLeaseUnavailable as exc:
+                if not exc.retryable:
+                    logger.error(
+                        "Control-plane run lease authority rejected the worker request.",
+                        extra={
+                            "run_id": run_id,
+                            "classification": "non_retryable",
+                            "attempts": attempts + 1,
+                        },
+                        exc_info=True,
+                    )
+                    raise RunAuthorityUnavailableError(
+                        "control-plane run lease authority rejected the request"
+                    ) from exc
+                lease = None
+            except Exception as exc:
+                logger.error(
+                    "Control-plane run lease returned an unclassified failure.",
+                    extra={
+                        "run_id": run_id,
+                        "classification": "non_retryable",
+                        "attempts": attempts + 1,
+                    },
+                    exc_info=True,
+                )
+                raise RunAuthorityUnavailableError(
+                    "control-plane run lease acquisition failed"
+                ) from exc
+            if lease is not None:
+                try:
+                    return _validated_run_lease(
+                        lease,
+                        run_id=run_id,
+                        worker_id=self.settings.worker_id,
+                    )
+                except RunLeaseUnavailable as exc:
+                    logger.error(
+                        "Control-plane run lease returned malformed authority.",
+                        extra={
+                            "run_id": run_id,
+                            "classification": "non_retryable",
+                            "attempts": attempts + 1,
+                        },
+                        exc_info=True,
+                    )
+                    raise RunAuthorityUnavailableError(
+                        "control-plane run lease was malformed"
+                    ) from exc
+            attempts += 1
+            elapsed = _authority_monotonic() - started_at
+            if elapsed >= _RUN_AUTHORITY_WAIT_BUDGET_SECONDS:
+                logger.error(
+                    "Control-plane run lease authority unavailable; redelivering without compute.",
+                    extra={
+                        "run_id": run_id,
+                        "classification": "retry_budget_exhausted",
+                        "attempts": attempts,
+                        "elapsed_seconds": round(elapsed, 3),
+                    },
+                )
+                raise RunAuthorityUnavailableError("control-plane run lease unavailable")
+            if attempts == 1 or attempts % 12 == 0:
+                logger.warning(
+                    "Control-plane run lease unavailable; retrying before snapshot and compute.",
+                    extra={"run_id": run_id, "attempt": attempts},
+                )
+            await asyncio.sleep(_run_events_snapshot_retry_delay(attempts))
 
     async def _load_user_profile(self, run_id: str) -> dict[str, Any] | None:
         """Best-effort fetch of the run owner's profile for memory seeding."""
@@ -1726,7 +2067,9 @@ def _event_message_id(event: dict[str, Any]) -> str:
     return ""
 
 
-async def _reconcile_consumer(js: Any, settings: RuntimeSettings, *, config: ConsumerConfig) -> None:
+async def _reconcile_consumer(
+    js: Any, settings: RuntimeSettings, *, config: ConsumerConfig
+) -> None:
     from nats.js.errors import NotFoundError
 
     try:
@@ -1750,7 +2093,9 @@ def _consumer_config_matches(existing_config: Any, desired_config: ConsumerConfi
         return False
     return (
         getattr(existing_config, "filter_subject", None) == desired_config.filter_subject
-        and _ack_policy_equal(getattr(existing_config, "ack_policy", None), desired_config.ack_policy)
+        and _ack_policy_equal(
+            getattr(existing_config, "ack_policy", None), desired_config.ack_policy
+        )
         and _float_equal(getattr(existing_config, "ack_wait", None), desired_config.ack_wait)
         and getattr(existing_config, "max_deliver", None) == desired_config.max_deliver
         and getattr(existing_config, "max_ack_pending", None) == desired_config.max_ack_pending
@@ -1832,7 +2177,9 @@ def _log_message_task_result(task: asyncio.Task) -> None:
         )
 
 
-def _start_ack_progress_task(message: Any | None, *, interval_seconds: float) -> asyncio.Task | None:
+def _start_ack_progress_task(
+    message: Any | None, *, interval_seconds: float
+) -> asyncio.Task | None:
     if message is None or interval_seconds <= 0 or not hasattr(message, "in_progress"):
         return None
     return asyncio.create_task(_ack_progress_loop(message, interval_seconds=interval_seconds))

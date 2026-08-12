@@ -36,7 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import nats
 from longhorizon_harness import (
@@ -364,6 +364,7 @@ class ChaosControlPlane:
         self.lease_tenures = 0
         self.lease_renewals = 0
         self.conflict_after_renewals: int | None = None
+        self.renewal_conflict_gate: Callable[[], bool] | None = None
 
     async def run_status(self, run_id: str, settings: RuntimeSettings) -> str | None:
         del settings
@@ -400,7 +401,9 @@ class ChaosControlPlane:
         # Runs on the _LeaseKeepalive thread, mirroring the sync HTTP renewal.
         del settings
         self.lease_renewals += 1
-        if self.conflict_after_renewals is not None:
+        if self.conflict_after_renewals is not None and (
+            self.renewal_conflict_gate is None or self.renewal_conflict_gate()
+        ):
             self.conflict_after_renewals -= 1
             if self.conflict_after_renewals < 0:
                 self.conflict_after_renewals = None  # one-shot: later tenures renew fine

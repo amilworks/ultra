@@ -2936,6 +2936,7 @@ func scanRunEventRows(rows pgx.Rows, capacity int) ([]domain.RunEventRecord, err
 	}
 	events := make([]domain.RunEventRecord, 0, capacity)
 	var event domain.RunEventRecord
+	var sourceSequence pgtype.Int8
 	var threadID pgtype.Text
 	var eventType pgtype.Text
 	var nodeName pgtype.Text
@@ -2950,7 +2951,7 @@ func scanRunEventRows(rows pgx.Rows, capacity int) ([]domain.RunEventRecord, err
 	scanTargets := []any{
 		&event.EventID,
 		&event.Sequence,
-		&event.SourceSequence,
+		&sourceSequence,
 		&event.RunID,
 		&threadID,
 		&event.EventKind,
@@ -2966,6 +2967,7 @@ func scanRunEventRows(rows pgx.Rows, capacity int) ([]domain.RunEventRecord, err
 		&payload,
 	}
 	_, err := pgx.ForEachRow(rows, scanTargets, func() error {
+		event.SourceSequence = int8Value(sourceSequence)
 		event.ThreadID = textValue(threadID)
 		event.EventType = textValue(eventType)
 		event.NodeName = textValue(nodeName)

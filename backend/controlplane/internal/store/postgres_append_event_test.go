@@ -307,6 +307,43 @@ func TestPostgresAppendRunEventNoSourceSequenceAvoidsWorkerSlotCollision(t *test
 		t.Fatalf("control event source_sequence = %d, want 0 (NULL)", canceled.SourceSequence)
 	}
 
+	// Every event-list projection must preserve the nullable source sequence.
+	// Worker resume and the admin/run-event HTTP surfaces all depend on these
+	// readers; scanning SQL NULL directly into int64 turns a valid control-plane
+	// event into an HTTP 500 and makes recovery lose its authoritative floor.
+	for name, list := range map[string]func() ([]domain.RunEventRecord, error){
+		"recent": func() ([]domain.RunEventRecord, error) {
+			return s.ListRunEvents(ctx, run.RunID, 10)
+		},
+		"after": func() ([]domain.RunEventRecord, error) {
+			return s.ListRunEventsAfter(ctx, run.RunID, 0, 10)
+		},
+		"recent for user": func() ([]domain.RunEventRecord, error) {
+			return s.ListRunEventsForUser(ctx, run.RunID, run.UserID, 10)
+		},
+		"after for user": func() ([]domain.RunEventRecord, error) {
+			return s.ListRunEventsAfterForUser(ctx, run.RunID, run.UserID, 0, 10)
+		},
+	} {
+		events, listErr := list()
+		if listErr != nil {
+			t.Fatalf("%s: %v", name, listErr)
+		}
+		var listedCanceled *domain.RunEventRecord
+		for index := range events {
+			if events[index].EventID == canceled.EventID {
+				listedCanceled = &events[index]
+				break
+			}
+		}
+		if listedCanceled == nil {
+			t.Fatalf("%s omitted nullable-source event %s", name, canceled.EventID)
+		}
+		if listedCanceled.SourceSequence != 0 {
+			t.Fatalf("%s source_sequence = %d, want 0 (NULL)", name, listedCanceled.SourceSequence)
+		}
+	}
+
 	// The worker's next stamp is still free: nothing was stolen.
 	next, outcome, err := s.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
 		EventID:        "evt-" + run.RunID + "-worker-000003",

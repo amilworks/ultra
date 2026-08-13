@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from unittest import mock
 
 import pytest
 from deepagents.backends.protocol import ExecuteResponse
@@ -43,8 +44,6 @@ from longhorizon_nats import (
     start_worker,
     stop_worker,
 )
-from unittest import mock
-
 from ultra_deepagents.schemas import RunJobEnvelope
 
 pytestmark = [
@@ -95,7 +94,7 @@ def test_job_flows_through_real_jetstream_and_completes(tmp_path, nats_server) -
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -158,7 +157,7 @@ def test_worker_death_redelivery_and_fresh_worker_resume(tmp_path, nats_server) 
     async def scenario() -> None:
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
 
         worker_one = ChaosWorker(
             settings,
@@ -244,7 +243,7 @@ def test_duplicate_delivery_parried_and_post_completion_redelivery_skipped(
     async def scenario() -> None:
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -371,7 +370,7 @@ def test_nats_server_restart_mid_run_recovers_and_completes(tmp_path, nats_serve
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -431,7 +430,7 @@ def test_cancel_subject_aborts_run_and_publishes_canceled(tmp_path, nats_server)
     async def scenario():
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
-        control_plane = ChaosControlPlane(collector)
+        control_plane = ChaosControlPlane(collector, grant_leases=True)
         worker = ChaosWorker(
             settings,
             world=world,
@@ -499,6 +498,7 @@ def test_lease_loss_aborts_promptly_and_redelivery_resumes(tmp_path, nats_server
         control_run_lease_ttl_seconds=1.0,  # keepalive ticks every 0.25s
     )
     world = ChaosWorld(tmp=tmp_path)
+    checkpoint_ready = threading.Event()
     job = RunJobEnvelope(
         run_id="run-chaos-leaseloss",
         thread_id="thread-chaos",
@@ -509,7 +509,12 @@ def test_lease_loss_aborts_promptly_and_redelivery_resumes(tmp_path, nats_server
     def policy(request: TurnRequest) -> TurnDecision:
         next_stage = len(world.sandbox.calls) + 1
         if next_stage <= 10:
-            # Slow, model-side turns so the conflict lands inside a model node.
+            # Reaching the stage-4 model call means stages 1-3 crossed graph
+            # step boundaries and are available to the zero-debounce durable
+            # checkpointer. Gate the injected 409 on that state instead of a
+            # wall-clock guess, which raced on slower fresh CI runners.
+            if next_stage == 4:
+                checkpoint_ready.set()
             return TurnDecision(
                 execute_command=f"python stage.py --index {next_stage}",
                 sleep_seconds=0.3,
@@ -520,7 +525,8 @@ def test_lease_loss_aborts_promptly_and_redelivery_resumes(tmp_path, nats_server
         collector = EventCollector(nats_server.url, namespace)
         await collector.start()
         control_plane = ChaosControlPlane(collector, grant_leases=True)
-        control_plane.conflict_after_renewals = 2  # 409 on the 3rd renewal (~0.75s in)
+        control_plane.renewal_conflict_gate = checkpoint_ready.is_set
+        control_plane.conflict_after_renewals = 0  # 409 on first renewal after the gate
         worker = ChaosWorker(
             settings,
             world=world,

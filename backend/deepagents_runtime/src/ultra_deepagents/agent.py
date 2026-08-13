@@ -54,7 +54,10 @@ from ultra_deepagents.evaluation_profiles import (
 )
 from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
-from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
+from ultra_deepagents.multimodal import (
+    BoundedImageMultimodalMiddleware,
+    TextOnlyMultimodalMiddleware,
+)
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.progress_guard import read_attempt_ledger_digest
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
@@ -1308,6 +1311,8 @@ def build_subagents(
     skills_sources: Sequence[str] | None = None,
     vision_tools: Sequence[BaseTool | Any] | None = None,
     qwen_coding_model: BaseChatModel | Any | None = None,
+    qwen_max_images_per_call: int = 4,
+    qwen_model_call_timeout_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     subagents: list[dict[str, Any]] = []
     resolved_backend = backend if backend is not None else StateBackend()
@@ -1365,6 +1370,13 @@ def build_subagents(
             subagent["skills"] = list(skills_sources)
         if text_only_model and subagent["name"] != QWEN_CODE_RUNNER_NAME:
             subagent_middleware.append(TextOnlyMultimodalMiddleware())
+        if subagent["name"] == QWEN_CODE_RUNNER_NAME:
+            subagent_middleware.append(
+                BoundedImageMultimodalMiddleware(
+                    max_images=qwen_max_images_per_call,
+                    async_timeout_seconds=qwen_model_call_timeout_seconds,
+                )
+            )
         subagent["middleware"] = subagent_middleware
     return subagents
 
@@ -2345,6 +2357,8 @@ def build_research_agent(
         skills_sources=skills_sources,
         vision_tools=vision_tools,
         qwen_coding_model=qwen_coding_model,
+        qwen_max_images_per_call=settings.qwen_vlm_max_images_per_call,
+        qwen_model_call_timeout_seconds=(settings.qwen_vlm_request_timeout_seconds * 1.5),
     )
     # Durable attempt-ledger digest -> system prompt, on the coordinator AND every
     # coding delegate (in the 6.7M-token livelock, code-runner owned 69% of the
@@ -2401,18 +2415,14 @@ def build_research_agent(
         enriched.setdefault("model", map_model)
         enriched.setdefault("tools", [])
         mappable_specs.append(enriched)
-    mappable_specs.append(
-        {**GENERAL_PURPOSE_SUBAGENT_SPEC, "model": map_model, "tools": []}
-    )
+    mappable_specs.append({**GENERAL_PURPOSE_SUBAGENT_SPEC, "model": map_model, "tools": []})
     # The manifest must list every subagent the task/map_task tools can really
     # reach: deepagents auto-adds a built-in general-purpose to task, and
     # map_task always carries the synthetic spec above — a bare run reporting
     # available_subagents:[] alongside a registered map_task is a lie the
     # model wastes reasoning on.
     manifest_subagents = [*subagents, dict(GENERAL_PURPOSE_SUBAGENT_SPEC)]
-    resolved_tools.append(
-        build_map_task_tool(mappable_specs, workspace_dir=workspace_dir)
-    )
+    resolved_tools.append(build_map_task_tool(mappable_specs, workspace_dir=workspace_dir))
     compute_resources = sandbox_compute_resources(settings)
     capability_manifest_tool = build_tool_capability_manifest_tool(
         resolved_tools,

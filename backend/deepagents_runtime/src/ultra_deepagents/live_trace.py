@@ -149,7 +149,11 @@ class ControlPlaneClient:
             next_after_sequence = max(
                 [after_sequence, *(_event_sequence(event) for event in records)]
             )
-            if len(records) < requested_limit or next_after_sequence <= after_sequence:
+            # The control plane may clamp a requested limit below the value in
+            # this client. A short page therefore does not prove exhaustion;
+            # only an empty/non-advancing page does. This extra terminal fetch
+            # keeps bulk traces complete once they exceed the server-side cap.
+            if not records or next_after_sequence <= after_sequence:
                 break
             after_sequence = next_after_sequence
         return events
@@ -421,12 +425,6 @@ def trace_prompt(
     return run, summary
 
 
-
-
-
-
-
-
 def run_trace(args: argparse.Namespace) -> dict[str, Any]:
     client_kwargs: dict[str, Any] = {"timeout_seconds": args.http_timeout}
     auth_headers = _auth_headers_from_args(args)
@@ -531,14 +529,6 @@ def evaluate_trace_requirements(
                     f"{label} run {run_id} artifact {artifact_id} download verification failed"
                 )
     return issues
-
-
-
-
-
-
-
-
 
 
 def _run_remote_mutation_intents(run: dict[str, Any]) -> tuple[list[str], bool]:
@@ -2715,20 +2705,6 @@ def _summarize_artifact(
     if artifact.get("sha256"):
         summary["sha256"] = artifact.get("sha256")
     return summary
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _summary_artifacts(summary: dict[str, Any]) -> list[dict[str, Any]]:

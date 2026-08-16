@@ -40,6 +40,12 @@ const LazyCiftiViewerShell = lazy(() =>
   }))
 );
 
+const LazyScene3dViewerShell = lazy(() =>
+  import("./viewer/scene3d/Scene3dViewerShell").then((module) => ({
+    default: module.Scene3dViewerShell,
+  }))
+);
+
 const LazyTextResourceViewer = lazy(() =>
   import("./viewer/TextResourceViewer").then((module) => ({
     default: module.TextResourceViewer,
@@ -226,6 +232,20 @@ const isPdfUpload = (file: UploadedFileRecord | null | undefined): boolean => {
   );
 };
 
+const isUnsupportedOfficeDocument = (file: UploadedFileRecord | null | undefined): boolean => {
+  const contentType = String(file?.content_type ?? "").split(";")[0].trim().toLowerCase();
+  const originalName = String(file?.original_name ?? "").trim().toLowerCase();
+  if (/\.(doc|docx|ppt|pptx)$/.test(originalName)) {
+    return true;
+  }
+  return new Set([
+    "application/msword",
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ]).has(contentType);
+};
+
 const isVideoUpload = (file: UploadedFileRecord | null | undefined): boolean => {
   const contentType = String(file?.content_type ?? "").split(";")[0].trim().toLowerCase();
   if (contentType.startsWith("video/")) {
@@ -291,6 +311,34 @@ function PdfViewerPanel({ file, apiClient }: { file: UploadedFileRecord; apiClie
           className="viewer-pdf-frame"
           loading="lazy"
         />
+      </div>
+    </section>
+  );
+}
+
+function UnsupportedOfficeDocumentPanel({
+  file,
+  apiClient,
+}: {
+  file: UploadedFileRecord;
+  apiClient: ApiClient;
+}) {
+  const downloadUrl = apiClient.resourceDownloadUrl(file.file_id);
+  return (
+    <section className="viewer-stage-document" aria-label="Office document download" role="region">
+      <div className="viewer-empty flex flex-col items-center gap-3 text-center">
+        <FileWarning className="size-8 opacity-60" aria-hidden />
+        <div className="text-base font-medium">Document preview unavailable</div>
+        <p className="max-w-md text-sm opacity-70">
+          This Office document is ready to download, but it cannot be previewed here.
+        </p>
+        <p className="text-xs opacity-50">{file.original_name}</p>
+        <Button asChild size="sm" variant="secondary">
+          <a href={downloadUrl} download>
+            <Download className="mr-1.5 size-3.5" />
+            Download original
+          </a>
+        </Button>
       </div>
     </section>
   );
@@ -422,10 +470,14 @@ export function UploadViewerWorkspace({
     ? uploadedFiles.find((file) => file.file_id === selectedFileId) ?? null
     : null;
   const selectedFileIsPdf = isPdfUpload(selectedFile);
+  const selectedFileIsOfficeDocument = isUnsupportedOfficeDocument(selectedFile);
   const selectedFileIsVideo = isVideoUpload(selectedFile);
   // Text/data files (CSV/JSON/YAML/XML/Markdown/text) route to the dedicated text
   // viewer and must short-circuit the image-engine probe, exactly like PDF/video.
-  const selectedTextKind = selectedFileIsPdf || selectedFileIsVideo ? null : classifyTextResource(selectedFile);
+  const selectedTextKind =
+    selectedFileIsPdf || selectedFileIsOfficeDocument || selectedFileIsVideo
+      ? null
+      : classifyTextResource(selectedFile);
   const selectedFileIsText = selectedTextKind !== null;
   const selectedViewerInfo = selectedFileId ? viewerInfoById[selectedFileId] ?? null : null;
   const selectedViewerError = selectedFileId ? viewerErrorById[selectedFileId] ?? null : null;
@@ -435,6 +487,7 @@ export function UploadViewerWorkspace({
       !active ||
       !selectedFileId ||
       selectedFileIsPdf ||
+      selectedFileIsOfficeDocument ||
       selectedFileIsVideo ||
       selectedFileIsText ||
       selectedViewerInfo ||
@@ -518,7 +571,17 @@ export function UploadViewerWorkspace({
       }
       setLoadingFileId((current) => (current === activeFileId ? null : current));
     };
-  }, [active, apiClient, selectedFileId, selectedFileIsPdf, selectedFileIsVideo, selectedFileIsText, selectedViewerError, selectedViewerInfo]);
+  }, [
+    active,
+    apiClient,
+    selectedFileId,
+    selectedFileIsOfficeDocument,
+    selectedFileIsPdf,
+    selectedFileIsVideo,
+    selectedFileIsText,
+    selectedViewerError,
+    selectedViewerInfo,
+  ]);
 
   const selectedIndices = selectedFileId ? viewerIndicesById[selectedFileId] ?? null : null;
 
@@ -548,6 +611,7 @@ export function UploadViewerWorkspace({
   const selectedDisplayState = selectedFileId ? viewerDisplayById[selectedFileId] ?? null : null;
   const isHdf5Viewer = selectedViewerInfo?.kind === "hdf5";
   const isCiftiViewer = selectedViewerInfo?.kind === "cifti";
+  const isScene3dViewer = selectedViewerInfo?.kind === "scene3d";
   const selectedDatasetPath = selectedFileId ? viewerHdf5SelectedDatasetById[selectedFileId] ?? null : null;
   const selectedDatasetSummaryKey =
     selectedFileId && selectedDatasetPath ? `${selectedFileId}:${selectedDatasetPath}` : null;
@@ -613,7 +677,11 @@ export function UploadViewerWorkspace({
       className={cn(
         "viewer-workspace",
         !showFileStrip && "viewer-workspace-single-file",
-        (selectedFileIsPdf || selectedFileIsVideo || selectedFileIsText) && "viewer-workspace-document",
+        (selectedFileIsPdf ||
+          selectedFileIsOfficeDocument ||
+          selectedFileIsVideo ||
+          selectedFileIsText) &&
+          "viewer-workspace-document",
         isHdf5Viewer && "viewer-workspace-hdf5",
         selectedViewerInfo && !isHdf5Viewer && `viewer-workspace-surface-${selectedSurface}`,
         className
@@ -650,6 +718,8 @@ export function UploadViewerWorkspace({
             <div className="viewer-empty">Select a file to start.</div>
           ) : selectedFileIsPdf && selectedFile ? (
             <PdfViewerPanel file={selectedFile} apiClient={apiClient} />
+          ) : selectedFileIsOfficeDocument && selectedFile ? (
+            <UnsupportedOfficeDocumentPanel file={selectedFile} apiClient={apiClient} />
           ) : selectedFileIsVideo && selectedFile ? (
             <VideoViewerPanel file={selectedFile} apiClient={apiClient} />
           ) : selectedFileIsText && selectedTextKind && selectedFile ? (
@@ -786,6 +856,12 @@ export function UploadViewerWorkspace({
                   />
                 ) : isCiftiViewer ? (
                   <LazyCiftiViewerShell
+                    key={selectedViewerInfo.file_id}
+                    viewerInfo={selectedViewerInfo}
+                    apiClient={apiClient}
+                  />
+                ) : isScene3dViewer ? (
+                  <LazyScene3dViewerShell
                     key={selectedViewerInfo.file_id}
                     viewerInfo={selectedViewerInfo}
                     apiClient={apiClient}

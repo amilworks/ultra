@@ -25,7 +25,15 @@ import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["TranscodeResult", "TranscodeError", "transcode_to_ome_tiff"]
+__all__ = [
+    "TranscodeResult",
+    "TranscodeError",
+    "TranscodeInputError",
+    "TranscodeDependencyError",
+    "TranscodeOperationalError",
+    "TranscodeResourceError",
+    "transcode_to_ome_tiff",
+]
 
 # Extensions bioio plugins (and libbioimage) commonly handle; used to recover from
 # series/page-suffixed upload names (e.g. "scan.lif_15") that defeat bioio's
@@ -33,8 +41,25 @@ __all__ = ["TranscodeResult", "TranscodeError", "transcode_to_ome_tiff"]
 # (czi/dv/lif/nd2/sldy/...) plus other microscopy containers libbioimage knows.
 _BIOIO_EXTS = frozenset(
     {
-        "lif", "czi", "nd2", "dv", "r3d", "mrc", "sldy", "zarr",
-        "lsm", "oib", "oif", "vsi", "scn", "svs", "ndpi", "ims", "zvi", "sld", "ipl",
+        "lif",
+        "czi",
+        "nd2",
+        "dv",
+        "r3d",
+        "mrc",
+        "sldy",
+        "zarr",
+        "lsm",
+        "oib",
+        "oif",
+        "vsi",
+        "scn",
+        "svs",
+        "ndpi",
+        "ims",
+        "zvi",
+        "sld",
+        "ipl",
     }
 )
 
@@ -64,7 +89,23 @@ def _clean_extension_alias(src: str) -> str | None:
 
 
 class TranscodeError(RuntimeError):
-    """A source could not be read/transcoded by bioio (no plugin, unreadable, empty)."""
+    """Base class for BioIO failures with an explicit retry disposition."""
+
+
+class TranscodeInputError(TranscodeError):
+    """Decoded source content is deterministically empty or invalid."""
+
+
+class TranscodeDependencyError(TranscodeError):
+    """A required BioIO/tifffile dependency is unavailable."""
+
+
+class TranscodeOperationalError(TranscodeError):
+    """An operational filesystem/runtime failure may succeed on retry."""
+
+
+class TranscodeResourceError(TranscodeError):
+    """The transcode exhausted memory or another runtime resource."""
 
 
 @dataclass
@@ -107,31 +148,51 @@ def _largest_scene_index(img: Any) -> int:
 def transcode_to_ome_tiff(src: str, dst: str, *, prefer: str = "largest") -> TranscodeResult:
     """Read ``src`` with bioio and write its (largest) series to ``dst`` as OME-TIFF.
 
-    Raises :class:`TranscodeError` if bioio is unavailable or cannot read the source —
-    the caller then records a permanent derivation failure and the viewer degrades to
-    the "preview unavailable" card.
+    Raises a structured transcode error: unreadable/unsupported source failures are
+    deterministic, while missing dependencies, I/O failures, and resource exhaustion
+    remain retryable in the worker.
     """
     try:
+        import tifffile
         from bioio import BioImage
-    except Exception as exc:  # noqa: BLE001 - missing dep is a transcode failure, not a crash
-        raise TranscodeError(f"bioio is not installed: {exc!r}") from exc
-    import tifffile
+        from bioio_base.exceptions import UnsupportedFileFormatError
+    except Exception as exc:  # noqa: BLE001 - dependency import failures are retryable
+        raise TranscodeDependencyError("bioio transcode dependencies are unavailable") from exc
 
     alias_dir: str | None = None
     try:
         img = BioImage(src)
+    except UnsupportedFileFormatError as exc:
+        raise TranscodeDependencyError(
+            "bioio has no available plugin for the source format"
+        ) from exc
+    except MemoryError as exc:
+        raise TranscodeResourceError("bioio exhausted memory while opening the source") from exc
+    except OSError as exc:
+        raise TranscodeOperationalError("bioio source open failed") from exc
     except Exception as first_exc:  # noqa: BLE001 - unreadable / no matching plugin
         # bioio detects the plugin by extension; a series-suffixed name ("scan.lif_15")
         # has no recognized extension, so retry via a clean-extension temp symlink.
         alias = _clean_extension_alias(src)
         if alias is None:
-            raise TranscodeError(f"bioio could not open {src!r}: {first_exc!r}") from first_exc
+            raise TranscodeOperationalError("bioio source open failed") from first_exc
         alias_dir = os.path.dirname(alias)
         try:
             img = BioImage(alias)
+        except UnsupportedFileFormatError as exc:
+            shutil.rmtree(alias_dir, ignore_errors=True)
+            raise TranscodeDependencyError(
+                "bioio has no available plugin for the source format"
+            ) from exc
+        except MemoryError as exc:
+            shutil.rmtree(alias_dir, ignore_errors=True)
+            raise TranscodeResourceError("bioio exhausted memory while opening the source") from exc
+        except OSError as exc:
+            shutil.rmtree(alias_dir, ignore_errors=True)
+            raise TranscodeOperationalError("bioio source open failed") from exc
         except Exception as exc:  # noqa: BLE001
             shutil.rmtree(alias_dir, ignore_errors=True)
-            raise TranscodeError(f"bioio could not open {src!r} (via {alias!r}): {exc!r}") from exc
+            raise TranscodeOperationalError("bioio source open failed") from exc
 
     try:
         try:
@@ -144,11 +205,15 @@ def transcode_to_ome_tiff(src: str, dst: str, *, prefer: str = "largest") -> Tra
             img.set_scene(index)
             name = str(img.current_scene)
             data = img.get_image_data("TCZYX")  # always 5D, contiguous
+        except MemoryError as exc:
+            raise TranscodeResourceError("bioio exhausted memory while reading the source") from exc
+        except OSError as exc:
+            raise TranscodeOperationalError("bioio source read failed") from exc
         except Exception as exc:  # noqa: BLE001
-            raise TranscodeError(f"bioio could not read series {index} of {src!r}: {exc!r}") from exc
+            raise TranscodeOperationalError("bioio source read failed") from exc
 
         if data is None or getattr(data, "size", 0) == 0:
-            raise TranscodeError(f"bioio returned an empty array for {src!r} series {index}")
+            raise TranscodeInputError("bioio returned an empty decoded array")
 
         num_t = int(data.shape[0])
         num_c = int(data.shape[1])
@@ -178,8 +243,12 @@ def transcode_to_ome_tiff(src: str, dst: str, *, prefer: str = "largest") -> Tra
 
         try:
             tifffile.imwrite(dst, data, ome=True, bigtiff=True, metadata=metadata)
-        except Exception as exc:  # noqa: BLE001
-            raise TranscodeError(f"failed writing OME-TIFF {dst!r}: {exc!r}") from exc
+        except MemoryError as exc:
+            raise TranscodeResourceError("OME-TIFF transcode exhausted memory") from exc
+        except OSError as exc:
+            raise TranscodeOperationalError("OME-TIFF transcode write failed") from exc
+        except Exception as exc:  # noqa: BLE001 - invalid source array/metadata
+            raise TranscodeOperationalError("OME-TIFF transcode write failed") from exc
 
         return TranscodeResult(
             path=dst,

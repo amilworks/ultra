@@ -674,6 +674,64 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 	})
 }
 
+func TestMemoryResourceLifecycleMutationCommitsStateAndAuditAtomically(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := NewMemoryStore()
+	resource, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: "file_atomic_lifecycle", OwnerUserID: "user-1", OwnerOrgID: "org-1",
+		Status: domain.ResourceStatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := store.SoftDeleteResourceForUserWithEvent(
+		canceled,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID: resource.ResourceID, OwnerUserID: "user-1", OwnerOrgID: "org-1",
+			ActorUserID: "user-1", ActorOrgID: "org-1", EventID: "event-canceled",
+		},
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled delete error = %v, want context canceled", err)
+	}
+	current, err := store.GetResourceForOwner(ctx, resource.ResourceID, "user-1", "org-1")
+	if err != nil || current.Status != domain.ResourceStatusActive {
+		t.Fatalf("canceled delete changed resource: status=%q err=%v", current.Status, err)
+	}
+	events, err := store.ListResourceEvents(ctx, resource.ResourceID, 10)
+	if err != nil || len(events) != 0 {
+		t.Fatalf("canceled delete created audit events: %+v err=%v", events, err)
+	}
+	deleted, err := store.SoftDeleteResourceForUserWithEvent(
+		ctx,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID: resource.ResourceID, OwnerUserID: "user-1", OwnerOrgID: "org-1",
+			ActorUserID: "user-1", ActorOrgID: "org-1", EventID: "event-delete",
+		},
+	)
+	if err != nil || deleted.Resource.Status != domain.ResourceStatusDeleted ||
+		deleted.Event.EventID != "event-delete" || deleted.Event.EventType != "resource.deleted" {
+		t.Fatalf("atomic delete = %+v err=%v", deleted, err)
+	}
+	restored, err := store.RestoreResourceForUserWithEvent(
+		ctx,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID: resource.ResourceID, OwnerUserID: "user-1", OwnerOrgID: "org-1",
+			ActorUserID: "user-1", ActorOrgID: "org-1", EventID: "event-restore",
+		},
+	)
+	if err != nil || restored.Resource.Status != domain.ResourceStatusActive ||
+		restored.Event.EventID != "event-restore" || restored.Event.EventType != "resource.restored" {
+		t.Fatalf("atomic restore = %+v err=%v", restored, err)
+	}
+	events, err = store.ListResourceEvents(ctx, resource.ResourceID, 10)
+	if err != nil || len(events) != 2 {
+		t.Fatalf("lifecycle audit events = %+v err=%v, want two", events, err)
+	}
+}
+
 func TestMemoryStoreThreadRunEventArtifactFlow(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1112,6 +1170,340 @@ func TestMemoryStoreListResourceEventsForUserScopesAndFilters(t *testing.T) {
 	}
 	if foreignEvents.TotalCount != 0 || len(foreignEvents.Events) != 0 {
 		t.Fatalf("charlie events = %+v, want no leaked audit events", foreignEvents)
+	}
+}
+
+func TestMemoryStoreRetentionClaimsFenceRestoreAndStaleWorkers(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	resourceStore := NewMemoryStore()
+	const resourceID = "file_retention_claim"
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:  resourceID,
+		OwnerUserID: "alice",
+		OwnerOrgID:  "org-a",
+		Status:      "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx,
+		resourceID,
+		"alice",
+		"org-a",
+		time.Now().Add(-31*24*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.RestoreResourceForUser(ctx, resourceID, "alice", "org-a", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired restore err = %v, want ErrNotFound", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan []domain.ResourceRecord, 2)
+	for range 2 {
+		go func() {
+			<-start
+			claimed, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10)
+			if err != nil {
+				t.Errorf("claim: %v", err)
+			}
+			results <- claimed
+		}()
+	}
+	close(start)
+	first := <-results
+	second := <-results
+	if len(first)+len(second) != 1 {
+		t.Fatalf("concurrent claims returned %d resources, want exactly one", len(first)+len(second))
+	}
+	claim := first
+	if len(claim) == 0 {
+		claim = second
+	}
+	claimedAt := claim[0].UpdatedAt
+	renewedAt, renewed, err := resourceStore.RenewResourceRetentionClaim(ctx, resourceID, claimedAt)
+	if err != nil || !renewed || !renewedAt.After(claimedAt) {
+		t.Fatalf("renew exact claim = %v/%v err=%v, want a newer token", renewedAt, renewed, err)
+	}
+	if _, renewed, err := resourceStore.RenewResourceRetentionClaim(ctx, resourceID, claimedAt); err != nil || renewed {
+		t.Fatalf("renew stale claim = %v err=%v, want false/nil", renewed, err)
+	}
+	claimedAt = renewedAt
+	if _, err := resourceStore.SoftDeleteResourceForUser(ctx, resourceID, "alice", "org-a", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeat delete while purging err = %v, want ErrNotFound", err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a", Status: "active",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("upsert while purging err = %v, want ErrConflict", err)
+	}
+	if restored, err := resourceStore.RestoreResourceForUser(ctx, resourceID, "alice", "org-a", time.Now()); !errors.Is(err, ErrNotFound) || restored.ResourceID != "" {
+		t.Fatalf("restore while purging = %+v err=%v, want hidden ErrNotFound", restored, err)
+	}
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, claimedAt.Add(time.Nanosecond)); err != nil || purged {
+		t.Fatalf("stale conditional purge = %v err=%v, want false/nil", purged, err)
+	}
+	if released, err := resourceStore.ReleaseResourceRetentionClaim(ctx, resourceID, claimedAt); err != nil || !released {
+		t.Fatalf("release exact claim = %v err=%v, want true/nil", released, err)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, resourceID); err != nil || !found || status != domain.ResourceStatusPurging {
+		t.Fatalf("released claim status = %q found=%v err=%v, want purging", status, found, err)
+	}
+
+	reclaimed, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10)
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("reclaim after release = %+v err=%v, want one", reclaimed, err)
+	}
+	// Simulate an abandoned worker lease, then prove a later worker can reclaim it.
+	resourceStore.mu.Lock()
+	stale := resourceStore.resources[resourceID]
+	stale.UpdatedAt = time.Now().Add(-2 * time.Hour)
+	resourceStore.resources[resourceID] = stale
+	resourceStore.mu.Unlock()
+	reclaimed, err = resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10)
+	if err != nil || len(reclaimed) != 1 || !reclaimed[0].UpdatedAt.After(stale.UpdatedAt) {
+		t.Fatalf("stale lease reclaim = %+v err=%v", reclaimed, err)
+	}
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, reclaimed[0].UpdatedAt); err != nil || !purged {
+		t.Fatalf("purge exact reclaimed lease = %v err=%v, want true/nil", purged, err)
+	}
+}
+
+func TestMemoryStoreStaleRetentionTakeoverReleaseNeverRegressesToDeleted(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	resourceStore := NewMemoryStore()
+	const resourceID = "file_retention_takeover"
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx, resourceID, "alice", "org-a", time.Now().Add(-31*24*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	first, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Nanosecond, 1)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first claim = %+v err=%v", first, err)
+	}
+	time.Sleep(time.Millisecond)
+	second, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Nanosecond, 1)
+	if err != nil || len(second) != 1 || !second[0].UpdatedAt.After(first[0].UpdatedAt) {
+		t.Fatalf("takeover claim = %+v err=%v", second, err)
+	}
+	if released, err := resourceStore.ReleaseResourceRetentionClaim(ctx, resourceID, second[0].UpdatedAt); err != nil || !released {
+		t.Fatalf("release takeover claim = %v err=%v", released, err)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, resourceID); err != nil || !found || status != domain.ResourceStatusPurging {
+		t.Fatalf("takeover release status = %q found=%v err=%v, want purging", status, found, err)
+	}
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, first[0].UpdatedAt); err != nil || purged {
+		t.Fatalf("stale first purge = %v err=%v, want false/nil", purged, err)
+	}
+	final, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 1)
+	if err != nil || len(final) != 1 {
+		t.Fatalf("catch-up claim = %+v err=%v", final, err)
+	}
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, final[0].UpdatedAt); err != nil || !purged {
+		t.Fatalf("catch-up purge = %v err=%v, want true/nil", purged, err)
+	}
+}
+
+func TestMemoryRetentionClaimPriorityKeepsManagedStorageAheadOfPoisonRows(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		resource domain.ResourceRecord
+		want     int
+	}{
+		{
+			name: "managed relative path",
+			resource: domain.ResourceRecord{
+				ResourceID: "file_managed", StoragePath: "file_managed__image.tif",
+			},
+			want: 0,
+		},
+		{
+			name: "legacy local URI",
+			resource: domain.ResourceRecord{
+				ResourceID: "file_legacy", StorageURI: "file:///uploads/file_legacy__image.tif",
+			},
+			want: 1,
+		},
+		{
+			name: "authoritative external URI overrides path hint",
+			resource: domain.ResourceRecord{
+				ResourceID: "file_external", StorageURI: "s3://bucket/image.tif", StoragePath: "image.tif",
+			},
+			want: 2,
+		},
+		{
+			name: "invalid legacy identity",
+			resource: domain.ResourceRecord{
+				ResourceID: " file_invalid", StoragePath: "file_invalid__image.tif",
+			},
+			want: 3,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resourceRetentionClaimPriority(test.resource); got != test.want {
+				t.Fatalf("resourceRetentionClaimPriority(%+v) = %d, want %d", test.resource, got, test.want)
+			}
+		})
+	}
+}
+
+func TestMemoryStoreUpsertCannotReactivateDeletedOrTransferOwnership(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	resourceStore := NewMemoryStore()
+	const resourceID = "file_upsert_lifecycle"
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a",
+		OriginalName: "before.tif", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "bob", OwnerOrgID: "org-b",
+		OriginalName: "stolen.tif", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-owner active upsert error = %v, want conflict", err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a",
+		OriginalName: "after.tif", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatalf("same-owner active update: %v", err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(ctx, resourceID, "alice", "org-a", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a",
+		OriginalName: "resurrected.tif", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("deleted-resource upsert error = %v, want conflict", err)
+	}
+	restored, err := resourceStore.RestoreResourceForUser(ctx, resourceID, "alice", "org-a", time.Now())
+	if err != nil || restored.Status != domain.ResourceStatusActive || restored.OriginalName != "after.tif" {
+		t.Fatalf("authorized restore = %+v err=%v", restored, err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: ".", OwnerUserID: "alice", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("noncanonical resource id error = %v, want conflict", err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: " " + resourceID, OwnerUserID: "alice", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("whitespace-aliased resource id error = %v, want conflict", err)
+	}
+}
+
+func TestMemoryStorePurgeClaimedResourceCascadesMutableChildren(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	resourceStore := NewMemoryStore()
+	const resourceID = "file_purge_cascade"
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice", OwnerOrgID: "org-a", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: "file_neighbor", OwnerUserID: "bob", OwnerOrgID: "org-b", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx, resourceID, "alice", "org-a", time.Now().Add(-31*24*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10)
+	if err != nil || len(claims) != 1 || claims[0].ResourceID != resourceID {
+		t.Fatalf("claims = %+v err=%v, want target", claims, err)
+	}
+
+	resourceStore.mu.Lock()
+	resourceStore.resourceEvents = append(resourceStore.resourceEvents,
+		domain.ResourceEventRecord{EventID: "event-target", ResourceID: resourceID},
+		domain.ResourceEventRecord{EventID: "event-neighbor", ResourceID: "file_neighbor"},
+	)
+	resourceStore.resourceGrants["grant-target"] = domain.ResourceShareGrantRecord{
+		GrantID: "grant-target", ResourceID: resourceID, GranteeUserID: "old-grantee", Status: "active",
+	}
+	resourceStore.resourceGrants["grant-neighbor"] = domain.ResourceShareGrantRecord{
+		GrantID: "grant-neighbor", ResourceID: "file_neighbor", GranteeUserID: "neighbor-grantee", Status: "active",
+	}
+	resourceStore.collectionMembers["collection-target"] = domain.ResourceCollectionMembershipRecord{
+		CollectionID: "collection", ResourceID: resourceID,
+	}
+	resourceStore.collectionMembers["collection-neighbor"] = domain.ResourceCollectionMembershipRecord{
+		CollectionID: "collection", ResourceID: "file_neighbor",
+	}
+	resourceStore.dataAgentJobResources["job-mixed"] = []domain.LinkDataAgentJobResourceInput{
+		{JobID: "job-mixed", ResourceID: resourceID},
+		{JobID: "job-mixed", ResourceID: "file_neighbor"},
+	}
+	resourceStore.dataAgentJobResources["job-target"] = []domain.LinkDataAgentJobResourceInput{
+		{JobID: "job-target", ResourceID: resourceID},
+	}
+	// Dataset snapshot rows intentionally retain copied resource metadata and
+	// have no PostgreSQL FK to control_resources; memory must preserve parity.
+	resourceStore.datasetEntries["snapshot"] = []domain.DatasetSnapshotResourceRecord{
+		{SnapshotID: "snapshot", ResourceID: resourceID, OriginalName: "historical.tif"},
+	}
+	resourceStore.mu.Unlock()
+
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, claims[0].UpdatedAt); err != nil || !purged {
+		t.Fatalf("purge = %v err=%v, want true/nil", purged, err)
+	}
+	resourceStore.mu.RLock()
+	for _, event := range resourceStore.resourceEvents {
+		if event.ResourceID == resourceID {
+			resourceStore.mu.RUnlock()
+			t.Fatal("resource event survived purge")
+		}
+	}
+	if _, ok := resourceStore.resourceGrants["grant-target"]; ok {
+		resourceStore.mu.RUnlock()
+		t.Fatal("resource grant survived purge")
+	}
+	if _, ok := resourceStore.collectionMembers["collection-target"]; ok {
+		resourceStore.mu.RUnlock()
+		t.Fatal("collection membership survived purge")
+	}
+	if len(resourceStore.dataAgentJobResources["job-mixed"]) != 1 ||
+		resourceStore.dataAgentJobResources["job-mixed"][0].ResourceID != "file_neighbor" {
+		resourceStore.mu.RUnlock()
+		t.Fatalf("mixed job links = %+v, want neighbor only", resourceStore.dataAgentJobResources["job-mixed"])
+	}
+	if _, ok := resourceStore.dataAgentJobResources["job-target"]; ok {
+		resourceStore.mu.RUnlock()
+		t.Fatal("target-only data-agent link survived purge")
+	}
+	if len(resourceStore.datasetEntries["snapshot"]) != 1 {
+		resourceStore.mu.RUnlock()
+		t.Fatal("immutable dataset snapshot entry was incorrectly removed")
+	}
+	resourceStore.mu.RUnlock()
+
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "new-owner", OwnerOrgID: "org-new", Status: "active",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reusing a purged resource ID err = %v, want ErrConflict", err)
+	}
+	if _, err := resourceStore.GetResourceForUser(ctx, resourceID, "old-grantee", "org-old"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old grantee visibility after purge err = %v, want ErrNotFound", err)
 	}
 }
 

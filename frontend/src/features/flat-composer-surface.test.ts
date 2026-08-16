@@ -27,15 +27,21 @@ describe("flat composer surface", () => {
     expect(stylesSource).not.toMatch(/^\.app-composer-card:focus-within\s*\{/m);
   });
 
-  it("keeps a visible focus state now that the border and shadow are gone", () => {
-    // The textarea's own outline is none, so the rule carries focus. The inset
-    // doubles the hairline to 2px WITHOUT widening the border, which would shove
-    // the whole row down 1px on every focus.
+  it("keeps the 2px focus state for the keyboard, and calm for the pointer", () => {
+    // SUPERSESSION, on purpose: this test previously pinned the 2px inset on
+    // :focus-within — every click on the product's most-used control fired
+    // the loudest focus indicator in the app. Meridian's calm-focus rule
+    // (established on the resource search well) scopes the indicator with
+    // :has(:focus-visible): keyboard users keep the full WCAG 2.4.11
+    // treatment, pointer users get the caret, which already announces the
+    // activation. The indicator itself is unchanged — the inset doubles the
+    // hairline to 2px WITHOUT widening the border, which would shove the
+    // whole row down 1px.
     expect(stylesSource).toMatch(
-      /\.app-composer-shell \.app-composer-card:focus-within\s*\{[^}]*border-top-color:\s*var\(--text-muted\);[^}]*box-shadow:\s*inset 0 1px 0 var\(--text-muted\);/s
+      /\.app-composer-shell \.app-composer-card:has\(\.app-composer-textarea:focus-visible\)\s*\{[^}]*border-top-color:\s*var\(--text-muted\);[^}]*box-shadow:\s*inset 0 1px 0 var\(--text-muted\);/s
     );
     expect(stylesSource).not.toMatch(
-      /\.app-composer-shell \.app-composer-card:focus-within\s*\{[^}]*border-top-width:/s
+      /\.app-composer-shell \.app-composer-card:focus-within\s*\{/s
     );
   });
 

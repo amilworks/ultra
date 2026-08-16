@@ -18,10 +18,21 @@ import math
 import operator
 import os
 import shutil
+import stat
 import tempfile
-from typing import Any
+import threading
+from contextlib import contextmanager, suppress
+from typing import Any, cast
 
-__all__ = ["create_app"]
+from ultra_deepagents.imaging.constants import (
+    MAX_ATLAS_CELLS,
+    MAX_ATLAS_GRID_EDGE,
+    MAX_COMPOSITE_CHANNELS,
+    MAX_TILE_EDGE,
+    is_ultra_owned_pyramid,
+)
+
+__all__ = ["MAX_COMPOSITE_CHANNELS", "create_app"]
 
 _PNG = "image/png"
 _SCALAR_VOLUME_MAX_BYTES = 256 * 1024 * 1024
@@ -172,6 +183,9 @@ _PYRAMID_CACHE_ENABLED = os.environ.get(
 _PYRAMID_CACHE_DIR = os.environ.get(
     "ULTRA_IMGSVC_LOCAL_PYRAMID_CACHE_DIR", ""
 ).strip() or os.path.join(tempfile.gettempdir(), "ultra-pyramid-cache")
+_PYRAMID_CACHE_LOCKS_GUARD = threading.Lock()
+_PYRAMID_CACHE_MUTATION_LOCK = threading.Lock()
+_PYRAMID_CACHE_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 
 
 def _pyramid_cache_budget_bytes() -> int:
@@ -185,17 +199,128 @@ def _pyramid_cache_budget_bytes() -> int:
 
 
 def _is_derived_pyramid(path: str) -> bool:
-    if not isinstance(path, str):
-        return False
-    normalized = os.path.normpath(path)
-    return (
-        os.path.basename(os.path.dirname(normalized)) == "derived"
-        and os.path.basename(normalized).endswith("__pyramid.tif")
-    )
+    """Compatibility alias for the shared owned-pyramid classifier."""
+
+    return bool(is_ultra_owned_pyramid(path))
 
 
 def _pyramid_access_marker(path: str) -> str:
     return f"{path}.access"
+
+
+def _regular_file_identity(path: str) -> tuple[int, int, int, int, int]:
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError("pyramid cache source must be a regular file")
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+@contextmanager
+def _pyramid_cache_flight(local_path: str):
+    with _PYRAMID_CACHE_LOCKS_GUARD:
+        lock, references = _PYRAMID_CACHE_LOCKS.get(local_path, (threading.Lock(), 0))
+        _PYRAMID_CACHE_LOCKS[local_path] = (lock, references + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _PYRAMID_CACHE_LOCKS_GUARD:
+            current_lock, current_references = _PYRAMID_CACHE_LOCKS[local_path]
+            if current_references == 1:
+                del _PYRAMID_CACHE_LOCKS[local_path]
+            else:
+                _PYRAMID_CACHE_LOCKS[local_path] = (
+                    current_lock,
+                    current_references - 1,
+                )
+
+
+def _cached_pyramid_ready(path: str, expected_size: int) -> bool:
+    try:
+        identity = _regular_file_identity(path)
+    except OSError:
+        return False
+    return identity[2] == expected_size
+
+
+def _fsync_cache_directory(path: str) -> None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _copy_stable_pyramid(
+    source_path: str,
+    local_path: str,
+    expected_identity: tuple[int, int, int, int, int],
+) -> bool:
+    source_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_descriptor = os.open(source_path, source_flags)
+    temp_path: str | None = None
+    try:
+        opened = os.fstat(source_descriptor)
+        opened_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+            opened.st_ctime_ns,
+        )
+        if (
+            opened_identity != expected_identity
+            or _regular_file_identity(source_path) != opened_identity
+        ):
+            return False
+        temp_descriptor, temp_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(local_path)}.tmp-",
+            dir=os.path.dirname(local_path),
+        )
+        with (
+            os.fdopen(source_descriptor, "rb", closefd=False) as source_stream,
+            os.fdopen(temp_descriptor, "wb") as destination_stream,
+        ):
+            shutil.copyfileobj(source_stream, destination_stream, length=1024 * 1024)
+            destination_stream.flush()
+            os.fchmod(destination_stream.fileno(), 0o600)
+            os.fsync(destination_stream.fileno())
+        source_after = os.fstat(source_descriptor)
+        source_after_identity = (
+            source_after.st_dev,
+            source_after.st_ino,
+            source_after.st_size,
+            source_after.st_mtime_ns,
+            source_after.st_ctime_ns,
+        )
+        if (
+            source_after_identity != expected_identity
+            or _regular_file_identity(source_path) != expected_identity
+            or os.stat(temp_path).st_size != expected_identity[2]
+        ):
+            return False
+        os.replace(temp_path, local_path)
+        temp_path = None
+        _fsync_cache_directory(os.path.dirname(local_path))
+        return True
+    finally:
+        os.close(source_descriptor)
+        if temp_path is not None:
+            with suppress(OSError):
+                os.remove(temp_path)
 
 
 def _touch_pyramid_access_marker(path: str) -> None:
@@ -243,10 +368,8 @@ def _evict_pyramid_cache(incoming: int) -> None:
                 total -= sz
             except OSError:
                 pass
-            try:
+            with suppress(OSError):
                 os.remove(_pyramid_access_marker(fp))
-            except OSError:
-                pass
     except OSError:
         pass
 
@@ -257,35 +380,46 @@ def localize_pyramid(path: str) -> str:
     if not _PYRAMID_CACHE_ENABLED or not _is_derived_pyramid(path):
         return path
     try:
-        st = os.stat(path)
+        source_identity = _regular_file_identity(path)
     except OSError:
         return path
-    key = hashlib.sha256(f"{path}|{st.st_size}|{int(st.st_mtime_ns)}".encode()).hexdigest()
+    source_size = source_identity[2]
+    budget = _pyramid_cache_budget_bytes()
+    if source_size <= 0 or source_size > budget:
+        return path
+    key = hashlib.sha256(f"{path}|{source_identity}".encode()).hexdigest()
     local = os.path.join(
         _PYRAMID_CACHE_DIR,
         "derived",
         f"{key}__pyramid.tif",
     )
     try:
-        if os.path.exists(local):
-            try:
+        if _cached_pyramid_ready(local, source_size):
+            with suppress(OSError):
                 # Keep LRU recency in a companion marker. Even an atime-only utime changes
                 # ctime on the TIFF itself, which invalidates exact Mask plans while
                 # another request is decoding the same warm localized source.
                 _touch_pyramid_access_marker(local)
-            except OSError:
-                pass
             return local
-        os.makedirs(os.path.dirname(local), exist_ok=True)
-        _evict_pyramid_cache(st.st_size)
-        tmp = f"{local}.tmp.{os.getpid()}"
-        shutil.copyfile(path, tmp)  # whole-file sequential read: fast even over NFS
-        os.replace(tmp, local)  # atomic publish
-        try:
-            _touch_pyramid_access_marker(local)
-        except OSError:
-            pass
-        return local
+        with _pyramid_cache_flight(local):
+            if _cached_pyramid_ready(local, source_size):
+                with suppress(OSError):
+                    _touch_pyramid_access_marker(local)
+                return local
+            with _PYRAMID_CACHE_MUTATION_LOCK:
+                if _cached_pyramid_ready(local, source_size):
+                    with suppress(OSError):
+                        _touch_pyramid_access_marker(local)
+                    return local
+                if _regular_file_identity(path) != source_identity:
+                    return path
+                os.makedirs(os.path.dirname(local), exist_ok=True)
+                _evict_pyramid_cache(source_size)
+                if not _copy_stable_pyramid(path, local, source_identity):
+                    return path
+                with suppress(OSError):
+                    _touch_pyramid_access_marker(local)
+                return local
     except OSError:
         return path  # degrade to the NFS path; never hard-fail
 
@@ -298,7 +432,7 @@ async def _localize_pyramid_async(path: str) -> str:
     path is a couple of stats — the threadpool hop costs microseconds."""
     from starlette.concurrency import run_in_threadpool  # lazy: service-only dep
 
-    return await run_in_threadpool(localize_pyramid, path)
+    return str(await run_in_threadpool(localize_pyramid, path))
 
 
 def _parse_fusion_request(channels: str | None, channel_colors: str | None):
@@ -316,31 +450,80 @@ def _parse_fusion_request(channels: str | None, channel_colors: str | None):
     from ultra_deepagents.imaging import fusion
 
     requested: list[int] | None = None
-    if channels:
-        requested = [int(part) for part in channels.split(",") if part.strip() != ""]
+    if channels is not None:
+        parts = channels.split(",")
+        if not parts or any(not part.strip() for part in parts):
+            raise ValueError("channel selection must be a comma-separated integer list")
+        try:
+            requested = [int(part.strip()) for part in parts]
+        except ValueError as exc:
+            raise ValueError("channel selection must contain only integers") from exc
+        if any(channel < 0 for channel in requested):
+            raise ValueError("channel selection indices must be nonnegative")
+        if len(set(requested)) != len(requested):
+            raise ValueError("channel selection must not contain duplicates")
+        if len(requested) > MAX_COMPOSITE_CHANNELS:
+            raise ValueError(
+                f"channel selection supports at most {MAX_COMPOSITE_CHANNELS} channels"
+            )
     selected_colors: list | None = None
-    if channel_colors:
-        selected_colors = [
-            fusion.parse_hex_color(part) for part in channel_colors.split(",")
-        ]
+    if channel_colors is not None:
+        color_parts = channel_colors.split(",")
+        if requested is None or any(not part.strip() for part in color_parts):
+            raise ValueError("channel colors require an explicit channel selection")
+        normalized_colors = [part.strip().removeprefix("#") for part in color_parts]
+        if any(
+            len(color) != 6 or any(character not in "0123456789abcdefABCDEF" for character in color)
+            for color in normalized_colors
+        ):
+            raise ValueError("channel colors must be six-digit hexadecimal colors")
+        selected_colors = [fusion.parse_hex_color(color) for color in normalized_colors]
+        if any(color is None for color in selected_colors):
+            raise ValueError("channel colors must be valid hexadecimal colors")
 
     remap = [c + 1 for c in requested] if requested else None
     if (
         requested is not None
-        and len(requested) >= 2
         and selected_colors is not None
         and len(selected_colors) != len(requested)
     ):
         raise ValueError("channel colors must match the selected channel count")
     fuse = (
         requested is not None
-        and len(requested) >= 2
+        and len(requested) >= 1
         and selected_colors is not None
         and any(color is not None for color in selected_colors)
     )
     if not fuse:
         return remap, None
     return remap, selected_colors
+
+
+def _reject_repeated_selectors(request: Any, selectors: tuple[str, ...]) -> None:
+    """Reject repeated scientific selectors before localization or decoder work.
+
+    FastAPI otherwise keeps one value for scalar query parameters, which would make
+    ``t=0&t=1`` or two channel lists silently ambiguous.
+    """
+    query = request.query_params
+    for selector in selectors:
+        if len(query.getlist(selector)) > 1:
+            raise ValueError(f"repeated {selector} selector is not allowed")
+
+
+def _validate_tile_size(size: int) -> int:
+    if isinstance(size, bool) or size <= 0 or size > MAX_TILE_EDGE:
+        raise ValueError(f"tile size must be between 1 and {MAX_TILE_EDGE} pixels")
+    return size
+
+
+async def _validate_channel_range(runner: Any, path: str, remap: list[int] | None) -> None:
+    if remap is None:
+        return
+    meta = await runner.call("meta", path)
+    channel_count = int(meta.get("image_num_c", 1) or 1)
+    if any(channel < 1 or channel > channel_count for channel in remap):
+        raise ValueError(f"channel selection is out of range for source C={channel_count}")
 
 
 def _parse_histogram_channels(
@@ -372,11 +555,15 @@ def _parse_histogram_channels(
 
 def create_app(runner: Any = None, *, prefer_real: bool = True):
     try:
-        from fastapi import FastAPI, HTTPException, Response
+        from fastapi import FastAPI, HTTPException, Request, Response
     except Exception as exc:  # pragma: no cover - exercised only without fastapi
         raise RuntimeError(
             "image service requires fastapi/uvicorn (install the 'imaging' extra)"
         ) from exc
+    # Endpoint annotations are postponed by ``from __future__ import annotations``;
+    # expose the lazily imported request type so FastAPI can resolve it without making
+    # FastAPI/Starlette an import-time dependency of this module.
+    globals()["Request"] = Request
 
     if runner is None:
         from ultra_deepagents.imaging.pool import ImagePool
@@ -416,7 +603,9 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         "out of range",
         "channel selection",
         "channel colors",
+        "tile size",
         "duplicate channel",
+        "repeated",
         "multiple scenes",
         "source plane input",
         "source generation",
@@ -425,7 +614,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
     )
 
     @app.exception_handler(ValueError)
-    async def _engine_value_error(_request, exc: ValueError):  # noqa: ANN202
+    async def _engine_value_error(_request, exc: ValueError) -> Any:
         message = str(exc)
         if any(marker in message.lower() for marker in decode_error_markers):
             return JSONResponse(
@@ -444,20 +633,37 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/meta")
     async def meta(path: str) -> dict[str, Any]:
-        return await runner.call("meta", await _localize_pyramid_async(path))
+        return cast(
+            dict[str, Any],
+            await runner.call("meta", await _localize_pyramid_async(path)),
+        )
 
     @app.get("/tile")
     async def tile(
+        request: Request,
         path: str,
         level: int = 0,
         col: int = 0,
         row: int = 0,
         size: int = 512,
+        t: int = 0,
+        z: int = 0,
         channels: str | None = None,
         channel_colors: str | None = None,
     ):
-        path = await _localize_pyramid_async(path)
+        _reject_repeated_selectors(
+            request,
+            ("level", "col", "row", "size", "t", "z", "channels", "channel_colors"),
+        )
+        if min(level, col, row, t, z) < 0:
+            raise HTTPException(
+                status_code=422,
+                detail="tile level, coordinates, time, and z must be nonnegative",
+            )
+        size = _validate_tile_size(size)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
+        path = await _localize_pyramid_async(path)
+        await _validate_channel_range(runner, path, remap)
         png = await runner.call(
             "tile",
             path,
@@ -465,6 +671,8 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             col=col,
             row=row,
             tile_size=size,
+            t=t,
+            z=z,
             channels=remap,
             colors=fuse_colors,
         )
@@ -472,6 +680,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/slice")
     async def slice_plane(
+        request: Request,
         path: str,
         z: int | None = None,
         t: int | None = None,
@@ -483,8 +692,28 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         scalar_threshold_value: float | None = None,
         scalar_threshold_foreground: str = "above",
     ):
-        path = await _localize_pyramid_async(path)
+        _reject_repeated_selectors(
+            request,
+            (
+                "z",
+                "t",
+                "level",
+                "channels",
+                "channel_colors",
+                "full_resolution",
+                "scalar_render_mode",
+                "scalar_threshold_value",
+                "scalar_threshold_foreground",
+            ),
+        )
+        if any(value is not None and value < 0 for value in (z, t, level)):
+            raise HTTPException(
+                status_code=422,
+                detail="slice level, time, and z must be nonnegative",
+            )
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
+        path = await _localize_pyramid_async(path)
+        await _validate_channel_range(runner, path, remap)
         # full_resolution=False (transient z-scrub frame) lets the engine pick a
         # bounded pyramid level; the settled view (True) reads the native plane so
         # pixel measurements stay exact. An explicit level always wins.
@@ -512,8 +741,9 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
         channels: str | None = None,
         channel_colors: str | None = None,
     ):
-        path = await _localize_pyramid_async(path)
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
+        path = await _localize_pyramid_async(path)
+        await _validate_channel_range(runner, path, remap)
         png = await runner.call(
             "thumbnail",
             path,
@@ -527,16 +757,53 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
 
     @app.get("/atlas")
     async def atlas(
+        request: Request,
         path: str,
         grid_rows: int | None = None,
         grid_cols: int | None = None,
         level: int | None = None,
         scale: float | None = None,
+        t: int = 0,
         channels: str | None = None,
         channel_colors: str | None = None,
     ):
-        path = await _localize_pyramid_async(path)
+        _reject_repeated_selectors(
+            request,
+            ("grid_rows", "grid_cols", "level", "scale", "t", "channels", "channel_colors"),
+        )
+        if (level is not None and level < 0) or t < 0:
+            raise HTTPException(
+                status_code=422,
+                detail="atlas level and time must be nonnegative",
+            )
+        if (grid_rows is None) != (grid_cols is None):
+            raise HTTPException(
+                status_code=422,
+                detail="atlas grid rows and columns must be supplied together",
+            )
+        if (
+            grid_rows is not None
+            and grid_cols is not None
+            and (
+                grid_rows < 1
+                or grid_cols < 1
+                or grid_rows > MAX_ATLAS_GRID_EDGE
+                or grid_cols > MAX_ATLAS_GRID_EDGE
+                or grid_rows * grid_cols > MAX_ATLAS_CELLS
+            )
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"atlas grid must contain 1 to {MAX_ATLAS_CELLS} bounded cells",
+            )
+        if scale is not None and (not math.isfinite(scale) or scale <= 0 or scale > 1):
+            raise HTTPException(
+                status_code=422,
+                detail="atlas scale must be greater than 0 and at most 1",
+            )
         remap, fuse_colors = _parse_fusion_request(channels, channel_colors)
+        path = await _localize_pyramid_async(path)
+        await _validate_channel_range(runner, path, remap)
         if getattr(runner, "workers", 1) > 1:
             # Multiple worker processes: fan the per-plane reads out across the pool
             # (the binding's global lock serializes them within one worker, so this is
@@ -544,7 +811,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             from ultra_deepagents.imaging.atlas import assemble_atlas
 
             png = await assemble_atlas(
-                runner, path, channels=remap, colors=fuse_colors, level=level
+                runner, path, channels=remap, colors=fuse_colors, level=level, t=t
             )
         else:
             # Single process (InlineRunner / externally-managed): the sequential path.
@@ -557,6 +824,7 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
                 atlas_scale=scale,
                 channels=remap,
                 colors=fuse_colors,
+                t=t,
             )
         return Response(content=png, media_type=_PNG)
 
@@ -577,20 +845,30 @@ def create_app(runner: Any = None, *, prefer_real: bool = True):
             channels=channels,
             scope=normalized_scope,
         )
-        return await runner.call(
-            "histogram",
-            await _localize_pyramid_async(path),
-            bins=bins,
-            channels=[value + 1 for value in selected],
-            t=t,
-            scope=normalized_scope,
+        return cast(
+            dict[str, Any],
+            await runner.call(
+                "histogram",
+                await _localize_pyramid_async(path),
+                bins=bins,
+                channels=[value + 1 for value in selected],
+                t=t,
+                scope=normalized_scope,
+            ),
         )
 
     @app.get("/viewerinfo")
     async def viewerinfo(path: str, name: str | None = None) -> dict[str, Any]:
         # ``name`` (the upload's original filename) lets HDF5-data files be detected
         # when the on-disk blob path has lost its extension; harmless for images.
-        return await runner.call("viewer_info", await _localize_pyramid_async(path), name=name)
+        return cast(
+            dict[str, Any],
+            await runner.call(
+                "viewer_info",
+                await _localize_pyramid_async(path),
+                name=name,
+            ),
+        )
 
     @app.get("/video-poster")
     async def video_poster(path: str, t: float = 1.0, max_size: int = 512):

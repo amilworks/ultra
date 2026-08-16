@@ -43,6 +43,10 @@ from ultra_deepagents.context_tools import (
     build_tool_capability_manifest,
     build_tool_capability_manifest_tool,
 )
+from ultra_deepagents.deepagents_compat import (
+    DEEPAGENTS_WRITE_FILE_DESCRIPTION,
+    build_deepagents_07_middleware,
+)
 from ultra_deepagents.episodic.tools import build_episodic_tools
 from ultra_deepagents.evaluation_profiles import (
     evaluation_memory_dir,
@@ -58,7 +62,10 @@ from ultra_deepagents.harness_plugins import (
 )
 from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
-from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
+from ultra_deepagents.multimodal import (
+    BoundedImageMultimodalMiddleware,
+    TextOnlyMultimodalMiddleware,
+)
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.progress_guard import read_attempt_ledger_digest
 from ultra_deepagents.rarespot.tools import looks_report_only_rarespot_goal
@@ -577,7 +584,9 @@ SANDBOX_VERIFICATION_TOOLCHAIN_GUIDANCE = """
 Verification toolchain (preinstalled, offline): headless Chromium via Playwright — browsers
 live under /root/.cache/ms-playwright (launch with PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright);
 never claim no browser exists without probing that path. For self-contained 3D pages a vendored
-three.js IIFE build is at /opt/report-assets/three.iife.min.js — inline it into the page; never
+three.js IIFE build is at /opt/report-assets/three.iife.min.js, and for interactive 2D charts a
+vendored Chart.js build (global `Chart`, time axes included) is at
+/opt/report-assets/chart.iife.min.js — inline the file contents into the page; never
 reference a CDN (deliverables must work with no internet). Any HTML page you deliver requires
 RENDER PROOF before the run can complete: load the final file headlessly with network disabled,
 require zero console errors and zero page errors, exercise at least one interaction (a control
@@ -1298,6 +1307,10 @@ def ensure_ultra_harness_profile() -> None:
     register_harness_profile(
         "openai",
         HarnessProfile(
+            tool_description_overrides={
+                "write_file": DEEPAGENTS_WRITE_FILE_DESCRIPTION,
+            },
+            excluded_tools=frozenset({"delete"}),
             general_purpose_subagent=GeneralPurposeSubagentProfile(enabled=False),
         ),
     )
@@ -1371,14 +1384,19 @@ def _custom_program_policies(tools: Sequence[Any]) -> tuple[ProgramToolPolicy, .
 def build_subagents(
     paper_tools: Sequence[BaseTool | Any] | None = None,
     *,
+    backend: Any | None = None,
     context: AgentRunContext | None = None,
     context_tools: Sequence[BaseTool | Any] | None = None,
+    permissions: Sequence[FilesystemPermission] = (),
     text_only_model: bool = True,
     skills_sources: Sequence[str] | None = None,
     vision_tools: Sequence[BaseTool | Any] | None = None,
     qwen_coding_model: BaseChatModel | Any | None = None,
+    qwen_max_images_per_call: int = 4,
+    qwen_model_call_timeout_seconds: float | None = None,
 ) -> list[dict[str, Any]]:
     subagents: list[dict[str, Any]] = []
+    resolved_backend = backend if backend is not None else StateBackend()
 
     if paper_tools:
         literature = dict(BASE_SUBAGENTS[0])
@@ -1421,6 +1439,10 @@ def build_subagents(
             subagents.append(qwen)
 
     for subagent in subagents:
+        subagent_middleware: list[Any] = build_deepagents_07_middleware(
+            backend=resolved_backend,
+            permissions=permissions,
+        )
         # Only the computational subagents benefit from the rigor/reporting
         # protocols; literature-reviewer is page-grounded paper review and would
         # just re-pay the per-subagent SkillsMiddleware overhead without ever
@@ -1428,7 +1450,15 @@ def build_subagents(
         if skills_sources and subagent["name"] in _SKILL_BEARING_SUBAGENTS:
             subagent["skills"] = list(skills_sources)
         if text_only_model and subagent["name"] != QWEN_CODE_RUNNER_NAME:
-            subagent["middleware"] = [TextOnlyMultimodalMiddleware()]
+            subagent_middleware.append(TextOnlyMultimodalMiddleware())
+        if subagent["name"] == QWEN_CODE_RUNNER_NAME:
+            subagent_middleware.append(
+                BoundedImageMultimodalMiddleware(
+                    max_images=qwen_max_images_per_call,
+                    async_timeout_seconds=qwen_model_call_timeout_seconds,
+                )
+            )
+        subagent["middleware"] = subagent_middleware
     return subagents
 
 
@@ -2327,8 +2357,12 @@ def build_research_agent(
             skills_sources = list(SKILLS_SOURCES)
     if resolved_backend is None:
         resolved_backend = StateBackend()
+    resolved_permissions = resolve_memory_permissions(settings)
 
-    middleware: list[Any] = []
+    middleware: list[Any] = build_deepagents_07_middleware(
+        backend=resolved_backend,
+        permissions=resolved_permissions,
+    )
     # OUTERMOST tool-call wrapper: contain a failing/slow `task` subagent to a degraded
     # ToolMessage so one bad subagent in a parallel fan-out cannot cancel its siblings and abort
     # the whole run (langgraph's gather has no return_exceptions; the default handler re-raises).
@@ -2350,8 +2384,15 @@ def build_research_agent(
         # Mid-run steering (Phase 1): a checkpointed before_model node that
         # folds user steers into COORDINATOR state between steps. Deliberately
         # absent from every subagent middleware stack — a steer lands between
-        # coordinator steps, never inside a delegation.
-        middleware.append(SteeringInboxMiddleware(steering_inbox))
+        # coordinator steps, never inside a delegation. Context + upload roots
+        # let the middleware stage steer-attached uploads at injection time.
+        middleware.append(
+            SteeringInboxMiddleware(
+                steering_inbox,
+                context=context,
+                upload_roots=settings.rarespot_upload_roots,
+            )
+        )
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 
@@ -2476,12 +2517,16 @@ def build_research_agent(
     )
     subagents = build_subagents(
         paper_tools,
+        backend=resolved_backend,
         context=context,
         context_tools=list(context_tools),
+        permissions=resolved_permissions,
         text_only_model=not settings.model_supports_multimodal,
         skills_sources=skills_sources,
         vision_tools=vision_tools,
         qwen_coding_model=qwen_coding_model,
+        qwen_max_images_per_call=settings.qwen_vlm_max_images_per_call,
+        qwen_model_call_timeout_seconds=(settings.qwen_vlm_request_timeout_seconds * 1.5),
     )
     # Durable attempt-ledger digest -> system prompt, on the coordinator AND every
     # coding delegate (in the 6.7M-token livelock, code-runner owned 69% of the
@@ -2515,7 +2560,7 @@ def build_research_agent(
         # The Builder is a pre-compiled CompiledSubAgent, so deepagents does NOT inherit
         # the coordinator's permissions onto it — pass the same memory denies explicitly
         # so the Builder lead + its worker cannot write /policies, /skills, /memories.
-        permissions=resolve_memory_permissions(settings),
+        permissions=resolved_permissions,
         extra_middleware=[ledger_middleware] if ledger_middleware is not None else None,
     )
     if builder_subagent is not None:
@@ -2538,9 +2583,7 @@ def build_research_agent(
         enriched.setdefault("model", map_model)
         enriched.setdefault("tools", [])
         mappable_specs.append(enriched)
-    mappable_specs.append(
-        {**GENERAL_PURPOSE_SUBAGENT_SPEC, "model": map_model, "tools": []}
-    )
+    mappable_specs.append({**GENERAL_PURPOSE_SUBAGENT_SPEC, "model": map_model, "tools": []})
     # The manifest must list every subagent the task/map_task tools can really
     # reach: deepagents auto-adds a built-in general-purpose to task, and
     # map_task always carries the synthetic spec above — a bare run reporting
@@ -2664,7 +2707,7 @@ def build_research_agent(
         skills=skills_sources,
         backend=resolved_backend,
         memory=[] if cleanroom else MEMORY_PATHS,
-        permissions=resolve_memory_permissions(settings),
+        permissions=resolved_permissions,
         middleware=middleware,
         checkpointer=checkpointer,
     )

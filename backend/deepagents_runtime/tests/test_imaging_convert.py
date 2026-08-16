@@ -9,6 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
 from ultra_deepagents.imaging.convert import (
+    ConversionDependencyError,
+    ConversionInputError,
+    ConversionProcessError,
+    ConversionResourceError,
     PyramidSpec,
     convert_command,
     pyramid_options,
@@ -25,8 +29,15 @@ def test_pyramid_options_custom():
 
 def test_convert_command_default_spec():
     assert convert_command("/data/a.czi", "/derived/a.tif", imgcnv_bin="imgcnv") == [
-        "imgcnv", "-i", "/data/a.czi", "-o", "/derived/a.tif",
-        "-t", "bigtiff", "-options", "compression lzw tiles 512 pyramid topdirs",
+        "imgcnv",
+        "-i",
+        "/data/a.czi",
+        "-o",
+        "/derived/a.tif",
+        "-t",
+        "bigtiff",
+        "-options",
+        "compression lzw tiles 512 pyramid topdirs",
     ]
 
 
@@ -50,6 +61,76 @@ def test_derive_pyramid_creates_destination_directory(tmp_path):
     result = derive_pyramid(str(src), str(dst), imgcnv_bin="true")
     assert result.ok
     assert dst.parent.is_dir()
+
+
+def test_derive_pyramid_classifies_missing_dependency(tmp_path):
+    from ultra_deepagents.imaging.convert import derive_pyramid
+
+    with pytest.raises(ConversionDependencyError):
+        derive_pyramid("source.tif", tmp_path / "out.tif", imgcnv_bin="definitely-not-imgcnv")
+
+
+def test_derive_pyramid_classifies_killed_process_as_resource_failure(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ultra_deepagents.imaging import convert
+
+    monkeypatch.setattr(
+        convert.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=137,
+            stdout="",
+            stderr="killed",
+        ),
+    )
+    with pytest.raises(ConversionResourceError):
+        convert.derive_pyramid("source.tif", tmp_path / "out.tif")
+
+
+def test_derive_pyramid_classifies_stable_imgcnv_input_diagnostic_and_bounds_details(
+    monkeypatch, tmp_path
+):
+    from types import SimpleNamespace
+
+    from ultra_deepagents.imaging import convert
+
+    monkeypatch.setattr(
+        convert.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="Input format is not supported\n" + ("x" * 10_000),
+            stderr="details\n" + ("y" * 10_000),
+        ),
+    )
+
+    with pytest.raises(ConversionInputError) as excinfo:
+        convert.derive_pyramid("source.invalid", tmp_path / "out.tif")
+
+    assert excinfo.value.returncode == 1
+    assert len(excinfo.value.stdout) <= 4096
+    assert len(excinfo.value.stderr) <= 4096
+    assert "Input format is not supported" in excinfo.value.stdout
+
+
+def test_derive_pyramid_keeps_unknown_nonzero_diagnostic_retryable(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ultra_deepagents.imaging import convert
+
+    monkeypatch.setattr(
+        convert.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="unsupported codec handshake failed",
+        ),
+    )
+
+    with pytest.raises(ConversionProcessError):
+        convert.derive_pyramid("source.tif", tmp_path / "out.tif")
 
 
 def test_pyramidspec_options_roundtrip():

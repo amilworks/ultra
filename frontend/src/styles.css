@@ -8,7 +8,7 @@
 
 :root {
   --font-size-body: 0.9375rem;
-  --font-size-reading: 1rem;
+  --font-size-reading: 0.9375rem;
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
@@ -18,8 +18,9 @@
      8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
      comfortably. Past ~75 the return sweep starts finding the wrong next line and
      the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
-     numbers are comparable: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9,
-     44rem = 83.9, unconstrained (49rem) = 92.9.
+     numbers are comparable — all AT THE THEN-16px READING SIZE, so read them as
+     the calibration record, not as current values: 37.5rem = 72.3 cpl,
+     40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9, unconstrained (49rem) = 92.9.
      44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
      column is a modest share of a wide screen and reads cramped when held to the
      middle of the band. Note 42.5rem and 44rem measured identically here — the
@@ -35,20 +36,45 @@
      different right edges instead of one column. A measure is a property of the
      column, not of the type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
-     full 49rem column. */
-  --reading-measure: 44rem;
-  --font-weight-body: 400;
-  --font-weight-reading-body: 400;
-  --font-weight-strong: 700;
+     full 49rem column.
+     RESCALED when reading dropped 16px -> 15px: the measure is in rem, so a
+     smaller font at a fixed rem width buys MORE characters per line, not fewer.
+     Holding 44rem would have stretched the calibrated 83.9 cpl to ~89.5 — most
+     of the way to the unconstrained 92.9 that made readers re-scan. 41.25rem is
+     44 x 15/16, which preserves 83.9 cpl at the new size. The character count is
+     the calibrated quantity here; the rem value is just how it is expressed. */
+  --reading-measure: 41.25rem;
+  /* 440, not 400. Inter's 400 sets 4% lighter than the grotesques Ultra is
+     measured against — the gap is not stroke width but the ratio of stroke to
+     letter. Inter's stem is only 2.7% thinner than Söhne Buch's (0.0876em vs
+     0.0900em), but Inter's x-height is larger (0.5444 vs 0.5230), so the same
+     stroke covers proportionally less: stem/x-height 0.1609 against 0.1721.
+     Two independent measurements put the matching weight at 430 — solving
+     stem/x-height from the outlines gives 431, and integrating rendered ink
+     over the x-height band gives 430 — and it holds across the optical range
+     because Inter's x-height does not move with weight. 440 is one step past
+     the match; 430 is the match itself. This product is read at 13–15px for long
+     stretches. Shipped at 440 first and dialled back to the measured match
+     after living with it. Measured in frontend/font-lab/weight.html. */
+  --font-weight-body: 430;
+  --font-weight-reading-body: 430;
+  /* 670, not 700. At 700 the hero title read as a shout rather than a heading
+     once body moved off 400 and closed the gap from 300 to 270. Dropping 30
+     restores the step without giving up the contrast. Scattered `font-weight:
+     700` on small labels (0.5–0.92rem table headers, section eyebrows) is
+     deliberately NOT swept into this token — at those sizes 700 is doing the
+     legibility job the comment below describes, not a display job. */
+  --font-weight-strong: 670;
   --font-weight-reading-heading: 600;
   /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
      **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 400 → 600 is still an unmistakable
-     step at reading size; nothing now outweighs a heading.
-     --font-weight-strong (UI chrome) stays 700 — different job, sparse use. */
+     dark blots and cost more than it marked. 430 → 600 is a narrower step than
+     the 400 → 600 this was tuned against, but still unmistakable at reading
+     size; nothing now outweighs a heading.
+     --font-weight-strong (UI chrome) is 670 — different job, sparse use. */
   --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
   --font-weight-action: 500;
@@ -56,6 +82,34 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
+  /* Mono is pinned, never inherited. JetBrains Mono ships as STATIC faces
+     (300/400/500/600), and CSS font-matching rounds a 400-500 target UP — so
+     when body moved 400 -> 430, every mono surface that inherited body weight
+     silently jumped a whole grade to Mono 500. Nobody chose that; the loaded
+     face proved it (only the 500 face was fetched).
+     400 is the measured choice, by the same stroke/x-height yardstick that set
+     body to 430: JBM 400 stem/x = 0.1636 vs prose@430 = 0.1721 (-5%); JBM 500
+     = 0.1964 (+14%). The exact parity weight solves to ~426 — 400 is 2.9x
+     closer than 500, it is the grade every code editor ships, and the chip
+     already carries salience from its tint and ink hue; bolder strokes on top
+     of that read as shouting, especially on Night where bloom adds weight.
+     Texture (ink per letter-area) runs lighter than prose either way (-19.5%
+     at 400) because mono's fixed 0.6em advance spends more of each em on air —
+     that is what the chip background is for. Measured in
+     frontend/font-lab/mono.html. */
+  --font-weight-mono: 400;
+  /* Optical size for display type. `font-optical-sizing: auto` maps the CSS
+     px size onto Inter's opsz axis and clamps at 32, so anything above 32px
+     gets Inter's narrowest cut — the axis takes ~8.5% off the round lowercase
+     between opsz 14 and 32. 24 is where Inter's x-height/cap-height ratio
+     (0.7275) meets the consensus of the grotesques Ultra was measured against:
+     Graphik 0.7315, Söhne 0.7284, TWK Lausanne 0.7240, all within 1% of each
+     other and all well below Inter at text sizes (0.7503).
+     Applied ONLY to type that renders above ~24px, which in practice is the
+     hero titles. Every other heading already sits at 18–23px, where auto
+     resolves at or below 24 — pinning those would make them NARROWER, the
+     opposite of the intent. Compared in frontend/font-lab/optical.html. */
+  --display-optical-size: 24;
   /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
      Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
      was previously enabled to buy identity from the letterforms. In use it read
@@ -82,27 +136,54 @@
      Two things this does NOT govern: uppercase/label tracking (positive values
      of 0.02–0.08em, a different job entirely) and monospace, which has its own
      spacing design — the Inter curve does not apply to either. */
-  --bg-page: #f5f5f4;
-  --bg-panel: rgba(255, 255, 255, 0.9);
-  --bg-panel-strong: #ffffff;
-  --bg-main: #f8f8f7;
-  /* Body ink. 16.12:1 on --bg-page — deliberately near-black: this is the
-     reading surface for scientific answers, and the earlier lift to #3b383c
-     (10.59:1) traded more legibility than the airiness was worth. Airiness is
-     bought elsewhere now — a quieter sidebar and a real reading measure — so
-     the text itself does not have to give any up. */
-  --text-main: #191919;
-  /* Secondary text people actually READ (timestamps, counts, meta lines, the
-     sidebar eyebrows via --sidebar-eyebrow-color). 3.77:1 on --bg-page, so it
-     clears AA for large text and sits just under it for small — a deliberate
-     step down from the old neutral #737373 (4.35:1) toward the sage family,
-     without dropping to the ghost weight that genuinely-inactive chrome uses.
-     Things that are inactive rather than secondary go to --composer-placeholder
-     territory instead; see the note there. */
-  --text-muted: #787f78;
-  --line: rgba(23, 23, 23, 0.08);
-  /* The hover/active step up from --line — exactly double the rest weight, so
-     the darkening reads as the affordance without approaching text ink.
+  /* ══ MERIDIAN DRIFT · DAY ══════════════════════════════════════════════
+     The plate. Every neutral below is near-achromatic on purpose — channel
+     spread 1–2 — because the identity's crispness comes from value, not from
+     a tint. Emphasis is bought with luminance; colour is left free to carry
+     data.
+
+     THE MAGNITUDE LADDER. Hierarchy is a geometric series in CONTRAST RATIO,
+     one step = 1.80x, solved numerically against the ground the text sits on:
+
+       m0  #171B1D  15.60:1  body ink
+       m1  #424547   8.69:1  secondary / navigation
+       m2  #696B6D   4.81:1  tertiary — the LAST legible step
+       m3  #939697   2.68:1  large text and UI edges only
+       m4  #C8C9CA   1.49:1  hairlines, never text
+
+     In contrast space, NOT luminance space, and that distinction is load-
+     bearing. The ladder was first solved as a luminance series, which works on
+     a dark ground because contrast is (L_hi + 0.05)/(L_lo + 0.05) and the 0.05
+     floor dominates when L_lo is near zero. Mirrored onto this light ground it
+     collapses — m1 lands at #ACADAE, 2.02:1, unusable, and slackening the
+     ratio to 2.30x does not rescue it. Contrast-space is ground-independent,
+     so ONE step governs Day and Night. The widest step that keeps m2 at AA on
+     both grounds is 1.815x; 1.80 sits just inside that on purpose.
+     Re-derive with scripts/, do not eyeball a new grey. ══════════════════ */
+  --bg-page: #edeeee;
+  --bg-panel: rgba(248, 249, 249, 0.9);
+  --bg-panel-strong: #f8f9f9;
+  --bg-main: #f2f3f3;
+  /* m0. 15.60:1 on --bg-main. Not #000000, for the same reason Night's ink is
+     not #ffffff: pure black on a light ground reads as a display rather than
+     as carbon, and the ladder wants a material top end, not a clipped one. */
+  --text-main: #171b1d;
+  /* m1, formalized as a named rung. It already backs the quiet sidebar and
+     the wordmark context; naming it lets interaction states step text one
+     magnitude brighter (m2 -> m1) without minting a new grey — the search
+     well's focus treatment is the first consumer. 8.69:1 on this ground. */
+  --text-secondary: #424547;
+  /* m2 — the last rung that can legally hold text. Secondary content people
+     actually READ (timestamps, counts, meta lines, the sidebar eyebrows via
+     --sidebar-eyebrow-color). 4.81:1, so unlike the grey it replaces (3.87:1,
+     which sat just UNDER AA for small text) this now clears AA outright.
+     Things that are inactive rather than secondary drop to m3/m4; see
+     --composer-placeholder. */
+  --text-muted: #696b6d;
+  --line: rgba(23, 27, 29, 0.12);
+  /* The hover/active step up from --line. Resolves to #c2c3c4 over --bg-main,
+     which lands on m4 — hairlines are a ladder rung, not a free-floating
+     alpha.
      This token was consumed by three hover rules (artifact cards, document
      chips, the report download button) for months while never being DEFINED:
      border-color is non-inherited, so the invalid var() resolved to
@@ -111,24 +192,55 @@
      now (the ultra-light-theme-ink lesson: an undefined var() fails silently,
      and any token consumed by theme-agnostic rules must exist in every
      theme). light-theme-ink.test.ts pins both definitions. */
-  --line-strong: rgba(23, 23, 23, 0.16);
-  --brand: #171717;
-  --brand-strong: #0a0a0a;
+  --line-strong: rgba(23, 27, 29, 0.22);
+  --brand: #171b1d;
+  --brand-strong: #0b0e0f;
   /* Future launch-only, non-text signal; intentionally has no var() consumers. */
   --ultra-launch-signal: #1994ff;
-  --account-avatar-fill: #171717;
-  --account-avatar-foreground: #ffffff;
-  --activity-heatmap-1: #d4d4d8;
-  --activity-heatmap-2: #a1a1aa;
-  --activity-heatmap-3: #71717a;
-  --activity-heatmap-4: #3f3f46;
+  --account-avatar-fill: #171b1d;
+  --account-avatar-foreground: #f2f3f3;
+  /* The heatmap is a sequential ramp, so it runs the ladder in reverse:
+     m4 -> m1, quiet to loud. It stops at m1, not m0 — the densest cell is a
+     fill, and a fill at body-ink strength would compete with text. */
+  --activity-heatmap-1: #c8c9ca;
+  --activity-heatmap-2: #939697;
+  --activity-heatmap-3: #696b6d;
+  --activity-heatmap-4: #424547;
   --status-success: #047857;
+  /* Semantic warning — pending, held-out, missed. ORANGE, deliberately, and
+     never gold: brass is reserved for "running", and a warning that leaned
+     yellow would counterfeit it. 4.52:1 here; the dark block re-fires it. */
+  --status-warn: #b45309;
   --danger: #c62828;
-  --selection-bg: #d4d4d8;
-  --selection-fg: #171717;
-  --shadow: 0 10px 26px rgba(12, 12, 12, 0.08);
+  /* THE POINT OF LIGHT — Meridian's single reserved accent. Brass carries
+     exactly one meaning, product-wide: the instrument is RUNNING (a live
+     conversation, a streaming answer, a job in flight). It is the only warm
+     colour in the system, which is what makes a running thing findable from
+     across the room — and it stays findable only while nothing else is
+     allowed to borrow it. Never a text-semantic, never decoration.
+     meridian-identity.test.ts counts the literals to hold the reservation.
+     Day fires the pigment darker (4.55:1 on this ground) because night's
+     brass measures 1.66:1 on paper — same material, different exposure. */
+  --accent-live: #8a6a12;
+  /* Halation is a dark-ground phenomenon: glow on paper reads as a smudge.
+     Day's halo is transparent, so every box-shadow drawn with it is a no-op
+     and the night-only glow needs no per-theme component rules. */
+  --accent-live-halo: transparent;
+  /* The recessed surface. Inputs and wells sit one value step BELOW the
+     canvas instead of declaring their boundary with a border — the de-boxing
+     rule: depth by value, edges only where a real edge exists. */
+  --bg-sunk: #e4e6e6;
+  --selection-bg: #c8c9ca;
+  --selection-fg: #171b1d;
+  --shadow: 0 10px 26px rgba(11, 14, 15, 0.10);
+  /* HELD NEUTRAL, and held deliberately. This is the one surface the language
+     does not get to touch: a surround measurably biases how a reader judges
+     the value of adjacent greyscale tissue, and this is the screen people make
+     diagnostic calls on. Day keeps the neutral carve-out; Night does not need
+     one, because a dark surround is the radiology convention for the same
+     reason. See the .dark block. */
   --viewer-bg: #e5e5e5;
-  --viewer-panel-bg: rgba(255, 255, 255, 0.9);
+  --viewer-panel-bg: rgba(248, 249, 249, 0.9);
   --radius-xl: 20px;
   --radius-lg: 16px;
   --radius-md: 12px;
@@ -164,24 +276,26 @@
      because this pass is a light-theme change and re-pointing dark's tokens
      would shift dark colours nobody asked to move. If dark is ever retuned,
      wire it the same way rather than editing two palettes. */
-  --background: oklch(1 0 0);
+  --background: var(--bg-main);
   --foreground: var(--text-main);
-  --card: oklch(1 0 0);
+  --card: var(--bg-panel-strong);
   --card-foreground: var(--text-main);
-  --popover: oklch(1 0 0);
+  --popover: var(--bg-panel-strong);
   --popover-foreground: var(--text-main);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
+  --primary: var(--brand);
+  --primary-foreground: var(--bg-main);
+  --secondary: #e9ebeb;
   --secondary-foreground: var(--text-main);
-  --muted: oklch(0.97 0 0);
+  --muted: #e9ebeb;
   --muted-foreground: var(--text-muted);
-  --accent: oklch(0.97 0 0);
+  --accent: #e9ebeb;
   --accent-foreground: var(--text-main);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --border: #dcdede;
+  --input: #dcdede;
+  /* m2, not m3. A focus ring is a UI component and owes 3:1; m3 measures
+     2.68:1 and would miss it, so the ring takes the last legible rung. */
+  --ring: #696b6d;
   /* Ultra brand data palette — vibrant, one hue per index across light/dark,
      leads with blue (graphite is the neutral/context tail, slot 8).
      Colorblind-validated (dataviz Machado-2009 + WCAG). Keep in sync with
@@ -194,11 +308,14 @@
   --chart-6: oklch(0.456 0.169 305.3); /* violet      #6e34a0 */
   --chart-7: oklch(0.601 0.150 145.3); /* green       #399743 */
   --chart-8: oklch(0.375 0.018 264.3); /* graphite    #3c414b */
-  /* chart chrome — quiet neutrals, never a hue */
-  --chart-grid: rgba(23, 23, 23, 0.08);
-  --chart-axis: rgba(23, 23, 23, 0.22);
-  --chart-label: #737373;
-  --chart-title: #171717;
+  /* chart chrome — quiet neutrals, never a hue. Labels and titles ride the
+     ladder (m2/m0) so a chart's hierarchy matches the prose around it. The
+     categorical scale above is UNCHANGED: it is colourblind-validated against
+     light grounds, and Day inherits it exactly. */
+  --chart-grid: rgba(23, 27, 29, 0.10);
+  --chart-axis: rgba(23, 27, 29, 0.24);
+  --chart-label: #696b6d;
+  --chart-title: #171b1d;
   /* sequential (single-hue slate, low->high) */
   --chart-seq-1: #e4eefb; --chart-seq-2: #c1d6f2; --chart-seq-3: #96b7e2;
   --chart-seq-4: #6791ca; --chart-seq-5: #3a6aa8; --chart-seq-6: #1f4577;
@@ -207,23 +324,24 @@
   --chart-div-1: #275591; --chart-div-2: #6488b9; --chart-div-3: #b0c3db;
   --chart-div-mid: #eae7e4; --chart-div-5: #e0b6a4; --chart-div-6: #bb7051;
   --chart-div-7: #9a4729;
-  --sidebar: oklch(0.985 0 0);
-  /* Navigation is not content, and it no longer follows --text-main. Body ink is
-     near-black (16.12:1) because answers are for reading; a sidebar at that same
-     weight competes with them for attention, and every row shouting at full
-     strength is what makes a chrome-heavy app feel busy. This sits at 6.6:1 —
-     unmistakably quieter than the transcript, still comfortably past AA's 4.5:1
-     for the 14px/500 row labels, which are essential navigation and must not be
-     decorative.
-     It also gives hover somewhere to go: rest 6.6:1 -> --sidebar-ink-hover
-     18.15:1 is a large, obvious step, so the darkening reads as the affordance.
-     Pinned to --text-main it would have been a 1.13:1 no-op.
-     Faintly sage rather than pure grey so it shares a family with --text-muted
-     (#787f78), which the section eyebrows already use.
+  /* The sidebar RECEDES from the canvas rather than floating above it, which is
+     the falloff model applied to chrome: what is further from the work is
+     further from the ground's opposite. It also makes the sidebar its own
+     ground, which matters for the rung below. */
+  --sidebar: #e9ebeb;
+  /* m1, and the ladder had to be re-solved here rather than borrowed. Body ink
+     measures 14.49:1 against this ground (not --bg-main's 15.60:1), so m2 lands
+     at 4.47:1 — a hair UNDER AA for the 14px/500 row labels, which are
+     essential navigation and must not be decorative. m1 is the honest rung:
+     8.07:1 on this ground, exactly one magnitude below the nav ink above it,
+     and comfortably past AA.
+     It also gives hover somewhere to go: rest 8.07:1 -> --sidebar-ink-hover
+     16.19:1 is a 2x step, so the darkening reads as the affordance. Pinned to
+     --text-main it would have been a 1.12:1 no-op.
      This is the QUIET half of the sidebar: the Recents list, which is long,
      repetitive and the actual source of sidebar noise. The fixed structural nav
      opts back up to full ink via --sidebar-nav-foreground below. */
-  --sidebar-foreground: #575a57;
+  --sidebar-foreground: #424547;
   /* Structural navigation — brand, New chat, Resources/Training/Admin/Lens, the
      BisQue links — at body ink. There are only ever a handful of these, they do
      not scroll, and they are the app's spine: making them recede treats
@@ -234,12 +352,13 @@
      background carries the affordance here; the quiet Recents rows still darken,
      because from 6.41:1 that step is worth 2.83:1 and reads clearly. */
   --sidebar-nav-foreground: var(--text-main);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  /* True black, and one step past --text-main on purpose. Drives BOTH hover and
-     data-[active=true], so the current page reads at full strength too. */
-  --sidebar-ink-hover: #0a0a0a;
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--bg-main);
+  --sidebar-accent: #e3e5e5;
+  /* One step past --text-main on purpose — in Day, "nearer" means darker.
+     Drives BOTH hover and data-[active=true], so the current page reads at full
+     strength too. */
+  --sidebar-ink-hover: #0b0e0f;
   --sidebar-accent-foreground: var(--sidebar-ink-hover);
   --sidebar-item-hover-bg: color-mix(in oklab, var(--sidebar-accent) 92%, var(--text-main) 8%);
   --sidebar-item-active-bg: color-mix(in oklab, var(--sidebar-accent) 88%, var(--text-main) 12%);
@@ -280,21 +399,23 @@
   /* Alias kept for existing sidebar consumers — there is only one curve. */
   --sidebar-motion-ease: var(--motion-ease);
   --sidebar-motion-fade-duration: 160ms;
-  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 82%, #ffffff 18%);
+  /* Mixes toward INK, not toward white. In Day, nearer means darker, so a hover
+     that brightened would push the control away from the pointer. */
+  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 92%, var(--text-main) 8%);
   /* True ghost weight, and NO LONGER derived from --text-muted. That derivation
      assumed one grey served both roles; it doesn't. Secondary text is read, so
-     it went to a deeper sage (3.77:1); a placeholder is genuinely inactive, and
-     low contrast is the correct signal there rather than a compromise. Splitting
+     it sits at m2 (4.81:1); a placeholder is genuinely inactive, and low
+     contrast is the correct signal there rather than a compromise. Splitting
      them is the point — pinning this value is what keeps a future --text-muted
      change from dragging the ghost weight along with it.
-     1.57:1 on --bg-page. Deliberately below 3:1, on the same reasoning the old
-     #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so nothing
-     about the control's name or operability depends on how faint this hint is
-     drawn — it is decoration over an input that is obvious on its own. */
-  --composer-placeholder: #c3c7c3;
-  --composer-submit-shadow: 0 12px 24px rgba(12, 12, 12, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+     m4, 1.49:1 on --bg-main. Deliberately below 3:1, on the same reasoning the
+     old #b1b1b1 (2.14:1) used: the textarea carries its own aria-label, so
+     nothing about the control's name or operability depends on how faint this
+     hint is drawn — it is decoration over an input that is obvious on its own. */
+  --composer-placeholder: #c8c9ca;
+  --composer-submit-shadow: 0 12px 24px rgba(11, 14, 15, 0.16), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --sidebar-border: #dcdede;
+  --sidebar-ring: #696b6d;
 }
 
 *,
@@ -383,15 +504,15 @@ body {
   border-radius: calc(var(--radius) + 0.7rem);
   border: 1px solid color-mix(in oklab, white 20%, transparent);
   padding: clamp(1.6rem, 2.8vw, 2.4rem);
-  color: #f8fafc;
+  color: #dce3ea;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 1rem;
-  background: linear-gradient(145deg, #1f2937 0%, #334155 55%, #0f172a 100%);
+  background: linear-gradient(145deg, #171b20 0%, #232930 55%, #0b0d10 100%);
   box-shadow:
-    0 22px 56px rgba(2, 6, 23, 0.34),
-    0 8px 22px rgba(2, 6, 23, 0.22),
+    0 22px 56px rgba(6, 8, 10, 0.34),
+    0 8px 22px rgba(6, 8, 10, 0.22),
     inset 0 1px 0 rgba(255, 255, 255, 0.12);
 }
 
@@ -413,21 +534,21 @@ body {
   background:
     radial-gradient(
       120% 120% at 8% 92%,
-      rgba(250, 250, 249, 0.12) 0%,
-      rgba(250, 250, 249, 0.04) 18%,
+      rgba(242, 243, 243, 0.12) 0%,
+      rgba(242, 243, 243, 0.04) 18%,
       transparent 46%
     ),
     repeating-linear-gradient(
       325deg,
-      rgba(245, 245, 244, 0) 0px,
-      rgba(245, 245, 244, 0) 18px,
-      rgba(245, 245, 244, 0.03) 18px,
-      rgba(245, 245, 244, 0.03) 19px,
-      rgba(245, 245, 244, 0) 19px,
-      rgba(245, 245, 244, 0) 46px
+      rgba(242, 243, 243, 0) 0px,
+      rgba(242, 243, 243, 0) 18px,
+      rgba(242, 243, 243, 0.03) 18px,
+      rgba(242, 243, 243, 0.03) 19px,
+      rgba(242, 243, 243, 0) 19px,
+      rgba(242, 243, 243, 0) 46px
     ),
     radial-gradient(circle at 78% 78%, rgba(255, 255, 255, 0.1), transparent 40%),
-    linear-gradient(160deg, rgba(2, 6, 23, 0.62) 0%, rgba(15, 23, 42, 0.82) 100%);
+    linear-gradient(160deg, rgba(6, 8, 10, 0.62) 0%, rgba(10, 12, 15, 0.82) 100%);
   background-size: 145% 145%, 220% 220%, auto, auto;
   animation: auth-space-drift 15s linear infinite;
   will-change: background-position;
@@ -475,6 +596,10 @@ body {
   margin: 0;
   font-size: 2.45rem;
   font-weight: 400;
+  /* 39–46px across breakpoints, the largest type in the product and furthest
+     past Inter's opsz ceiling. See --display-optical-size. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.08;
   letter-spacing: 0;
 }
@@ -523,7 +648,7 @@ body {
   margin: 0;
   font-size: 0.95rem;
   line-height: 1.6;
-  color: rgba(241, 245, 249, 0.92);
+  color: rgba(220, 227, 234, 0.92);
   max-width: 34ch;
 }
 
@@ -531,7 +656,7 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  color: #f8fafc;
+  color: #dce3ea;
   text-decoration: none;
   width: fit-content;
   font-weight: 500;
@@ -698,8 +823,8 @@ body {
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-main) 93%, #ffffff 7%) 0%,
-      color-mix(in oklab, var(--bg-main) 88%, #ffffff 12%) 100%
+      color-mix(in oklab, var(--bg-main) 93%, var(--bg-panel-strong) 7%) 0%,
+      color-mix(in oklab, var(--bg-main) 88%, var(--bg-panel-strong) 12%) 100%
     );
   box-shadow: inset -1px 0 0 color-mix(in oklab, var(--line) 88%, transparent);
 }
@@ -1905,7 +2030,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: 0.875rem;
   line-height: 1.35;
   font-weight: 400;
-  color: var(--sidebar-foreground);
+  /* Every sidebar label rests at full ink — the same voice as the nav items —
+     and the pill background alone carries hover/selection (the macOS-sidebar
+     model). Resting recents a shade lighter read as disabled next to the nav
+     and cost contrast for no hierarchy the eyebrows don't already provide. */
+  color: var(--sidebar-nav-foreground);
   transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
 }
 
@@ -2413,12 +2542,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: clamp(1.65rem, 3.2vw, 2.35rem);
   font-weight: var(--font-weight-strong);
+  /* 26.4–37.6px, the only type in the app that rides the top of the opsz axis.
+     Left on `auto` it renders at Inter's narrowest cut; pinned it keeps the
+     rounder proportions. Both properties are required — `font-variation-settings`
+     alone loses to the automatic axis. See --display-optical-size. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   letter-spacing: 0;
   color: var(--text-main);
 }
 
 .dark .hero-title {
-  color: #ffffff;
+  color: var(--text-main);
 }
 
 .hero-subtitle {
@@ -2430,7 +2565,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .dark .hero-subtitle {
-  color: color-mix(in oklab, #ffffff 68%, transparent);
+  color: color-mix(in oklab, var(--text-main) 68%, transparent);
 }
 
 .blank-chat-usage-state {
@@ -2438,6 +2573,90 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: clamp(0.75rem, 4vh, 2rem) 0 1.4rem;
   display: flex;
   justify-content: center;
+}
+
+/* ============================ WELCOME STAGE ============================
+   An empty, hydrated desktop chat composes as ONE centered cluster:
+   eyebrow -> hero -> composer -> starter chips. The stage stops growing and
+   the shell centers the group, so the primary action sits where the eye
+   already is instead of docked a viewport away. The first send renders the
+   optimistic message, the flag drops, the stage grows back and the composer
+   re-docks — one composer instance, no remount, the draft survives. `safe`
+   keeps short viewports top-anchored instead of clipping both ends; the
+   :not() guard leaves the split report-canvas grid alone. */
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) {
+  justify-content: safe center;
+}
+
+.app-main-shell[data-welcome-stage="true"]:not([data-report-canvas]) .chat-stage-scroller {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.app-main-shell[data-welcome-stage="true"] .blank-chat-usage-state {
+  padding-bottom: 0.5rem;
+}
+
+/* The welcome block's own 80vh min-height was the OLD centering mechanism —
+   inside the centered cluster it would just re-inflate the void the cluster
+   exists to remove. The shell centers now; the block is content-sized. */
+.app-main-shell[data-welcome-stage="true"] .blank-chat-welcome {
+  min-height: 0;
+  gap: 1.4rem;
+}
+
+.app-main-shell[data-welcome-stage="true"] .app-composer-shell {
+  padding-bottom: 0;
+}
+
+.welcome-starters {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 1.1rem 1.5rem 2.4rem;
+}
+
+/* Quiet ghost pills: hairline border, label at full ink, icon one voice
+   quieter — suggestions, not commands. Hover is a background whisper, the
+   same affordance model as the sidebar rows. */
+.welcome-starter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), border-color 160ms var(--motion-ease);
+}
+
+.welcome-starter-chip svg {
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--text-muted);
+  flex: none;
+}
+
+.welcome-starter-chip:hover {
+  background: color-mix(in oklab, var(--accent) 80%, transparent);
+}
+
+.welcome-starter-chip:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.welcome-starter-label {
+  max-width: 26ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Mobile composer-forward empty-chat hero: a calm greeting fills the space
@@ -2459,6 +2678,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: 1.6rem;
   font-weight: 400;
+  /* 25.6px — just past the pin point, so it gets the same treatment as
+     .hero-title rather than drifting narrower than its desktop counterpart. */
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   letter-spacing: -0.018em;
   color: var(--text-main);
 }
@@ -2534,6 +2757,23 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 1rem 1rem 0;
 }
 
+/* The field above the prompt — the only surface where the language's one
+   impossibility lives (MeridianField.tsx draws it from the live tokens).
+   Height is deliberately modest: the welcome stage's calm is its emptiness,
+   and the sky must never crowd the greeting on a phone. */
+.meridian-field {
+  /* Fluid, not fixed: the sky takes a wide share of the column and settles
+     between phone and cinema widths; the drawing scales its star DENSITY by
+     area (MeridianField.tsx), so wide never reads sparse and narrow never
+     reads crowded. Height leans on viewport height so short laptop windows
+     give the sky back to the greeting. */
+  width: min(46rem, 100%);
+  height: clamp(96px, 16vh, 172px);
+  color: var(--text-main);
+  display: block;
+  pointer-events: none;
+}
+
 .blank-chat-welcome-greeting {
   display: flex;
   flex-direction: column;
@@ -2553,31 +2793,45 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
   /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight. Tracking is NOT restrained here: at 34px this sits
-     past Inter's opsz ceiling (14–32), so the axis has stopped tightening and
-     the tracking has to be supplied by hand — see the tracking note at the top
-     of this file. Inter's metric for ~34px is -0.022em; -0.01em left the
-     largest text in the product visibly the loosest. */
+     regular reading weight. Tracking is NOT restrained here: the tracking has to
+     be supplied by hand — see the tracking note at the top of this file. Inter's
+     metric for ~34px is -0.022em; -0.01em left the largest text in the product
+     visibly the loosest.
+     The opsz pin below replaces what used to be a ceiling problem. At 34px on
+     `auto` this ran past Inter's opsz range (14–32) and rendered at the axis
+     maximum — the narrowest cut Inter has. Pinned at 24 it keeps the rounder
+     proportions the reference grotesques share. The hand-set tracking still
+     applies on top and is unchanged: it was measured against the glyph metric,
+     not the axis. */
   font-weight: 400;
+  font-optical-sizing: none;
+  font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.2;
   letter-spacing: -0.022em;
   color: var(--text-main);
 }
 
-.blank-chat-usage-disclosure {
-  width: 100%;
+/* One whisper below the starter chips: "View usage" opens the full panel on
+   demand. The resting welcome shows NO numbers — a lifetime token count with
+   no denominator reads as noise, and the chips already answer "what now".
+   border-top:0 fends off the legacy global `details` hairline rule. */
+.welcome-usage-disclosure {
+  width: min(100%, var(--user-chat-width));
+  margin-inline: auto;
+  border-top: 0;
+  padding-top: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
 }
 
-.blank-chat-usage-strip {
+.welcome-usage-link {
   display: inline-flex;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.5rem 0.95rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.75rem;
   border-radius: 999px;
-  font-size: 0.85rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
   cursor: pointer;
   list-style: none;
@@ -2586,52 +2840,32 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-strip::-webkit-details-marker {
+.welcome-usage-link::-webkit-details-marker {
   display: none;
 }
 
-.blank-chat-usage-strip:hover,
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip {
+.welcome-usage-link:hover,
+.welcome-usage-disclosure[open] .welcome-usage-link {
   background: color-mix(in oklab, var(--text-main) 6%, transparent);
   color: var(--text-main);
 }
 
-.blank-chat-usage-strip-stats {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.55rem;
-}
-
-.blank-chat-usage-strip-stats strong {
-  font-weight: var(--font-weight-data);
-  color: color-mix(in oklab, var(--text-main) 78%, var(--text-muted) 22%);
-}
-
-.blank-chat-usage-strip-dot {
-  opacity: 0.45;
-}
-
-.blank-chat-usage-strip-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.28rem;
-}
-
-.blank-chat-usage-strip-chevron {
+.welcome-usage-chevron {
   transition: transform 160ms var(--motion-ease);
 }
 
-.blank-chat-usage-disclosure[open] .blank-chat-usage-strip-chevron {
+.welcome-usage-disclosure[open] .welcome-usage-chevron {
   transform: rotate(180deg);
 }
 
-.blank-chat-usage-disclosure-body {
-  margin-top: 1.35rem;
-  width: min(100%, var(--user-chat-width));
+.welcome-usage-body {
+  margin-top: 1.1rem;
+  width: 100%;
+  text-align: left;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .blank-chat-usage-strip-chevron {
+  .welcome-usage-chevron {
     transition: none;
   }
 }
@@ -2693,10 +2927,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   min-height: 0;
 }
 
+/* DE-BOXED: the back card is gone. A browser inside a panel inside a page is
+   exactly the box-in-box-in-box the language deletes — the mockup's Resources
+   frame put the toolbar and cards directly on the canvas, and the chrome that
+   needs a surface (cards, the search well) already carries its own value
+   step. The shell keeps only its layout duties. */
 .resource-browser-shell {
-  border-radius: calc(var(--radius) + 0.85rem);
-  border-color: var(--line);
-  background: color-mix(in oklab, var(--bg-panel-strong) 92%, transparent);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   min-width: 0;
   min-height: min(100%, calc(100svh - 7.2rem));
 }
@@ -2754,26 +2994,47 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.65rem;
 }
 
+/* De-boxed: the search well is SUNK — one value step below the canvas — and
+   rises to panel level when focused. The focus ring stays: focus is a real
+   edge, the one boundary the de-boxing rule never deletes. */
 .resource-browser-search-field {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
   height: 2.55rem;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 0.95rem;
-  background: color-mix(in oklab, var(--bg-panel-strong) 82%, var(--bg-main) 18%);
+  background: var(--bg-sunk);
   padding-inline: 0.78rem 0.2rem;
-  box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
   transition:
     border-color 150ms var(--motion-ease),
     box-shadow 150ms var(--motion-ease),
     background-color 150ms var(--motion-ease);
 }
 
+/* Pointer focus stays CALM: the well does not light up, rise, or grow a ring
+   — the type inside simply steps one magnitude brighter (m2 -> m1) and the
+   caret does the rest. A text input's activation is self-evident to the
+   person who just clicked it; announcing it with a glow was chrome shouting
+   about the obvious. */
 .resource-browser-search-field:focus-within {
+  background: var(--bg-sunk);
+}
+
+.resource-browser-search-field:focus-within svg {
+  color: var(--text-secondary);
+}
+
+.resource-browser-search-field:focus-within .resource-browser-search::placeholder {
+  color: var(--text-secondary);
+}
+
+/* Keyboard focus keeps the full ring. WCAG 2.4.11 is about operability
+   without a pointer, and :has(:focus-visible) scopes the ring to exactly the
+   users who need it — tabbing lights the well, clicking never does. */
+.resource-browser-search-field:has(.resource-browser-search:focus-visible) {
   border-color: color-mix(in oklab, var(--ring) 38%, var(--line) 62%);
-  background: var(--bg-panel-strong);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 12%, transparent);
 }
 
@@ -2807,12 +3068,26 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   line-height: 1.4;
 }
 
+/* De-boxed secondary control: same sunk well as the search field beside it —
+   the toolbar reads as one family of recesses in the canvas. Hover steps the
+   surface toward ink, which is "nearer" in both themes (darker on the plate,
+   brighter in the field). Borders on buttons are reserved for the primary
+   action's solid fill and for focus; a hairline on a secondary control was
+   declaring an edge nothing needed. */
 .resource-browser-filter-trigger {
   flex: 0 0 auto;
   min-height: 2.55rem;
   border-radius: 0.95rem;
   padding-inline: 0.9rem;
   white-space: nowrap;
+  border-color: transparent;
+  background: var(--bg-sunk);
+  box-shadow: none;
+}
+
+.resource-browser-filter-trigger:hover {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
 }
 
 .resource-browser-filter-count {
@@ -3847,11 +4122,18 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.24rem;
 }
 
+/* DE-BOXED (the Meridian structural rule): the card separates from the canvas
+   by one value step — panel-strong on main — not by an enclosure. The border
+   is kept at 1px TRANSPARENT so layout is byte-identical and the selected
+   state below can still paint a real edge into the same box. Hover is lift
+   and shadow only; a border appearing on hover would reintroduce the box the
+   rule deletes. Selection keeps its edge on purpose: a selection boundary is
+   a real edge, like an ink contour on a silhouette. */
 .resource-browser-card {
   position: relative;
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--bg-panel);
+  background: var(--bg-panel-strong);
   overflow: hidden;
   height: 17.75rem;
   display: grid;
@@ -3861,7 +4143,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .resource-browser-card:hover,
 .resource-browser-card:focus-visible {
-  border-color: color-mix(in oklab, var(--foreground) 18%, var(--border) 82%);
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.1);
   transform: translateY(-1px);
 }
@@ -3892,7 +4173,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   position: relative;
   width: 100%;
   height: 10.75rem;
-  border-bottom: 1px solid var(--line);
+  /* No rule between image and caption — the preview well sits one value step
+     below the card and the step IS the boundary. */
   background: color-mix(in oklab, var(--bg-main) 92%, var(--bg-panel-strong) 8%);
 }
 
@@ -3935,6 +4217,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   bottom: 0.45rem;
   right: 0.45rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.6rem;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -3989,6 +4272,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-thumb-snippet {
   margin: 0;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.66rem;
   line-height: 1.5;
   color: var(--text-muted);
@@ -4277,12 +4561,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .figure-lightbox-thumb[data-active="true"] {
-  border-color: #6aa9ff;
+  border-color: #f2f3f5;
   opacity: 1;
 }
 
 .figure-lightbox-thumb[data-pinned="true"] {
-  border-color: rgba(120, 170, 255, 0.45);
+  border-color: rgba(242, 243, 245, 0.45);
   opacity: 0.9;
 }
 
@@ -4624,6 +4908,1512 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
+/* ============================ NOTES ============================
+   The personal layer: two panes, zero friction, two modes over one file.
+   Markdown mode is a doc-style surface (ribbon + shortcuts) whose editable
+   area wears pk-message-content — the styled note IS the rendered note.
+   Plaintext mode is the raw mono dump surface. ⌘⇧E flips; each note
+   remembers. Structure carries state (pin glyph, save whisper) — the one
+   pigment in the room is the highlighter wash, and it is content. */
+
+/* The single highlight tone — amber like a real highlighter on paper.
+   Content marking, not chrome: used only by <mark> in rendered markdown. */
+:root {
+  --highlight-wash: rgba(246, 205, 90, 0.38);
+}
+
+.dark {
+  --highlight-wash: rgba(246, 205, 90, 0.26);
+}
+
+/* Inline code wears a quiet violet chip (user-chosen, GitHub-merged
+   reference): code is the one content register that reads better set apart
+   from prose ink, and one desaturated tone in both themes keeps it calm.
+   RE-REVIEWED 2026-08-09 against neutral (GitHub-style, ink = body) and a
+   half-saturation slate, live in both themes: KEEP. The violet became
+   load-bearing when the mono register was pinned to 400 — at 0.88em and
+   regular grade, hue is what keeps run IDs, paths, and identifiers spottable
+   at a glance; neutral sank chips into tinted body text, and slate read as
+   neutral with the point removed. It is the only purple in the stylesheet by
+   design: a content register, deliberately outside the chrome accent system
+   (--accent-live stays the sole chrome accent), same layer as the syntax
+   palette inside blocks — whose github themes carry violet tokens it rhymes
+   with. Contrast on the chip tint: 6.7:1 dark, 5.1:1 light — both AA-clear
+   at chip size. */
+:root {
+  --inline-code-bg: rgba(103, 88, 220, 0.1);
+  --inline-code-ink: #5b4bc4;
+}
+
+.dark {
+  --inline-code-bg: rgba(158, 146, 246, 0.14);
+  --inline-code-ink: #a89ef2;
+}
+
+/* ==highlight== renders as <mark> everywhere house markdown renders — the
+   notes editor and chat answers share one voice. */
+.pk-message-content mark {
+  background: var(--highlight-wash);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.15em;
+}
+.notes-page {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.notes-list {
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 14px 12px 10px;
+  background: var(--background);
+}
+
+.notes-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 6px 12px;
+}
+
+.notes-list-head h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.notes-search {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0.42rem 0.65rem;
+  margin-bottom: 10px;
+  color: var(--text-muted);
+}
+
+.notes-search svg { width: 0.85rem; height: 0.85rem; flex: none; }
+
+.notes-search input {
+  border: 0;
+  outline: none;
+  background: transparent;
+  font: inherit;
+  font-size: 0.83rem;
+  color: var(--text-main);
+  width: 100%;
+}
+
+.notes-list-scroll { overflow-y: auto; min-height: 0; flex: 1; }
+
+.notes-group-label {
+  font-size: 0.68rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 600;
+  padding: 12px 8px 5px;
+}
+
+.notes-row {
+  display: grid;
+  gap: 0.1rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  border-radius: 9px;
+  padding: 8px 9px;
+  cursor: pointer;
+  font-family: var(--font-sans);
+}
+
+.notes-row:hover { background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent); }
+.notes-row[data-active="true"] { background: color-mix(in oklab, var(--sidebar-accent) 88%, var(--sidebar-foreground) 8%); }
+.notes-row:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ring); }
+
+.notes-row-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.84rem;
+  font-weight: 500;
+  color: var(--sidebar-nav-foreground);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.notes-row-pin { width: 0.65rem; height: 0.65rem; color: var(--text-muted); flex: none; }
+
+.notes-row-snippet {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.notes-row-snippet:empty {
+  display: none;
+}
+
+.notes-list-state {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 1rem 0.5rem;
+  font-size: 0.83rem;
+  color: var(--text-muted);
+}
+
+.notes-list-foot {
+  margin-top: auto;
+  border-top: 1px solid var(--line);
+  padding: 10px 8px 2px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.notes-editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 18px 40px 28px;
+  overflow-y: auto;
+}
+
+.notes-editor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 14px;
+}
+
+.notes-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.notes-save-state svg { width: 0.75rem; height: 0.75rem; }
+.notes-save-state[data-state="error"] { color: var(--danger); }
+
+.notes-editor-actions { display: flex; align-items: center; gap: 0.45rem; }
+
+.notes-editor-bar-lead { display: flex; align-items: center; gap: 0.6rem; min-width: 0; }
+
+/* Phones collapse to the editor; this chip flips the list back in front.
+   Desktop never sees it. */
+/* Control chrome never behaves like text on touch — a long-press on the
+   back chip or a list row must not start a selection on iOS. */
+.notes-mobile-back,
+.notes-row {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.notes-mobile-back {
+  display: none;
+  align-items: center;
+  gap: 0.15rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  font-size: 0.83rem;
+  font-weight: 500;
+  padding: 0.35rem 0.5rem 0.35rem 0.2rem;
+  border-radius: 9px;
+  cursor: pointer;
+}
+
+.notes-mobile-back svg { width: 1rem; height: 1rem; }
+
+.notes-title-input {
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 1.65rem;
+  font-weight: var(--font-weight-page-heading);
+  letter-spacing: -0.02em;
+  color: var(--text-main);
+  padding: 0 0 4px;
+  width: min(100%, 46rem);
+}
+
+.notes-title-input::placeholder { color: var(--text-muted); opacity: 0.7; }
+
+.notes-body-shell { position: relative; flex: 1; min-height: 0; display: flex; }
+
+/* Write mode IS the raw source, and the type says so: the house mono (same
+   stack as the code/data viewers) marks "this is plaintext you can dump into"
+   the way Sublime does — while Preview flips to the reading face. Ligatures
+   off on purpose: raw text must never render != as a single glyph. */
+.notes-body-input {
+  flex: 1;
+  min-height: 16rem;
+  width: min(100%, 46rem);
+  border: 0;
+  outline: none;
+  background: transparent;
+  resize: none;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
+  font-size: 0.84rem;
+  line-height: 1.7;
+  font-variant-ligatures: none;
+  tab-size: 2;
+  color: var(--text-main);
+  padding-top: 6px;
+}
+
+.notes-body-input::placeholder { color: var(--text-muted); opacity: 0.7; }
+
+.notes-slash {
+  position: absolute;
+  top: 2.4rem;
+  left: 0;
+  z-index: 10;
+  width: 240px;
+  background: var(--popover);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(25, 25, 25, 0.13);
+  padding: 5px;
+}
+
+.notes-slash-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-family: var(--font-sans);
+  font-size: 0.83rem;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.notes-slash-item small { color: var(--text-muted); font-size: 0.7rem; }
+.notes-slash-item[data-highlighted="true"] { background: color-mix(in oklab, var(--accent) 85%, transparent); }
+
+.notes-link-pop {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  width: min(100%, 30rem);
+  margin-top: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--popover);
+  box-shadow: 0 12px 32px rgba(25, 25, 25, 0.13);
+}
+
+.notes-link-pop input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  color: var(--text-main);
+  padding: 0.3rem 0.5rem;
+}
+
+.notes-md-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.notes-md-shell > div { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+
+/* The editable ProseMirror root. pk-message-content supplies the reading
+   voice; these lines supply only what an EDITOR needs on top. */
+.notes-md-prose {
+  flex: 1;
+  width: min(100%, 46rem);
+  outline: none;
+  padding-top: 10px;
+  padding-bottom: 40vh; /* generous runway — tapping below the last line lands the caret */
+  white-space: pre-wrap;
+  word-break: break-word;
+  caret-color: var(--text-main);
+  background: transparent;
+}
+
+.notes-md-prose.ProseMirror-hideselection *::selection { background: transparent; }
+
+/* Milkdown wraps every list item's text in a <p>; keep lists tight. */
+.notes-md-prose li > p { margin: 0; }
+
+/* The editor's bare inline <code> wears the same violet chip as chat's
+   pk-inline-code — one register, both surfaces. */
+.notes-md-prose :not(pre) > code {
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
+  font-size: 0.88em;
+  background: var(--inline-code-bg);
+  color: var(--inline-code-ink);
+  border-radius: 0.375rem;
+  padding: 0.05rem 0.32rem;
+}
+
+/* GFM task items arrive as data attributes, not inputs — draw the house
+   checkbox crisply (borders, not glyphs: sharp at every DPR) and let a
+   click on the box toggle it (taskTogglePlugin). */
+.notes-md-prose li[data-item-type="task"] { list-style: none; position: relative; }
+
+.notes-md-prose li[data-item-type="task"]::before {
+  content: "";
+  position: absolute;
+  left: -1.5rem;
+  top: 0.24em;
+  width: 0.92rem;
+  height: 0.92rem;
+  box-sizing: border-box;
+  border: 1.5px solid color-mix(in oklab, var(--text-main) 36%, transparent);
+  border-radius: 5px;
+  background: var(--background);
+  cursor: pointer;
+}
+
+.notes-md-prose li[data-item-type="task"]:hover::before {
+  border-color: color-mix(in oklab, var(--text-main) 60%, transparent);
+}
+
+.notes-md-prose li[data-item-type="task"][data-checked="true"]::before {
+  background: var(--text-main);
+  border-color: var(--text-main);
+}
+
+/* The tick: two borders rotated 45° — crisper than any glyph. */
+.notes-md-prose li[data-item-type="task"][data-checked="true"]::after {
+  content: "";
+  position: absolute;
+  left: calc(-1.5rem + 0.3rem);
+  top: calc(0.24em + 0.14rem);
+  width: 0.3rem;
+  height: 0.52rem;
+  box-sizing: border-box;
+  border-right: 1.5px solid var(--background);
+  border-bottom: 1.5px solid var(--background);
+  transform: rotate(42deg);
+  cursor: pointer;
+}
+
+.notes-md-prose li[data-item-type="task"][data-checked="true"] > p {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+/* Gap cursor (plugin-cursor): the blinking landing strip beside block
+   atoms — how you arrow past a table, formula, or media block. */
+.notes-md-prose .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+
+.notes-md-prose .ProseMirror-gapcursor::after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 20px;
+  border-top: 1px solid var(--text-main);
+  animation: notes-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes notes-gapcursor-blink {
+  to { visibility: hidden; }
+}
+
+.notes-md-prose.ProseMirror-focused .ProseMirror-gapcursor { display: block; }
+
+/* Table chrome, mirroring .pk-table's registers — chat tables get these
+   from React components; ProseMirror emits raw table elements. */
+.notes-md-prose table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  margin: 0.35rem 0;
+}
+
+.notes-md-prose td,
+.notes-md-prose th {
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.87rem;
+  line-height: 1.5;
+  vertical-align: top;
+  text-align: left;
+}
+
+.notes-md-prose th {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.45rem 0.85rem 0.4rem;
+  border-bottom: 1px solid color-mix(in oklab, var(--text-main) 20%, transparent);
+}
+
+.notes-md-prose tr:last-child td { border-bottom: 0; }
+
+/* Code blocks: the house code stage (chat gets it from CodeBlock components;
+   ProseMirror emits a bare pre>code). Editable, so no copy chrome. */
+.notes-md-prose pre {
+  margin: 0.35rem 0;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: color-mix(in oklab, var(--bg-panel-strong) 94%, transparent);
+  overflow-x: auto;
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  white-space: pre;
+}
+
+.notes-md-prose pre code {
+  font-family: inherit;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+/* prosemirror-tables affordances, in house tones. */
+.notes-md-prose .selectedCell { position: relative; }
+
+.notes-md-prose .selectedCell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: color-mix(in oklab, var(--ring) 12%, transparent);
+  pointer-events: none;
+}
+
+.notes-md-prose .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--ring);
+  pointer-events: none;
+}
+
+.notes-md-prose.resize-cursor { cursor: col-resize; }
+
+/* Media node views reuse the shared frames below; selection is a quiet
+   ring (rules live beside the frames). */
+.notes-md-media { display: inline-block; max-width: 100%; }
+
+/* LaTeX atoms: KaTeX renders the formula; click flips to a raw-TeX editor
+   in place. The affordance is a quiet hover pill — math is content, and its
+   chrome stays out of the way. */
+.notes-math-inline {
+  display: inline-block;
+  padding: 0 0.15em;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.notes-math-inline:hover { background: color-mix(in oklab, var(--sidebar-accent) 70%, transparent); }
+
+.notes-math-block {
+  display: block;
+  margin: 0.5rem 0;
+  padding: 0.65rem 0.9rem;
+  border-radius: var(--radius);
+  cursor: pointer;
+  text-align: center;
+  overflow-x: auto;
+}
+
+.notes-math-block:hover { background: color-mix(in oklab, var(--sidebar-accent) 55%, transparent); }
+
+.notes-math-inline.is-selected,
+.notes-math-block.is-selected { box-shadow: 0 0 0 2px var(--ring); }
+
+.notes-math-editor {
+  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
+  font-size: 0.84rem;
+  color: var(--text-main);
+  background: var(--popover);
+  border: 1px solid var(--line-strong, var(--line));
+  border-radius: 7px;
+  padding: 0.25rem 0.5rem;
+  outline: none;
+  min-width: 12ch;
+}
+
+.notes-math-editor-block {
+  display: block;
+  width: 100%;
+  min-height: 3.2rem;
+  resize: vertical;
+  text-align: left;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+/* Media blocks: quiet frames in the house geometry. The preview column, not
+   the file, bounds them; video keeps a dark stage so letterboxing reads as
+   intentional in both themes. */
+.notes-media-img {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0.4rem 0 0.9rem;
+}
+
+.notes-media-video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin: 0.4rem 0 0.9rem;
+  /* A video stage stays dark in both themes on purpose — letterboxing must
+     read as intentional, and media content is not chrome. */
+  background: black;
+}
+
+.notes-md-media.is-selected .notes-media-img,
+.notes-md-media.is-selected .notes-media-video {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-editor-drop {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.notes-editor-drop.pk-file-upload-drag {
+  outline: 1.5px dashed var(--line-strong, var(--line));
+  outline-offset: -8px;
+  border-radius: var(--radius);
+}
+
+.notes-editor-empty {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
+@media (max-width: 960px) {
+  .notes-page { grid-template-columns: 1fr; }
+  .notes-list { display: none; }
+  .notes-editor { padding: 12px 16px 20px; }
+
+  /* The back chip swaps the panes: list in front, editor parked. */
+  .notes-mobile-back { display: inline-flex; }
+  .notes-page[data-mobile-list="true"] .notes-list { display: flex; }
+  .notes-page[data-mobile-list="true"] .notes-editor { display: none; }
+
+  /* iOS Safari zooms any focused text under 16px — both editing surfaces
+     (and the title) hold the line so focus never lurches the viewport. */
+  .notes-body-input { font-size: 16px; }
+  .notes-md-prose { font-size: 16px; }
+  .notes-title-input { font-size: 1.35rem; }
+
+  .notes-editor-bar { flex-wrap: wrap; gap: 0.5rem; }
+}
+
+/* Writing-first Notes refinement. The rich editor is the primary surface;
+   formatting, raw source, resources, and destructive actions disclose only
+   when the writer asks for them. */
+.notes-page {
+  grid-template-columns: minmax(238px, 276px) minmax(0, 1fr);
+  background: var(--background);
+  transition: grid-template-columns 180ms var(--motion-ease);
+}
+
+.notes-page[data-focus-mode="true"] {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.notes-page[data-focus-mode="true"] .notes-list {
+  visibility: hidden;
+  min-width: 0;
+  overflow: hidden;
+  padding-inline: 0;
+  border: 0;
+}
+
+.notes-list {
+  padding: 10px 8px 8px;
+  background: color-mix(in oklab, var(--background) 95%, var(--sidebar-accent));
+}
+
+.notes-list-head {
+  min-height: 50px;
+  padding: 4px 5px 8px 8px;
+}
+
+.notes-new-button {
+  min-height: 34px;
+  border-radius: 9px;
+}
+
+.notes-search {
+  margin: 0 4px 8px;
+  background: var(--background);
+}
+
+.notes-row {
+  position: relative;
+  gap: 0.16rem;
+  padding: 9px 10px 9px 12px;
+}
+
+.notes-row[data-active="true"]::before {
+  position: absolute;
+  top: 9px;
+  bottom: 9px;
+  left: 3px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--ring);
+  content: "";
+}
+
+.notes-row-time {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+
+.notes-list-empty {
+  display: grid;
+  justify-items: start;
+  gap: 0.45rem;
+}
+
+.notes-list-empty button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-list-error {
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.notes-list-error button,
+.notes-resource-state button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-list-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.notes-list-foot::before {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 50%;
+  background: var(--text-muted);
+  content: "";
+  opacity: 0.7;
+}
+
+.notes-editor {
+  position: relative;
+  padding: 0;
+  background: var(--background);
+}
+
+.notes-editor-drop {
+  position: relative;
+}
+
+.notes-editor-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  min-height: 58px;
+  margin: 0;
+  padding: 8px 16px 8px 18px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in oklab, var(--background) 96%, transparent);
+  backdrop-filter: blur(12px);
+}
+
+.notes-save-state {
+  min-height: 34px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.notes-save-state span {
+  min-width: 0;
+}
+
+.notes-save-state:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-save-state:focus-visible,
+.notes-mobile-back:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-save-state[data-state="error"] {
+  color: var(--danger);
+}
+
+.notes-save-menu {
+  width: 270px;
+}
+
+.notes-save-detail {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.55rem 0.65rem 0.65rem;
+  color: var(--text-main);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.notes-save-detail strong {
+  font-weight: 600;
+}
+
+.notes-save-detail span {
+  color: var(--text-muted);
+}
+
+.notes-editor-actions {
+  gap: 0.2rem;
+}
+
+.notes-icon-button {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.notes-icon-button:hover,
+.notes-icon-button[aria-pressed="true"] {
+  border-color: var(--line);
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-icon-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-icon-button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.notes-delete-menu-item {
+  color: var(--danger);
+}
+
+.notes-editor-error {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 14px auto 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid color-mix(in oklab, var(--danger) 35%, var(--line));
+  border-radius: 10px;
+  color: var(--danger);
+  font-size: 0.8rem;
+}
+
+.notes-editor-error > span {
+  flex: 1;
+}
+
+.notes-editor-error button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.notes-editor-error svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-title-input {
+  display: block;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 46px auto 0;
+  padding: 0;
+  font-size: 1.72rem;
+  line-height: 1.24;
+}
+
+.notes-document-context {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 8px auto 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.notes-document-context span + span::before {
+  margin-right: 0.5rem;
+  content: "·";
+}
+
+.notes-document-context button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-document-context button::before {
+  margin-right: 0.5rem;
+  content: "·";
+}
+
+.notes-document-context button:hover {
+  color: var(--text-main);
+}
+
+.notes-document-context button:focus-visible,
+.notes-list-empty button:focus-visible,
+.notes-list-error button:focus-visible,
+.notes-resource-state button:focus-visible,
+.notes-source-banner button:focus-visible,
+.notes-resource-row:focus-visible,
+.notes-resource-upload:focus-visible,
+.notes-resource-picker-head button:focus-visible,
+.notes-table-tools button:focus-visible,
+.notes-selection-toolbar button:focus-visible,
+.notes-slash-item:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.notes-search:focus-within,
+.notes-resource-search:focus-within,
+.notes-link-pop:focus-within {
+  border-color: color-mix(in oklab, var(--line) 40%, var(--text-muted) 60%);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--ring) 72%, transparent);
+}
+
+.notes-body-shell,
+.notes-md-shell {
+  position: relative;
+  width: min(calc(100% - 64px), 46rem);
+  margin: 28px auto 0;
+}
+
+.notes-body-shell {
+  flex: none;
+  min-height: 30rem;
+  flex-direction: column;
+}
+
+.notes-source-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--sidebar-accent) 48%, transparent);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.notes-source-banner button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.notes-body-input {
+  width: 100%;
+  min-height: 28rem;
+  font-size: 0.88rem;
+}
+
+.notes-md-shell {
+  display: flex;
+  min-height: 32rem;
+  flex-direction: column;
+}
+
+.notes-md-shell > div:not(.notes-editor-placeholder):not(.notes-editor-hint) {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.notes-md-prose {
+  width: 100%;
+  min-height: 28rem;
+  padding-top: 0;
+  padding-bottom: 35vh;
+  font-size: 1rem;
+  line-height: 1.68;
+  caret-color: var(--ring);
+}
+
+.notes-editor-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  color: var(--text-muted);
+  font-size: 1rem;
+  pointer-events: none;
+  opacity: 0.75;
+}
+
+.notes-md-shell > .notes-editor-hint {
+  position: absolute;
+  top: 2.15rem;
+  left: 0;
+  display: flex;
+  min-height: auto;
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  pointer-events: none;
+}
+
+.notes-md-shell > .notes-editor-hint kbd {
+  display: inline-grid;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-bottom-color: color-mix(in oklab, var(--text-main) 30%, var(--line));
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--sidebar-accent) 52%, transparent);
+  color: var(--text-main);
+  font: inherit;
+}
+
+.notes-selection-toolbar {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 12px 30px rgba(16, 20, 18, 0.18);
+  transform: translateX(-50%);
+}
+
+.notes-selection-toolbar button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.notes-selection-toolbar button:hover,
+.notes-selection-toolbar button[data-active="true"] {
+  background: color-mix(in oklab, var(--sidebar-accent) 82%, transparent);
+}
+
+.notes-selection-toolbar svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-table-tools {
+  position: fixed;
+  z-index: 59;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  width: max-content;
+  max-width: calc(100vw - 20px);
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--popover);
+  box-shadow: 0 12px 30px rgba(16, 20, 18, 0.16);
+  transform: translateX(-50%);
+}
+
+.notes-table-tools button {
+  min-height: 30px;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.73rem;
+  cursor: pointer;
+}
+
+.notes-table-tools button:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+  color: var(--text-main);
+}
+
+.notes-link-pop-contextual {
+  position: fixed;
+  z-index: 65;
+  margin: 0;
+  transform: translateX(-50%);
+}
+
+.notes-slash-floating {
+  position: fixed;
+  top: auto;
+  z-index: 64;
+  width: min(310px, calc(100vw - 24px));
+  max-height: min(440px, calc(100vh - 24px));
+  overflow-y: auto;
+}
+
+.notes-slash-heading {
+  padding: 7px 10px 5px;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.notes-slash-empty {
+  padding: 0.75rem 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.notes-resource-picker {
+  position: absolute;
+  top: 66px;
+  right: 18px;
+  z-index: 62;
+  width: min(350px, calc(100% - 36px));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--popover);
+  box-shadow: 0 16px 38px rgba(16, 20, 18, 0.2);
+}
+
+.notes-resource-picker[data-floating="true"] {
+  position: fixed;
+  top: auto;
+  right: auto;
+  width: min(350px, calc(100vw - 24px));
+}
+
+.notes-resource-picker-head {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 7px 8px 5px 12px;
+  font-size: 0.82rem;
+}
+
+.notes-resource-picker-head button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.notes-resource-picker-head button:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+}
+
+.notes-resource-picker-head svg,
+.notes-resource-search svg,
+.notes-resource-row > svg,
+.notes-resource-upload svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+.notes-resource-search {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0 8px 6px;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.notes-resource-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.notes-resource-results {
+  max-height: 310px;
+  overflow-y: auto;
+  padding: 0 6px 5px;
+}
+
+.notes-resource-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  padding: 0.8rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.notes-resource-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.5rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+}
+
+.notes-resource-row:hover {
+  background: color-mix(in oklab, var(--sidebar-accent) 72%, transparent);
+}
+
+.notes-resource-kind {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  text-transform: uppercase;
+}
+
+.notes-resource-copy {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.notes-resource-copy strong,
+.notes-resource-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-resource-copy strong {
+  font-size: 0.79rem;
+  font-weight: 600;
+}
+
+.notes-resource-copy small {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.notes-resource-upload {
+  display: flex;
+  width: calc(100% - 12px);
+  min-height: 38px;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 6px 6px;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.notes-editor-welcome {
+  flex-direction: column;
+}
+
+.notes-editor-load-error {
+  flex-direction: column;
+  padding: 2rem;
+  text-align: center;
+}
+
+.notes-editor-load-error > svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  color: var(--danger);
+}
+
+.notes-editor-load-error strong {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
+.notes-editor-load-error > span {
+  max-width: 32rem;
+}
+
+.notes-editor-load-error > div {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.notes-load-back {
+  display: none;
+}
+
+@media (max-width: 960px) {
+  .notes-page,
+  .notes-page[data-focus-mode="true"] {
+    display: block;
+  }
+
+  .notes-page[data-focus-mode="true"] .notes-list {
+    visibility: visible;
+  }
+
+  .notes-list {
+    min-height: 100%;
+  }
+
+  .notes-editor {
+    padding: 0;
+  }
+
+  .notes-editor-bar {
+    min-height: 50px;
+    flex-wrap: nowrap;
+    padding: 5px 9px 5px 10px;
+  }
+
+  .notes-editor-bar-lead {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .notes-save-state span {
+    max-width: 6.4rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .notes-editor-actions {
+    flex: none;
+  }
+
+  .notes-title-input,
+  .notes-document-context,
+  .notes-body-shell,
+  .notes-md-shell,
+  .notes-editor-error {
+    width: calc(100% - 36px);
+  }
+
+  .notes-title-input {
+    margin-top: 28px;
+    font-size: 1.45rem;
+  }
+
+  .notes-body-shell,
+  .notes-md-shell {
+    margin-top: 26px;
+  }
+
+  .notes-md-prose {
+    font-size: 16px;
+    line-height: 1.64;
+  }
+
+  .notes-body-input {
+    font-size: 16px;
+  }
+
+  .notes-focus-button {
+    display: none;
+  }
+
+  .notes-mobile-back {
+    min-height: 40px;
+  }
+
+  .notes-load-back {
+    display: inline-flex;
+  }
+
+  .notes-icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .notes-selection-toolbar button,
+  .notes-resource-picker-head button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .notes-table-tools button,
+  .notes-slash-item {
+    min-height: 40px;
+  }
+
+  .notes-resource-picker,
+  .notes-resource-picker[data-floating="true"] {
+    position: fixed;
+    top: 108px !important;
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+  }
+
+  .notes-link-pop-contextual {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+    transform: none;
+  }
+
+  .notes-slash-floating {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+  }
+
+  .notes-table-tools {
+    right: 10px;
+    left: 10px !important;
+    width: auto;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .notes-page {
+    transition: none;
+  }
+}
+
 @media (max-width: 720px) {
   .resource-browser-grid {
     grid-template-columns: 1fr;
@@ -4736,7 +6526,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     min-width: 0;
     height: 2.75rem;
     border-radius: 1rem;
-    background: color-mix(in oklab, var(--bg-main) 86%, #ffffff 14%);
+    background: color-mix(in oklab, var(--bg-main) 86%, var(--bg-panel-strong) 14%);
     padding-inline: 0.78rem 0.15rem;
   }
 
@@ -5362,6 +7152,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .admin-queue-consumer-heading strong {
   color: var(--text-main);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
@@ -5691,6 +7482,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .admin-org-row span {
   color: var(--text-muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -5837,6 +7629,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .admin-run-event-kind {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.73rem;
   color: var(--text-main);
 }
@@ -5934,11 +7727,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .chat-tool-card--prairie {
   background:
-    radial-gradient(circle at top right, color-mix(in oklab, #d7c7a0 24%, transparent), transparent 34%),
+    radial-gradient(circle at top right, color-mix(in oklab, var(--bg-sunk) 24%, transparent), transparent 34%),
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-panel) 88%, #efe4c9 12%),
-      color-mix(in oklab, var(--bg-panel) 94%, #9eb08a 6%)
+      color-mix(in oklab, var(--bg-panel) 88%, var(--bg-sunk) 12%),
+      color-mix(in oklab, var(--bg-panel) 94%, var(--bg-sunk) 6%)
     );
 }
 
@@ -6343,13 +8136,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .chat-tool-figure-media-wrap {
   overflow: hidden;
   border-radius: var(--radius-lg);
-  border: 1px solid color-mix(in oklab, var(--line) 84%, #9b8867 16%);
-  background: color-mix(in oklab, var(--bg-main) 92%, white 8%);
+  border: 1px solid color-mix(in oklab, var(--line) 84%, var(--text-muted) 16%);
+  background: color-mix(in oklab, var(--bg-main) 92%, var(--bg-panel-strong) 8%);
 }
 
 .chat-tool-figure-card--prairie .chat-tool-figure-media-wrap {
-  border-color: color-mix(in oklab, var(--line) 74%, #a78d63 26%);
-  background: color-mix(in oklab, var(--bg-main) 90%, #efe2c0 10%);
+  border-color: color-mix(in oklab, var(--line) 74%, var(--text-muted) 26%);
+  background: color-mix(in oklab, var(--bg-main) 90%, var(--bg-sunk) 10%);
 }
 
 .chat-tool-figure-image {
@@ -6357,7 +8150,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   width: 100%;
   max-height: min(72vh, 42rem);
   object-fit: contain;
-  background: color-mix(in oklab, var(--bg-main) 90%, white 10%);
+  background: color-mix(in oklab, var(--bg-main) 90%, var(--bg-panel-strong) 10%);
 }
 
 .chat-tool-figure-placeholder {
@@ -6413,16 +8206,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   padding: 0.8rem 0.9rem;
   border-radius: 14px;
-  border: 1px solid color-mix(in oklab, var(--line) 84%, #9b8867 16%);
-  background: color-mix(in oklab, var(--bg-panel-strong) 95%, #f6efe0 5%);
+  border: 1px solid color-mix(in oklab, var(--line) 84%, var(--text-muted) 16%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 95%, var(--bg-sunk) 5%);
   font-size: 0.76rem;
   line-height: 1.5;
   color: color-mix(in oklab, var(--text-main) 82%, var(--text-muted) 18%);
 }
 
 .chat-tool-figure-unavailable--prairie {
-  border-color: color-mix(in oklab, var(--line) 78%, #a78d63 22%);
-  background: color-mix(in oklab, var(--bg-panel-strong) 95%, #efe2c0 5%);
+  border-color: color-mix(in oklab, var(--line) 78%, var(--text-muted) 22%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 95%, var(--bg-sunk) 5%);
 }
 
 .chat-tool-carousel {
@@ -6439,12 +8232,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .chat-tool-carousel-stage--prairie {
-  border-color: color-mix(in oklab, var(--line) 68%, #a78d63 32%);
+  border-color: color-mix(in oklab, var(--line) 68%, var(--text-muted) 32%);
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--bg-panel-strong) 90%, #efe2c0 10%),
-      color-mix(in oklab, var(--bg-panel-strong) 94%, #8b9a6d 6%)
+      color-mix(in oklab, var(--bg-panel-strong) 90%, var(--bg-sunk) 10%),
+      color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-sunk) 6%)
     );
 }
 
@@ -6513,7 +8306,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: white;
   white-space: nowrap;
   background: color-mix(in oklab, var(--bg-panel-strong) 22%, black 78%);
-  border: 1px solid color-mix(in oklab, white 22%, transparent);
+  border: 1px solid color-mix(in oklab, var(--bg-panel-strong) 22%, transparent);
   max-width: min(180px, 100%);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6592,9 +8385,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   display: grid;
   gap: 0.18rem;
   padding: 0.58rem 0.68rem;
-  border: 1px solid color-mix(in oklab, var(--line) 82%, #a78d63 18%);
+  border: 1px solid color-mix(in oklab, var(--line) 82%, var(--text-muted) 18%);
   border-radius: 14px;
-  background: color-mix(in oklab, var(--bg-panel-strong) 94%, #f1e4c8 6%);
+  background: color-mix(in oklab, var(--bg-panel-strong) 94%, var(--bg-sunk) 6%);
 }
 
 .chat-tool-prairie-stat-label {
@@ -6602,13 +8395,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: color-mix(in oklab, var(--text-muted) 80%, #715638 20%);
+  color: color-mix(in oklab, var(--text-muted) 80%, var(--text-main) 20%);
 }
 
 .chat-tool-prairie-stat-value {
   font-size: 0.96rem;
   line-height: 1.2;
-  color: color-mix(in oklab, var(--text-main) 90%, #4d3a2a 10%);
+  color: var(--text-main);
 }
 
 .chat-tool-carousel-thumbs {
@@ -6807,7 +8600,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .chat-document-report-error {
-  color: color-mix(in oklab, #d4503b 70%, var(--foreground));
+  color: color-mix(in oklab, var(--danger) 70%, var(--foreground));
 }
 
 .chat-document-report-inline-link {
@@ -7294,17 +9087,60 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     box-shadow 160ms var(--motion-ease);
 }
 
-/* Losing the border and shadow took the focus state with them, and the textarea's
-   own outline is none — so the rule itself has to carry it. The inset line doubles
-   the hairline to a visible 2px WITHOUT widening the border, which would shove the
-   whole row down 1px on every focus. --text-muted (#787f78 since the ink pass)
-   measures 4.11:1 on the composer's white ground, clearing the 3:1 and 2px WCAG
-   2.4.11 asks of a focus indicator with margin. Re-measure this if --text-muted
-   moves again: the indicator borrows the token, so a colour decision made for
-   body text silently sets the focus contrast too. */
-.app-composer-shell .app-composer-card:focus-within {
+/* CALM POINTER FOCUS — the search-well rule, applied to the control that
+   needs it most. Clicking a text field is self-announcing (the caret), and
+   the old :focus-within treatment fired a 2px ink line across the page's
+   most-used control on every click — the loudest focus in the product for
+   the most obvious activation in it. Pointer focus now lights nothing.
+
+   Keyboard keeps the full indicator: the inset line doubles the hairline to
+   a visible 2px WITHOUT widening the border (which would shove the row down
+   1px), at --text-muted — m2, 5.07:1 on the composer's ground — clearing the
+   3:1 and 2px WCAG 2.4.11 asks of a focus indicator with margin.
+   :has(:focus-visible) scopes it to exactly the users who need it. Re-measure
+   if --text-muted moves: the indicator borrows the token. */
+.app-composer-shell .app-composer-card:has(.app-composer-textarea:focus-visible) {
   border-top-color: var(--text-muted);
   box-shadow: inset 0 1px 0 var(--text-muted);
+}
+
+/* THE RECORDER — while the instrument runs, the baseline records. The brass
+   trace lies ON the composer's top hairline, writing from the left: the most
+   seen line in the product, finally earning its place by recording something.
+   Gated in App.tsx by activeSending, so brass touches the composer only while
+   a run is genuinely live; the mid-run steer/queue/stop controls carry the
+   rest of the running state. */
+/* The recorder's anchor. The card itself clips (overflow: hidden), so the
+   trace hangs off the FileUpload wrapper, which shares the card's exact box
+   and clips nothing. Scoped to the composer: pk-file-upload is a shared
+   primitive and other uses must not gain a positioning context. */
+.app-composer-shell .pk-file-upload {
+  position: relative;
+}
+
+.app-composer-recorder {
+  position: absolute;
+  left: 1.35rem;
+  top: 0;
+  width: 6rem;
+  height: 10px;
+  transform: translateY(-50%);
+  color: var(--accent-live);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.app-composer-recorder path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-write 3.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-composer-recorder path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
 }
 
 .app-composer-card-body {
@@ -7685,8 +9521,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-submit-button {
   border: 0;
-  background: #050505;
-  color: #ffffff;
+  background: var(--primary);
+  color: var(--primary-foreground);
   box-shadow: var(--composer-submit-shadow);
 }
 
@@ -7699,7 +9535,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-composer-submit-button:not(:disabled):hover,
 .app-composer-submit-button:not(:disabled):focus-visible {
-  background: #000000;
+  background: var(--brand-strong);
 }
 
 .app-composer-submit-button:disabled {
@@ -7757,17 +9593,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: 0 10px 22px rgba(146, 37, 37, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
+/* The point of light. Brass themes itself through --accent-live, so the old
+   per-theme ink overrides are gone; the halo token is transparent in Day, so
+   the glow declaration below is a no-op on paper and real at night — glow on
+   a dark ground is the one bloom Meridian permits, because it is the signal,
+   not a surface. Supersedes the CircularLoader spinner (and the rejected
+   "beacon"): a running instrument is marked by light, not by motion. */
 .running-status-pill {
-  --running-status-ink: #111111;
+  --running-status-ink: var(--accent-live);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
   color: var(--running-status-ink);
-}
-
-.dark .running-status-pill {
-  --running-status-ink: #ffffff;
 }
 
 .running-status-pill[data-size="default"] {
@@ -7780,12 +9618,70 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 1rem;
 }
 
-.running-status-pill-loader {
-  color: var(--running-status-ink);
+.running-status-point {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0.5rem var(--accent-live-halo);
+  /* A breath, not a blink: the point never disappears, it dims. ease-in-out
+     is deliberate — this is a continuous indicator (the motion law's spinner
+     exemption), not a surface transition on the house curve. */
+  animation: running-point-breathe 2.8s ease-in-out infinite;
+}
+
+.running-status-pill[data-size="compact"] .running-status-point {
+  width: 0.4rem;
+  height: 0.4rem;
+}
+
+/* The trace — a record being written. It accumulates left to right, holds a
+   beat, and starts a new line; it never loops, because a reasoning trace is a
+   record, not a spinner passing time. pathLength=1 on the SVG normalises the
+   dash math. Brass: thinking is the instrument running. */
+.thinking-bar-trace {
+  width: 1.6rem;
+  height: 0.6rem;
+  flex: 0 0 auto;
+  color: var(--accent-live);
+  overflow: visible;
+}
+
+.thinking-bar-trace path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-write 3.4s ease-in-out infinite;
+}
+
+@keyframes trace-write {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  72%,
+  100% {
+    stroke-dashoffset: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .running-status-pill-loader {
+  .thinking-bar-trace path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes running-point-breathe {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .running-status-point {
     animation: none;
   }
 }
@@ -7800,7 +9696,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 summary {
   cursor: pointer;
   font-weight: 600;
-  color: #1d2f57;
+  color: var(--text-main);
 }
 
 details {
@@ -8099,7 +9995,7 @@ details {
 }
 
 .viewer-workspace-document {
-  background: color-mix(in oklab, var(--bg-main) 97%, #6f8f85 3%);
+  background: color-mix(in oklab, var(--bg-main) 97%, var(--text-muted) 3%);
 }
 
 .viewer-pdf-reader {
@@ -8125,7 +10021,7 @@ details {
   width: 1rem;
   height: 1rem;
   flex: 0 0 auto;
-  color: color-mix(in oklab, var(--text-muted) 78%, #4f8073 22%);
+  color: var(--text-muted);
 }
 
 .viewer-pdf-title {
@@ -8133,9 +10029,9 @@ details {
 }
 
 .viewer-pdf-badge {
-  border-color: color-mix(in oklab, var(--line) 82%, #4f8073 18%);
-  background: color-mix(in oklab, var(--surface-panel) 88%, #4f8073 12%);
-  color: color-mix(in oklab, var(--text-main) 84%, #28594e 16%);
+  border-color: color-mix(in oklab, var(--line) 82%, var(--text-muted) 18%);
+  background: color-mix(in oklab, var(--surface-panel) 88%, var(--text-muted) 12%);
+  color: color-mix(in oklab, var(--text-main) 84%, var(--text-muted) 16%);
 }
 
 .viewer-pdf-actions {
@@ -8148,14 +10044,14 @@ details {
 .viewer-pdf-shell {
   min-height: clamp(520px, 68vh, 920px);
   flex: 1;
-  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, #4f8073 16%);
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, var(--text-muted) 16%);
   border-radius: 8px;
   overflow: hidden;
   background:
     linear-gradient(
       180deg,
-      color-mix(in oklab, var(--surface-panel) 96%, #4f8073 4%),
-      color-mix(in oklab, var(--bg-main) 98%, #536b8f 2%)
+      color-mix(in oklab, var(--surface-panel) 96%, var(--text-muted) 4%),
+      color-mix(in oklab, var(--bg-main) 98%, var(--text-muted) 2%)
     );
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.7),
@@ -8168,7 +10064,7 @@ details {
   height: 100%;
   min-height: clamp(520px, 68vh, 920px);
   border: 0;
-  background: #f8faf9;
+  background: var(--bg-panel-strong);
 }
 
 /* Text / data resource viewer — a calm sibling of the PDF/image viewers.
@@ -8210,6 +10106,7 @@ details {
 .text-viewer-chip {
   flex: 0 0 auto;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.66rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -8341,6 +10238,7 @@ details {
   width: max-content;
   min-width: 100%;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 13px;
   line-height: 22px;
 }
@@ -8370,6 +10268,7 @@ details {
 .text-viewer-pre-wrap {
   margin: 0;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -8477,6 +10376,7 @@ details {
   width: 44px;
   text-align: right;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   color: var(--text-muted);
   background: var(--bg-panel-strong);
 }
@@ -8657,6 +10557,7 @@ details {
 .resource-quick-peek-chip {
   flex: 0 0 auto;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.62rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -8672,6 +10573,7 @@ details {
   overflow: auto;
   padding: 0.6rem 0.75rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 12px;
   line-height: 1.55;
   white-space: pre;
@@ -8699,7 +10601,7 @@ details {
 .viewer-video-shell {
   min-height: clamp(420px, 60vh, 860px);
   flex: 1;
-  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, #4f8073 16%);
+  border: 1px solid color-mix(in oklab, var(--viewer-control-line) 84%, var(--text-muted) 16%);
   border-radius: 8px;
   overflow: hidden;
   background: #05070a;
@@ -8758,6 +10660,15 @@ details {
 .viewer-workspace-surface-2d .viewer-canvas-layout-2d {
   min-height: 0;
   height: 100%;
+}
+
+/* The workspace already gives the active 2D panel its remaining height. Let the
+   canvas honor that allocation instead of applying the standalone 64vh floor:
+   on shorter viewports the floor overflowed the panel and covered the caption
+   and channel controls below it. */
+.viewer-workspace-surface-2d .viewer-canvas-shell-2d {
+  height: 100%;
+  min-height: 0;
 }
 
 /* The non-volume 2D wrapper is otherwise a bare block, so the canvas-shell wouldn't
@@ -9364,7 +11275,11 @@ details {
 }
 
 .viewer-direct-image-error {
-  color: color-mix(in oklab, var(--accent-strong) 84%, white 16%);
+  /* Glass island (always-dark, sits on imagery), so the danger tint is a
+     literal like its siblings. The previous --accent-strong reference had no
+     fallback and no definition anywhere — an invalid colour silently
+     inheriting currentColor, the same failure --line-strong once shipped. */
+  color: color-mix(in oklab, #d45e5e 70%, white 30%);
   background: rgba(28, 15, 17, 0.78);
   border: 1px solid rgba(255, 120, 120, 0.24);
 }
@@ -9386,7 +11301,7 @@ details {
   height: 100%;
   width: 0;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--accent-strong, #6aa9ff) 80%, white 20%);
+  background: var(--accent-live);
   transition: width 120ms ease-out;
 }
 
@@ -9508,6 +11423,10 @@ details {
 .viewer-display-controls-direct {
   grid-template-columns: minmax(180px, 260px) repeat(auto-fit, minmax(150px, 1fr));
   align-items: center;
+}
+
+.viewer-display-controls-channels {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .viewer-display-controls-stack {
@@ -10130,10 +12049,10 @@ details {
   display: inline-flex;
   align-items: center;
   padding: 0.05rem 0.42rem;
-  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border: 1px solid color-mix(in oklab, var(--status-warn) 38%, var(--line));
   border-radius: 999px;
-  background: color-mix(in oklab, #b45309 16%, transparent);
-  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  background: color-mix(in oklab, var(--status-warn) 16%, transparent);
+  color: color-mix(in oklab, var(--status-warn) 72%, var(--text-main));
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -10243,6 +12162,7 @@ details {
   margin: 0;
   color: var(--text-main);
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.78rem;
   line-height: 1.3;
 }
@@ -10266,6 +12186,7 @@ details {
   padding-inline: 0.5rem;
   color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.68rem;
   line-height: 1;
 }
@@ -10431,6 +12352,7 @@ details {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.4rem;
+  min-width: 0;
 }
 
 .viewer-channel-chip {
@@ -10446,6 +12368,10 @@ details {
     opacity var(--motion-fast, 160ms) var(--motion-ease),
     border-color var(--motion-fast, 160ms) var(--motion-ease),
     background var(--motion-fast, 160ms) var(--motion-ease);
+}
+
+.viewer-channel-chip[data-disabled="true"] {
+  opacity: 0.48;
 }
 
 .viewer-channel-chip[data-active="true"] {
@@ -10542,6 +12468,306 @@ details {
   border-radius: 6px;
   background: transparent;
   cursor: pointer;
+}
+
+/* High-dimensional imagery keeps only the active signals in the resting UI. The
+   complete channel catalog opens as an opaque, fullscreen-safe dialog and its DOM
+   stays bounded by a small virtual window, so hundreds of spectral bands cannot
+   collapse the image stage or create a document-height scrollbar. */
+.viewer-channel-controls-bounded {
+  align-items: center;
+}
+
+.viewer-channel-browser-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 1.8rem;
+  padding: 0 0.62rem;
+  border: 1px solid var(--viewer-control-line, var(--line));
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--surface-panel) 82%, white 10%);
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    border-color var(--motion-fast, 160ms) var(--motion-ease),
+    background var(--motion-fast, 160ms) var(--motion-ease);
+}
+
+.viewer-channel-browser-trigger:hover,
+.viewer-channel-browser-trigger[data-state="open"] {
+  border-color: color-mix(in oklab, var(--text-main) 30%, var(--line));
+  background: color-mix(in oklab, var(--surface-panel) 72%, white 16%);
+}
+
+.viewer-channel-browser-trigger:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 34%, transparent);
+  outline-offset: 2px;
+}
+
+.viewer-channel-browser-trigger svg {
+  width: 0.82rem;
+  height: 0.82rem;
+  color: var(--text-muted);
+  transition: transform 140ms var(--motion-ease);
+}
+
+.viewer-channel-browser-trigger[data-state="open"] svg {
+  transform: rotate(180deg);
+}
+
+.viewer-channel-browser-count {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.viewer-channel-browser-dialog {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, auto) auto;
+  gap: 0.65rem;
+  width: min(30rem, calc(100vw - 2rem));
+  max-width: 30rem;
+  max-height: calc(100dvh - 2rem);
+  padding: 0.85rem;
+  overflow: hidden;
+  border-color: var(--viewer-control-line, var(--line));
+  background: var(--background);
+  color: var(--text-main);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.viewer-channel-browser-dialog [data-slot="dialog-close"] {
+  top: 0.7rem;
+  right: 0.7rem;
+  display: inline-grid;
+  width: 1.8rem;
+  height: 1.8rem;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--text-muted);
+}
+
+.viewer-channel-browser-head,
+.viewer-channel-browser-foot {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  text-align: left;
+}
+
+.viewer-channel-browser-head {
+  padding-right: 2.25rem;
+}
+
+.viewer-channel-browser-head > div {
+  display: grid;
+  gap: 0.16rem;
+}
+
+.viewer-channel-browser-head [data-slot="dialog-title"] {
+  margin: 0;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  font-weight: var(--font-weight-label);
+  line-height: 1.25;
+}
+
+.viewer-channel-browser-head [data-slot="dialog-description"],
+.viewer-channel-browser-foot,
+.viewer-channel-browser-total {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.viewer-channel-browser-total {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-channel-search {
+  position: relative;
+  display: block;
+}
+
+.viewer-channel-search > svg {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 0.62rem;
+  width: 0.9rem;
+  height: 0.9rem;
+  color: var(--text-muted);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.viewer-channel-search [data-slot="input"] {
+  height: 2.05rem;
+  padding-left: 2rem;
+  border-color: var(--viewer-control-line, var(--line));
+  background: color-mix(in oklab, var(--background) 95%, var(--foreground) 5%);
+  font-size: 0.76rem;
+}
+
+.viewer-channel-browser-viewport {
+  position: relative;
+  width: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  max-height: clamp(7rem, calc(100dvh - 12rem), 20rem);
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--background) 97%, var(--foreground) 3%);
+  scrollbar-width: none;
+}
+
+.viewer-channel-browser-viewport::-webkit-scrollbar {
+  display: none;
+}
+
+.viewer-channel-browser-viewport:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 28%, transparent);
+  outline-offset: 1px;
+}
+
+.viewer-channel-browser-spacer {
+  position: relative;
+  width: 100%;
+}
+
+.viewer-channel-browser-row {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.48rem;
+  height: var(--viewer-channel-row-height);
+  padding: 0.24rem 0.22rem;
+  border-radius: 6px;
+}
+
+.viewer-channel-browser-row:hover,
+.viewer-channel-browser-row[data-active="true"] {
+  background: color-mix(in oklab, var(--background) 90%, var(--foreground) 10%);
+}
+
+.viewer-channel-browser-row[data-disabled="true"] {
+  opacity: 0.48;
+}
+
+.viewer-channel-browser-row > button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  height: 100%;
+  padding: 0 0.34rem;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.viewer-channel-browser-row > button:disabled {
+  cursor: not-allowed;
+}
+
+.viewer-channel-browser-row[data-active="true"] > button {
+  color: var(--text-main);
+}
+
+.viewer-channel-browser-row > button:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--text-main) 30%, transparent);
+  outline-offset: -2px;
+  border-radius: 5px;
+}
+
+.viewer-channel-browser-row > button > svg {
+  flex: 0 0 auto;
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+.viewer-channel-browser-label {
+  display: flex;
+  flex: 1;
+  align-items: baseline;
+  gap: 0.38rem;
+  min-width: 0;
+  font-size: 0.77rem;
+  font-weight: var(--font-weight-action);
+}
+
+.viewer-channel-browser-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-channel-browser-label small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-weight: var(--font-weight-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-channel-browser-index {
+  flex: 0 0 auto;
+  color: color-mix(in oklab, var(--text-muted) 76%, transparent);
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-channel-browser-color {
+  flex: 0 0 auto;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  border: 1px solid color-mix(in oklab, var(--text-main) 24%, transparent);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.viewer-channel-browser-swatch {
+  flex: 0 0 auto;
+  margin-inline: 0.2rem 0.04rem;
+}
+
+.viewer-channel-browser-empty {
+  display: grid;
+  min-height: 4.5rem;
+  place-items: center;
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.viewer-channel-browser-foot {
+  min-height: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .viewer-channel-browser-dialog {
+    width: calc(100vw - 1.25rem);
+    max-height: calc(100dvh - 1.25rem);
+    padding: 0.75rem;
+  }
 }
 
 /* Slider field (Z / Time / Window): label + tabular counter on one line, the
@@ -11098,7 +13324,7 @@ details {
 }
 
 .dark .chat-message-action:hover:not(:disabled) {
-  /* rgba(12,12,12,0.1) is invisible on a #1b1b1d panel. */
+  /* rgba(12,12,12,0.1) is invisible on a #151719 panel. */
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.45);
 }
 
@@ -11294,7 +13520,7 @@ details {
 }
 
 .chat-steering-eyebrow[data-steering="missed"] {
-  color: color-mix(in oklab, var(--warning, #a16207) 70%, var(--text-main) 30%);
+  color: color-mix(in oklab, var(--status-warn) 70%, var(--text-main) 30%);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -11521,6 +13747,7 @@ details {
 .bisque-link-preview-copy span {
   color: var(--text-soft);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, monospace);
+  font-weight: var(--font-weight-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -11812,11 +14039,12 @@ details {
 }
 
 .pk-inline-code {
-  background: var(--muted);
-  color: var(--foreground);
+  background: var(--inline-code-bg);
+  color: var(--inline-code-ink);
   border-radius: 0.375rem;
   padding: 0.05rem 0.32rem;
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
   font-size: 0.88em;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -11845,6 +14073,7 @@ details {
 
 .pk-code-render :where(pre, code) {
   font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-weight: var(--font-weight-mono);
 }
 
 .pk-code-render :where(code) {
@@ -11956,7 +14185,10 @@ details {
    the reduced-motion variant is a static frame (handled in-component). */
 .thinking-constellation {
   display: block;
-  color: var(--text-muted);
+  /* Brass, not muted ink: live thinking IS the reserved meaning of
+     --accent-live, and the constellation only renders while the instrument
+     is working. The canvas reads currentColor, so the token themes it. */
+  color: var(--accent-live);
 }
 
 @media (max-width: 640px) {
@@ -12304,33 +14536,80 @@ details {
 }
 
 .dark {
-  --bg-page: #0f0f10;
-  --bg-panel: rgba(30, 30, 32, 0.88);
-  --bg-panel-strong: #1b1b1d;
-  --bg-main: #111113;
-  --text-main: #f5f5f5;
-  --text-muted: #a1a1aa;
-  --line: rgba(255, 255, 255, 0.14);
-  /* Hover/active hairline step (see the light-block note). Not a straight
-     doubling here: light-on-dark strokes read brighter than dark-on-light at
-     equal offset (the composer-placeholder lesson below), so 0.14 → 0.24
-     lands the same perceived step as light's 0.08 → 0.16. */
-  --line-strong: rgba(255, 255, 255, 0.24);
-  --brand: #f5f5f5;
-  --brand-strong: #ffffff;
-  --account-avatar-fill: #f5f5f5;
-  --account-avatar-foreground: #111113;
-  --activity-heatmap-1: #3f3f46;
-  --activity-heatmap-2: #71717a;
-  --activity-heatmap-3: #a1a1aa;
-  --activity-heatmap-4: #d4d4d8;
+  /* ══ MERIDIAN DRIFT · NIGHT ════════════════════════════════════════════
+     The deep field. Same language as Day, same derivation, opposite
+     direction: signal falls off toward the ground instead of toward paper.
+
+     THE MAGNITUDE LADDER — the SAME 1.80x contrast step as Day, re-solved
+     against this ground rather than inverted from it:
+
+       m0  #DCE3EA  14.95:1  body ink
+       m1  #A5ABB0   8.34:1  secondary / navigation
+       m2  #777C82   4.60:1  tertiary — the LAST legible step
+       m3  #505559   2.57:1  large text and UI edges only
+       m4  #2B2E32   1.42:1  hairlines and graticule, never text
+
+     Baffle black, not black: the ground keeps a channel spread of 6 because
+     optical flock genuinely is slightly cool, but the chrome above it is held
+     to 4–5. An earlier cut ran spread 12–16 and the sidebar read as a blue
+     PANEL rather than as black. The one thing still strongly chromatic is the
+     data palette, which is the only thing allowed to be. ════════════════ */
+  --bg-page: #090b0d;
+  --bg-panel: rgba(21, 23, 25, 0.88);
+  --bg-panel-strong: #151719;
+  --bg-main: #0b0e11;
+  /* m0. Plate silver, not #ffffff: pure white on a dark ground blooms, the
+     halation is worse on OLED, and it makes a long read tiring. 14.95:1 is
+     already more contrast than the reading surface needs. */
+  --text-main: #dce3ea;
+  /* m1, the named rung — see the light block. 8.34:1 on this ground. */
+  --text-secondary: #a5abb0;
+  /* m2 — the last rung that can legally hold text. 4.60:1. */
+  --text-muted: #777c82;
+  --line: rgba(220, 227, 234, 0.12);
+  /* Hover/active hairline step (see the light-block note). Resolves to #393d41
+     over --bg-main, one rung past m4 — the same ladder relationship Day has,
+     which is why both blocks can now carry the same alpha pair instead of the
+     hand-tuned offsets this token used to need. */
+  --line-strong: rgba(220, 227, 234, 0.22);
+  --brand: #dce3ea;
+  --brand-strong: #eef3f8;
+  --account-avatar-fill: #dce3ea;
+  --account-avatar-foreground: #0b0e11;
+  /* Sequential ramp, running the ladder m4 -> m1 (see the light block). */
+  --activity-heatmap-1: #2b2e32;
+  --activity-heatmap-2: #505559;
+  --activity-heatmap-3: #777c82;
+  --activity-heatmap-4: #a5abb0;
   --status-success: #6ee7b7;
-  --selection-bg: #3f3f46;
-  --selection-fg: #f5f5f5;
-  --shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
-  --viewer-bg: #2a2a2f;
-  --viewer-panel-bg: rgba(30, 30, 34, 0.92);
-  --composer-control-hover-bg: color-mix(in srgb, var(--bg-main) 74%, rgba(255, 255, 255, 0.12) 26%);
+  /* Warning at night: lifted orange, 6.50:1 on this ground — and measurably
+     DARKER than brass (luminance 0.30 vs 0.52), so a pending badge can never
+     be mistaken for a running instrument at a glance. */
+  --status-warn: #d97f3e;
+  /* Dark never defined its own danger — it inherited light's #c62828, which
+     measures 3.44:1 on this ground: sub-AA error text for the theme's whole
+     life. Lifted along the #c62828 -> white line to the first stop clearing
+     AA on BOTH surfaces it sits on: 5.13:1 on --bg-main, 4.76:1 on
+     --bg-panel-strong. */
+  --danger: #d45e5e;
+  /* The point of light, at full brass — see the light block for the
+     reservation. 10.50:1 on this ground. */
+  --accent-live: #e8b84b;
+  /* Night is where halation is real: the glow around a running marker is the
+     one bloom the theme permits, because it is the signal, not a surface. */
+  --accent-live-halo: color-mix(in srgb, var(--accent-live) 45%, transparent);
+  --bg-sunk: #0d1012;
+  --selection-bg: #2b2e32;
+  --selection-fg: #dce3ea;
+  --shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+  /* NATIVE here, and this is the one place the two grounds genuinely diverge.
+     Day has to carve the viewer out and hold it neutral because a light
+     surround biases greyscale judgement; Night does not, because a dark
+     surround is the radiology and microscopy convention for exactly that
+     reason. The screen that fights the language in Day is at home in Night. */
+  --viewer-bg: #08090b;
+  --viewer-panel-bg: rgba(21, 23, 25, 0.92);
+  --composer-control-hover-bg: color-mix(in oklab, var(--bg-main) 92%, var(--text-main) 8%);
   /* Fades toward the panel it sits on, NOT toward white — mixing with white on
      a dark surface brightens a hint rather than dimming it (this token once
      measured 8.16:1 while muted body text was 6.71:1, i.e. the placeholder was
@@ -12341,25 +14620,30 @@ details {
      Matching raw contrast ratio instead would have made this look dimmer than
      its light counterpart. */
   --composer-placeholder: color-mix(in oklab, var(--text-muted) 50%, var(--bg-panel-strong) 50%);
-  --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --composer-submit-shadow: 0 12px 24px rgba(0, 0, 0, 0.38), inset 0 1px 0 rgba(220, 227, 234, 0.06);
+  /* Wired to the house tokens, the way light already was. The light block's
+     note asked for exactly this if dark were ever retuned — two palettes for
+     one job is how a theme drifts, and this pass retunes dark, so the second
+     palette goes away rather than being edited alongside. */
+  --background: var(--bg-main);
+  --foreground: var(--text-main);
+  --card: var(--bg-panel-strong);
+  --card-foreground: var(--text-main);
+  --popover: var(--bg-panel-strong);
+  --popover-foreground: var(--text-main);
+  --primary: var(--brand);
+  --primary-foreground: var(--bg-main);
+  --secondary: #1a1d20;
+  --secondary-foreground: var(--text-main);
+  --muted: #1a1d20;
+  --muted-foreground: var(--text-muted);
+  --accent: #1a1d20;
+  --accent-foreground: var(--text-main);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: #1b1e22;
+  --input: #24282b;
+  /* m2, matching Day: a focus ring owes 3:1 and m3 measures 2.57:1. */
+  --ring: #777c82;
   /* Ultra brand data palette (dark) — same hue per index as light; only L/C shift. */
   --chart-1: oklch(0.660 0.161 256.5); /* blue        #4a92f2 */
   --chart-2: oklch(0.665 0.169 42.0);  /* terracotta  #e66933 */
@@ -12369,30 +14653,37 @@ details {
   --chart-6: oklch(0.585 0.169 304.6); /* violet      #935ccb */
   --chart-7: oklch(0.662 0.150 145.1); /* green       #4eaa55 */
   --chart-8: oklch(0.800 0.016 260.7); /* graphite    #b8bec8 */
-  --chart-grid: rgba(255, 255, 255, 0.10);
-  --chart-axis: rgba(255, 255, 255, 0.24);
-  --chart-label: #a1a1aa;
-  --chart-title: #f5f5f5;
+  --chart-grid: rgba(220, 227, 234, 0.10);
+  --chart-axis: rgba(220, 227, 234, 0.24);
+  --chart-label: #777c82;
+  --chart-title: #dce3ea;
   --chart-seq-1: #16223b; --chart-seq-2: #1f3a63; --chart-seq-3: #2f5991;
   --chart-seq-4: #4f7cbb; --chart-seq-5: #7ba0da; --chart-seq-6: #a8c4ec;
   --chart-seq-7: #d3e2f8;
   --chart-div-1: #6294d8; --chart-div-2: #47709f; --chart-div-3: #3a5069;
   --chart-div-mid: #3a3936; --chart-div-5: #7a4f3e; --chart-div-6: #b06f52;
   --chart-div-7: #d17956;
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  /* Recedes from the canvas, same as Day — in Night that means one step
+     BRIGHTER than the ground, since the ground is the dark end here. */
+  --sidebar: #0f1214;
+  /* m1, re-solved against the sidebar's own ground: 8.04:1. Dark previously
+     ran its Recents at full white, i.e. it never got the quiet-sidebar split
+     that light shipped — so this both applies the ladder and closes that
+     asymmetry. m2 was rejected for the same reason as in Day: 4.46:1 on this
+     ground is a hair under AA for the 14px/500 row labels. */
+  --sidebar-foreground: #a5abb0;
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: var(--bg-main);
+  --sidebar-accent: #1a1d20;
   /* Dark's half of the ink-goes-crisp promise. The rules that darken a hovered
-     sidebar row in light theme brighten it here, so this MUST be defined for
-     both themes — an undefined var() makes `color` invalid at computed-value
-     time and the row silently inherits instead. One step past dark's
-     --text-main (#f5f5f5), the same way #0a0a0a sits past light's. */
-  --sidebar-ink-hover: #ffffff;
+     sidebar row in Day brighten it here, so this MUST be defined for both
+     themes — an undefined var() makes `color` invalid at computed-value time
+     and the row silently inherits instead. One step past --text-main, and not
+     #ffffff: the ink avoids pure white to stop bloom, so its hover must too. */
+  --sidebar-ink-hover: #eef3f8;
   --sidebar-accent-foreground: var(--sidebar-ink-hover);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --sidebar-border: #1b1e22;
+  --sidebar-ring: #777c82;
   --collapsed-sidebar-bg: color-mix(in oklab, var(--sidebar) 94%, var(--background) 6%);
   --collapsed-sidebar-popover-bg: color-mix(in oklab, var(--popover) 92%, var(--background) 8%);
   --collapsed-sidebar-popover-shadow: 0 28px 70px rgba(0, 0, 0, 0.42), 0 8px 24px rgba(0, 0, 0, 0.24);
@@ -13022,10 +15313,10 @@ details {
   display: inline-flex;
   align-items: center;
   padding: 0.05rem 0.42rem;
-  border: 1px solid color-mix(in oklab, #b45309 38%, var(--line));
+  border: 1px solid color-mix(in oklab, var(--status-warn) 38%, var(--line));
   border-radius: 999px;
-  background: color-mix(in oklab, #b45309 16%, transparent);
-  color: color-mix(in oklab, #b45309 72%, var(--text-main));
+  background: color-mix(in oklab, var(--status-warn) 16%, transparent);
+  color: color-mix(in oklab, var(--status-warn) 72%, var(--text-main));
   font-size: 11px;
   font-weight: 600;
   line-height: 1.4;
@@ -13286,7 +15577,7 @@ summary:hover,
 .token-heatmap-mode:hover,
 .figure-lightbox-thumb:hover,
 .viewer-channel-chip:hover,
-.blank-chat-usage-strip:hover,
+.welcome-usage-link:hover,
 .resource-quick-peek-trigger:hover,
 .viewer-chrome-fade:hover {
   transition-duration: 60ms;

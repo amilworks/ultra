@@ -249,6 +249,8 @@ import type {
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
+import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
+import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -294,9 +296,12 @@ import {
   FolderOpen,
   FileUp,
   FolderUp,
+  History,
   ImageIcon,
   Images,
+  Layers,
   Link2,
+  NotebookPen,
   Pencil,
   Plus,
   PlusIcon,
@@ -351,7 +356,7 @@ type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
 type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
-type ActivePanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
+type ActivePanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 type ComposerIntelligenceMode = "high" | "pro";
 type BisqueResourceCounts = {
   image: number;
@@ -537,6 +542,7 @@ const LazyResourceBrowser = lazyNamed(
   loadResourceBrowserModule,
   "ResourceBrowser"
 );
+const LazyNotesPage = lazyNamed(() => import("./components/NotesPage"), "NotesPage");
 const LazyComposerSlashMenu = lazyNamed(
   loadComposerSlashMenuModule,
   "ComposerSlashMenu"
@@ -1039,6 +1045,7 @@ const browserPreviewExtensions = new Set([
 
 const NEW_CHAT_SHORTCUT_KEY = "k";
 const RESOURCES_SHORTCUT_KEY = "e";
+const NOTES_SHORTCUT_KEY = "u";
 const TRAINING_SHORTCUT_KEY = "t";
 const GO_TO_BISQUE_SHORTCUT_KEY = "o";
 
@@ -2578,6 +2585,7 @@ const ConversationTranscript = memo(
               </div>
             ) : (
               <div className="blank-chat-welcome">
+                <MeridianField />
                 <div className="blank-chat-welcome-greeting">
                   {welcomeName ? (
                     <p className="blank-chat-welcome-eyebrow">
@@ -2586,50 +2594,6 @@ const ConversationTranscript = memo(
                   ) : null}
                   <h2 className="blank-chat-welcome-hero">{welcomePrompt}</h2>
                 </div>
-                <details className="blank-chat-usage-disclosure">
-                  <summary className="blank-chat-usage-strip">
-                    {blankChatTokenUsage?.summary ? (
-                      <span className="blank-chat-usage-strip-stats">
-                        <span>
-                          <strong>
-                            {formatTokens(
-                              blankChatTokenUsage.summary.lifetime_total_tokens
-                            )}
-                          </strong>{" "}
-                          tokens
-                        </span>
-                        <span className="blank-chat-usage-strip-dot" aria-hidden>
-                          ·
-                        </span>
-                        <span>
-                          <strong>
-                            {blankChatTokenUsage.summary.current_streak_days}-day
-                          </strong>{" "}
-                          streak
-                        </span>
-                        <span className="blank-chat-usage-strip-dot" aria-hidden>
-                          ·
-                        </span>
-                      </span>
-                    ) : null}
-                    <span className="blank-chat-usage-strip-toggle">
-                      View usage
-                      <ChevronDown
-                        className="blank-chat-usage-strip-chevron size-4"
-                        aria-hidden
-                      />
-                    </span>
-                  </summary>
-                  <div className="blank-chat-usage-disclosure-body">
-                    <UserTokenUsagePanel
-                      tokenUsage={blankChatTokenUsage}
-                      loading={blankChatUsageLoading}
-                      error={blankChatUsageError}
-                      className="blank-chat-usage-panel"
-                      density="compact"
-                    />
-                  </div>
-                </details>
               </div>
             )}
           </div>
@@ -6879,6 +6843,13 @@ export function App() {
     setResourceRefreshToken((value) => value + 1);
   }, [rememberActiveConversationScrollPosition]);
 
+  const openNotesPanel = useCallback((): void => {
+    rememberActiveConversationScrollPosition();
+    setActivePanel("notes");
+    setViewerOpen(false);
+    setResourceViewerContext(null);
+  }, [rememberActiveConversationScrollPosition]);
+
   const openTrainingPanel = useCallback((): void => {
     rememberActiveConversationScrollPosition();
     setActivePanel("training");
@@ -6921,6 +6892,8 @@ export function App() {
           ? createNewConversation
           : key === RESOURCES_SHORTCUT_KEY
             ? openResourcesPanel
+            : key === NOTES_SHORTCUT_KEY
+              ? openNotesPanel
             : key === TRAINING_SHORTCUT_KEY
               ? openTrainingPanel
             : key === GO_TO_BISQUE_SHORTCUT_KEY
@@ -6941,6 +6914,7 @@ export function App() {
     authStatus,
     createNewConversation,
     openBisqueHome,
+    openNotesPanel,
     openResourcesPanel,
     openTrainingPanel,
   ]);
@@ -10360,7 +10334,7 @@ export function App() {
     setPendingBulkResourceDelete(resourcesToDelete);
   };
 
-  const uploadPendingFiles = async (
+  const uploadPendingFiles = useCallback(async (
     conversationId: string,
     pendingFilesSnapshot: File[],
     existingUploadedFiles: UploadedFileRecord[]
@@ -10426,7 +10400,7 @@ export function App() {
       allUploadedFiles: merged,
       newlyUploadedFiles: response.uploaded,
     };
-  };
+  }, [apiClient, updateConversation]);
 
   const handleCopy = useCallback(async (value: string, feedbackKey?: string): Promise<void> => {
     if (!navigator.clipboard) {
@@ -12611,6 +12585,13 @@ export function App() {
     }
     const steerId = `steer_${makeId()}`;
     const conversationId = conversation.id;
+    // Attachments steer WITH the text: snapshot the pending files now, upload
+    // them first, and stamp their ids onto the steer itself — a steer that
+    // says "use this image" while the image stays behind in the composer was
+    // the exact live failure this flow replaces.
+    const pendingFilesSnapshot = conversation.pendingFiles;
+    const uploadedFilesSnapshot = conversation.uploadedFiles;
+    const uploadedFileNames = pendingFilesSnapshot.map((file) => file.name);
     setActivePromptValue("");
     updateConversation(conversationId, (current) => {
       const message: UiMessage = {
@@ -12620,6 +12601,7 @@ export function App() {
         createdAt: Date.now(),
         steering: "pending",
         steerId,
+        uploadedFileNames: uploadedFileNames.length > 0 ? uploadedFileNames : undefined,
       };
       const messages = [...current.messages];
       const insertAt = current.streamingMessageId
@@ -12632,8 +12614,37 @@ export function App() {
       }
       return { ...current, updatedAt: Date.now(), messages };
     });
-    void apiClient
-      .steerRun(runId, { steerId, text })
+    void (async () => {
+      let fileIds: string[] = [];
+      if (pendingFilesSnapshot.length > 0) {
+        try {
+          const uploadResult = await uploadPendingFiles(
+            conversationId,
+            pendingFilesSnapshot,
+            uploadedFilesSnapshot
+          );
+          fileIds = uploadResult.newlyUploadedFiles.map((file) => file.file_id);
+        } catch (uploadError) {
+          // Never send a partial steer: with the upload failed, withdraw the
+          // optimistic row and hand the text back to the draft. The files are
+          // still selected, so the user's retry re-sends both together.
+          updateConversation(conversationId, (current) => ({
+            ...current,
+            updatedAt: Date.now(),
+            messages: current.messages.filter((item) => item.steerId !== steerId),
+            chatError:
+              uploadError instanceof Error
+                ? `Attachment upload failed — ${uploadError.message}`
+                : "Attachment upload failed.",
+          }));
+          setActivePromptValue((previous) =>
+            previous.trim() ? `${previous.replace(/\s+$/, "")}\n\n${text}` : text
+          );
+          return;
+        }
+      }
+      return apiClient
+      .steerRun(runId, { steerId, text, fileIds })
       .then((record) => {
         // Adopt the durable transcript row id so live steer.* events and the
         // next hydration converge on one message.
@@ -12699,6 +12710,7 @@ export function App() {
           );
         }
       });
+    })();
   }, [
     activeConversation,
     activePrompt,
@@ -12708,6 +12720,7 @@ export function App() {
     setActivePromptValue,
     slashMenuOpen,
     updateConversation,
+    uploadPendingFiles,
   ]);
 
   /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn
@@ -12833,11 +12846,44 @@ export function App() {
       })).filter((group) => group.conversations.length > 0),
     [historyItems]
   );
+  /* Welcome stage: an empty, hydrated desktop chat composes hero + composer +
+     starters as one centered cluster (the phone hero is already
+     composer-forward, and thumb reach wants the phone composer docked). The
+     flag flips off the instant the optimistic user message lands — that
+     reflow IS the composer re-docking; one composer instance, no remount,
+     draft and focus survive. */
+  const welcomeStageActive =
+    activePanel === "chat" &&
+    !isPhoneView &&
+    activeConversationHydrated &&
+    activeMessages.length === 0;
+  const welcomeStarterConversation = useMemo(
+    () =>
+      historyItems.find(
+        (item) => item.id !== activeConversationId && item.title.trim().length > 0
+      ) ?? null,
+    [historyItems, activeConversationId]
+  );
+  const startDashboardDraft = useCallback((): void => {
+    setActivePromptValue("Build an interactive dashboard from my data: ");
+    focusComposerTextarea();
+  }, [focusComposerTextarea, setActivePromptValue]);
+  /* The hero asks a question; the keyboard should already be the answer.
+     Re-fires per conversation so switching into any empty chat lands typing-
+     ready, exactly like the New-chat action feels. */
+  useEffect(() => {
+    if (welcomeStageActive) {
+      focusComposerTextarea();
+    }
+  }, [welcomeStageActive, activeConversationId, focusComposerTextarea]);
+
   // Contextual title for the mobile top bar: the panel name, or the active
   // conversation's title once it has a real exchange (else the shared app wordmark).
   const mobileShellTitle =
     activePanel === "resources"
       ? "Resources"
+      : activePanel === "notes"
+        ? "Notes"
       : activePanel === "training"
         ? "Training"
         : activePanel === "admin"
@@ -12973,6 +13019,30 @@ export function App() {
                   </kbd>
                   <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
                     E
+                  </kbd>
+                </span>
+              </Button>
+              <Button
+                variant={activePanel === "notes" ? "secondary" : "ghost"}
+                className="app-resource-browser-button group/notes mb-1 flex w-full items-center justify-between gap-2"
+                onClick={openNotesPanel}
+                title="Notes (⌘+Shift+U)"
+                aria-keyshortcuts="Control+Shift+U Meta+Shift+U"
+                {...mobileSidebarCloseProps}
+              >
+                <span className="flex items-center gap-2">
+                  <NotebookPen className="size-4" />
+                  <span>Notes</span>
+                </span>
+                <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/notes:opacity-100">
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    ⌘
+                  </kbd>
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    ⇧
+                  </kbd>
+                  <kbd className="bg-muted border-border/70 inline-flex h-5 min-w-5 items-center justify-center rounded border px-1 font-medium leading-none">
+                    U
                   </kbd>
                 </span>
               </Button>
@@ -13282,6 +13352,7 @@ export function App() {
         <main
           ref={setMainShellElement}
           className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden"
+          data-welcome-stage={welcomeStageActive ? "true" : undefined}
           /* Split-mode report canvas: the attribute flips the shell from a
              column into a named-area grid (bar / stage+canvas / composer),
              so the canvas gets a real column without re-nesting the chat
@@ -13496,7 +13567,7 @@ export function App() {
                 }}
                 onClearActiveCollection={clearActiveResourceCollection}
                 thumbnailUrlFor={(resource: ResourceRecord) =>
-                  apiClient.resourceThumbnailUrl(resource.file_id)
+                  apiClient.resourceThumbnailUrl(resource)
                 }
                 zScrubThumbnail={{
                   // Gallery scrub is a transient thumbnail (never measured), so request
@@ -13532,6 +13603,17 @@ export function App() {
                 onPushResourceToBisque={bisqueNavLinks ? pushResourceToBisque : undefined}
                 onPushCollectionToBisque={bisqueNavLinks ? pushCollectionToBisque : undefined}
               />
+            </Suspense>
+          ) : activePanel === "notes" ? (
+            <Suspense
+              fallback={
+                <PanelLoadingState
+                  title="Loading notes..."
+                  subtitle="Your notes stay out of the main bundle until you open them."
+                />
+              }
+            >
+              <LazyNotesPage apiClient={apiClient} />
             </Suspense>
           ) : activePanel === "training" ? (
             <Suspense
@@ -13667,6 +13749,7 @@ export function App() {
               composerScrolledAway && !activeSending ? "true" : undefined
             }
             data-composer-slim={
+              !welcomeStageActive &&
               activeConversationHydrated &&
               !activeSending &&
               !composerPromptOverflows &&
@@ -13677,6 +13760,7 @@ export function App() {
                 : undefined
             }
             data-composer-idle={
+              !welcomeStageActive &&
               activeConversationHydrated &&
               !activeSending &&
               activePrompt.trim().length === 0 &&
@@ -13707,6 +13791,15 @@ export function App() {
                 multiple
                 allowDirectories
               >
+                {/* The recorder: while the instrument runs, the composer's
+                    baseline carries the trace — the one moment brass may touch
+                    this control. It lives on the FileUpload wrapper, NOT inside
+                    the card: the card clips (overflow: hidden), and a trace
+                    centred on the border loses every upward peak to that clip —
+                    it shipped once as a flat line with a single dip. */}
+                {activeSending ? (
+                  <RecorderTraceIcon className="app-composer-recorder" />
+                ) : null}
                 <PromptInput
                   /* Hydration is the ONLY thing that disables typing. Folding
                      activeSending in here disabled the textarea for the whole
@@ -14388,6 +14481,55 @@ export function App() {
               </FileUpload>
             </div>
           </div>
+          {welcomeStageActive ? (
+            <div className="welcome-starters">
+              {welcomeStarterConversation ? (
+                <button
+                  type="button"
+                  className="welcome-starter-chip"
+                  onClick={() => openHistoryItem(welcomeStarterConversation)}
+                >
+                  <History aria-hidden="true" />
+                  <span className="welcome-starter-label">
+                    Continue “{welcomeStarterConversation.title}”
+                  </span>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="welcome-starter-chip"
+                onClick={startDashboardDraft}
+              >
+                <Table2 aria-hidden="true" />
+                <span className="welcome-starter-label">
+                  Build a dashboard from your data
+                </span>
+              </button>
+              <button
+                type="button"
+                className="welcome-starter-chip"
+                onClick={openScientificViewerPanel}
+              >
+                <Layers aria-hidden="true" />
+                <span className="welcome-starter-label">Open an image in Lens</span>
+              </button>
+              <details className="welcome-usage-disclosure">
+                <summary className="welcome-usage-link">
+                  View usage
+                  <ChevronDown className="welcome-usage-chevron size-4" aria-hidden />
+                </summary>
+                <div className="welcome-usage-body">
+                  <UserTokenUsagePanel
+                    tokenUsage={blankChatTokenUsage}
+                    loading={blankChatUsageLoading}
+                    error={blankChatUsageError}
+                    className="blank-chat-usage-panel"
+                    density="compact"
+                  />
+                </div>
+              </details>
+            </div>
+          ) : null}
           {reportCanvasVisible && activeReportCanvasVersions ? (
             <Suspense fallback={null}>
               <LazyReportCanvas

@@ -26,6 +26,15 @@ export function useThemePreference(themePreference: ThemePreference): "light" | 
         shouldUseDark ? "dark" : "light"
       );
       document.body.setAttribute("data-theme", shouldUseDark ? "dark" : "light");
+      // Browser-chrome tint. The media-scoped metas in index.html cover the
+      // OS-driven case before hydration; an explicit in-app choice has to
+      // override BOTH of them, media attribute and all, or an OS-light device
+      // set to Dark keeps a paper-white address bar. Grounds, not hexes from
+      // anywhere else: these are --bg-main in each theme block.
+      const ground = shouldUseDark ? "#0b0e11" : "#f2f3f3";
+      document
+        .querySelectorAll('meta[name="theme-color"]')
+        .forEach((meta) => meta.setAttribute("content", ground));
       setResolvedTheme(shouldUseDark ? "dark" : "light");
     };
     applyTheme();

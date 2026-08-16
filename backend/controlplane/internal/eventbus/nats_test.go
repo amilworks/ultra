@@ -180,6 +180,54 @@ func TestRunEventMessageDispositionAcksHandledPayload(t *testing.T) {
 	}
 }
 
+func TestRunEventMessageDispositionSanitizesNULInDisplayText(t *testing.T) {
+	t.Parallel()
+
+	payload, err := json.Marshal(domain.AppendRunEventInput{
+		EventID:   "evt-run-nul-progress",
+		RunID:     "run-nul-progress",
+		ThreadID:  "thread-nul-progress",
+		EventKind: "tool_call.progress",
+		Message:   "/workspace/train.py\x00155:def train():",
+		Payload: domain.JSONMap{
+			"text": "/workspace/train.py\x00155:def train():",
+			"nested": []any{
+				"safe",
+				map[string]any{"key\x00suffix": "value\x00suffix"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal payload: %v", err)
+	}
+	var handled domain.AppendRunEventInput
+	disposition := runEventMessageDisposition(context.Background(), payload, func(_ context.Context, input domain.AppendRunEventInput) error {
+		handled = input
+		return nil
+	})
+
+	if disposition != runEventMessageAck {
+		t.Fatalf("disposition = %v, want ack", disposition)
+	}
+	if handled.Message != "/workspace/train.py\\0155:def train():" {
+		t.Fatalf("message = %q, want storage-safe NUL marker", handled.Message)
+	}
+	if got := handled.Payload["text"]; got != "/workspace/train.py\\0155:def train():" {
+		t.Fatalf("payload text = %#v, want storage-safe NUL marker", got)
+	}
+	nested, ok := handled.Payload["nested"].([]any)
+	if !ok || len(nested) != 2 {
+		t.Fatalf("nested payload = %#v, want two-item list", handled.Payload["nested"])
+	}
+	nestedMap, ok := nested[1].(domain.JSONMap)
+	if !ok {
+		t.Fatalf("nested payload map = %#v, want map", nested[1])
+	}
+	if got := nestedMap["key\\0suffix"]; got != "value\\0suffix" {
+		t.Fatalf("nested payload value = %#v, want storage-safe NUL marker", got)
+	}
+}
+
 func TestRunEventSubscribeSubjectUsesPushConsumerDeliverSubject(t *testing.T) {
 	t.Parallel()
 

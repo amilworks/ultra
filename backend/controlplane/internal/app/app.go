@@ -160,6 +160,27 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	var startFns []func(context.Context) error
+	// Backfill filesystem publication fences before any background subscribers
+	// or recovery loops can expose pre-upgrade deleted resources to a retried
+	// worker. New deletes create the same fence transactionally in the handler.
+	if lifecycleStore, ok := controlStore.(httpapi.ResourceLifecycleFenceStore); ok {
+		startFns = append(startFns, func(ctx context.Context) error {
+			root, err := retentionGCUploadRoot(cfg.UploadRoot)
+			if err != nil {
+				return err
+			}
+			reconciled, err := httpapi.ReconcileResourceLifecycleFences(ctx, lifecycleStore, root, 0)
+			if err != nil {
+				return err
+			}
+			if reconciled > 0 {
+				slog.InfoContext(ctx, "resource lifecycle fences reconciled", "resources", reconciled)
+			}
+			go httpapi.RunResourceLifecycleFenceRepair(ctx, lifecycleStore, root, time.Minute)
+			go httpapi.RunResourceLifecycleTerminalRepair(ctx, root, time.Minute)
+			return nil
+		})
+	}
 	if natsBus != nil {
 		startFns = append(startFns, func(ctx context.Context) error {
 			return natsBus.SubscribeAllRunEvents(ctx, func(ctx context.Context, input domain.AppendRunEventInput) error {

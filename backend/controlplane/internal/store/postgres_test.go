@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,63 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestPostgresResourceLifecycleMutationRollsBackWithoutAuditEvent(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	resourceID := "pg-lifecycle-atomic-" + suffix
+	ownerID := "pg-lifecycle-owner-" + suffix
+	if _, err := store.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-lifecycle",
+		Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	duplicateEventID := "resource-event-lifecycle-conflict-" + suffix
+	if _, err := store.CreateResourceEvent(ctx, domain.AppendResourceEventInput{
+		EventID: duplicateEventID, ResourceID: resourceID, ActorUserID: ownerID,
+		ActorOrgID: "org-lifecycle", EventType: "resource.seeded",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SoftDeleteResourceForUserWithEvent(
+		ctx,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-lifecycle",
+			ActorUserID: ownerID, ActorOrgID: "org-lifecycle", EventID: duplicateEventID,
+		},
+	); err == nil {
+		t.Fatal("delete with duplicate audit identity unexpectedly committed")
+	}
+	current, err := store.GetResourceForOwner(ctx, resourceID, ownerID, "org-lifecycle")
+	if err != nil || current.Status != domain.ResourceStatusActive {
+		t.Fatalf("failed audit append changed lifecycle state: status=%q err=%v", current.Status, err)
+	}
+	deleted, err := store.SoftDeleteResourceForUserWithEvent(
+		ctx,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-lifecycle",
+			ActorUserID: ownerID, ActorOrgID: "org-lifecycle", EventID: "delete-" + suffix,
+		},
+	)
+	if err != nil || deleted.Resource.Status != domain.ResourceStatusDeleted ||
+		deleted.Event.EventType != "resource.deleted" {
+		t.Fatalf("atomic lifecycle delete = %+v err=%v", deleted, err)
+	}
+}
 
 func TestPostgresViewerCalibrationCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
@@ -608,6 +666,467 @@ func TestPostgresStoreListResourcesPastRetentionIncludesStorageURI(t *testing.T)
 		return
 	}
 	t.Fatalf("expired resources missing %s: %+v", resourceID, expired)
+}
+
+func TestPostgresStoreRetentionClaimIsAtomicAndExpiredRestoreIsHidden(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	resourceStore := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	resourceID := "file_retention_claim_" + suffix
+	ownerID := "retention-owner-" + suffix
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:  resourceID,
+		OwnerUserID: ownerID,
+		OwnerOrgID:  "org-retention",
+		Status:      "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx,
+		resourceID,
+		ownerID,
+		"org-retention",
+		time.Now().Add(-31*24*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.RestoreResourceForUser(ctx, resourceID, ownerID, "org-retention", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired restore err = %v, want ErrNotFound", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan []domain.ResourceRecord, 2)
+	errorsCh := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			claimed, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10000)
+			results <- claimed
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	allClaims := append(<-results, (<-results)...)
+	for range 2 {
+		if err := <-errorsCh; err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+	}
+	var ownClaims []domain.ResourceRecord
+	for _, claim := range allClaims {
+		if claim.ResourceID == resourceID {
+			ownClaims = append(ownClaims, claim)
+			continue
+		}
+		// Keep this shared integration database neutral for other retention tests.
+		_, _ = resourceStore.ReleaseResourceRetentionClaim(ctx, claim.ResourceID, claim.UpdatedAt)
+	}
+	if len(ownClaims) != 1 {
+		t.Fatalf("concurrent claims acquired target %d times, want exactly once", len(ownClaims))
+	}
+	claim := ownClaims[0]
+	renewedAt, renewed, err := resourceStore.RenewResourceRetentionClaim(ctx, resourceID, claim.UpdatedAt)
+	if err != nil || !renewed || !renewedAt.After(claim.UpdatedAt) {
+		t.Fatalf("renew exact claim = %v/%v err=%v, want a newer token", renewedAt, renewed, err)
+	}
+	if _, renewed, err := resourceStore.RenewResourceRetentionClaim(ctx, resourceID, claim.UpdatedAt); err != nil || renewed {
+		t.Fatalf("renew stale claim = %v err=%v, want false/nil", renewed, err)
+	}
+	claim.UpdatedAt = renewedAt
+	if _, err := resourceStore.SoftDeleteResourceForUser(ctx, resourceID, ownerID, "org-retention", time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("repeat delete while purging err = %v, want ErrNotFound", err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-retention", Status: "active",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("upsert while purging err = %v, want ErrConflict", err)
+	}
+	if purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, claim.UpdatedAt.Add(time.Second)); err != nil || purged {
+		t.Fatalf("stale conditional purge = %v err=%v, want false/nil", purged, err)
+	}
+	raceStart := make(chan struct{})
+	purgeResult := make(chan bool, 1)
+	raceErrors := make(chan error, 2)
+	go func() {
+		<-raceStart
+		purged, err := resourceStore.PurgeClaimedResource(ctx, resourceID, claim.UpdatedAt)
+		purgeResult <- purged
+		raceErrors <- err
+	}()
+	go func() {
+		<-raceStart
+		_, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-retention", Status: "active",
+		})
+		raceErrors <- err
+	}()
+	close(raceStart)
+	if purged := <-purgeResult; !purged {
+		t.Fatal("exact conditional purge lost the purge-vs-upsert race")
+	}
+	var conflictCount int
+	for range 2 {
+		if err := <-raceErrors; err != nil {
+			if errors.Is(err, ErrConflict) {
+				conflictCount++
+				continue
+			}
+			t.Fatalf("purge-vs-upsert race error: %v", err)
+		}
+	}
+	if conflictCount != 1 {
+		t.Fatalf("purge-vs-upsert conflicts = %d, want exactly the upsert rejected", conflictCount)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-retention", Status: "active",
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("reuse purged resource ID err = %v, want ErrConflict", err)
+	}
+}
+
+func TestPostgresStoreRetentionClaimPrioritizesManagedBeforeLimit(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	resourceStore := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	poisonID := "file_claim_poison_" + suffix
+	managedID := "file_claim_managed_" + suffix
+	resourceIDs := []string{poisonID, managedID}
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM control_resources WHERE resource_id = ANY($1::text[])`, resourceIDs)
+	}()
+	for _, input := range []domain.UpsertResourceInput{
+		{
+			ResourceID: poisonID, OwnerUserID: "claim-owner-" + suffix, OwnerOrgID: "org-claim",
+			StorageURI: "s3://external/older.tif", StoragePath: poisonID + "__misleading.tif", Status: domain.ResourceStatusActive,
+		},
+		{
+			ResourceID: managedID, OwnerUserID: "claim-owner-" + suffix, OwnerOrgID: "org-claim",
+			StoragePath: managedID + "__managed.tif", Status: domain.ResourceStatusActive,
+		},
+	} {
+		if _, err := resourceStore.UpsertResource(ctx, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx, poisonID, "claim-owner-"+suffix, "org-claim", time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx, managedID, "claim-owner-"+suffix, "org-claim", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC),
+	); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claim := range claims {
+		_, _ = resourceStore.ReleaseResourceRetentionClaim(ctx, claim.ResourceID, claim.UpdatedAt)
+	}
+	if len(claims) != 1 || claims[0].ResourceID != managedID {
+		t.Fatalf("limit-one retention claim = %+v, want newer managed resource %s ahead of older poison %s", claims, managedID, poisonID)
+	}
+}
+
+func TestPostgresStoreLifecycleFenceCandidatesAreStable(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	resourceStore := NewPostgresStore(pool)
+	prefix := "zzzz_file_lifecycle_fence_" + strconv.FormatInt(time.Now().UnixNano(), 36) + "_"
+	terminalIDs := []string{
+		prefix + " legacy ",
+		prefix + "-dash",
+		prefix + ".dot",
+		prefix + ":colon",
+		prefix + "A",
+		prefix + "a",
+	}
+	activeID := prefix + "z_active"
+	resourceIDs := append(append([]string{}, terminalIDs...), activeID)
+	defer func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM control_resources WHERE resource_id = ANY($1::text[])`, resourceIDs)
+	}()
+	for index, resourceID := range terminalIDs[1:] {
+		statuses := []string{
+			domain.ResourceStatusDeleted,
+			domain.ResourceStatusPurging,
+			domain.ResourceStatusRetentionBlocked,
+		}
+		if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID: resourceID, OwnerUserID: "fence-owner", OwnerOrgID: "fence-org", Status: statuses[index%len(statuses)],
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: activeID, OwnerUserID: "fence-owner", OwnerOrgID: "fence-org", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO control_resources (
+			resource_id, owner_user_id, original_name, status, created_at, updated_at
+		) VALUES ($1, 'fence-owner', 'legacy', 'deleted', clock_timestamp(), clock_timestamp())`, terminalIDs[0]); err != nil {
+		t.Fatal(err)
+	}
+	expected := append([]string(nil), terminalIDs...)
+	sort.Strings(expected)
+	var got []string
+	cursor := prefix
+	for {
+		page, err := resourceStore.ListResourceLifecycleFenceCandidates(ctx, cursor, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page[0].ResourceID)
+		cursor = page[0].ResourceID
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("C-collated lifecycle pages = %q, want %q", got, expected)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, terminalIDs[3]); err != nil || !found || status != domain.ResourceStatusRetentionBlocked {
+		t.Fatalf("lifecycle status = %q found=%v err=%v", status, found, err)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, terminalIDs[0]); err != nil || !found || status != domain.ResourceStatusDeleted {
+		t.Fatalf("raw legacy lifecycle status = %q found=%v err=%v", status, found, err)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, strings.TrimSpace(terminalIDs[0])); err != nil || found || status != "" {
+		t.Fatalf("trimmed legacy alias status = %q found=%v err=%v, want absent", status, found, err)
+	}
+	if status, found, err := resourceStore.GetResourceLifecycleStatus(ctx, prefix+"missing"); err != nil || found || status != "" {
+		t.Fatalf("missing lifecycle status = %q found=%v err=%v", status, found, err)
+	}
+}
+
+func TestPostgresStoreUpsertCannotReactivateDeletedOrTransferOwnership(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	resourceStore := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	resourceID := "file_upsert_lifecycle_" + suffix
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice-" + suffix, OwnerOrgID: "org-a",
+		OriginalName: "before.tif", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "bob-" + suffix, OwnerOrgID: "org-b",
+		OriginalName: "stolen.tif", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-owner active upsert error = %v, want conflict", err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice-" + suffix, OwnerOrgID: "org-a",
+		OriginalName: "after.tif", Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatalf("same-owner active update: %v", err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(ctx, resourceID, "alice-"+suffix, "org-a", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "alice-" + suffix, OwnerOrgID: "org-a",
+		OriginalName: "resurrected.tif", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("deleted-resource upsert error = %v, want conflict", err)
+	}
+	restored, err := resourceStore.RestoreResourceForUser(ctx, resourceID, "alice-"+suffix, "org-a", time.Now())
+	if err != nil || restored.OriginalName != "after.tif" || restored.Status != domain.ResourceStatusActive {
+		t.Fatalf("authorized restore = %+v err=%v", restored, err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: " " + resourceID, OwnerUserID: "alice-" + suffix, OwnerOrgID: "org-a",
+		OriginalName: "alias.tif", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("whitespace-aliased resource ID error = %v, want conflict", err)
+	}
+}
+
+func TestPostgresStoreRetentionBlockedRowsAreDurableAndVisible(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	resourceStore := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	resourceID := "file_retention_blocked_" + suffix
+	ownerID := "blocked-owner-" + suffix
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-blocked",
+		StorageURI: "s3://external/source.tif", SizeBytes: 321, Status: domain.ResourceStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resourceStore.SoftDeleteResourceForUser(
+		ctx, resourceID, ownerID, "org-blocked", time.Now().Add(-31*24*time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Minute, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claim domain.ResourceRecord
+	for _, candidate := range claims {
+		if candidate.ResourceID == resourceID {
+			claim = candidate
+			continue
+		}
+		_, _ = resourceStore.ReleaseResourceRetentionClaim(ctx, candidate.ResourceID, candidate.UpdatedAt)
+	}
+	if claim.ResourceID == "" {
+		t.Fatalf("target resource was not claimed: %+v", claims)
+	}
+	if blocked, err := resourceStore.BlockResourceRetentionClaim(ctx, resourceID, claim.UpdatedAt); err != nil || !blocked {
+		t.Fatalf("block exact claim = %v err=%v", blocked, err)
+	}
+	if _, err := resourceStore.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: ownerID, OwnerOrgID: "org-blocked", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("blocked resource upsert error = %v, want conflict", err)
+	}
+	backlog, err := resourceStore.RetentionBacklog(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backlog.BlockedCount < 1 || backlog.BlockedBytes < 321 {
+		t.Fatalf("retention backlog = %+v, want blocked resource visible", backlog)
+	}
+	if claims, err := resourceStore.ClaimResourcesPastRetention(ctx, time.Nanosecond, 10000); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, candidate := range claims {
+			if candidate.ResourceID == resourceID {
+				t.Fatalf("blocked resource re-entered automatic claims: %+v", candidate)
+			}
+			_, _ = resourceStore.ReleaseResourceRetentionClaim(ctx, candidate.ResourceID, candidate.UpdatedAt)
+		}
+	}
+}
+
+func TestRetentionMigrationRollbackAndReapplyPreservesPurgeTombstones(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	up, err := os.ReadFile("../../migrations/000013_resource_retention_claim_indexes.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, err := os.ReadFile("../../migrations/000013_resource_retention_claim_indexes.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	schemaName := "retention_rollback_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if _, err := tx.Exec(ctx, "CREATE SCHEMA "+schemaName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL search_path TO "+schemaName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `CREATE TABLE control_resources (
+		resource_id text PRIMARY KEY,
+		status text NOT NULL,
+		size_bytes bigint NOT NULL DEFAULT 0,
+		storage_uri text,
+		storage_path text,
+		retention_expires_at timestamptz,
+		updated_at timestamptz NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, string(up)); err != nil {
+		t.Fatalf("apply up migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO control_resource_purge_tombstones (resource_id, purged_at) VALUES ('file_irreversible', now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, string(down)); err != nil {
+		t.Fatalf("apply down migration: %v", err)
+	}
+	if _, err := tx.Exec(ctx, string(up)); err != nil {
+		t.Fatalf("reapply up migration: %v", err)
+	}
+	var count int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM control_resource_purge_tombstones WHERE resource_id = 'file_irreversible'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("purge tombstones after down/reapply = %d, want 1", count)
+	}
 }
 
 func TestPostgresStoreListResourceEventsForUserScopesAndFilters(t *testing.T) {

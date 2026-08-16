@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import type { UploadViewerInfo } from "@/types";
 
 import {
   thumbnailScrubAxis,
   thumbnailScrubConfig,
   thumbnailScrubSliceRequest,
 } from "./thumbnailScrubAxis";
+import { ApiClient } from "./api";
 import { normalizeUploadViewerInfo } from "./viewerManifest";
 
 describe("thumbnailScrubAxis", () => {
@@ -57,6 +59,9 @@ describe("thumbnailScrubAxis", () => {
           rgb: [255, 255, 255],
         })),
       },
+      viewer: {
+        display_capabilities: ["channel_color", "channel_lut_transport"],
+      } as UploadViewerInfo["viewer"],
     });
 
     expect(config).toMatchObject({
@@ -79,6 +84,112 @@ describe("thumbnailScrubAxis", () => {
       fullResolution: false,
       cacheKey: "metadata-zscrub-v1",
     });
+  });
+
+  it("uses the strict scalar NIfTI slice contract for metadata hover scrubbing", () => {
+    const info = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-nifti",
+      original_name: "brain.nii",
+      backend_mode: "scalar",
+      axis_sizes: { T: 2, C: 2, Z: 8, Y: 16, X: 24 },
+      selected_indices: { T: 1, C: 1, Z: 3 },
+      display_defaults: {
+        channels: [1],
+        channel_colors: ["#0000ff", "#ff0000"],
+        time_index: 1,
+        z_index: 3,
+      },
+      viewer: {
+        backend_mode: "scalar",
+        delivery_mode: "scalar",
+        volume_mode: "scalar",
+        render_policy: "scalar",
+        display_capabilities: ["strict_scalar_slice", "channel_visibility", "time_navigation"],
+      },
+    });
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const request = thumbnailScrubSliceRequest(thumbnailScrubConfig(info), 5);
+    const parsed = new URL(client.uploadSliceUrl(info.file_id, request));
+
+    expect(parsed.searchParams.get("axis")).toBe("z");
+    expect(parsed.searchParams.get("z")).toBe("5");
+    expect(parsed.searchParams.get("t")).toBe("1");
+    expect(parsed.searchParams.get("c")).toBe("1");
+    expect(parsed.searchParams.has("channels")).toBe(false);
+    expect(parsed.searchParams.has("channel_colors")).toBe(false);
+    expect(parsed.searchParams.has("x")).toBe(false);
+    expect(parsed.searchParams.has("y")).toBe(false);
+  });
+});
+
+describe("normalizeUploadViewerInfo Scene3D admission", () => {
+  it("preserves an unsupported PLY identity instead of relabeling it as a point cloud", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-ascii",
+      original_name: "ascii.ply",
+      decodable: false,
+      scene_kind: "unknown",
+      status: "failed",
+      message: "ASCII PLY is not supported; re-export as binary PLY.",
+      service_urls: {},
+    });
+
+    expect(viewer.decodable).toBe(false);
+    expect(viewer.scene3d?.scene_kind).toBe("unknown");
+    expect(viewer.scene3d?.status).toBe("failed");
+    expect(viewer.message).toContain("ASCII PLY");
+  });
+
+  it("retains only a complete finite source-bound frame and scale calibration", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-calibrated",
+      original_name: "scene.ply",
+      decodable: true,
+      scene_kind: "splat",
+      status: "ready",
+      calibration: {
+        version: 1,
+        source_sha256: "b".repeat(64),
+        revision: 4,
+        signed_up_axis: "+z",
+        handedness: "right",
+        units: "um",
+        units_per_source_unit: 0.125,
+      },
+      service_urls: {},
+    });
+
+    expect(viewer.scene3d?.calibration).toEqual({
+      version: 1,
+      source_sha256: "b".repeat(64),
+      revision: 4,
+      signed_up_axis: "+z",
+      handedness: "right",
+      units: "um",
+      units_per_source_unit: 0.125,
+    });
+
+    const malformed = normalizeUploadViewerInfo({
+      kind: "scene3d",
+      file_id: "file-malformed",
+      original_name: "scene.ply",
+      scene_kind: "splat",
+      status: "ready",
+      calibration: {
+        version: 1,
+        source_sha256: "b".repeat(64),
+        revision: 4,
+        signed_up_axis: "+z",
+        handedness: "right",
+        units: "um",
+        units_per_source_unit: Number.POSITIVE_INFINITY,
+      },
+      service_urls: {},
+    });
+    expect(malformed.scene3d?.calibration).toBeNull();
   });
 });
 
@@ -260,6 +371,39 @@ describe("normalizeUploadViewerInfo scalar medical defaults", () => {
     expect(viewer.metadata.physical_spacing_unit).toBe("mm");
   });
 
+  it("reconstructs preferred-reader phys from top-level anisotropic metadata", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-bioio",
+      original_name: "markers.nd2",
+      modality: "microscopy",
+      dims_order: "TCZYX",
+      axis_sizes: { T: 2, C: 3, Z: 4, Y: 80, X: 120 },
+      channel_names: ["DAPI", "FITC", "Cy5"],
+      physical_spacing: { x: 0.11, y: 0.22, z: 1.7 },
+      metadata: {
+        reader: "bioio",
+        spacing_units: { x: "um", y: "um", z: "um" },
+      },
+      display_defaults: { channels: [2, 0] },
+      viewer: { render_policy: "scalar" },
+    });
+
+    expect(viewer.metadata.physical_spacing).toEqual({ x: 0.11, y: 0.22, z: 1.7 });
+    expect(viewer.metadata.spacing_units).toEqual({ x: "um", y: "um", z: "um" });
+    expect(viewer.phys).toMatchObject({
+      x: 120,
+      y: 80,
+      z: 4,
+      t: 2,
+      ch: 3,
+      pixel_size: [0.11, 0.22, 1.7, 1],
+      pixel_units: ["um", "um", "um", "frame"],
+      channel_names: ["DAPI", "FITC", "Cy5"],
+      display_channels: [2, 0],
+    });
+  });
+
   it("promotes CT-like scalar volumes to legible scientific 3D defaults", () => {
     const viewer = normalizeUploadViewerInfo({
       kind: "image",
@@ -416,6 +560,99 @@ describe("normalizeUploadViewerInfo HDF5 geometry", () => {
       cell_data_path: "/DataContainers/Image/CellData",
       cell_data_consistent: true,
       complete: true,
+    });
+  });
+});
+
+describe("normalizeUploadViewerInfo NGFF channel identity", () => {
+  it("rejects malformed channel indices and deduplicates valid identities", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "malformed-channels",
+      original_name: "channels.ome.tif",
+      axis_sizes: { T: 1, C: 3, Z: 1, Y: 8, X: 8 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      phys: {
+        ch: 3,
+        display_channels: ["malformed", -1, 2, 2, 99, 1.5],
+      },
+      display_defaults: {
+        channels: ["malformed", -1, 2, 2, 99, 1.5],
+      },
+      viewer: { render_policy: "scalar" },
+    });
+
+    expect(viewer.phys?.display_channels).toEqual([2]);
+    expect(viewer.display_defaults?.channels).toEqual([2]);
+  });
+
+  it("round-trips canonical OME colors into sparse slice and tile requests", () => {
+    const viewer = normalizeUploadViewerInfo({
+      kind: "image",
+      file_id: "file-ngff",
+      original_name: "markers.ome.zarr",
+      modality: "microscopy",
+      backend_mode: "pyramid",
+      dims_order: "TCZYX",
+      axis_sizes: { T: 1, C: 3, Z: 1, Y: 64, X: 64 },
+      selected_indices: { T: 0, C: 0, Z: 0 },
+      is_volume: false,
+      is_multichannel: true,
+      phys: {
+        channel_names: ["DAPI", "FITC", "TRITC"],
+        channel_colors: [
+          { index: 0, hex: "#0000FF", rgb: [0, 0, 255] },
+          { index: 1, hex: "#00FF00", rgb: [0, 255, 0] },
+          { index: 2, hex: "#FF0000", rgb: [255, 0, 0] },
+        ],
+      },
+      display_defaults: {
+        enhancement: "d",
+        negative: false,
+        rotate: 0,
+        fusion_method: "m",
+        channel_mode: "composite",
+        channels: [0, 2],
+        channel_colors: ["#0000FF", "#00FF00", "#FF0000"],
+        time_index: 0,
+        z_index: 0,
+      },
+      viewer: {
+        backend_mode: "pyramid",
+        delivery_mode: "deferred_multiscale",
+        render_policy: "scalar",
+        channel_mode: "composite",
+        tile_scheme: {
+          tile_size: 512,
+          format: "png",
+          levels: [{ level: 0, width: 64, height: 64, columns: 1, rows: 1, downsample: 1 }],
+        },
+      },
+    });
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const channels = viewer.display_defaults?.channels;
+    const colors = viewer.display_defaults?.channel_colors;
+    const urls = [
+      client.uploadSliceUrl(viewer.file_id, { axis: "z", z: 0, channels, channelColors: colors }),
+      client.uploadTileUrl(viewer.file_id, {
+        axis: "z",
+        level: 0,
+        tileX: 0,
+        tileY: 0,
+        channels,
+        channelColors: colors,
+      }),
+    ];
+
+    expect(viewer.phys?.channel_colors).toEqual([
+      { index: 0, hex: "#0000FF", rgb: [0, 0, 255] },
+      { index: 1, hex: "#00FF00", rgb: [0, 255, 0] },
+      { index: 2, hex: "#FF0000", rgb: [255, 0, 0] },
+    ]);
+    urls.forEach((value) => {
+      const parsed = new URL(value);
+      expect(parsed.searchParams.get("channels")).toBe("0,2");
+      expect(parsed.searchParams.get("channel_colors")).toBe("#0000FF,#FF0000");
     });
   });
 });

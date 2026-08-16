@@ -176,3 +176,78 @@ func TestMemoryViewerCalibrationCASRejectsMissingOrReplacedSourceSHA(t *testing.
 		}
 	}
 }
+
+func scene3dCalibrationPatch(sha string, revision int, scale float64) domain.JSONMap {
+	return domain.JSONMap{
+		"ultra_scene3d_calibration_v1": domain.JSONMap{
+			"version":               1,
+			"source_sha256":         sha,
+			"revision":              revision,
+			"signed_up_axis":        "+z",
+			"handedness":            "right",
+			"units":                 "mm",
+			"units_per_source_unit": scale,
+		},
+	}
+}
+
+func TestMergeResourceMetadataReplacesScene3dCalibrationSnapshot(t *testing.T) {
+	existing := domain.JSONMap{
+		"ultra_scene3d_calibration_v1": domain.JSONMap{
+			"version":       1,
+			"source_sha256": "source-sha",
+			"revision":      1,
+			"stale":         true,
+		},
+	}
+	merged := mergeResourceMetadata(existing, scene3dCalibrationPatch("source-sha", 2, 0.25))
+	calibration, ok := resourceMetadataMap(merged["ultra_scene3d_calibration_v1"])
+	if !ok || calibration["revision"] != 2 || calibration["units_per_source_unit"] != 0.25 {
+		t.Fatalf("scene calibration snapshot = %#v", calibration)
+	}
+	if _, exists := calibration["stale"]; exists {
+		t.Fatalf("stale scene calibration key survived replacement: %#v", calibration)
+	}
+}
+
+func TestMemoryScene3dCalibrationCASRejectsReverseCommitOrder(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	memory := NewMemoryStore()
+	_, err := memory.UpsertResource(ctx, domain.UpsertResourceInput{
+		ResourceID:   "scene-cas",
+		OriginalName: "scene.ply",
+		SHA256:       "source-sha",
+		OwnerUserID:  "user-1",
+		OwnerOrgID:   "org-1",
+		Status:       "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := 0
+	input := func(scale float64) domain.MergeResourceMetadataInput {
+		return domain.MergeResourceMetadataInput{
+			ResourceID:              "scene-cas",
+			UserID:                  "user-1",
+			OrgID:                   "org-1",
+			Patch:                   scene3dCalibrationPatch("source-sha", 1, scale),
+			ExpectedSourceSHA256:    "source-sha",
+			Scene3dExpectedRevision: &expected,
+		}
+	}
+	if _, err := memory.MergeResourceMetadataForUser(ctx, input(0.5)); err != nil {
+		t.Fatalf("scene calibration commit failed: %v", err)
+	}
+	if _, err := memory.MergeResourceMetadataForUser(ctx, input(2)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale scene calibration error = %v, want conflict", err)
+	}
+	resource, err := memory.GetResourceForUser(ctx, "scene-cas", "user-1", "org-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	calibration, _ := resourceMetadataMap(resource.Metadata["ultra_scene3d_calibration_v1"])
+	if calibration["units_per_source_unit"] != 0.5 || calibration["revision"] != 1 {
+		t.Fatalf("persisted scene calibration = %#v", calibration)
+	}
+}

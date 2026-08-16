@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Matching Söhne's colour with Inter's weight axis</title>
+<style>
+  @font-face { font-family:"US"; src:url("./build/UltraSans-calm.woff2") format("woff2"); font-weight:100 900; }
+  /* Klim TRIAL font — local evaluation only, never shipped. See refs/README.txt */
+  @font-face { font-family:"Soehne"; src:url("./refs/test-soehne-buch.woff2") format("woff2"); font-weight:400; }
+
+  :root { --ink:#171b1d; --ink2:#5b6266; --ink3:#8b9296; --rule:#e4e7e9; --bg:#fff;
+          --hit:#c2410c; --good:#0f766e; --ref:#4f46e5; font-synthesis:none; }
+  @media (prefers-color-scheme:dark) {
+    :root { --ink:#dce3ea; --ink2:#a5abb0; --ink3:#6f767b; --rule:#2a2f33; --bg:#141719;
+            --hit:#fb923c; --good:#5eead4; --ref:#a5b4fc; } }
+  *{box-sizing:border-box}
+  /* NOTE: deliberately NO -webkit-font-smoothing here. Ultra's app CSS does not set it,
+     so this page renders type the way the product actually renders it. The other
+     font-lab pages DO set `antialiased`, which thins strokes on macOS and makes every
+     face look lighter than it will in the app. */
+  body { margin:0; padding:44px 40px 96px; background:var(--bg); color:var(--ink);
+         font-family:"US",system-ui,sans-serif; font-optical-sizing:auto; }
+  .wrap { max-width:1080px; margin:0 auto; }
+  h1 { font-size:15px; font-weight:600; margin:0 0 5px; letter-spacing:-.01em; }
+  .sub { font-size:13px; color:var(--ink2); line-height:1.62; margin:0 0 16px; max-width:74ch; }
+  .sub b { color:var(--ink); font-weight:600; }
+  .warn { font-size:12px; color:var(--ink2); border-left:2px solid var(--hit); padding:7px 0 7px 13px;
+          margin:0 0 34px; max-width:74ch; line-height:1.6; }
+  .warn b { color:var(--ink); font-weight:600; }
+  section { border-top:1px solid var(--rule); padding:26px 0 10px; }
+  .eyebrow { font-size:10px; font-weight:600; letter-spacing:.09em; text-transform:uppercase;
+             color:var(--ink3); margin:0 0 20px; }
+  .row { display:grid; grid-template-columns:150px 1fr; gap:22px; align-items:baseline;
+         padding:12px 0; border-bottom:1px solid var(--rule); }
+  .row:last-child { border-bottom:0; }
+  .tag { font-size:10px; font-weight:600; letter-spacing:.05em; text-transform:uppercase;
+         color:var(--ink3); padding-top:.4em; line-height:1.55; }
+  .tag em { font-style:normal; display:block; color:var(--ref); }
+  .tag b  { font-weight:600; display:block; color:var(--good); }
+  .tag i  { font-style:normal; display:block; color:var(--hit); }
+
+  .soehne { font-family:"Soehne"; font-weight:400; }
+  .w400 { font-weight:400; } .w420 { font-weight:420; }
+  .w430 { font-weight:430; } .w440 { font-weight:440; } .w450 { font-weight:450; }
+
+  .body { font-size:15px; line-height:1.62; max-width:62ch; }
+  .small { font-size:13px; line-height:1.55; max-width:62ch; }
+  .smooth { -webkit-font-smoothing:antialiased; }
+  table { border-collapse:collapse; font-size:13px; margin-top:4px; }
+  th,td { text-align:right; padding:5px 15px 5px 0; border-bottom:1px solid var(--rule); }
+  th:first-child, td:first-child { text-align:left; }
+  th { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink3); font-weight:600; }
+  td.n { font-variant-numeric:tabular-nums; }
+  .win { color:var(--good); } .gap { color:var(--hit); }
+  .note { font-size:12.5px; color:var(--ink2); line-height:1.65; margin:15px 0 0; max-width:76ch; }
+  .note b { color:var(--ink); font-weight:600; }
+  code { font-size:.94em; }
+</style>
+</head>
+<body><div class="wrap">
+  <h1>Matching Söhne's colour with Inter's weight axis</h1>
+  <p class="sub">Söhne looks darker than Inter at the same size because its strokes are thicker
+  <b>relative to its letters</b> — stem/x-height 0.1721 against Inter's 0.1609, a 6.9% difference.
+  Inter's absolute stem is only 2.7% thinner; the gap is that Inter's x-height is larger, so the
+  same stroke covers proportionally less. Raising Inter's weight axis closes it.
+  Two independent methods agree on <b>wght 430</b>.</p>
+  <p class="warn"><b>This page sets no <code>-webkit-font-smoothing</code></b>, matching Ultra's app CSS,
+  so it renders type the way the product does. The other font-lab pages set <code>antialiased</code>;
+  on a Retina Mac that turns out to make no visible difference (last section), so the pages are
+  comparable either way.</p>
+
+  <section>
+    <p class="eyebrow">Body 15px — find the row that matches Söhne</p>
+    <div class="row"><span class="tag">Söhne Buch<em>the target</em></span><span class="body soehne">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Inter 400<i>ships today</i></span><span class="body w400">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Inter 420</span><span class="body w420">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Inter 430<b>the fit</b></span><span class="body w430">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+    <div class="row"><span class="tag">Inter 440</span><span class="body w440">The segmentation run finished in 47 minutes across 1308 fields of view. Registration drift stayed under 0.6 microns for all but three tiles.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">13px — small UI text, where added weight helps most</p>
+    <div class="row"><span class="tag">Söhne Buch</span><span class="small soehne">Registration drift stayed under 0.6 microns for all but three tiles, which are flagged in the report.</span></div>
+    <div class="row"><span class="tag">Inter 400</span><span class="small w400">Registration drift stayed under 0.6 microns for all but three tiles, which are flagged in the report.</span></div>
+    <div class="row"><span class="tag">Inter 430</span><span class="small w430">Registration drift stayed under 0.6 microns for all but three tiles, which are flagged in the report.</span></div>
+  </section>
+
+  <section>
+    <p class="eyebrow">Measured — two independent methods, one answer</p>
+    <table>
+      <tr><th></th><th>stem (em)</th><th>x-height</th><th>stem / x-height</th><th>rendered ink density</th><th>vs Söhne</th></tr>
+      <tr><td>Söhne Buch</td><td class="n">0.0900</td><td class="n">0.5230</td><td class="n">0.1721</td><td class="n">112.3</td><td class="n">—</td></tr>
+      <tr><td>Graphik Regular</td><td class="n">0.0840</td><td class="n">0.5230</td><td class="n">0.1606</td><td class="n">99.8</td><td class="n gap">−11.2%</td></tr>
+      <tr><td>Inter 400</td><td class="n">0.0876</td><td class="n">0.5444</td><td class="n">0.1609</td><td class="n">107.8</td><td class="n gap">−4.0%</td></tr>
+      <tr><td>Inter 420</td><td class="n">0.0915</td><td class="n">0.5444</td><td class="n">0.1681</td><td class="n">111.0</td><td class="n">−1.1%</td></tr>
+      <tr><td><b>Inter 430</b></td><td class="n"><b>0.0937</b></td><td class="n">0.5444</td><td class="n"><b>0.1721</b></td><td class="n"><b>112.4</b></td><td class="n win"><b>+0.1%</b></td></tr>
+      <tr><td>Inter 440</td><td class="n">0.0954</td><td class="n">0.5444</td><td class="n">0.1753</td><td class="n">114.0</td><td class="n">+1.5%</td></tr>
+    </table>
+    <p class="note"><b>Geometric</b> — solving stem/x-height from the outlines — lands at wght 431.
+    <b>Photometric</b> — rasterising a real sentence and integrating ink over the x-height band —
+    lands at wght 430. They were computed independently and agree to within one axis unit.
+    Note that <b>Graphik is the lightest of the three by a wide margin</b>, which is why it reads as
+    airy next to Söhne.</p>
+    <p class="note">A caution on the earlier number: measuring ink per unit of <i>line length</i> shows
+    Inter 400 and Söhne as identical (0.88 each). That metric is misleading — Söhne is narrower, so it
+    packs equal ink into a shorter line. Perception follows ink per unit of <i>letter area</i>,
+    because you read letters, not line-inches. That is the column above.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">What font-smoothing alone was costing</p>
+    <div class="row"><span class="tag">Inter 400<b>app rendering</b></span><span class="body w400">The segmentation run finished in 47 minutes across 1308 fields of view.</span></div>
+    <div class="row"><span class="tag">Inter 400<i>antialiased</i></span><span class="body w400 smooth">The segmentation run finished in 47 minutes across 1308 fields of view.</span></div>
+    <p class="note">The second line is how every other font-lab page renders Inter.
+    <b>On this display the two are indistinguishable</b>, and that is the expected result on any
+    Retina Mac: macOS uses grayscale antialiasing at HiDPI regardless, so
+    <code>-webkit-font-smoothing: antialiased</code> is close to a no-op. It mattered on non-Retina
+    screens. So this was <b>not</b> a hidden weight lever — the gap you are seeing is the typeface,
+    and <code>wght</code> is the honest way to close it.</p>
+  </section>
+
+  <section>
+    <p class="eyebrow">Knock-on: the weight ladder</p>
+    <p class="note">Ultra's scale in <code>styles.css</code> is body 400, nav/data/action 500,
+    label/heading 600, strong 700. Moving body to 430 leaves only <b>70 units</b> between body and
+    nav instead of 100, which flattens a distinction the calm hierarchy leans on. If body moves, the
+    ladder probably should too — something like <b>430 / 530 / 620 / 700</b> keeps the steps roughly
+    even. That is a deliberate change to <code>--font-weight-*</code>, not a side effect worth
+    absorbing silently.</p>
+  </section>
+</div></body></html>

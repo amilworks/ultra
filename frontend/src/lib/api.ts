@@ -96,6 +96,7 @@ import type {
   UploadViewerInfo,
   CiftiCarpetResponse,
   CiftiConnectivityResponse,
+  Scene3dManifestResponse,
   UploadChunkResponse,
   UploadedFileRecord,
   UploadFilesResponse,
@@ -207,10 +208,44 @@ export type RunSteerMessageRecord = {
   thread_id: string;
   message_id: string;
   content: string;
+  file_ids?: string[];
   status: "pending" | "applied" | "missed";
   created_at: string;
   applied_at?: string;
   updated_at: string;
+};
+
+export type NoteEditorMode = "markdown" | "plaintext";
+
+export type NoteRecord = {
+  note_id: string;
+  title: string;
+  body_markdown: string;
+  pinned: boolean;
+  /** Sticky per-note editing surface; the body is markdown in either mode. */
+  editor_mode: NoteEditorMode;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NoteListItem = {
+  note_id: string;
+  title: string;
+  snippet: string;
+  pinned: boolean;
+  updated_at: string;
+};
+
+export type NoteListResponse = {
+  notes: NoteListItem[];
+  total_count: number;
+};
+
+export type NoteWritePayload = {
+  title?: string;
+  body_markdown?: string;
+  pinned?: boolean;
+  editor_mode?: NoteEditorMode;
 };
 
 /** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
@@ -374,11 +409,8 @@ const waitBeforeStreamRetry = async (
     Math.floor(Math.random() * 250);
   await new Promise<void>((resolve, reject) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
     const cleanup = () => {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-      }
+      clearTimeout(timer);
       if (typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", onVisible);
       }
@@ -406,7 +438,7 @@ const waitBeforeStreamRetry = async (
         reject(new DOMException("The operation was aborted.", "AbortError"));
       }
     };
-    timer = setTimeout(finish, delayMs);
+    const timer = setTimeout(finish, delayMs);
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", onVisible);
     }
@@ -638,18 +670,25 @@ const buildUrl = (
  * the same order as `channels`. Projecting at this shared request boundary keeps
  * display, slice, and atlas URLs consistent and prevents cardinality mismatches.
  */
+const MAX_IMAGE_CHANNEL_SELECTION = 8;
+
 const applyImageChannelSelection = (
   params: Record<string, string>,
   channels?: number[],
   channelPalette?: string[]
 ): void => {
-  const selectedChannels = Array.isArray(channels)
-    ? channels
-        .filter((value) => Number.isFinite(value))
-        .map((value) => Math.max(0, Math.floor(value)))
-    : [];
+  const selectedChannels = Array.isArray(channels) ? channels : [];
   if (selectedChannels.length === 0) {
     return;
+  }
+  if (selectedChannels.length > MAX_IMAGE_CHANNEL_SELECTION) {
+    throw new RangeError(`At most ${MAX_IMAGE_CHANNEL_SELECTION} image channels may be selected.`);
+  }
+  if (selectedChannels.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw new RangeError("Image channel indices must be non-negative safe integers.");
+  }
+  if (new Set(selectedChannels).size !== selectedChannels.length) {
+    throw new RangeError("Duplicate image channel indices are not allowed.");
   }
   params.channels = selectedChannels.map(String).join(",");
 
@@ -2230,14 +2269,21 @@ export class ApiClient {
    */
   async steerRun(
     runId: string,
-    input: { steerId: string; text: string }
+    input: { steerId: string; text: string; fileIds?: string[] }
   ): Promise<RunSteerMessageRecord> {
     return await this.fetchJson<RunSteerMessageRecord>(
       `/v2/runs/${encodeURIComponent(runId)}/steer`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ steer_id: input.steerId, text: input.text }),
+        body: JSON.stringify({
+          steer_id: input.steerId,
+          text: input.text,
+          // Attachments must ride the steer itself: the worker only grants
+          // staging authority to control-plane-stamped ids, never to ids
+          // that merely appear in the text.
+          file_ids: input.fileIds ?? [],
+        }),
       }
     );
   }
@@ -2249,6 +2295,46 @@ export class ApiClient {
       `/v2/runs/${encodeURIComponent(runId)}/steer`
     );
     return response.steer_messages ?? [];
+  }
+
+  /* Notes — the personal layer. Markdown is the source of truth; every call
+     is owner-scoped by the session. */
+  async listNotes(options?: { query?: string; limit?: number; offset?: number }): Promise<NoteListResponse> {
+    const params = new URLSearchParams();
+    if (options?.query?.trim()) params.set("query", options.query.trim());
+    if (options?.limit) params.set("limit", String(options.limit));
+    if (options?.offset) params.set("offset", String(options.offset));
+    // Plain concatenation on purpose: the openapi route-documentation test
+    // scans string literals, and `/v2/notes${…}` reads as an undocumented
+    // route pattern instead of /v2/notes plus a query string.
+    const suffix = params.size > 0 ? `?${params.toString()}` : "";
+    return await this.fetchJson<NoteListResponse>("/v2/notes" + suffix);
+  }
+
+  async createNote(payload: NoteWritePayload = {}): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getNote(noteId: string): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`);
+  }
+
+  async updateNote(noteId: string, payload: NoteWritePayload): Promise<NoteRecord> {
+    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteNote(noteId: string): Promise<void> {
+    await this.fetchJson<{ status: string }>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+      method: "DELETE",
+    });
   }
 
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
@@ -4670,9 +4756,34 @@ export class ApiClient {
     return (await response.json()) as { deleted: boolean; file_id: string };
   }
 
-  resourceThumbnailUrl(fileId: string): string {
+  resourceThumbnailUrl(
+    resourceOrFileId: string | Pick<ResourceRecord, "file_id" | "has_thumbnail" | "thumbnail_url">
+  ): string {
+    const fileId = typeof resourceOrFileId === "string" ? resourceOrFileId : resourceOrFileId.file_id;
     const safeFileId = encodeURIComponent(fileId);
-    return buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
+    const canonical = buildUrl(this.baseUrl, `/v2/resources/${safeFileId}/thumbnail`);
+    if (typeof resourceOrFileId === "string" || resourceOrFileId.has_thumbnail !== true) {
+      return canonical;
+    }
+    const advertised = String(resourceOrFileId.thumbnail_url ?? "").trim();
+    if (!advertised) {
+      return canonical;
+    }
+    try {
+      const base = new URL(this.baseUrl.endsWith("/") ? this.baseUrl : `${this.baseUrl}/`);
+      const candidate = new URL(advertised, base);
+      if (
+        (candidate.protocol !== "http:" && candidate.protocol !== "https:") ||
+        candidate.origin !== base.origin ||
+        candidate.username !== "" ||
+        candidate.password !== ""
+      ) {
+        return canonical;
+      }
+      return candidate.toString();
+    } catch {
+      return canonical;
+    }
   }
 
   resourceDownloadUrl(fileId: string): string {
@@ -4934,6 +5045,10 @@ export class ApiClient {
       z?: number | null;
       c?: number | null;
       t?: number | null;
+      channels?: number[];
+      /** Source-channel-indexed color palette. */
+      channelColors?: string[];
+      cacheKey?: string;
     }
   ): string {
     const safeFileId = encodeURIComponent(fileId);
@@ -4957,6 +5072,11 @@ export class ApiClient {
     }
     if (typeof config.t === "number" && Number.isFinite(config.t)) {
       params.t = String(Math.max(0, Math.floor(config.t)));
+    }
+    applyImageChannelSelection(params, config.channels, config.channelColors);
+    const cacheKey = String(config.cacheKey ?? "").trim();
+    if (cacheKey) {
+      params.cache_key = cacheKey;
     }
     return buildUrl(
       this.baseUrl,
@@ -5182,6 +5302,85 @@ export class ApiClient {
       {},
       params
     );
+  }
+
+  // Lens scene3d: the derive job's manifest. Small JSON regardless of the (often
+  // multi-GB) source, because the control plane never parses a scene file in the
+  // request path — it serves what the worker already derived. While the job is
+  // still running the same endpoint answers with `{status:"deriving"}`, so callers
+  // poll this rather than treating a non-ready answer as an error.
+  async getScene3dManifest(fileId: string): Promise<Scene3dManifestResponse> {
+    return this.fetchJson<Scene3dManifestResponse>(
+      `/v2/uploads/${encodeURIComponent(fileId)}/scene3d/manifest`
+    );
+  }
+
+  // A single derived chunk (USX1 splats or UPC1 points), returned as raw bytes so
+  // the caller can build zero-copy typed-array views over the planar payload. The
+  // response is immutable + ETagged, and the caller passes a signal so in-flight
+  // tier fetches abort when the viewer unmounts mid-stream.
+  async fetchScene3dChunk(
+    fileId: string,
+    index: number,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<ArrayBuffer> {
+    const safeFileId = encodeURIComponent(fileId);
+    const safeIndex = Math.max(0, Math.floor(Number(index) || 0));
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/chunk/${safeIndex}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: options.signal,
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return response.arrayBuffer();
+  }
+
+  async fetchScene3dCameraImage(
+    fileId: string,
+    index: number,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Blob> {
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new Error(`scene3d camera image index must be a non-negative integer, got ${index}`);
+    }
+    const safeFileId = encodeURIComponent(fileId);
+    const response = await fetch(
+      buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/image/${index}`),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: options.signal,
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return response.blob();
+  }
+
+  // Spark's PagedSplats performs its own Range requests for the RAD header and the
+  // relative RADC pages named inside it. Give that loader the same authenticated
+  // request context as every ordinary API call; handing it a bare URL would work for
+  // an unauthenticated localhost and fail for real users behind X-API-Key auth.
+  getScene3dPagedLodSource(fileId: string): {
+    url: string;
+    requestHeader: Record<string, string>;
+    withCredentials: true;
+  } {
+    const safeFileId = encodeURIComponent(fileId);
+    const headerArtifact = encodeURIComponent("scene-lod.rad");
+    return {
+      url: buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/scene3d/lod/${headerArtifact}`),
+      requestHeader: this.headers(),
+      withCredentials: true,
+    };
   }
 
   async getHdf5DatasetSummary(fileId: string, datasetPath: string): Promise<Hdf5DatasetSummary> {

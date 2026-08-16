@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"math"
@@ -3310,11 +3311,8 @@ func TestV2UploadAndResourceHandlers(t *testing.T) {
 	sliceReq.Header.Set("X-Ultra-Org-Id", "smithsonian")
 	sliceRec := httptest.NewRecorder()
 	router.ServeHTTP(sliceRec, sliceReq)
-	if sliceRec.Code != http.StatusOK {
-		t.Fatalf("slice status = %d body=%s", sliceRec.Code, sliceRec.Body.String())
-	}
-	if !bytes.Equal(sliceRec.Body.Bytes(), pngBytes) {
-		t.Fatalf("slice body = %q, want uploaded PNG bytes", sliceRec.Body.String())
+	if sliceRec.Code != http.StatusNotImplemented {
+		t.Fatalf("selector-bearing photo slice status = %d body=%s, want 501", sliceRec.Code, sliceRec.Body.String())
 	}
 
 	viewerReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+uploaded.FileID+"/viewer", nil)
@@ -3588,6 +3586,170 @@ func TestResourceRecordFromCatalogExposesDataAgentMetadata(t *testing.T) {
 	}
 	if caption["status"] != "succeeded" || caption["caption"] == "" || caption["job_id"] != "data_agent_job_caption" {
 		t.Fatalf("caption_resources metadata = %#v, want persisted caption job state", caption)
+	}
+}
+
+func TestResourceThumbnailMetadataIsConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	write := func(fileID, name string, body []byte) domain.ResourceRecord {
+		t.Helper()
+		storageName := fileID + "__" + safeOriginalFilename(name)
+		if err := os.WriteFile(filepath.Join(root, storageName), body, 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return domain.ResourceRecord{
+			ResourceID: fileID, OriginalName: name, ContentType: "application/octet-stream",
+			SizeBytes: int64(len(body)), SHA256: fmt.Sprintf("%x", sha256.Sum256(body)), StoragePath: storageName,
+			SourceType: "upload", ResourceKind: "file", OwnerUserID: "alice", CreatedAt: domain.Now(),
+		}
+	}
+	pngResource := write("file_png", "image.png", testPNGBytes(t, 12, 8))
+	pngRecord := (ServerDeps{}).resourceRecordFromCatalog(root, pngResource)
+	if !pngRecord.HasThumbnail || pngRecord.ThumbnailURL != "/v2/resources/file_png/thumbnail" {
+		t.Fatalf("PNG thumbnail metadata = has:%v url:%q", pngRecord.HasThumbnail, pngRecord.ThumbnailURL)
+	}
+	if pngRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("PNG thumbnail interaction = %q, want static", pngRecord.ThumbnailInteraction)
+	}
+	if pngRecord.PreviewURL != "/v2/uploads/file_png/preview" {
+		t.Fatalf("PNG preview URL = %q", pngRecord.PreviewURL)
+	}
+
+	_, ciftiBytes := writeCifti2Fixture(t, "metadata.dtseries.nii", 8, 300, func(row, col int) float32 {
+		return float32(row + col)
+	})
+	ciftiRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_cifti", "metadata.dtseries.nii", ciftiBytes))
+	if !ciftiRecord.HasThumbnail || ciftiRecord.ThumbnailURL != "/v2/resources/file_cifti/thumbnail" {
+		t.Fatalf("CIFTI thumbnail metadata = has:%v url:%q", ciftiRecord.HasThumbnail, ciftiRecord.ThumbnailURL)
+	}
+	if ciftiRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("CIFTI thumbnail interaction = %q, want static", ciftiRecord.ThumbnailInteraction)
+	}
+	genericCiftiResource := write("file_cifti_generic", "connectome-data", ciftiBytes)
+	genericCiftiResource.ContentType = "application/x-nifti"
+	genericCifti := (ServerDeps{}).resourceRecordFromCatalog(root, genericCiftiResource)
+	if !genericCifti.HasThumbnail || genericCifti.ThumbnailInteraction != "static" {
+		t.Fatalf("generic-name CIFTI thumbnail metadata = %+v, want static", genericCifti)
+	}
+	_, scalarCiftiBytes := writeCifti2FixtureWithOptions(t, "metadata.dscalar.nii", 8, 3, ciftiFixtureOptions{
+		physicalRowRole: "brain_models", physicalColRole: "scalars", dim7: 1,
+	}, func(row, col int) float32 { return float32(row + col) })
+	scalarCifti := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_dscalar", "metadata.dscalar.nii", scalarCiftiBytes))
+	if scalarCifti.HasThumbnail || scalarCifti.ThumbnailURL != "" {
+		t.Fatalf("dscalar advertised carpet thumbnail capability: %+v", scalarCifti)
+	}
+
+	niftiBytes := testNifti1Uint16Bytes(t, 2, 2, 2, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	niftiRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_nifti", "brain.nii", niftiBytes))
+	if !niftiRecord.HasThumbnail || niftiRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("NIfTI thumbnail metadata = %+v, want admitted static thumbnail", niftiRecord)
+	}
+	gzipCifti := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_cifti_gz", "metadata.dtseries.nii.gz", []byte("gzip")))
+	if gzipCifti.HasThumbnail || gzipCifti.ThumbnailURL != "" {
+		t.Fatalf("gzip CIFTI advertised thumbnail: %+v", gzipCifti)
+	}
+
+	jpegBytes := testJPEGBytes(t, 8, 6)
+	pngBytes := testPNGBytes(t, 4, 4)
+	malformedPNG := append([]byte(nil), pngBytes...)
+	malformedPNG[29] ^= 0xff // Corrupt the bounded IHDR checksum.
+	if jpegRecord := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_jpeg", "photo.jpg", jpegBytes)); !jpegRecord.HasThumbnail || jpegRecord.ThumbnailInteraction != "static" {
+		t.Fatalf("valid JPEG thumbnail metadata = %+v", jpegRecord)
+	}
+	invalidRasters := []struct {
+		fileID string
+		name   string
+		body   []byte
+	}{
+		{fileID: "file_truncated_png", name: "truncated.png", body: pngBytes[:len(pngBytes)-4]},
+		{fileID: "file_malformed_png", name: "malformed.png", body: malformedPNG},
+		{fileID: "file_truncated_jpeg", name: "truncated.jpg", body: jpegBytes[:len(jpegBytes)-2]},
+		{fileID: "file_malformed_jpeg", name: "malformed.jpg", body: []byte{0xff, 0xd8, 0x00, 0xff, 0xd9}},
+	}
+	for _, invalid := range invalidRasters {
+		record := (ServerDeps{}).resourceRecordFromCatalog(root, write(invalid.fileID, invalid.name, invalid.body))
+		if record.HasThumbnail || record.ThumbnailURL != "" {
+			t.Fatalf("invalid native raster %s advertised thumbnail: %+v", invalid.name, record)
+		}
+	}
+
+	for index, name := range []string{"report.pdf", "slides.ppt", "slides.pptx", "letter.doc", "letter.docx"} {
+		record := (ServerDeps{}).resourceRecordFromCatalog(root, write("file_doc_"+strconv.Itoa(index), name, []byte("binary")))
+		if record.ResourceKind != "document" || record.HasThumbnail || record.ThumbnailURL != "" {
+			t.Fatalf("binary document metadata for %s = kind:%q has:%v url:%q", name, record.ResourceKind, record.HasThumbnail, record.ThumbnailURL)
+		}
+	}
+
+	videoResource := write("file_video", "clip.mp4", []byte("\x00\x00\x00\x18ftypmp42____moovdata"))
+	if record := (ServerDeps{}).resourceRecordFromCatalog(root, videoResource); record.HasThumbnail {
+		t.Fatal("video advertised a thumbnail without the image service")
+	}
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, videoResource); !record.HasThumbnail || record.ThumbnailInteraction != "video_hover" {
+		t.Fatalf("video thumbnail metadata = %+v, want video_hover with configured service", record)
+	}
+	scientificBytes := testOmeTIFFStackBytes(t, 2, 2, 2, 1, []string{"DAPI"}, []uint16{0, 1, 2, 3, 4, 5, 6, 7})
+	scientificResource := write("file_czi", "cells.ome.tiff", scientificBytes)
+	if record := (ServerDeps{}).resourceRecordFromCatalog(root, scientificResource); record.HasThumbnail {
+		t.Fatal("scientific resource advertised a thumbnail without its service")
+	}
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); record.HasThumbnail {
+		t.Fatal("scientific resource advertised a thumbnail without a ready derivative")
+	}
+	writeCommittedThumbnailDerivativeForTest(
+		t,
+		root,
+		filepath.Join(root, scientificResource.StoragePath),
+		resourceRecordFromCatalogState(scientificResource, true),
+	)
+	if record := (ServerDeps{ImageServiceURL: "http://image-service"}).resourceRecordFromCatalog(root, scientificResource); !record.HasThumbnail || record.ThumbnailInteraction != "z_scrub" {
+		t.Fatalf("scientific thumbnail metadata = %+v, want ready z-scrub", record)
+	}
+}
+
+func TestLegacyUploadResourceThumbnailMetadataIsConservative(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	pngPath := filepath.Join(root, "file_png__image.png")
+	if err := os.WriteFile(pngPath, testPNGBytes(t, 10, 5), 0o600); err != nil {
+		t.Fatalf("write legacy PNG: %v", err)
+	}
+	pngRecord, err := uploadResourceFromPath(root, pngPath)
+	if err != nil {
+		t.Fatalf("legacy PNG metadata: %v", err)
+	}
+	if !pngRecord.HasThumbnail || pngRecord.ThumbnailURL != "/v2/resources/file_png/thumbnail" {
+		t.Fatalf("legacy PNG thumbnail metadata = %+v", pngRecord)
+	}
+	pdfPath := filepath.Join(root, "file_pdf__report.pdf")
+	if err := os.WriteFile(pdfPath, []byte("%PDF"), 0o600); err != nil {
+		t.Fatalf("write legacy PDF: %v", err)
+	}
+	pdfRecord, err := uploadResourceFromPath(root, pdfPath)
+	if err != nil {
+		t.Fatalf("legacy PDF metadata: %v", err)
+	}
+	if pdfRecord.ResourceKind != "document" || pdfRecord.HasThumbnail || pdfRecord.ThumbnailURL != "" {
+		t.Fatalf("legacy PDF metadata = %+v", pdfRecord)
+	}
+}
+
+func TestResourceKindClassifiesBinaryAndTextDocuments(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"report.pdf", "slides.ppt", "slides.pptx", "letter.doc", "letter.docx"} {
+		if got := resourceKindForContent(name, "application/octet-stream"); got != "document" {
+			t.Errorf("resourceKindForContent(%q, octet-stream) = %q, want document", name, got)
+		}
+	}
+	for _, tc := range []struct{ name, contentType string }{
+		{name: "report", contentType: "application/pdf"},
+		{name: "slides", contentType: "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+		{name: "notes.txt", contentType: "application/octet-stream"},
+		{name: "notes", contentType: "text/plain"},
+	} {
+		if got := resourceKindForContent(tc.name, tc.contentType); got != "document" {
+			t.Errorf("resourceKindForContent(%q, %q) = %q, want document", tc.name, tc.contentType, got)
+		}
 	}
 }
 
@@ -5658,6 +5820,159 @@ func TestV2UploadRejectsResourceQuotaAndCleansBlob(t *testing.T) {
 	}
 }
 
+func TestV2UploadReconcilesCommitAcknowledgementLossWithoutDeletingSource(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	catalog := &commitThenErrorUploadStore{MemoryStore: store.NewMemoryStore(), failOnce: true}
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "ack-loss.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 3, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-User-Id", "ack-user")
+	req.Header.Set("X-Ultra-Org-Id", "ack-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload status = %d body=%s, want reconciled success", rec.Code, rec.Body.String())
+	}
+	var response uploadFilesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Uploaded) != 1 {
+		t.Fatalf("uploaded = %+v, want one", response.Uploaded)
+	}
+	resource, err := catalog.GetResourceForUser(context.Background(), response.Uploaded[0].FileID, "ack-user", "ack-org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resource.StoragePath)); err != nil {
+		t.Fatalf("catalog row points at removed data: %v", err)
+	}
+}
+
+func TestV2UploadRetainsDurableReconciliationIntentOnUnknownCatalogOutcome(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	// Simulate a steady-state process whose one-time filesystem migration already
+	// completed. The ambiguous write must be repaired by the durable intent
+	// worker itself, not incidentally by a later list request starting migration.
+	uploadCatalogMigrations.Store(uploadRoot, &uploadCatalogMigrationState{done: true})
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(uploadRoot) })
+	catalog := &unknownOutcomeUploadStore{
+		MemoryStore: store.NewMemoryStore(), failWrites: true, failLookups: true,
+	}
+	router := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("files", "unknown.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(testPNGBytes(t, 2, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v2/uploads", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("X-Ultra-User-Id", "unknown-user")
+	req.Header.Set("X-Ultra-Org-Id", "unknown-org")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("upload status = %d body=%s, want ambiguous 500", rec.Code, rec.Body.String())
+	}
+	resources, err := listUploadResources(uploadRoot)
+	if err != nil || len(resources) != 1 {
+		t.Fatalf("retained upload resources = %+v err=%v, want one", resources, err)
+	}
+	retained := resources[0]
+	source := filepath.Join(uploadRoot, retained.FileID+"__"+retained.OriginalName)
+	for _, path := range []string{
+		source,
+		uploadMetadataPath(uploadRoot, retained.FileID),
+		filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID)),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("ambiguous catalog outcome did not retain %q: %v", path, err)
+		}
+	}
+
+	catalog.setFailures(false, false)
+	listResources := func(activeRouter http.Handler) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, "/v2/resources", nil)
+		request.Header.Set("X-Ultra-User-Id", "unknown-user")
+		request.Header.Set("X-Ultra-Org-Id", "unknown-org")
+		response := httptest.NewRecorder()
+		activeRouter.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("resource list status = %d body=%s", response.Code, response.Body.String())
+		}
+	}
+	// Reconciliation runs independently of the viewer hot path. Recover the
+	// catalog and wait for the bounded worker without issuing a request that
+	// could hide a broken steady-state scheduler.
+	var resource domain.ResourceRecord
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resource, err = catalog.GetResourceForUser(context.Background(), retained.FileID, "unknown-user", "unknown-org")
+		_, intentErr := os.Stat(filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID)))
+		if err == nil && errors.Is(intentErr, os.ErrNotExist) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("background catalog reconciliation did not converge: catalog=%v intent=%v", err, intentErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resource.StoragePath)); err != nil {
+		t.Fatalf("reconciled catalog row points at removed data: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceCatalogReconciliationDir, resourceCatalogReconciliationIntentName(retained.FileID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconciliation intent survived successful catalog repair: %v", err)
+	}
+	if writes := catalog.successfulWriteCount(); writes != 1 {
+		t.Fatalf("successful catalog reconciliation writes = %d, want exactly one", writes)
+	}
+	// Repeated requests and a fresh process state are idempotent: neither path
+	// duplicates nor loses the repaired resource.
+	listResources(router)
+	uploadCatalogMigrations.Delete(uploadRoot)
+	restartedRouter := NewRouter(ServerDeps{
+		Version: "test-version", Runs: runcontrol.NewService(catalog, eventbus.NewMemoryBus()),
+		Store: catalog, UploadRoot: uploadRoot,
+	})
+	listResources(restartedRouter)
+	page, err := catalog.ListResourcesForUser(context.Background(), domain.ResourceListInput{
+		UserID: "unknown-user", OrgID: "unknown-org", Limit: 20,
+	})
+	if err != nil || page.TotalCount != 1 {
+		t.Fatalf("reconciled catalog after replay/restart = %+v err=%v, want one resource", page, err)
+	}
+}
+
 func TestV2UploadRejectsDeclaredBodyAboveDirectUploadLimit(t *testing.T) {
 	t.Parallel()
 
@@ -7428,6 +7743,224 @@ type countingUploadStore struct {
 	chunksBySession          map[string][]domain.UploadChunkRecord
 }
 
+type commitThenErrorUploadStore struct {
+	*store.MemoryStore
+	mu       sync.Mutex
+	failOnce bool
+}
+
+func (s *commitThenErrorUploadStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	resource, err := s.MemoryStore.UpsertResource(ctx, input)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failOnce
+	s.failOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog commit acknowledgement lost")
+	}
+	return resource, nil
+}
+
+type commitThenErrorResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu              sync.Mutex
+	failDeleteOnce  bool
+	failRestoreOnce bool
+}
+
+type failBeforeRestoreResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu             sync.Mutex
+	failResourceID string
+	failed         bool
+}
+
+type failBeforeDeleteResourceLifecycleStore struct {
+	*store.MemoryStore
+	mu             sync.Mutex
+	failResourceID string
+	failed         bool
+}
+
+func (s *failBeforeRestoreResourceLifecycleStore) RestoreResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	restoredAt time.Time,
+) (domain.ResourceRecord, error) {
+	s.mu.Lock()
+	shouldFail := resourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceRecord{}, errors.New("injected restore failure before commit")
+	}
+	return s.MemoryStore.RestoreResourceForUser(ctx, resourceID, userID, orgID, restoredAt)
+}
+
+func (s *failBeforeRestoreResourceLifecycleStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	s.mu.Lock()
+	shouldFail := input.ResourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("injected restore failure before commit")
+	}
+	return s.MemoryStore.RestoreResourceForUserWithEvent(ctx, input)
+}
+
+func (s *failBeforeDeleteResourceLifecycleStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	s.mu.Lock()
+	shouldFail := input.ResourceID == s.failResourceID && !s.failed
+	if shouldFail {
+		s.failed = true
+	}
+	s.mu.Unlock()
+	if shouldFail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("injected delete failure before commit")
+	}
+	return s.MemoryStore.SoftDeleteResourceForUserWithEvent(ctx, input)
+}
+
+func (s *commitThenErrorResourceLifecycleStore) SoftDeleteResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	deletedAt time.Time,
+) (domain.ResourceRecord, error) {
+	record, err := s.MemoryStore.SoftDeleteResourceForUser(ctx, resourceID, userID, orgID, deletedAt)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failDeleteOnce
+	s.failDeleteOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("soft-delete commit acknowledgement lost")
+	}
+	return record, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	result, err := s.MemoryStore.SoftDeleteResourceForUserWithEvent(ctx, input)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	fail := s.failDeleteOnce
+	s.failDeleteOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("soft-delete commit acknowledgement lost")
+	}
+	return result, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) RestoreResourceForUser(
+	ctx context.Context,
+	resourceID string,
+	userID string,
+	orgID string,
+	restoredAt time.Time,
+) (domain.ResourceRecord, error) {
+	record, err := s.MemoryStore.RestoreResourceForUser(ctx, resourceID, userID, orgID, restoredAt)
+	if err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	s.mu.Lock()
+	fail := s.failRestoreOnce
+	s.failRestoreOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("restore commit acknowledgement lost")
+	}
+	return record, nil
+}
+
+func (s *commitThenErrorResourceLifecycleStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	result, err := s.MemoryStore.RestoreResourceForUserWithEvent(ctx, input)
+	if err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	fail := s.failRestoreOnce
+	s.failRestoreOnce = false
+	s.mu.Unlock()
+	if fail {
+		return domain.ResourceLifecycleMutationResult{}, errors.New("restore commit acknowledgement lost")
+	}
+	return result, nil
+}
+
+type unknownOutcomeUploadStore struct {
+	*store.MemoryStore
+	mu               sync.RWMutex
+	failWrites       bool
+	failLookups      bool
+	successfulWrites int
+}
+
+func (s *unknownOutcomeUploadStore) setFailures(writes bool, lookups bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failWrites = writes
+	s.failLookups = lookups
+}
+
+func (s *unknownOutcomeUploadStore) UpsertResource(ctx context.Context, input domain.UpsertResourceInput) (domain.ResourceRecord, error) {
+	s.mu.RLock()
+	fail := s.failWrites
+	s.mu.RUnlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog write outcome unavailable")
+	}
+	record, err := s.MemoryStore.UpsertResource(ctx, input)
+	if err == nil {
+		s.mu.Lock()
+		s.successfulWrites++
+		s.mu.Unlock()
+	}
+	return record, err
+}
+
+func (s *unknownOutcomeUploadStore) successfulWriteCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.successfulWrites
+}
+
+func (s *unknownOutcomeUploadStore) GetResourceForUser(ctx context.Context, resourceID string, userID string, orgID string) (domain.ResourceRecord, error) {
+	s.mu.RLock()
+	fail := s.failLookups
+	s.mu.RUnlock()
+	if fail {
+		return domain.ResourceRecord{}, errors.New("catalog reconciliation lookup unavailable")
+	}
+	return s.MemoryStore.GetResourceForUser(ctx, resourceID, userID, orgID)
+}
+
 type exactOrganizationLookupStore struct {
 	*store.MemoryStore
 	org       domain.Organization
@@ -7803,6 +8336,66 @@ func TestEnsureUploadCatalogMigratedDoesNotCacheTransientFailure(t *testing.T) {
 	}
 	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
 		t.Fatalf("migration must retry after a transient failure, got: %v", err)
+	}
+}
+
+func TestEnsureUploadCatalogMigratedWaitersHonorTheirOwnContexts(t *testing.T) {
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{Version: "test-version", Store: mem}
+	root := t.TempDir()
+	attempt := &uploadCatalogMigrationAttempt{done: make(chan struct{})}
+	state := &uploadCatalogMigrationState{migration: attempt}
+	uploadCatalogMigrations.Store(root, state)
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(root) })
+
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			results <- deps.ensureUploadCatalogMigrated(ctx, root)
+		}()
+	}
+	for range 2 {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("migration waiter error = %v, want deadline exceeded", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("migration waiter ignored its request context")
+		}
+	}
+
+	state.mu.Lock()
+	state.done = true
+	state.migration = nil
+	close(attempt.done)
+	state.mu.Unlock()
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
+		t.Fatalf("completed shared migration remained blocked: %v", err)
+	}
+}
+
+func TestEnsureUploadCatalogMigratedSteadyStateDoesNotTouchFilesystem(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	deps := ServerDeps{
+		Version: "test-version",
+		Runs:    runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:   mem,
+	}
+	// A regular file would make both migration and reconciliation fail. Marking
+	// this unique root complete proves steady-state viewer requests use only the
+	// in-memory fast path and perform no filesystem scan.
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	uploadCatalogMigrations.Store(root, &uploadCatalogMigrationState{done: true})
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(root) })
+	if err := deps.ensureUploadCatalogMigrated(context.Background(), root); err != nil {
+		t.Fatalf("steady-state catalog gate touched filesystem: %v", err)
 	}
 }
 
@@ -9809,6 +10402,11 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	if err != nil || len(matches) != 1 {
 		t.Fatalf("uploaded fixture files = %v err=%v, want one file", matches, err)
 	}
+	originalBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDigest := sha256.Sum256(originalBytes)
 	deleteReq := httptest.NewRequest(http.MethodDelete, "/v2/resources/"+fileID, nil)
 	deleteReq.Header.Set("X-Ultra-User-Id", "test-user")
 	deleteReq.Header.Set("X-Ultra-Org-Id", "test-org")
@@ -9819,6 +10417,38 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	}
 	if _, err := os.Stat(matches[0]); err != nil {
 		t.Fatalf("soft delete removed the physical blob: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceTombstoneDir, resourceFilesystemDeleteFenceName(fileID))); err != nil {
+		t.Fatalf("soft delete did not publish its reversible filesystem fence: %v", err)
+	}
+	root, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock, lockErr := acquireResourceLifecycleLock(context.Background(), root, fileID, filepath.Base(matches[0])); !errors.Is(lockErr, errResourceLifecycleTombstoned) {
+		if lock != nil {
+			_ = lock.release()
+		}
+		_ = root.Close()
+		t.Fatalf("replayed producer lock error = %v, want delete-fence rejection", lockErr)
+	}
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID: fileID, OwnerUserID: "test-user", OwnerOrgID: "test-org", Status: domain.ResourceStatusActive,
+	}); !errors.Is(err, store.ErrConflict) {
+		_ = root.Close()
+		t.Fatalf("replayed resource registration error = %v, want lifecycle conflict", err)
+	}
+	retainedBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		_ = root.Close()
+		t.Fatal(err)
+	}
+	if retainedDigest := sha256.Sum256(retainedBytes); retainedDigest != originalDigest {
+		_ = root.Close()
+		t.Fatalf("soft-deleted source generation changed: got %x want %x", retainedDigest, originalDigest)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
 	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
@@ -9844,6 +10474,16 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	router.ServeHTTP(restoreRec, restoreReq)
 	if restoreRec.Code != http.StatusOK {
 		t.Fatalf("restore status = %d body=%s", restoreRec.Code, restoreRec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(uploadRoot, resourceTombstoneDir, resourceFilesystemDeleteFenceName(fileID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore retained reversible filesystem fence: %v", err)
+	}
+	restoredBytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredDigest := sha256.Sum256(restoredBytes); restoredDigest != originalDigest {
+		t.Fatalf("restored source generation = %x, want original %x", restoredDigest, originalDigest)
 	}
 	listAgainRec := httptest.NewRecorder()
 	router.ServeHTTP(listAgainRec, listReq)
@@ -9890,6 +10530,143 @@ func TestV2ResourceDeleteIsSoftAndRestoreReactivatesCatalogRow(t *testing.T) {
 	router.ServeHTTP(foreignEventsRec, foreignEventsReq)
 	if foreignEventsRec.Code != http.StatusNotFound {
 		t.Fatalf("foreign events status = %d body=%s, want 404", foreignEventsRec.Code, foreignEventsRec.Body.String())
+	}
+}
+
+func TestV2ResourceLifecycleMutationReturnsRetryableBusyWhilePublisherOwnsFence(t *testing.T) {
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	fileID := writeTestUploadFile(t, uploadRoot, "busy-lifecycle.png", testPNGBytes(t, 2, 2))
+
+	migrateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	migrateReq.Header.Set("X-Ultra-User-Id", "test-user")
+	migrateReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	migrateRec := httptest.NewRecorder()
+	router.ServeHTTP(migrateRec, migrateReq)
+	if migrateRec.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body=%s", migrateRec.Code, migrateRec.Body.String())
+	}
+	matches, err := filepath.Glob(filepath.Join(uploadRoot, fileID+"__*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("uploaded fixture files = %v err=%v, want one file", matches, err)
+	}
+	root, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	request := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	assertRetryableBusy := func(rec *httptest.ResponseRecorder, elapsed time.Duration) {
+		t.Helper()
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("busy lifecycle status = %d body=%s, want 503", rec.Code, rec.Body.String())
+		}
+		if retryAfter := rec.Header().Get("Retry-After"); retryAfter != "1" {
+			t.Fatalf("Retry-After = %q, want 1", retryAfter)
+		}
+		if elapsed > 2*resourceLifecycleMutationLockWait {
+			t.Fatalf("busy lifecycle request took %s, want bounded near %s", elapsed, resourceLifecycleMutationLockWait)
+		}
+	}
+
+	publisherLock, err := acquireResourceLifecycleLock(
+		context.Background(),
+		root,
+		fileID,
+		filepath.Base(matches[0]),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	busyDelete := request(http.MethodDelete, "/v2/resources/"+fileID)
+	assertRetryableBusy(busyDelete, time.Since(started))
+	if err := publisherLock.release(); err != nil {
+		t.Fatal(err)
+	}
+	if deleted := request(http.MethodDelete, "/v2/resources/"+fileID); deleted.Code != http.StatusOK {
+		t.Fatalf("delete after publisher release = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+
+	mutationLock, err := acquireResourceLifecycleMutationLock(context.Background(), root, fileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started = time.Now()
+	busyRestore := request(http.MethodPost, "/v2/resources/"+fileID+"/restore")
+	assertRetryableBusy(busyRestore, time.Since(started))
+	if err := mutationLock.release(); err != nil {
+		t.Fatal(err)
+	}
+	if restored := request(http.MethodPost, "/v2/resources/"+fileID+"/restore"); restored.Code != http.StatusOK {
+		t.Fatalf("restore after lifecycle release = %d body=%s", restored.Code, restored.Body.String())
+	}
+}
+
+func TestV2ResourceLifecycleAmbiguousCommitsEmitExactlyOneAuditEvent(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	baseStore := store.NewMemoryStore()
+	faultStore := &commitThenErrorResourceLifecycleStore{
+		MemoryStore:     baseStore,
+		failDeleteOnce:  true,
+		failRestoreOnce: true,
+	}
+	router := NewRouter(ServerDeps{Version: "test-version", Store: faultStore, UploadRoot: uploadRoot})
+	fileID := writeTestUploadFile(t, uploadRoot, "ambiguous-lifecycle.png", testPNGBytes(t, 2, 2))
+
+	migrateReq := httptest.NewRequest(http.MethodGet, "/v2/resources?limit=20", nil)
+	migrateReq.Header.Set("X-Ultra-User-Id", "test-user")
+	migrateReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	migrateRec := httptest.NewRecorder()
+	router.ServeHTTP(migrateRec, migrateReq)
+	if migrateRec.Code != http.StatusOK {
+		t.Fatalf("initial list status = %d body=%s", migrateRec.Code, migrateRec.Body.String())
+	}
+
+	request := func(method string, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	deleted := request(http.MethodDelete, "/v2/resources/"+fileID)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("ambiguous committed delete = %d body=%s", deleted.Code, deleted.Body.String())
+	}
+	restored := request(http.MethodPost, "/v2/resources/"+fileID+"/restore")
+	if restored.Code != http.StatusOK {
+		t.Fatalf("ambiguous committed restore = %d body=%s", restored.Code, restored.Body.String())
+	}
+
+	events, err := baseStore.ListResourceEvents(context.Background(), fileID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, event := range events {
+		counts[event.EventType]++
+	}
+	for _, eventType := range []string{"resource.deleted", "resource.restored"} {
+		if counts[eventType] != 1 {
+			t.Fatalf("%s event count = %d, want exactly one; events=%+v", eventType, counts[eventType], events)
+		}
 	}
 }
 
@@ -10023,6 +10800,208 @@ func TestV2ResourceBulkDeleteIsAtomicAndAudited(t *testing.T) {
 	}
 	if events.Count != 2 || events.TotalCount != 2 {
 		t.Fatalf("bulk delete events = %+v, want two deleted events", events)
+	}
+}
+
+func TestV2ResourceBulkDeleteHonorsRequestWideDeadline(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	now := time.Now().UTC()
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID:   "bulk_deadline_a",
+		OriginalName: "bulk-deadline-a.nii.gz",
+		ContentType:  "application/gzip",
+		SizeBytes:    64,
+		SHA256:       "sha-bulk-deadline-a",
+		SourceType:   "upload",
+		ResourceKind: "file",
+		OwnerUserID:  "alice",
+		OwnerOrgID:   "org-a",
+		Status:       domain.ResourceStatusActive,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpsertResource: %v", err)
+	}
+	uploadRootHandle, err := os.OpenRoot(uploadRoot)
+	if err != nil {
+		t.Fatalf("OpenRoot: %v", err)
+	}
+	defer uploadRootHandle.Close()
+	heldLock, err := acquireResourceLifecycleMutationLock(
+		context.Background(), uploadRootHandle, "bulk_deadline_a",
+	)
+	if err != nil {
+		t.Fatalf("acquireResourceLifecycleMutationLock: %v", err)
+	}
+	defer heldLock.release() //nolint:errcheck // test cleanup
+
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(mem, eventbus.NewMemoryBus()),
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancelRequest()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resources/delete/bulk",
+		strings.NewReader(`{"resource_ids":["bulk_deadline_a"]}`),
+	).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "alice")
+	req.Header.Set("X-Ultra-Org-Id", "org-a")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("bulk delete deadline status = %d body=%s, want 503", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+	}
+	resource, err := mem.GetResourceForUser(
+		context.Background(), "bulk_deadline_a", "alice", "org-a",
+	)
+	if err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("resource after timed-out bulk delete = %+v err=%v, want active", resource, err)
+	}
+}
+
+func TestV2ResourceBulkDeleteDeadlineIncludesCatalogMigrationWait(t *testing.T) {
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	attempt := &uploadCatalogMigrationAttempt{done: make(chan struct{})}
+	state := &uploadCatalogMigrationState{migration: attempt}
+	uploadCatalogMigrations.Store(uploadRoot, state)
+	t.Cleanup(func() { uploadCatalogMigrations.Delete(uploadRoot) })
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Store:      mem,
+		UploadRoot: uploadRoot,
+	})
+	requestCtx, cancelRequest := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancelRequest()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/resources/delete/bulk",
+		strings.NewReader(`{"resource_ids":["unreached"]}`),
+	).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Ultra-User-Id", "alice")
+	req.Header.Set("X-Ultra-Org-Id", "org-a")
+	rec := httptest.NewRecorder()
+	started := time.Now()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("bulk delete migration wait status = %d body=%s, want 503", rec.Code, rec.Body.String())
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bulk delete migration wait took %s, want request-bounded", elapsed)
+	}
+	if rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("Retry-After = %q, want 1", rec.Header().Get("Retry-After"))
+	}
+
+	state.mu.Lock()
+	state.done = true
+	state.migration = nil
+	close(attempt.done)
+	state.mu.Unlock()
+}
+
+func TestV2ResourceBulkDeleteRetryResumesWithoutDuplicateEvents(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	faultStore := &failBeforeDeleteResourceLifecycleStore{
+		MemoryStore:    mem,
+		failResourceID: "bulk_delete_resume_b",
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(faultStore, eventbus.NewMemoryBus()),
+		Store:      faultStore,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for index, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: resourceID + ".nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    int64(64 + index),
+			SHA256:       "sha-" + resourceID,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       domain.ResourceStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+	}
+
+	requestDelete := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/resources/delete/bulk", strings.NewReader(`{
+			"resource_ids":["bulk_delete_resume_a","bulk_delete_resume_b"]
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-User-Id", "alice")
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := requestDelete()
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first bulk delete status = %d body=%s, want 500", first.Code, first.Body.String())
+	}
+	if resource, err := mem.GetResourceForOwner(context.Background(), "bulk_delete_resume_a", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusDeleted {
+		t.Fatalf("first resource after partial delete = %+v err=%v, want deleted", resource, err)
+	}
+	if resource, err := mem.GetResourceForUser(context.Background(), "bulk_delete_resume_b", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("second resource after injected failure = %+v err=%v, want active", resource, err)
+	}
+
+	second := requestDelete()
+	if second.Code != http.StatusOK {
+		t.Fatalf("retried bulk delete status = %d body=%s, want 200", second.Code, second.Body.String())
+	}
+	for _, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		resource, err := mem.GetResourceForOwner(context.Background(), resourceID, "alice", "org-a")
+		if err != nil || resource.Status != domain.ResourceStatusDeleted {
+			t.Fatalf("resource %s after retry = %+v err=%v, want deleted", resourceID, resource, err)
+		}
+	}
+
+	events, err := mem.ListResourceEventsForUser(context.Background(), domain.ResourceEventListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		EventType: "resource.deleted",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser: %v", err)
+	}
+	if events.TotalCount != 2 || len(events.Events) != 2 {
+		t.Fatalf("deleted events after replay = %+v, want exactly one per resource", events)
+	}
+	counts := map[string]int{}
+	for _, event := range events.Events {
+		counts[event.ResourceID]++
+	}
+	for _, resourceID := range []string{"bulk_delete_resume_a", "bulk_delete_resume_b"} {
+		if counts[resourceID] != 1 {
+			t.Fatalf("deleted event count for %s = %d, want 1; events=%+v", resourceID, counts[resourceID], events.Events)
+		}
 	}
 }
 
@@ -10161,6 +11140,103 @@ func TestV2ResourceBulkRestoreIsAtomicAndAudited(t *testing.T) {
 	for _, event := range events.Events {
 		if event.EventType != "resource.restored" {
 			t.Fatalf("bulk restore event = %+v, want resource.restored", event)
+		}
+	}
+}
+
+func TestV2ResourceBulkRestoreRetryResumesWithoutDuplicateEvents(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	mem := store.NewMemoryStore()
+	faultStore := &failBeforeRestoreResourceLifecycleStore{
+		MemoryStore:    mem,
+		failResourceID: "bulk_resume_b",
+	}
+	router := NewRouter(ServerDeps{
+		Version:    "test-version",
+		Runs:       runcontrol.NewService(faultStore, eventbus.NewMemoryBus()),
+		Store:      faultStore,
+		UploadRoot: uploadRoot,
+	})
+	now := time.Now().UTC()
+	for index, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: resourceID + ".nii.gz",
+			ContentType:  "application/gzip",
+			SizeBytes:    int64(64 + index),
+			SHA256:       "sha-" + resourceID,
+			SourceType:   "upload",
+			ResourceKind: "file",
+			OwnerUserID:  "alice",
+			OwnerOrgID:   "org-a",
+			Status:       domain.ResourceStatusActive,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+		if _, err := mem.SoftDeleteResourceForUser(
+			context.Background(), resourceID, "alice", "org-a", now.Add(time.Minute),
+		); err != nil {
+			t.Fatalf("SoftDeleteResourceForUser(%s): %v", resourceID, err)
+		}
+	}
+
+	requestRestore := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/resources/restore/bulk", strings.NewReader(`{
+			"resource_ids":["bulk_resume_a","bulk_resume_b"]
+		}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Ultra-User-Id", "alice")
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	first := requestRestore()
+	if first.Code != http.StatusInternalServerError {
+		t.Fatalf("first bulk restore status = %d body=%s, want 500", first.Code, first.Body.String())
+	}
+	if resource, err := mem.GetResourceForUser(context.Background(), "bulk_resume_a", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusActive {
+		t.Fatalf("first resource after partial restore = %+v err=%v, want active", resource, err)
+	}
+	if resource, err := mem.GetResourceForOwner(context.Background(), "bulk_resume_b", "alice", "org-a"); err != nil || resource.Status != domain.ResourceStatusDeleted {
+		t.Fatalf("second resource after injected failure = %+v err=%v, want deleted", resource, err)
+	}
+
+	second := requestRestore()
+	if second.Code != http.StatusOK {
+		t.Fatalf("retried bulk restore status = %d body=%s, want 200", second.Code, second.Body.String())
+	}
+	for _, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		resource, err := mem.GetResourceForUser(context.Background(), resourceID, "alice", "org-a")
+		if err != nil || resource.Status != domain.ResourceStatusActive {
+			t.Fatalf("resource %s after retry = %+v err=%v, want active", resourceID, resource, err)
+		}
+	}
+
+	events, err := mem.ListResourceEventsForUser(context.Background(), domain.ResourceEventListInput{
+		UserID:    "alice",
+		OrgID:     "org-a",
+		EventType: "resource.restored",
+		Limit:     20,
+	})
+	if err != nil {
+		t.Fatalf("ListResourceEventsForUser: %v", err)
+	}
+	if events.TotalCount != 2 || len(events.Events) != 2 {
+		t.Fatalf("restored events after replay = %+v, want exactly one per resource", events)
+	}
+	counts := map[string]int{}
+	for _, event := range events.Events {
+		counts[event.ResourceID]++
+	}
+	for _, resourceID := range []string{"bulk_resume_a", "bulk_resume_b"} {
+		if counts[resourceID] != 1 {
+			t.Fatalf("restored event count for %s = %d, want 1; events=%+v", resourceID, counts[resourceID], events.Events)
 		}
 	}
 }
@@ -10401,9 +11477,10 @@ func TestOmeTiffUploadViewerKeepsScientificMetadata(t *testing.T) {
 			ContentType string   `json:"content_type"`
 		} `json:"metadata"`
 		Viewer struct {
-			Status           string   `json:"status"`
-			Available        []string `json:"available_surfaces"`
-			AssetPreparation struct {
+			Status              string   `json:"status"`
+			Available           []string `json:"available_surfaces"`
+			DisplayCapabilities []string `json:"display_capabilities"`
+			AssetPreparation    struct {
 				Status          string `json:"status"`
 				NativeSupported bool   `json:"native_supported"`
 				TilePyramid     string `json:"tile_pyramid"`
@@ -10446,29 +11523,19 @@ func TestOmeTiffUploadViewerKeepsScientificMetadata(t *testing.T) {
 	if len(viewerResponse.Viewer.Available) != 2 || viewerResponse.Viewer.Available[0] != "2d" || viewerResponse.Viewer.Available[1] != "metadata" {
 		t.Fatalf("available surfaces = %v, want 2d + metadata for OME-TIFF stack", viewerResponse.Viewer.Available)
 	}
+	for _, capability := range []string{"channel_visibility", "channel_color", "channel_lut_transport"} {
+		if !sliceContains(viewerResponse.Viewer.DisplayCapabilities, capability) {
+			t.Fatalf("display capabilities = %v, want %s", viewerResponse.Viewer.DisplayCapabilities, capability)
+		}
+	}
 
 	displayReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?axis=z&z=1&channels=2&window_min=600&window_max=900", nil)
 	displayReq.Header.Set("X-Ultra-User-Id", "test-user")
 	displayReq.Header.Set("X-Ultra-Org-Id", "test-org")
 	displayRec := httptest.NewRecorder()
 	router.ServeHTTP(displayRec, displayReq)
-	if displayRec.Code != http.StatusOK {
-		t.Fatalf("display status = %d body=%s", displayRec.Code, displayRec.Body.String())
-	}
-	if got := displayRec.Header().Get("Content-Type"); got != "image/png" {
-		t.Fatalf("display content type = %q, want image/png", got)
-	}
-	displayImage, format, err := image.Decode(bytes.NewReader(displayRec.Body.Bytes()))
-	if err != nil {
-		t.Fatalf("decode display PNG: %v", err)
-	}
-	if format != "png" || displayImage.Bounds().Dx() != 2 || displayImage.Bounds().Dy() != 1 {
-		t.Fatalf("display config = %dx%d %s, want 2x1 png", displayImage.Bounds().Dx(), displayImage.Bounds().Dy(), format)
-	}
-	first := color.GrayModel.Convert(displayImage.At(0, 0)).(color.Gray).Y
-	second := color.GrayModel.Convert(displayImage.At(1, 0)).(color.Gray).Y
-	if first > 5 || second < 250 {
-		t.Fatalf("selected OME plane pixels = %d,%d, want windowed z1 c2 low/high contrast", first, second)
+	if displayRec.Code != http.StatusNotImplemented {
+		t.Fatalf("scientific slice status = %d body=%s, want 501 without image service", displayRec.Code, displayRec.Body.String())
 	}
 }
 
@@ -10631,6 +11698,30 @@ func TestNiftiUploadViewerServesScalarVolume(t *testing.T) {
 		if got != want {
 			t.Fatalf("voxel[%d] = %d, want %d", index, got, want)
 		}
+	}
+
+	for _, rawQuery := range []string{
+		"channel=-1", "channel=1.5", "channel=0&channel=0", "channel=0&c=0",
+		"channel=0,1", "channels=0", "channel=1", "t=1", "t=", "time=0&timepoint=0",
+		"sampling=linear", "sampling=box&sampling=box",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?"+rawQuery, nil)
+		req.Header.Set("X-Ultra-User-Id", "test-user")
+		req.Header.Set("X-Ultra-Org-Id", "test-org")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("query %q status=%d body=%s, want 400", rawQuery, rec.Code, rec.Body.String())
+		}
+	}
+
+	nearestReq := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/scalar-volume?sampling=nearest", nil)
+	nearestReq.Header.Set("X-Ultra-User-Id", "test-user")
+	nearestReq.Header.Set("X-Ultra-Org-Id", "test-org")
+	nearestRec := httptest.NewRecorder()
+	router.ServeHTTP(nearestRec, nearestReq)
+	if nearestRec.Code != http.StatusOK || nearestRec.Header().Get("x-volume-sampling") != "nearest" {
+		t.Fatalf("nearest response status=%d sampling=%q body=%s", nearestRec.Code, nearestRec.Header().Get("x-volume-sampling"), nearestRec.Body.String())
 	}
 }
 
@@ -11035,6 +12126,100 @@ func TestNiftiUploadViewerServesSelectedScalarTimepoint(t *testing.T) {
 	}
 }
 
+func TestNiftiUploadSliceServesExactMPRPlanesAndTimeAliases(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: uploadRoot})
+	values := []uint16{
+		0, 10, 20, 30, 40, 50,
+		60, 70, 80, 90, 100, 110,
+		100, 110, 120, 130, 140, 150,
+		160, 170, 180, 190, 200, 210,
+	}
+	fileID := writeTestUploadFile(t, uploadRoot, "mpr-time-series.nii", testNifti1Uint16TimeBytes(t, 3, 2, 2, 2, values))
+
+	cases := []struct {
+		name       string
+		query      string
+		wantWidth  int
+		wantHeight int
+		wantFirst  uint8
+		wantLast   uint8
+	}{
+		{name: "sagittal x with t", query: "axis=x&x=2&t=1", wantWidth: 2, wantHeight: 2, wantFirst: 46, wantLast: 255},
+		{name: "coronal y with time", query: "axis=y&y=1&time=1", wantWidth: 3, wantHeight: 2, wantFirst: 70, wantLast: 255},
+		{name: "axial z with timepoint", query: "axis=z&z=1&timepoint=1", wantWidth: 3, wantHeight: 2, wantFirst: 139, wantLast: 255},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?"+tc.query+"&window_min=100&window_max=210", nil)
+			req.Header.Set("X-Ultra-User-Id", "test-user")
+			req.Header.Set("X-Ultra-Org-Id", "test-org")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("slice status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			img, err := png.Decode(bytes.NewReader(rec.Body.Bytes()))
+			if err != nil {
+				t.Fatalf("decode slice png: %v", err)
+			}
+			if got := img.Bounds().Dx(); got != tc.wantWidth {
+				t.Fatalf("slice width = %d, want %d", got, tc.wantWidth)
+			}
+			if got := img.Bounds().Dy(); got != tc.wantHeight {
+				t.Fatalf("slice height = %d, want %d", got, tc.wantHeight)
+			}
+			gotFirst := color.GrayModel.Convert(img.At(0, 0)).(color.Gray).Y
+			gotLast := color.GrayModel.Convert(img.At(tc.wantWidth-1, tc.wantHeight-1)).(color.Gray).Y
+			if gotFirst != tc.wantFirst || gotLast != tc.wantLast {
+				t.Fatalf("slice corner pixels = %d,%d, want %d,%d", gotFirst, gotLast, tc.wantFirst, tc.wantLast)
+			}
+		})
+	}
+}
+
+func TestNiftiUploadSliceRejectsInexactMPRSelectors(t *testing.T) {
+	t.Parallel()
+
+	uploadRoot := t.TempDir()
+	router := NewRouter(ServerDeps{Version: "test-version", UploadRoot: uploadRoot})
+	values := make([]uint16, 3*2*2*2)
+	fileID := writeTestUploadFile(t, uploadRoot, "strict-mpr.nii", testNifti1Uint16TimeBytes(t, 3, 2, 2, 2, values))
+
+	cases := []string{
+		"x=1",
+		"axis=q&z=0",
+		"axis=x",
+		"axis=y",
+		"axis=z",
+		"axis=x&x=1&y=0",
+		"axis=x&x=1&x=2",
+		"axis=z&z=-1",
+		"axis=z&z=2",
+		"axis=y&y=2",
+		"axis=x&x=3",
+		"axis=z&z=0&t=-1",
+		"axis=z&z=0&t=2",
+		"axis=z&z=0&t=one",
+		"axis=z&z=0&t=0&t=1",
+		"axis=z&z=0&t=0&time=0",
+	}
+	for _, query := range cases {
+		t.Run(query, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/uploads/"+fileID+"/slice?"+query, nil)
+			req.Header.Set("X-Ultra-User-Id", "test-user")
+			req.Header.Set("X-Ultra-Org-Id", "test-org")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("slice status = %d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	t.Parallel()
 
@@ -11096,6 +12281,9 @@ func TestNiftiUploadViewerServesSelectedScalarChannel(t *testing.T) {
 	}
 	if !sliceContains(viewerResponse.Viewer.DisplayCapabilities, "channel_visibility") {
 		t.Fatalf("display capabilities = %v, want channel_visibility", viewerResponse.Viewer.DisplayCapabilities)
+	}
+	if sliceContains(viewerResponse.Viewer.DisplayCapabilities, "channel_lut_transport") {
+		t.Fatalf("NIfTI display capabilities = %v, must not advertise channel LUT transport", viewerResponse.Viewer.DisplayCapabilities)
 	}
 	if len(viewerResponse.Metadata.ArrayShape) != 4 || viewerResponse.Metadata.ArrayShape[0] != 2 || viewerResponse.Metadata.ArrayShape[1] != 2 || viewerResponse.Metadata.ArrayShape[2] != 1 || viewerResponse.Metadata.ArrayShape[3] != 2 {
 		t.Fatalf("array_shape = %v, want [2 2 1 2] (C,Z,Y,X)", viewerResponse.Metadata.ArrayShape)
@@ -13796,6 +14984,21 @@ func testPNGBytes(t *testing.T, width int, height int) []byte {
 	var buffer bytes.Buffer
 	if err := png.Encode(&buffer, img); err != nil {
 		t.Fatalf("encode test PNG: %v", err)
+	}
+	return buffer.Bytes()
+}
+
+func testJPEGBytes(t *testing.T, width int, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(20 * x), G: uint8(30 * y), B: 100, A: 255})
+		}
+	}
+	var buffer bytes.Buffer
+	if err := jpeg.Encode(&buffer, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatalf("encode test JPEG: %v", err)
 	}
 	return buffer.Bytes()
 }

@@ -12,7 +12,7 @@
 //    the conversation-URL layer never clobber each other — each only owns its own keys.
 
 // Mirrors App.tsx's ActivePanel union (kept local to avoid importing the 14.8k-line App).
-export type NavPanel = "chat" | "resources" | "admin" | "training" | "scientific-viewer";
+export type NavPanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 
 export type NavState = {
   panel: NavPanel;
@@ -27,6 +27,7 @@ export type NavState = {
 const PANEL_TO_VIEW: Record<NavPanel, string | null> = {
   chat: null,
   resources: "resources",
+  notes: "notes",
   admin: "admin",
   training: "training",
   "scientific-viewer": "lens",
@@ -34,6 +35,7 @@ const PANEL_TO_VIEW: Record<NavPanel, string | null> = {
 
 const VIEW_TO_PANEL: Record<string, NavPanel> = {
   resources: "resources",
+  notes: "notes",
   admin: "admin",
   training: "training",
   lens: "scientific-viewer",

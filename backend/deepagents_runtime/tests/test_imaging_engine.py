@@ -7,6 +7,7 @@ where ``libimgcnv.so`` is installed).
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import types
@@ -14,11 +15,13 @@ import types
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
+from ultra_deepagents.imaging.convert import ConvertResult
 from ultra_deepagents.imaging.engine import (
     EngineUnavailable,
     LibBioImageEngine,
     StubEngine,
 )
+from ultra_deepagents.imaging.job import run_derive_pyramid_job
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -184,6 +187,57 @@ def test_localized_owned_pyramid_retains_native_libbioimage_routing(
     engine._semantic_tiff_engine = object()
 
     assert localized != str(source)
+    assert engine._tiff_scalar_engine(localized) is None
+
+
+def test_strict_digest_pyramid_localizes_and_retains_native_libbioimage_routing(
+    tmp_path,
+    monkeypatch,
+):
+    from ultra_deepagents.imaging import service as service_module
+
+    source = tmp_path / "source.ome.tif"
+    source_bytes = b"strict source generation"
+    source.write_bytes(source_bytes)
+    destination = tmp_path / "derived" / "sample__pyramid.tif"
+    viewer_info = {
+        "dims_order": "TCZYX",
+        "axis_sizes": {"T": 1, "C": 1, "Z": 1, "Y": 8, "X": 16},
+        "dtype": "uint16",
+        "channel_names": ["Intensity"],
+        "physical_spacing": {"x": 1.0, "y": 1.0, "z": 1.0},
+        "metadata": {"spacing_units": {"x": "pixel", "y": "pixel", "z": "voxel"}},
+        "viewer": {"tile_scheme": {"levels": [{"level": 0, "width": 16, "height": 8}]}},
+        "tile_scheme": {"levels": [{"level": 0, "width": 16, "height": 8}]},
+    }
+
+    def write_artifact(src, dst, *, spec):
+        with open(dst, "wb") as artifact:
+            artifact.write(b"digest pyramid")
+        return ConvertResult(src, dst, 0, "", "")
+
+    result = run_derive_pyramid_job(
+        {
+            "resource_id": "sample",
+            "src_path": str(source),
+            "dst_path": str(destination),
+            "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+            "source_size_bytes": len(source_bytes),
+        },
+        convert_fn=write_artifact,
+        meta_fn=lambda _path: {"image_num_x": 16, "image_num_y": 8},
+        viewer_info_fn=lambda _path: viewer_info,
+    )
+    artifact_path = result["derived_path"]
+    assert "__pyramid.sha256-" in artifact_path
+
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_ENABLED", True)
+    monkeypatch.setattr(service_module, "_PYRAMID_CACHE_DIR", str(tmp_path / "local-cache"))
+    localized = service_module.localize_pyramid(artifact_path)
+    engine = object.__new__(LibBioImageEngine)
+    engine._semantic_tiff_engine = object()
+
+    assert localized != artifact_path
     assert engine._tiff_scalar_engine(localized) is None
 
 
@@ -678,8 +732,9 @@ def _fallback_engine(*, width, height, plane, is_photo=True, windows=None):
 
 def test_tile_level0_empty_falls_back_to_native_plane_crop():
     np = pytest.importorskip("numpy")
-    from PIL import Image
     import io as _io
+
+    from PIL import Image
 
     # 1000x1200 gradient plane; tile (col=1,row=1) -> crop x 512:1000, y 512:1024
     plane = (np.arange(1200 * 1000, dtype="uint32").reshape(1200, 1000) % 251).astype("uint8")
@@ -694,8 +749,9 @@ def test_tile_level0_empty_falls_back_to_native_plane_crop():
 
 def test_tile_level0_fallback_windowed_scalar_branch():
     np = pytest.importorskip("numpy")
-    from PIL import Image
     import io as _io
+
+    from PIL import Image
 
     plane = np.linspace(0.0, 1000.0, 600 * 600, dtype="float32").reshape(600, 600)
     engine = _fallback_engine(
@@ -738,8 +794,9 @@ def test_tile_level0_fallback_respects_pixel_budget():
 
 def test_tile_level0_fallback_fused_branch_composites_crop():
     np = pytest.importorskip("numpy")
-    from PIL import Image
     import io as _io
+
+    from PIL import Image
 
     # (C,H,W) float plane: 2 channels; fused branch must crop then composite
     plane = np.stack(

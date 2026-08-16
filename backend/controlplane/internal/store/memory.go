@@ -33,89 +33,93 @@ type uploadSessionStats struct {
 }
 
 type MemoryStore struct {
-	mu                     sync.RWMutex
-	threads                map[string]domain.ThreadRecord
-	messages               map[string][]domain.ThreadMessage
-	runs                   map[string]domain.RunRecord
-	events                 map[string][]domain.RunEventRecord
-	artifacts              map[string]domain.ArtifactRecord
-	resources              map[string]domain.ResourceRecord
-	resourceEvents         []domain.ResourceEventRecord
-	resourceGrants         map[string]domain.ResourceShareGrantRecord
-	collections            map[string]domain.ResourceCollectionRecord
-	collectionMembers      map[string]domain.ResourceCollectionMembershipRecord
-	collectionGrants       map[string]domain.ResourceCollectionShareGrantRecord
-	datasetSnapshots       map[string]domain.DatasetSnapshotRecord
-	datasetEntries         map[string][]domain.DatasetSnapshotResourceRecord
-	datasetGrants          map[string]domain.DatasetSnapshotShareGrantRecord
-	datasetEvents          []domain.DatasetSnapshotEventRecord
-	dataAgentJobs          map[string]domain.DataAgentJobRecord
-	dataAgentEvents        map[string][]domain.DataAgentJobEventRecord
-	dataAgentLeases        map[string]domain.DataAgentJobLeaseRecord
-	dataAgentJobResources  map[string][]domain.LinkDataAgentJobResourceInput
-	uploadSessions         map[string]domain.UploadSessionRecord
-	uploadFiles            map[string]domain.UploadSessionFileRecord
-	uploadChunks           map[string]domain.UploadChunkRecord
-	uploadFilesBySession   map[string]map[string]struct{}
-	uploadChunksByFile     map[string]map[string]struct{}
-	uploadChunksBySession  map[string]map[string]struct{}
-	uploadSessionStats     map[string]uploadSessionStats
-	uploadEvents           []domain.UploadSessionEventRecord
-	users                  map[string]domain.UserAccount
-	runTokenUsage          map[string]domain.RunTokenUsageRecord
-	runTokenUsageFinalized map[string]bool
-	tokenUsageDaily        map[string]map[string]*domain.UserTokenUsageDaily
-	tokenUsageLifetime     map[string]domain.UserTokenUsageStats
-	orgs                   map[string]domain.Organization
-	bisque                 map[string]domain.BisqueCredentialRecord
-	leases                 map[string]domain.RunLeaseRecord
-	steerMessages          map[string][]domain.RunSteerMessageRecord
-	steerBarriers          map[string]time.Time
-	workers                map[string]domain.WorkerHeartbeatRecord
-	training               *memoryTrainingState
+	mu                      sync.RWMutex
+	threads                 map[string]domain.ThreadRecord
+	messages                map[string][]domain.ThreadMessage
+	runs                    map[string]domain.RunRecord
+	events                  map[string][]domain.RunEventRecord
+	artifacts               map[string]domain.ArtifactRecord
+	resources               map[string]domain.ResourceRecord
+	resourcePurgeTombstones map[string]time.Time
+	resourceEvents          []domain.ResourceEventRecord
+	resourceGrants          map[string]domain.ResourceShareGrantRecord
+	collections             map[string]domain.ResourceCollectionRecord
+	collectionMembers       map[string]domain.ResourceCollectionMembershipRecord
+	collectionGrants        map[string]domain.ResourceCollectionShareGrantRecord
+	datasetSnapshots        map[string]domain.DatasetSnapshotRecord
+	datasetEntries          map[string][]domain.DatasetSnapshotResourceRecord
+	datasetGrants           map[string]domain.DatasetSnapshotShareGrantRecord
+	datasetEvents           []domain.DatasetSnapshotEventRecord
+	dataAgentJobs           map[string]domain.DataAgentJobRecord
+	dataAgentEvents         map[string][]domain.DataAgentJobEventRecord
+	dataAgentLeases         map[string]domain.DataAgentJobLeaseRecord
+	dataAgentJobResources   map[string][]domain.LinkDataAgentJobResourceInput
+	uploadSessions          map[string]domain.UploadSessionRecord
+	uploadFiles             map[string]domain.UploadSessionFileRecord
+	uploadChunks            map[string]domain.UploadChunkRecord
+	uploadFilesBySession    map[string]map[string]struct{}
+	uploadChunksByFile      map[string]map[string]struct{}
+	uploadChunksBySession   map[string]map[string]struct{}
+	uploadSessionStats      map[string]uploadSessionStats
+	uploadEvents            []domain.UploadSessionEventRecord
+	users                   map[string]domain.UserAccount
+	runTokenUsage           map[string]domain.RunTokenUsageRecord
+	runTokenUsageFinalized  map[string]bool
+	tokenUsageDaily         map[string]map[string]*domain.UserTokenUsageDaily
+	tokenUsageLifetime      map[string]domain.UserTokenUsageStats
+	orgs                    map[string]domain.Organization
+	bisque                  map[string]domain.BisqueCredentialRecord
+	leases                  map[string]domain.RunLeaseRecord
+	notes                   map[string]domain.NoteRecord
+	steerMessages           map[string][]domain.RunSteerMessageRecord
+	steerBarriers           map[string]time.Time
+	workers                 map[string]domain.WorkerHeartbeatRecord
+	training                *memoryTrainingState
 }
 
 func NewMemoryStore() *MemoryStore {
 	store := &MemoryStore{
-		threads:                map[string]domain.ThreadRecord{},
-		messages:               map[string][]domain.ThreadMessage{},
-		runs:                   map[string]domain.RunRecord{},
-		events:                 map[string][]domain.RunEventRecord{},
-		artifacts:              map[string]domain.ArtifactRecord{},
-		resources:              map[string]domain.ResourceRecord{},
-		resourceEvents:         []domain.ResourceEventRecord{},
-		resourceGrants:         map[string]domain.ResourceShareGrantRecord{},
-		collections:            map[string]domain.ResourceCollectionRecord{},
-		collectionMembers:      map[string]domain.ResourceCollectionMembershipRecord{},
-		collectionGrants:       map[string]domain.ResourceCollectionShareGrantRecord{},
-		datasetSnapshots:       map[string]domain.DatasetSnapshotRecord{},
-		datasetEntries:         map[string][]domain.DatasetSnapshotResourceRecord{},
-		datasetGrants:          map[string]domain.DatasetSnapshotShareGrantRecord{},
-		datasetEvents:          []domain.DatasetSnapshotEventRecord{},
-		dataAgentJobs:          map[string]domain.DataAgentJobRecord{},
-		dataAgentEvents:        map[string][]domain.DataAgentJobEventRecord{},
-		dataAgentLeases:        map[string]domain.DataAgentJobLeaseRecord{},
-		dataAgentJobResources:  map[string][]domain.LinkDataAgentJobResourceInput{},
-		uploadSessions:         map[string]domain.UploadSessionRecord{},
-		uploadFiles:            map[string]domain.UploadSessionFileRecord{},
-		uploadChunks:           map[string]domain.UploadChunkRecord{},
-		uploadFilesBySession:   map[string]map[string]struct{}{},
-		uploadChunksByFile:     map[string]map[string]struct{}{},
-		uploadChunksBySession:  map[string]map[string]struct{}{},
-		uploadSessionStats:     map[string]uploadSessionStats{},
-		uploadEvents:           []domain.UploadSessionEventRecord{},
-		users:                  map[string]domain.UserAccount{},
-		runTokenUsage:          map[string]domain.RunTokenUsageRecord{},
-		runTokenUsageFinalized: map[string]bool{},
-		tokenUsageDaily:        map[string]map[string]*domain.UserTokenUsageDaily{},
-		tokenUsageLifetime:     map[string]domain.UserTokenUsageStats{},
-		orgs:                   map[string]domain.Organization{},
-		bisque:                 map[string]domain.BisqueCredentialRecord{},
-		leases:                 map[string]domain.RunLeaseRecord{},
-		steerMessages:          map[string][]domain.RunSteerMessageRecord{},
-		steerBarriers:          map[string]time.Time{},
-		workers:                map[string]domain.WorkerHeartbeatRecord{},
-		training:               newMemoryTrainingState(),
+		threads:                 map[string]domain.ThreadRecord{},
+		messages:                map[string][]domain.ThreadMessage{},
+		runs:                    map[string]domain.RunRecord{},
+		events:                  map[string][]domain.RunEventRecord{},
+		artifacts:               map[string]domain.ArtifactRecord{},
+		resources:               map[string]domain.ResourceRecord{},
+		resourcePurgeTombstones: map[string]time.Time{},
+		resourceEvents:          []domain.ResourceEventRecord{},
+		resourceGrants:          map[string]domain.ResourceShareGrantRecord{},
+		collections:             map[string]domain.ResourceCollectionRecord{},
+		collectionMembers:       map[string]domain.ResourceCollectionMembershipRecord{},
+		collectionGrants:        map[string]domain.ResourceCollectionShareGrantRecord{},
+		datasetSnapshots:        map[string]domain.DatasetSnapshotRecord{},
+		datasetEntries:          map[string][]domain.DatasetSnapshotResourceRecord{},
+		datasetGrants:           map[string]domain.DatasetSnapshotShareGrantRecord{},
+		datasetEvents:           []domain.DatasetSnapshotEventRecord{},
+		dataAgentJobs:           map[string]domain.DataAgentJobRecord{},
+		dataAgentEvents:         map[string][]domain.DataAgentJobEventRecord{},
+		dataAgentLeases:         map[string]domain.DataAgentJobLeaseRecord{},
+		dataAgentJobResources:   map[string][]domain.LinkDataAgentJobResourceInput{},
+		uploadSessions:          map[string]domain.UploadSessionRecord{},
+		uploadFiles:             map[string]domain.UploadSessionFileRecord{},
+		uploadChunks:            map[string]domain.UploadChunkRecord{},
+		uploadFilesBySession:    map[string]map[string]struct{}{},
+		uploadChunksByFile:      map[string]map[string]struct{}{},
+		uploadChunksBySession:   map[string]map[string]struct{}{},
+		uploadSessionStats:      map[string]uploadSessionStats{},
+		uploadEvents:            []domain.UploadSessionEventRecord{},
+		users:                   map[string]domain.UserAccount{},
+		runTokenUsage:           map[string]domain.RunTokenUsageRecord{},
+		runTokenUsageFinalized:  map[string]bool{},
+		tokenUsageDaily:         map[string]map[string]*domain.UserTokenUsageDaily{},
+		tokenUsageLifetime:      map[string]domain.UserTokenUsageStats{},
+		orgs:                    map[string]domain.Organization{},
+		bisque:                  map[string]domain.BisqueCredentialRecord{},
+		leases:                  map[string]domain.RunLeaseRecord{},
+		notes:                   map[string]domain.NoteRecord{},
+		steerMessages:           map[string][]domain.RunSteerMessageRecord{},
+		steerBarriers:           map[string]time.Time{},
+		workers:                 map[string]domain.WorkerHeartbeatRecord{},
+		training:                newMemoryTrainingState(),
 	}
 	store.orgs["local-org"] = defaultLocalOrganization(domain.Now())
 	return store
@@ -2595,10 +2599,17 @@ func (s *MemoryStore) UpsertResource(ctx context.Context, input domain.UpsertRes
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	resourceID := strings.TrimSpace(input.ResourceID)
+	resourceID := input.ResourceID
 	if resourceID == "" {
 		resourceID = domain.NewID("file")
 	}
+	if !domain.IsCanonicalResourceID(resourceID) {
+		return domain.ResourceRecord{}, ErrConflict
+	}
+	if _, purged := s.resourcePurgeTombstones[resourceID]; purged {
+		return domain.ResourceRecord{}, ErrConflict
+	}
+	existing, exists := s.resources[resourceID]
 	ownerUserID := strings.TrimSpace(input.OwnerUserID)
 	if ownerUserID == "" {
 		ownerUserID = "local-user"
@@ -2618,7 +2629,7 @@ func (s *MemoryStore) UpsertResource(ctx context.Context, input domain.UpsertRes
 	now := domain.Now()
 	createdAt := input.CreatedAt
 	if createdAt.IsZero() {
-		if existing, ok := s.resources[resourceID]; ok && !existing.CreatedAt.IsZero() {
+		if exists && !existing.CreatedAt.IsZero() {
 			createdAt = existing.CreatedAt
 		} else {
 			createdAt = now
@@ -2655,8 +2666,24 @@ func (s *MemoryStore) UpsertResource(ctx context.Context, input domain.UpsertRes
 		resource.Tags = resourceTagsFromMetadata(resource.Metadata)
 	}
 	resource.Metadata = resourceMetadataWithTags(resource.Metadata, resource.Tags)
+	if exists {
+		if !resourceUpsertMayUpdateActiveOwner(existing, resource) {
+			return domain.ResourceRecord{}, ErrConflict
+		}
+		resource.CreatedAt = existing.CreatedAt
+	}
 	s.resources[resource.ResourceID] = resource
 	return resource, nil
+}
+
+// resourceUpsertMayUpdateActiveOwner preserves the historical active-resource
+// update contract while preventing generic upsert from becoming an alternate
+// restore, retention-claim bypass, or ownership-transfer API.
+func resourceUpsertMayUpdateActiveOwner(existing, candidate domain.ResourceRecord) bool {
+	return strings.TrimSpace(existing.Status) == domain.ResourceStatusActive &&
+		strings.TrimSpace(candidate.Status) == domain.ResourceStatusActive &&
+		existing.OwnerUserID == candidate.OwnerUserID &&
+		existing.OwnerOrgID == candidate.OwnerOrgID
 }
 
 func (s *MemoryStore) MergeResourceMetadataForUser(ctx context.Context, input domain.MergeResourceMetadataInput) (domain.ResourceRecord, error) {
@@ -2669,6 +2696,9 @@ func (s *MemoryStore) MergeResourceMetadataForUser(ctx context.Context, input do
 		return domain.ResourceRecord{}, ErrNotFound
 	}
 	if err := validateViewerCalibrationPrecondition(resource, input); err != nil {
+		return domain.ResourceRecord{}, err
+	}
+	if err := validateScene3dCalibrationPrecondition(resource, input); err != nil {
 		return domain.ResourceRecord{}, err
 	}
 	updatedAt := input.UpdatedAt
@@ -4506,12 +4536,49 @@ func (s *MemoryStore) ListResources(ctx context.Context, limit int, offset int) 
 	return take(resources[offset:], limit), nil
 }
 
+// ListResourceLifecycleFenceCandidates pages terminal and restorable deletion
+// states by immutable resource ID. Startup reconciliation uses this to backfill
+// publication fences for rows created before lifecycle fencing existed.
+func (s *MemoryStore) ListResourceLifecycleFenceCandidates(ctx context.Context, afterResourceID string, limit int) ([]domain.ResourceRecord, error) {
+	_ = ctx
+	if limit <= 0 {
+		limit = 100
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	resources := make([]domain.ResourceRecord, 0, limit)
+	for _, resource := range s.resources {
+		if resource.ResourceID <= afterResourceID {
+			continue
+		}
+		switch strings.TrimSpace(resource.Status) {
+		case domain.ResourceStatusDeleted, domain.ResourceStatusPurging, domain.ResourceStatusRetentionBlocked:
+			resources = append(resources, resourceWithNormalizedTags(resource))
+		}
+	}
+	sort.Slice(resources, func(i, j int) bool {
+		return resources[i].ResourceID < resources[j].ResourceID
+	})
+	return take(resources, limit), nil
+}
+
+func (s *MemoryStore) GetResourceLifecycleStatus(ctx context.Context, resourceID string) (string, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	resource, ok := s.resources[resourceID]
+	if !ok {
+		return "", false, nil
+	}
+	return strings.TrimSpace(resource.Status), true, nil
+}
+
 func (s *MemoryStore) SoftDeleteResourceForUser(ctx context.Context, resourceID string, userID string, orgID string, deletedAt time.Time) (domain.ResourceRecord, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	resource, ok := s.resources[strings.TrimSpace(resourceID)]
-	if !ok || !resourceVisibleToOwner(resource, userID, orgID) || strings.TrimSpace(resource.Status) == "deleted" {
+	if !ok || !resourceVisibleToOwner(resource, userID, orgID) || strings.TrimSpace(resource.Status) != "active" {
 		return domain.ResourceRecord{}, ErrNotFound
 	}
 	if deletedAt.IsZero() {
@@ -4530,7 +4597,10 @@ func (s *MemoryStore) RestoreResourceForUser(ctx context.Context, resourceID str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	resource, ok := s.resources[strings.TrimSpace(resourceID)]
-	if !ok || !resourceVisibleToOwner(resource, userID, orgID) {
+	if !ok || !resourceVisibleToOwner(resource, userID, orgID) ||
+		strings.TrimSpace(resource.Status) != "deleted" ||
+		resource.RetentionExpiresAt.IsZero() ||
+		!resource.RetentionExpiresAt.After(domain.Now()) {
 		return domain.ResourceRecord{}, ErrNotFound
 	}
 	if restoredAt.IsZero() {
@@ -4542,6 +4612,97 @@ func (s *MemoryStore) RestoreResourceForUser(ctx context.Context, resourceID str
 	resource.UpdatedAt = restoredAt.UTC()
 	s.resources[resource.ResourceID] = resource
 	return resource, nil
+}
+
+func (s *MemoryStore) SoftDeleteResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resourceID := strings.TrimSpace(input.ResourceID)
+	resource, ok := s.resources[resourceID]
+	if !ok || !resourceVisibleToOwner(resource, input.OwnerUserID, input.OwnerOrgID) ||
+		strings.TrimSpace(resource.Status) != domain.ResourceStatusActive {
+		return domain.ResourceLifecycleMutationResult{}, ErrNotFound
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	ts = ts.UTC()
+	resource.Status = domain.ResourceStatusDeleted
+	resource.DeletedAt = ts
+	resource.RetentionExpiresAt = ts.Add(defaultResourceRetention)
+	resource.UpdatedAt = ts
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	event := domain.ResourceEventRecord{
+		EventID:     eventID,
+		ResourceID:  resource.ResourceID,
+		ActorUserID: strings.TrimSpace(input.ActorUserID),
+		ActorOrgID:  strings.TrimSpace(input.ActorOrgID),
+		EventType:   "resource.deleted",
+		TS:          ts,
+		Metadata:    cloneJSONMap(input.Metadata),
+	}
+	s.resources[resource.ResourceID] = resource
+	s.resourceEvents = append(s.resourceEvents, event)
+	return domain.ResourceLifecycleMutationResult{
+		Resource: resourceWithNormalizedTags(resource),
+		Event:    event,
+	}, nil
+}
+
+func (s *MemoryStore) RestoreResourceForUserWithEvent(
+	ctx context.Context,
+	input domain.ResourceLifecycleMutationInput,
+) (domain.ResourceLifecycleMutationResult, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ResourceLifecycleMutationResult{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resourceID := strings.TrimSpace(input.ResourceID)
+	resource, ok := s.resources[resourceID]
+	if !ok || !resourceVisibleToOwner(resource, input.OwnerUserID, input.OwnerOrgID) ||
+		strings.TrimSpace(resource.Status) != domain.ResourceStatusDeleted ||
+		resource.RetentionExpiresAt.IsZero() || !resource.RetentionExpiresAt.After(domain.Now()) {
+		return domain.ResourceLifecycleMutationResult{}, ErrNotFound
+	}
+	ts := input.TS
+	if ts.IsZero() {
+		ts = domain.Now()
+	}
+	ts = ts.UTC()
+	resource.Status = domain.ResourceStatusActive
+	resource.DeletedAt = time.Time{}
+	resource.RetentionExpiresAt = time.Time{}
+	resource.UpdatedAt = ts
+	eventID := strings.TrimSpace(input.EventID)
+	if eventID == "" {
+		eventID = domain.NewID("resource_event")
+	}
+	event := domain.ResourceEventRecord{
+		EventID:     eventID,
+		ResourceID:  resource.ResourceID,
+		ActorUserID: strings.TrimSpace(input.ActorUserID),
+		ActorOrgID:  strings.TrimSpace(input.ActorOrgID),
+		EventType:   "resource.restored",
+		TS:          ts,
+		Metadata:    cloneJSONMap(input.Metadata),
+	}
+	s.resources[resource.ResourceID] = resource
+	s.resourceEvents = append(s.resourceEvents, event)
+	return domain.ResourceLifecycleMutationResult{
+		Resource: resourceWithNormalizedTags(resource),
+		Event:    event,
+	}, nil
 }
 
 func (s *MemoryStore) ResourceStorageStats(ctx context.Context) (domain.ResourceStorageStats, error) {
@@ -4562,7 +4723,7 @@ func (s *MemoryStore) ResourceStorageStats(ctx context.Context) (domain.Resource
 // resourcePastRetention reports whether a resource is soft-deleted AND its undelete
 // window has elapsed — i.e. it can no longer be restored, so it is safe to reclaim.
 func resourcePastRetention(resource domain.ResourceRecord, now time.Time) bool {
-	return strings.TrimSpace(resource.Status) == "deleted" &&
+	return strings.TrimSpace(resource.Status) == domain.ResourceStatusDeleted &&
 		!resource.RetentionExpiresAt.IsZero() &&
 		resource.RetentionExpiresAt.Before(now)
 }
@@ -4576,6 +4737,16 @@ func (s *MemoryStore) RetentionBacklog(ctx context.Context, now time.Time) (doma
 		if resourcePastRetention(resource, now) {
 			backlog.Count++
 			backlog.Bytes += resource.SizeBytes
+			continue
+		}
+		if strings.TrimSpace(resource.Status) == domain.ResourceStatusRetentionBlocked {
+			backlog.BlockedCount++
+			backlog.BlockedBytes += resource.SizeBytes
+			continue
+		}
+		if strings.TrimSpace(resource.Status) == domain.ResourceStatusPurging {
+			backlog.PurgingCount++
+			backlog.PurgingBytes += resource.SizeBytes
 		}
 	}
 	return backlog, nil
@@ -4598,12 +4769,176 @@ func (s *MemoryStore) ListResourcesPastRetention(ctx context.Context, now time.T
 	return out, nil
 }
 
-func (s *MemoryStore) PurgeResource(ctx context.Context, resourceID string) error {
+// ClaimResourcesPastRetention atomically moves eligible rows into a reclaimable
+// purging lease. UpdatedAt is the exact claim token used by release and purge;
+// callers must preserve it unchanged for the duration of filesystem cleanup.
+func (s *MemoryStore) ClaimResourcesPastRetention(ctx context.Context, lease time.Duration, limit int) ([]domain.ResourceRecord, error) {
+	_ = ctx
+	if lease <= 0 {
+		lease = 15 * time.Minute
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	now := domain.Now()
+	staleBefore := now.Add(-lease)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	candidates := make([]domain.ResourceRecord, 0, limit)
+	for _, resource := range s.resources {
+		status := strings.TrimSpace(resource.Status)
+		eligible := resourcePastRetention(resource, now) ||
+			(status == domain.ResourceStatusPurging && !resource.UpdatedAt.IsZero() && resource.UpdatedAt.Before(staleBefore))
+		if eligible {
+			candidates = append(candidates, resource)
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		leftPriority := resourceRetentionClaimPriority(candidates[i])
+		rightPriority := resourceRetentionClaimPriority(candidates[j])
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		leftDeleted := strings.TrimSpace(candidates[i].Status) == domain.ResourceStatusDeleted
+		rightDeleted := strings.TrimSpace(candidates[j].Status) == domain.ResourceStatusDeleted
+		if leftDeleted != rightDeleted {
+			return leftDeleted
+		}
+		left := candidates[i].RetentionExpiresAt
+		right := candidates[j].RetentionExpiresAt
+		if left.Equal(right) {
+			if !candidates[i].UpdatedAt.Equal(candidates[j].UpdatedAt) {
+				return candidates[i].UpdatedAt.Before(candidates[j].UpdatedAt)
+			}
+			return candidates[i].ResourceID < candidates[j].ResourceID
+		}
+		return left.Before(right)
+	})
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	for i := range candidates {
+		resource := candidates[i]
+		resource.Status = domain.ResourceStatusPurging
+		resource.UpdatedAt = now
+		s.resources[resource.ResourceID] = resource
+		candidates[i] = resource
+	}
+	return candidates, nil
+}
+
+// resourceRetentionClaimPriority keeps provably managed resources ahead of
+// poison/external rows. A bounded GC tick should reclaim owned storage even if
+// older legacy rows must first be classified retention_blocked.
+func resourceRetentionClaimPriority(resource domain.ResourceRecord) int {
+	if !domain.IsCanonicalResourceID(resource.ResourceID) {
+		return 3
+	}
+	storageURI := strings.TrimSpace(resource.StorageURI)
+	if storageURI == "" && strings.TrimSpace(resource.StoragePath) != "" {
+		return 0
+	}
+	if strings.HasPrefix(strings.ToLower(storageURI), "file://") {
+		return 1
+	}
+	return 2
+}
+
+// RenewResourceRetentionClaim extends an exact live claim and returns its new
+// timestamp token.
+func (s *MemoryStore) RenewResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (time.Time, bool, error) {
 	_ = ctx
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.resources, strings.TrimSpace(resourceID))
-	return nil
+	resource, ok := s.resources[resourceID]
+	if !ok || strings.TrimSpace(resource.Status) != domain.ResourceStatusPurging || !resource.UpdatedAt.Equal(claimedAt) {
+		return time.Time{}, false, nil
+	}
+	renewedAt := domain.Now()
+	if !renewedAt.After(resource.UpdatedAt) {
+		renewedAt = resource.UpdatedAt.Add(time.Nanosecond)
+	}
+	resource.UpdatedAt = renewedAt
+	s.resources[resource.ResourceID] = resource
+	return resource.UpdatedAt, true, nil
+}
+
+// ReleaseResourceRetentionClaim makes an exact failed claim immediately
+// reclaimable without regressing the terminal purging state. A newer replica
+// may already hold the claim while an older one finishes filesystem cleanup.
+func (s *MemoryStore) ReleaseResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resource, ok := s.resources[resourceID]
+	if !ok || strings.TrimSpace(resource.Status) != domain.ResourceStatusPurging || !resource.UpdatedAt.Equal(claimedAt) {
+		return false, nil
+	}
+	resource.UpdatedAt = time.Unix(0, 0).UTC()
+	s.resources[resource.ResourceID] = resource
+	return true, nil
+}
+
+// BlockResourceRetentionClaim moves a terminal, exact claim out of the retry
+// queue when this control plane cannot prove it owns the authoritative source.
+// The row remains a non-reactivatable, operator-visible tombstone.
+func (s *MemoryStore) BlockResourceRetentionClaim(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resource, ok := s.resources[resourceID]
+	if !ok || strings.TrimSpace(resource.Status) != domain.ResourceStatusPurging || !resource.UpdatedAt.Equal(claimedAt) {
+		return false, nil
+	}
+	resource.Status = domain.ResourceStatusRetentionBlocked
+	resource.UpdatedAt = domain.Now()
+	s.resources[resource.ResourceID] = resource
+	return true, nil
+}
+
+// PurgeClaimedResource permanently deletes only the exact purging claim held
+// by the caller. This prevents a stale GC listing from deleting a restored row.
+func (s *MemoryStore) PurgeClaimedResource(ctx context.Context, resourceID string, claimedAt time.Time) (bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resource, ok := s.resources[resourceID]
+	if !ok || strings.TrimSpace(resource.Status) != domain.ResourceStatusPurging || !resource.UpdatedAt.Equal(claimedAt) {
+		return false, nil
+	}
+	s.resourcePurgeTombstones[resource.ResourceID] = domain.Now()
+	delete(s.resources, resource.ResourceID)
+	events := s.resourceEvents[:0]
+	for _, event := range s.resourceEvents {
+		if event.ResourceID != resource.ResourceID {
+			events = append(events, event)
+		}
+	}
+	s.resourceEvents = events
+	for grantID, grant := range s.resourceGrants {
+		if grant.ResourceID == resource.ResourceID {
+			delete(s.resourceGrants, grantID)
+		}
+	}
+	for membershipID, membership := range s.collectionMembers {
+		if membership.ResourceID == resource.ResourceID {
+			delete(s.collectionMembers, membershipID)
+		}
+	}
+	for jobID, links := range s.dataAgentJobResources {
+		kept := links[:0]
+		for _, link := range links {
+			if link.ResourceID != resource.ResourceID {
+				kept = append(kept, link)
+			}
+		}
+		if len(kept) == 0 {
+			delete(s.dataAgentJobResources, jobID)
+			continue
+		}
+		s.dataAgentJobResources[jobID] = kept
+	}
+	return true, nil
 }
 
 // resourceUsageBy aggregates active-resource count + bytes for resources matching key(r).

@@ -1,9 +1,19 @@
 import { marked } from "marked";
 import { ExternalLink } from "lucide-react";
 import { lazy, memo, type ReactNode, Suspense, useEffect, useId, useMemo, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
+
+// First-party scheme: `ultra://resource/<id>/<name>` lets markdown reference
+// platform objects (notes today; anywhere markdown renders tomorrow). The
+// default transform strips unknown schemes to empty strings, which silently
+// blanks those references before a custom component can resolve them. Passing
+// the scheme through is inert by itself — browsers do not fetch ultra:// —
+// so rendering only happens where a caller supplies a resolving component.
+const ultraUrlTransform = (url: string): string =>
+  url.startsWith("ultra://") ? url : defaultUrlTransform(url);
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import { remarkHighlight } from "@/lib/remarkHighlight";
 import { Button } from "@/components/ui/button";
 import {
   HoverCard,
@@ -638,6 +648,7 @@ const MemoizedMarkdownBlock = memo(
         remarkPlugins={remarkPlugins as []}
         rehypePlugins={rehypePlugins as []}
         components={components}
+        urlTransform={ultraUrlTransform}
       >
         {content}
       </ReactMarkdown>
@@ -707,8 +718,8 @@ function MarkdownComponent({
   const remarkPlugins = useMemo<Array<unknown>>(
     () =>
       mathPlugins
-        ? [remarkGfm, remarkNumericColumnAlign, remarkBreaks, mathPlugins.remarkMath]
-        : [remarkGfm, remarkNumericColumnAlign, remarkBreaks],
+        ? [remarkGfm, remarkHighlight, remarkNumericColumnAlign, remarkBreaks, mathPlugins.remarkMath]
+        : [remarkGfm, remarkHighlight, remarkNumericColumnAlign, remarkBreaks],
     [mathPlugins]
   );
   const rehypePlugins = useMemo<Array<unknown>>(

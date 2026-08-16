@@ -137,6 +137,87 @@ describe("UploadViewerWorkspace PDF uploads", () => {
   });
 });
 
+describe("UploadViewerWorkspace unsupported Office documents", () => {
+  it.each([
+    ["report.doc", "application/msword"],
+    ["report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ["slides.ppt", "application/vnd.ms-powerpoint"],
+    ["slides.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  ])("renders %s as download-only without probing the image engine", async (originalName, contentType) => {
+    const getUploadViewer = vi.fn(async () => {
+      throw new Error("Office documents must not load scientific image metadata");
+    });
+    const resourceDownloadUrl = vi.fn(
+      (fileId: string) => `https://ultra.example.org/v2/resources/${fileId}/download`
+    );
+    const fileId = `file_${originalName.replace(".", "_")}`;
+    const apiClient = {
+      getUploadViewer,
+      resourceDownloadUrl,
+    } as unknown as ApiClient;
+
+    render(
+      <UploadViewerWorkspace
+        uploadedFiles={[
+          {
+            file_id: fileId,
+            original_name: originalName,
+            content_type: contentType,
+            size_bytes: 2048,
+            sha256: `sha-${fileId}`,
+            created_at: "2026-06-08T00:00:00Z",
+          },
+        ]}
+        bisqueLinksByFileId={{}}
+        apiClient={apiClient}
+        active
+      />
+    );
+
+    expect(
+      await screen.findByRole("region", { name: "Office document download" })
+    ).toBeInTheDocument();
+    expect(screen.getByText(originalName)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Download original" })).toHaveAttribute(
+      "href",
+      `https://ultra.example.org/v2/resources/${fileId}/download`
+    );
+    expect(resourceDownloadUrl).toHaveBeenCalledWith(fileId);
+    expect(getUploadViewer).not.toHaveBeenCalled();
+  });
+
+  it("also short-circuits a legacy generic-MIME Office record by extension", async () => {
+    const getUploadViewer = vi.fn();
+    const apiClient = {
+      getUploadViewer,
+      resourceDownloadUrl: vi.fn(() => "/v2/resources/file_legacy_doc/download"),
+    } as unknown as ApiClient;
+
+    render(
+      <UploadViewerWorkspace
+        uploadedFiles={[
+          {
+            file_id: "file_legacy_doc",
+            original_name: "legacy.DOCX",
+            content_type: "application/octet-stream",
+            size_bytes: 1024,
+            sha256: "sha-legacy-doc",
+            created_at: "2026-06-08T00:00:00Z",
+          },
+        ]}
+        bisqueLinksByFileId={{}}
+        apiClient={apiClient}
+        active
+      />
+    );
+
+    expect(
+      await screen.findByRole("region", { name: "Office document download" })
+    ).toBeInTheDocument();
+    expect(getUploadViewer).not.toHaveBeenCalled();
+  });
+});
+
 describe("UploadViewerWorkspace volume defaults", () => {
   it("propagates scientific volume display defaults into the image viewer shell", async () => {
     const getUploadViewer = vi.fn(async (): Promise<UploadViewerInfo> => ({

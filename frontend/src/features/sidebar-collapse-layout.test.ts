@@ -55,11 +55,20 @@ describe("sidebar collapse layout", () => {
     expect(stylesSource).toMatch(/\.app-sidebar-brand-button\[data-slot="button"\]:hover/);
   });
 
-  it("uses the prompt-kit circular loader for running sidebar chats", () => {
-    expect(runningStatusSource.includes("CircularLoader")).toBe(true);
-    expect(runningStatusSource.includes("running-status-pill-beacon")).toBe(false);
-    expect(stylesSource.includes(".pk-circular-loader")).toBe(true);
-    expect(stylesSource.includes(".running-status-pill-loader")).toBe(true);
+  it("marks running sidebar chats with the point of light, not a spinner", () => {
+    // SUPERSESSION, on purpose: this test previously pinned CircularLoader
+    // (and rejected a "beacon" dot). Meridian reverses that decision as a
+    // design rule — the product's one reserved accent, brass, marks a running
+    // instrument with LIGHT rather than motion. The dot breathes (opacity),
+    // never spins, and holds still under prefers-reduced-motion.
+    expect(runningStatusSource.includes("running-status-point")).toBe(true);
+    expect(runningStatusSource.includes("CircularLoader")).toBe(false);
+    expect(stylesSource.includes(".running-status-point")).toBe(true);
+    expect(stylesSource).toMatch(
+      /\.running-status-pill\s*\{[^}]*--running-status-ink:\s*var\(--accent-live\);/s
+    );
+    // The old per-theme ink overrides are gone — the brass token themes itself.
+    expect(stylesSource).not.toMatch(/\.dark \.running-status-pill/);
   });
 
   it("keeps Lens on the original sidebar icon with active-only top-layer fill", () => {

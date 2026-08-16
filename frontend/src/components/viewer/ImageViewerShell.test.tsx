@@ -35,15 +35,25 @@ vi.mock("./DirectPlaneImage", () => ({
 
 vi.mock("./DeepZoomCanvas", () => ({
   DeepZoomCanvas: ({
+    apiClient,
     fileId,
     viewerInfo,
+    axis = "z",
     zIndex,
     tIndex,
+    channels,
+    channelColors,
+    cacheKey,
   }: {
+    apiClient: ApiClient;
     fileId: string;
     viewerInfo: UploadViewerInfo;
+    axis?: "z" | "y" | "x";
     zIndex: number;
     tIndex: number;
+    channels?: number[];
+    channelColors?: string[];
+    cacheKey?: string;
   }) => (
     <div
       data-testid="deep-zoom-canvas"
@@ -51,6 +61,19 @@ vi.mock("./DeepZoomCanvas", () => ({
       data-level-count={String(viewerInfo.viewer.tile_scheme.levels.length)}
       data-z-index={String(zIndex)}
       data-t-index={String(tIndex)}
+      data-channels={channels?.join(",") ?? ""}
+      data-cache-key={cacheKey ?? ""}
+      data-tile-url={apiClient.uploadTileUrl(fileId, {
+        axis,
+        level: viewerInfo.viewer.tile_scheme.levels[0]?.level ?? 0,
+        tileX: 0,
+        tileY: 0,
+        z: zIndex,
+        t: tIndex,
+        channels,
+        channelColors,
+        cacheKey,
+      })}
     />
   ),
 }));
@@ -62,12 +85,16 @@ vi.mock("./SlicePlaneCanvas", () => ({
     scalarSlice,
     crosshair,
     coordinateGrid,
+    measureMode,
+    onMeasurePoint,
   }: {
     imageUrl: string;
     title: string;
     scalarSlice?: { sliceIndex: number } | null;
     crosshair?: { row: number; col: number };
     coordinateGrid?: { width: number; height: number } | null;
+    measureMode?: boolean;
+    onMeasurePoint?: (point: { row: number; col: number }) => void;
   }) => (
     <div
       data-testid="slice-plane-canvas"
@@ -78,7 +105,11 @@ vi.mock("./SlicePlaneCanvas", () => ({
       data-crosshair-col={crosshair?.col ?? ""}
       data-coordinate-grid-width={coordinateGrid?.width ?? ""}
       data-coordinate-grid-height={coordinateGrid?.height ?? ""}
-    />
+      data-measure-mode={measureMode ? "true" : "false"}
+    >
+      <button type="button" aria-label={`measure ${title} start`} onClick={() => onMeasurePoint?.({ row: 0, col: 0 })} />
+      <button type="button" aria-label={`measure ${title} end`} onClick={() => onMeasurePoint?.({ row: 1, col: 1 })} />
+    </div>
   ),
 }));
 
@@ -264,6 +295,117 @@ const histogram: UploadViewerHistogramResponse = {
   },
 };
 
+const physicalScalarViewerInfo = (
+  spacingUnits: { x: string; y: string; z: string }
+): UploadViewerInfo => {
+  const planeZ = {
+    axis: "z" as const,
+    label: "XY plane",
+    axes: ["Y", "X"],
+    pixel_size: { width: 64, height: 32 },
+    spacing: { row: 0.5, col: 0.5 },
+    world_size: { width: 32, height: 16 },
+    aspect_ratio: 2,
+  };
+  return {
+    ...viewerInfo,
+    original_name: "physical-volume.ome.tiff",
+    modality: "microscopy",
+    dims_order: "ZYX",
+    backend_mode: "scalar",
+    axis_sizes: { T: 1, C: 1, Z: 12, Y: 32, X: 64 },
+    selected_indices: { T: 0, C: 0, Z: 6 },
+    is_volume: true,
+    display_defaults: {
+      ...(viewerInfo.display_defaults as NonNullable<UploadViewerInfo["display_defaults"]>),
+      channels: [0],
+      channel_colors: ["#ffffff"],
+      volume_channel: 0,
+    },
+    metadata: {
+      ...viewerInfo.metadata,
+      dims_order: "ZYX",
+      array_shape: [12, 32, 64],
+      physical_spacing: { x: 0.5, y: 0.5, z: 2 },
+      physical_spacing_unit:
+        spacingUnits.x === spacingUnits.y && spacingUnits.y === spacingUnits.z
+          ? spacingUnits.x
+          : null,
+      spacing_units: spacingUnits,
+    },
+    viewer: {
+      ...viewerInfo.viewer,
+      available_surfaces: ["2d", "mpr", "volume", "metadata"],
+      default_surface: "volume",
+      default_axis: "z",
+      slice_axes: ["z", "y", "x"],
+      default_plane: planeZ,
+      planes: {
+        z: planeZ,
+        y: {
+          ...planeZ,
+          axis: "y" as const,
+          label: "XZ plane",
+          axes: ["Z", "X"],
+          pixel_size: { width: 64, height: 12 },
+          spacing: { row: 2, col: 0.5 },
+          world_size: { width: 32, height: 24 },
+          aspect_ratio: 4 / 3,
+        },
+        x: {
+          ...planeZ,
+          axis: "x" as const,
+          label: "YZ plane",
+          axes: ["Z", "Y"],
+          pixel_size: { width: 32, height: 12 },
+          spacing: { row: 2, col: 0.5 },
+          world_size: { width: 16, height: 24 },
+          aspect_ratio: 2 / 3,
+        },
+      },
+      volume_mode: "scalar",
+      render_policy: "scalar",
+      diagnostic_surface: "mpr",
+      measurement_policy: "spacing-aware",
+      display_capabilities: ["physical_scale", "diagnostic_mpr"],
+      viewer_capabilities: ["volume", "metadata", "physical_scale"],
+    },
+  };
+};
+
+const renderPhysicalViewer = (
+  info: UploadViewerInfo,
+  selectedSurface: "mpr" | "volume"
+) =>
+  render(
+    <ImageViewerShell
+      viewerInfo={info}
+      apiClient={
+        {
+          getUploadHistogram: vi.fn(async () => histogram),
+          uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+          uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+        } as unknown as ApiClient
+      }
+      selectedSurface={selectedSurface}
+      onSurfaceChange={() => {}}
+      selectedDisplayState={info.display_defaults ?? null}
+      updateSelectedDisplay={() => {}}
+      clampedIndices={{ x: 0, y: 0, z: 6, t: 0 }}
+      debouncedX={0}
+      debouncedY={0}
+      debouncedZ={6}
+      debouncedT={0}
+      xAxisSize={64}
+      yAxisSize={32}
+      zAxisSize={12}
+      tAxisSize={1}
+      setSelectedIndex={() => {}}
+      selectedCaption=""
+      captionLoading={false}
+    />
+  );
+
 type DisplayUrlConfig = {
   enhancement?: string;
   negative?: boolean;
@@ -290,6 +432,10 @@ const buildDisplayUrl = (
   }
   if (Array.isArray(config?.channels) && config.channels.length > 0) {
     params.set("channels", config.channels.join(","));
+    const projected = config.channels.map((index) => config.channelColors?.[index] ?? "");
+    if (projected.every(Boolean)) {
+      params.set("channel_colors", projected.join(","));
+    }
   }
   if (Array.isArray(config?.channelColors) && config.channelColors.length > 0) {
     params.set("channel_colors", config.channelColors.join(","));
@@ -330,6 +476,10 @@ const buildSliceUrl = (fileId: string, config?: SliceUrlConfig) => {
   }
   if (Array.isArray(config?.channels) && config.channels.length > 0) {
     params.set("channels", config.channels.join(","));
+    const projected = config.channels.map((index) => config.channelColors?.[index] ?? "");
+    if (projected.every(Boolean)) {
+      params.set("channel_colors", projected.join(","));
+    }
   }
   if (config?.cacheKey) {
     params.set("cache_key", config.cacheKey);
@@ -342,6 +492,28 @@ const buildSliceUrl = (fileId: string, config?: SliceUrlConfig) => {
   }
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return `https://ultra.example.org/v2/uploads/${fileId}/slice${suffix}`;
+};
+
+type TileUrlConfig = DisplayUrlConfig & {
+  axis: "z" | "y" | "x";
+  level: number;
+  tileX: number;
+  tileY: number;
+  z?: number;
+  t?: number;
+};
+
+const buildTileUrl = (fileId: string, config: TileUrlConfig) => {
+  const params = new URLSearchParams();
+  if (typeof config.z === "number") params.set("z", String(config.z));
+  if (typeof config.t === "number") params.set("t", String(config.t));
+  if (config.channels?.length) {
+    params.set("channels", config.channels.join(","));
+    const projected = config.channels.map((index) => config.channelColors?.[index] ?? "");
+    if (projected.every(Boolean)) params.set("channel_colors", projected.join(","));
+  }
+  if (config.cacheKey) params.set("cache_key", config.cacheKey);
+  return `https://ultra.example.org/v2/uploads/${fileId}/tiles/${config.axis}/${config.level}/${config.tileX}/${config.tileY}?${params.toString()}`;
 };
 
 const openAdvancedControls = () => {
@@ -1173,11 +1345,11 @@ describe("ImageViewerShell", () => {
     expect(source).toMatch(/<SelectTrigger/);
   });
 
-  it("uses upload histograms to drive direct-image intensity windows", async () => {
+  it("keeps scientific slice URLs exact when upload histograms load", async () => {
     const apiClient = {
       getUploadHistogram: vi.fn(async () => histogram),
       uploadDisplayUrl: vi.fn(buildDisplayUrl),
-      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
       uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
     } as unknown as ApiClient;
 
@@ -1220,17 +1392,17 @@ describe("ImageViewerShell", () => {
         })
       )
     );
-    const centerSlider = await screen.findByLabelText("Window center");
-    fireEvent.change(centerSlider, { target: { value: "1002" } });
-
-    await waitFor(() =>
-      // The default width now anchors on the robust p1..p99 range (2.25 for this
-      // uniform 4-bin fixture) instead of the full 3.0 min..max span; the slider
-      // still drives the center.
-      expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain(
-        "enhancement=hounsfield%3A1002.000%3A2.250"
-      )
-    );
+    await waitFor(() => {
+      expect(screen.queryByLabelText("Window center")).toBeNull();
+      expect(screen.queryByLabelText("Window width")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Auto" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Full" })).toBeNull();
+      expect(screen.queryByText("Negative")).toBeNull();
+      const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
+      expect(imageUrl).not.toContain("enhancement=");
+      expect(imageUrl).not.toContain("window_min=");
+      expect(imageUrl).not.toContain("window_max=");
+    });
   });
 
   it("offers a curated right-click context menu on the 2D surface", async () => {
@@ -1238,7 +1410,7 @@ describe("ImageViewerShell", () => {
     const apiClient = {
       getUploadHistogram: vi.fn(async () => histogram),
       uploadDisplayUrl: vi.fn(buildDisplayUrl),
-      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
       uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
       resourceDownloadUrl,
     } as unknown as ApiClient;
@@ -1382,7 +1554,7 @@ describe("ImageViewerShell", () => {
         histogram: { ...histogram.histogram, channel_indices: [0, 1, 2] },
       })),
       uploadDisplayUrl: vi.fn(buildDisplayUrl),
-      uploadSliceUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/slice"),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
       uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
     } as unknown as ApiClient;
 
@@ -1418,13 +1590,204 @@ describe("ImageViewerShell", () => {
 
     expect(await screen.findByTestId("direct-plane-image")).toBeInTheDocument();
     expect(screen.getByText("Channel 1")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Channel 1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Channel 3" }));
+    fireEvent.click(screen.getByRole("button", { name: "Channel 1, source channel 0" }));
+    fireEvent.click(screen.getByRole("button", { name: "Channel 3, source channel 2" }));
 
     await waitFor(() => {
       const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
       expect(imageUrl).toContain("channels=1");
     });
+  });
+
+  it("keeps hyperspectral channel controls bounded and searchable", async () => {
+    const channelNames = Array.from({ length: 260 }, (_value, index) => `Band ${index + 1}`);
+    const channelColors = Array.from(
+      { length: 260 },
+      (_value, index) => ["#3b82f6", "#22c55e", "#ef4444"][index % 3],
+    );
+    const hyperspectralViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      axis_sizes: { ...viewerInfo.axis_sizes, T: 4, C: 260, Z: 7 },
+      is_multichannel: true,
+      display_defaults: {
+        ...(viewerInfo.display_defaults ?? {
+          enhancement: "d",
+          negative: false,
+          rotate: 0,
+          fusion_method: "m",
+          channel_mode: "composite",
+          channels: [5, 1, 3],
+          channel_colors: [],
+        time_index: 2,
+        z_index: 4,
+        }),
+        channel_mode: "composite",
+        channels: [5, 1, 3, 5, -1, 1.5, 260, Number.NaN],
+        channel_colors: channelColors,
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        dims_order: "TCZYX",
+        array_shape: [4, 260, 7, 4, 4],
+        array_dtype: "uint16",
+        microscopy: {
+          ...viewerInfo.metadata.microscopy,
+          channel_names: channelNames,
+        },
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        render_policy: "scalar",
+        channel_mode: "composite",
+        display_capabilities: [
+          "histogram",
+          "channel_visibility",
+          "channel_color",
+          "channel_lut_transport",
+        ],
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => ({
+        ...histogram,
+        channels: [5, 1, 3],
+        histogram: { ...histogram.histogram, channel_indices: [5, 1, 3] },
+      })),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+
+    function Harness() {
+      const [displayState, setDisplayState] = useState(hyperspectralViewerInfo.display_defaults ?? null);
+      return (
+        <ImageViewerShell
+          viewerInfo={hyperspectralViewerInfo}
+          apiClient={apiClient}
+          selectedSurface="2d"
+          onSurfaceChange={() => {}}
+          selectedDisplayState={displayState}
+          updateSelectedDisplay={(patch) =>
+            setDisplayState((previous) => (previous ? { ...previous, ...patch } : previous))
+          }
+          clampedIndices={{ x: 0, y: 0, z: 4, t: 2 }}
+          debouncedX={0}
+          debouncedY={0}
+          debouncedZ={4}
+          debouncedT={2}
+          xAxisSize={4}
+          yAxisSize={4}
+          zAxisSize={7}
+          tAxisSize={4}
+          setSelectedIndex={() => {}}
+          selectedCaption=""
+          captionLoading={false}
+        />
+      );
+    }
+
+    const { container } = render(<Harness />);
+
+    expect(await screen.findByTestId("direct-plane-image")).toBeInTheDocument();
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("/slice?");
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("z=4");
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("t=2");
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("channels=5%2C1%2C3");
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain(
+      "channel_colors=%23ef4444%2C%2322c55e%2C%233b82f6",
+    );
+    expect(apiClient.uploadDisplayUrl).not.toHaveBeenCalled();
+    expect(
+      Array.from(container.querySelectorAll(".viewer-channel-toggle")).map((element) =>
+        element.getAttribute("aria-label"),
+      ),
+    ).toEqual([
+      "Band 6, source channel 5",
+      "Band 2, source channel 1",
+      "Band 4, source channel 3",
+    ]);
+    expect(screen.queryByRole("button", { name: "Band 260, source channel 259" })).toBeNull();
+    expect(container.querySelectorAll('[data-viewer-channel-chip="true"]')).toHaveLength(3);
+    expect(container.querySelectorAll('[data-viewer-channel-row="true"]')).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Enter fullscreen" }));
+    await waitFor(() => {
+      expect(container.querySelector(".viewer-shell")).toHaveAttribute(
+        "data-viewer-fullscreen",
+        "true",
+      );
+    });
+
+    const chooserTrigger = screen.getByRole("button", {
+      name: "Choose channels, 3 selected of 260",
+    });
+    fireEvent.click(chooserTrigger);
+    const channelDialog = await screen.findByRole("dialog", { name: "Channels" });
+    expect(channelDialog).toHaveClass("viewer-channel-browser-dialog");
+    expect(channelDialog.closest(".viewer-shell")).not.toBeNull();
+    let search = await screen.findByPlaceholderText("Search 260 channels");
+    expect(search).toHaveFocus();
+    expect(document.querySelectorAll('[data-viewer-channel-row="true"]').length).toBeLessThanOrEqual(12);
+
+    fireEvent.change(search, { target: { value: "C259" } });
+    const focusedVirtualRow = await screen.findByRole("button", {
+      name: "Band 260, source channel 259",
+    });
+    focusedVirtualRow.focus();
+    expect(focusedVirtualRow).toHaveFocus();
+    fireEvent.keyDown(focusedVirtualRow, { key: "Escape", code: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Channels" })).toBeNull());
+    expect(container.querySelector(".viewer-shell")).toHaveAttribute(
+      "data-viewer-fullscreen",
+      "true",
+    );
+    expect(chooserTrigger).toHaveFocus();
+
+    fireEvent.click(chooserTrigger);
+    search = await screen.findByPlaceholderText("Search 260 channels");
+    expect(search).toHaveFocus();
+    expect(search).toHaveValue("");
+    fireEvent.change(search, { target: { value: "C259" } });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Band 260, source channel 259" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/4 selected/)).toBeInTheDocument();
+      const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
+      expect(imageUrl).toContain("/slice?");
+      expect(imageUrl).toContain("channels=5%2C1%2C3%2C259");
+      expect(imageUrl).toContain("z=4");
+      expect(imageUrl).toContain("t=2");
+      expect(apiClient.uploadSliceUrl).toHaveBeenLastCalledWith(
+        hyperspectralViewerInfo.file_id,
+        expect.objectContaining({
+          z: 4,
+          t: 2,
+          channels: [5, 1, 3, 259],
+          channelColors,
+          fullResolution: true,
+        }),
+      );
+    });
+
+    for (const sourceIndex of [200, 201, 202, 203]) {
+      fireEvent.change(search, { target: { value: `C${sourceIndex}` } });
+      fireEvent.click(
+        await screen.findByRole("button", {
+          name: `Band ${sourceIndex + 1}, source channel ${sourceIndex}`,
+        }),
+      );
+    }
+    await waitFor(() => {
+      expect(screen.getByText(/8 selected/)).toBeInTheDocument();
+    });
+
+    fireEvent.change(search, { target: { value: "C204" } });
+    expect(
+      await screen.findByRole("button", { name: "Band 205, source channel 204" }),
+    ).toBeDisabled();
+    expect(screen.getByText("Remove a channel to choose another.")).toBeInTheDocument();
   });
 
   it("hides per-channel controls for an RGB(A) display photo", async () => {
@@ -1474,12 +1837,88 @@ describe("ImageViewerShell", () => {
     );
 
     expect(await screen.findByTestId("direct-plane-image")).toBeInTheDocument();
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).toContain("/display");
+    expect(apiClient.uploadDisplayUrl).toHaveBeenCalledWith(
+      photoViewerInfo.file_id,
+      photoViewerInfo.service_urls?.display,
+      expect.objectContaining({ channels: undefined, channelColors: undefined }),
+    );
     // No per-channel pills (the composite UI is suppressed for a photo).
-    expect(screen.queryByRole("button", { name: "Channel 1" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Channel 2" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Channel 1, source channel 0" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Channel 2, source channel 1" })).toBeNull();
+    expect(await screen.findByLabelText("Window center")).toBeInTheDocument();
+    expect(screen.getByLabelText("Window width")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Auto" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Full" })).toBeInTheDocument();
+    expect(screen.getByText("Negative")).toBeInTheDocument();
+  });
+
+  it("renders a flat RGB time series through an exact T-aware scientific slice", () => {
+    const timeSeriesViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      original_name: "rgb-timeseries.ome.tif",
+      backend_mode: "pyramid",
+      dims_order: "TCYX",
+      axis_sizes: { T: 3, C: 3, Z: 1, Y: 1024, X: 1024 },
+      is_timeseries: true,
+      display_defaults: {
+        ...viewerInfo.display_defaults!,
+        enhancement: "hounsfield:50:100",
+        negative: true,
+        fusion_method: "m",
+        channels: [0, 1, 2],
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        backend_mode: "pyramid",
+        delivery_mode: "deferred_multiscale",
+        render_policy: "display",
+        tile_scheme: {
+          tile_size: 512,
+          format: "png",
+          levels: [{ level: 0, width: 1024, height: 1024, columns: 2, rows: 2, downsample: 1 }],
+        },
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+      uploadTileUrl: vi.fn(buildTileUrl),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={timeSeriesViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="2d"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={timeSeriesViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 2 }}
+        debouncedX={0} debouncedY={0} debouncedZ={0} debouncedT={2}
+        xAxisSize={1024} yAxisSize={1024} zAxisSize={1} tAxisSize={3}
+        setSelectedIndex={() => {}} selectedCaption="" captionLoading={false}
+      />
+    );
+
+    expect(screen.queryByTestId("deep-zoom-canvas")).not.toBeInTheDocument();
+    const imageUrl = new URL(screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "");
+    expect(imageUrl.pathname).toContain("/slice");
+    expect(imageUrl.searchParams.get("t")).toBe("2");
+    expect(imageUrl.searchParams.has("enhancement")).toBe(false);
+    expect(imageUrl.searchParams.has("negative")).toBe(false);
+    expect(imageUrl.searchParams.get("cache_key")).not.toContain("hounsfield");
+    expect(imageUrl.searchParams.get("cache_key")).not.toContain("negative");
+    expect(apiClient.uploadDisplayUrl).not.toHaveBeenCalled();
   });
 
   it("uses deep zoom tiles for pyramid-backed 2D images", () => {
+    const pyramidColors = Array.from(
+      { length: 260 },
+      (_value, index) => ["#3b82f6", "#22c55e", "#ef4444"][index % 3],
+    );
     const pyramidPlane = {
       ...defaultPlane,
       pixel_size: { width: 95174, height: 91416 },
@@ -1490,8 +1929,19 @@ describe("ImageViewerShell", () => {
       ...viewerInfo,
       original_name: "large-pyramid.tif",
       backend_mode: "pyramid",
-      axis_sizes: { T: 1, C: 4, Z: 1, Y: 91416, X: 95174 },
+      axis_sizes: { T: 1, C: 260, Z: 1, Y: 91416, X: 95174 },
       is_multichannel: true,
+      display_defaults: {
+        ...viewerInfo.display_defaults!,
+        channel_mode: "composite",
+        channels: [5, 1, 259],
+        channel_colors: pyramidColors,
+      },
+      phys: {
+        ...viewerInfo.phys!,
+        channel_names: ["DAPI", "FITC"],
+        channel_colors: pyramidColors.map((hex, index) => ({ index, hex, rgb: [0, 0, 0] })),
+      },
       service_urls: {
         ...viewerInfo.service_urls,
         tile: "/v2/uploads/file-123/tiles/{axis}/{level}/{tile_x}/{tile_y}",
@@ -1499,14 +1949,26 @@ describe("ImageViewerShell", () => {
       metadata: {
         ...viewerInfo.metadata,
         reader: "libbioimage",
-        array_shape: [4, 91416, 95174],
+        array_shape: [260, 91416, 95174],
         array_dtype: "uint8",
+        microscopy: {
+          ...viewerInfo.metadata.microscopy,
+          channel_names: ["DAPI", ""],
+        },
       },
       viewer: {
         ...viewerInfo.viewer,
         backend_mode: "pyramid",
         delivery_mode: "deferred_multiscale",
         first_paint_mode: "webgl",
+        render_policy: "scalar",
+        channel_mode: "composite",
+        display_capabilities: [
+          "histogram",
+          "channel_visibility",
+          "channel_color",
+          "channel_lut_transport",
+        ],
         tile_scheme: {
           tile_size: 512,
           format: "png",
@@ -1526,7 +1988,7 @@ describe("ImageViewerShell", () => {
       uploadDisplayUrl: vi.fn(buildDisplayUrl),
       uploadSliceUrl: vi.fn(buildSliceUrl),
       uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
-      uploadTileUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/tiles/z/8/0/0"),
+      uploadTileUrl: vi.fn(buildTileUrl),
     } as unknown as ApiClient;
 
     render(
@@ -1554,7 +2016,81 @@ describe("ImageViewerShell", () => {
 
     expect(screen.getByTestId("deep-zoom-canvas")).toHaveAttribute("data-level-count", "3");
     expect(screen.getByTestId("deep-zoom-canvas")).toHaveAttribute("data-z-index", "0");
+    expect(screen.getByTestId("deep-zoom-canvas")).toHaveAttribute("data-channels", "5,1,259");
+    expect(screen.getByRole("button", { name: "Channel 260, source channel 259" })).toBeInTheDocument();
+    const tileUrl = new URL(screen.getByTestId("deep-zoom-canvas").dataset.tileUrl ?? "");
+    expect(tileUrl.searchParams.get("channels")).toBe("5,1,259");
+    expect(tileUrl.searchParams.get("channel_colors")).toBe(
+      [pyramidColors[5], pyramidColors[1], pyramidColors[259]].join(","),
+    );
+    expect(tileUrl.searchParams.get("cache_key")).toContain(":5,1,259:");
     expect(screen.queryByTestId("direct-plane-image")).not.toBeInTheDocument();
+  });
+
+  it("keeps pyramid-backed RGB(A) tiles on their native display path", () => {
+    const photoViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      original_name: "rgba-orthomosaic.tif",
+      backend_mode: "pyramid",
+      axis_sizes: { T: 1, C: 4, Z: 1, Y: 4096, X: 4096 },
+      is_multichannel: true,
+      display_defaults: {
+        ...viewerInfo.display_defaults!,
+        channel_mode: "single",
+        channels: [0, 1, 2, 3],
+        channel_colors: ["#ff0000", "#00ff00", "#0000ff", "#ffffff"],
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        backend_mode: "pyramid",
+        delivery_mode: "deferred_multiscale",
+        render_policy: "display",
+        channel_mode: "single",
+        tile_scheme: {
+          tile_size: 512,
+          format: "png",
+          levels: [{ level: 0, width: 4096, height: 4096, columns: 8, rows: 8, downsample: 1 }],
+        },
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadDisplayUrl: vi.fn(buildDisplayUrl),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+      uploadTileUrl: vi.fn(buildTileUrl),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={photoViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="2d"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={photoViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+        debouncedX={0}
+        debouncedY={0}
+        debouncedZ={0}
+        debouncedT={0}
+        xAxisSize={4096}
+        yAxisSize={4096}
+        zAxisSize={1}
+        tAxisSize={1}
+        setSelectedIndex={() => {}}
+        selectedCaption=""
+        captionLoading={false}
+      />
+    );
+
+    const canvas = screen.getByTestId("deep-zoom-canvas");
+    expect(canvas).toHaveAttribute("data-channels", "");
+    expect(canvas).toHaveAttribute("data-cache-key", "");
+    const tileUrl = new URL(canvas.dataset.tileUrl ?? "");
+    expect(tileUrl.searchParams.has("channels")).toBe(false);
+    expect(tileUrl.searchParams.has("channel_colors")).toBe(false);
+    expect(tileUrl.searchParams.has("cache_key")).toBe(false);
   });
 
   it("presents OME TIFF stacks with single-channel slice controls", async () => {
@@ -1601,7 +2137,13 @@ describe("ImageViewerShell", () => {
         ...viewerInfo.viewer,
         volume_mode: "slice_stack",
         channel_mode: "single",
-        display_capabilities: ["slice_navigation", "channel_visibility", "physical_scale"],
+        display_capabilities: [
+          "slice_navigation",
+          "channel_visibility",
+          "channel_color",
+          "channel_lut_transport",
+          "physical_scale",
+        ],
         viewer_capabilities: ["webgl_first_paint", "direct_delivery", "channel_selection"],
       },
     };
@@ -1647,12 +2189,14 @@ describe("ImageViewerShell", () => {
       const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
       expect(imageUrl).toContain("z=1");
       expect(imageUrl).toContain("channels=2");
+      expect(imageUrl).toContain("channel_colors=%23ffffff");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "DAPI" }));
+    fireEvent.click(screen.getByRole("button", { name: "DAPI, source channel 0" }));
     await waitFor(() => {
       const imageUrl = screen.getByTestId("direct-plane-image").dataset.imageUrl ?? "";
       expect(imageUrl).toContain("channels=0");
+      expect(imageUrl).toContain("channel_colors=%230000ff");
       expect(imageUrl).not.toContain("channels=0%2C2");
       expect(imageUrl).not.toContain("channels=0,2");
     });
@@ -2674,7 +3218,7 @@ describe("ImageViewerShell", () => {
     });
     expect(apiClient.getUploadHistogram).not.toHaveBeenCalled();
     openAdvancedControls();
-    fireEvent.click(screen.getByRole("button", { name: "Channel 1" }));
+    fireEvent.click(screen.getByRole("button", { name: "Channel 1, source channel 0" }));
     expect(apiClient.getUploadHistogram).not.toHaveBeenCalled();
   });
 
@@ -3696,6 +4240,58 @@ describe("ImageViewerShell", () => {
     });
   });
 
+  it.each([
+    {
+      name: "uniform physical axes",
+      units: { x: "um", y: "um", z: "um" },
+      expected: "2.062 um",
+    },
+    {
+      name: "mixed physical and voxel axes",
+      units: { x: "um", y: "um", z: "voxel" },
+      expected: "1.414 vox",
+    },
+  ])("keeps MPR measurement units honest for $name", async ({ units, expected }) => {
+    renderPhysicalViewer(physicalScalarViewerInfo(units), "mpr");
+
+    fireEvent.click(screen.getByLabelText("Measure"));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "measure y-plane start" }).parentElement
+      ).toHaveAttribute("data-measure-mode", "true")
+    );
+    fireEvent.click(screen.getByRole("button", { name: "measure y-plane start" }));
+    await waitFor(() => expect(screen.getByText(/0\.000 (?:um|vox)/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "measure y-plane end" }));
+
+    await waitFor(() =>
+      expect(document.querySelector(".viewer-mpr-distance-readout")).not.toHaveTextContent("0.000")
+    );
+    expect(document.querySelector(".viewer-mpr-distance-readout")).toHaveTextContent(expected);
+  });
+
+  it("uses one global unit only for uniform axes and keeps mixed-axis volume geometry in voxel space", async () => {
+    const uniform = renderPhysicalViewer(
+      physicalScalarViewerInfo({ x: "um", y: "um", z: "um" }),
+      "volume"
+    );
+    let summary = await screen.findByLabelText("Volume summary");
+    expect(within(summary).getByText("32 x 16 x 24 um")).toBeInTheDocument();
+    expect(within(summary).getByText("0.50 x 0.50 x 2.00 um")).toBeInTheDocument();
+
+    uniform.unmount();
+    renderPhysicalViewer(
+      physicalScalarViewerInfo({ x: "um", y: "um", z: "voxel" }),
+      "volume"
+    );
+    summary = await screen.findByLabelText("Volume summary");
+    expect(within(summary).getByText("64 x 32 x 12 vox")).toBeInTheDocument();
+    expect(
+      within(summary).getByText("X 0.50 um · Y 0.50 um · Z 2.00 voxel")
+    ).toBeInTheDocument();
+    expect(within(summary).queryByText(/32 x 16 x 24 um/)).not.toBeInTheDocument();
+  });
+
   it("shows physical volume geometry for spacing-aware 3D data", async () => {
     const anisotropicPlane = {
       axis: "z" as const,
@@ -3908,5 +4504,159 @@ describe("ImageViewerShell", () => {
     expect(await screen.findByText("Image header")).toBeInTheDocument();
     expect(screen.getByText("scanner")).toBeInTheDocument();
     expect(screen.getByText("CT-1")).toBeInTheDocument();
+  });
+
+  it("renders backend-shaped phys pixel units per axis without a mixed composite quantity", () => {
+    const mixedUnitViewerInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      original_name: "mixed-calibration.ome.tiff",
+      dims_order: "ZYX",
+      axis_sizes: { T: 1, C: 1, Z: 8, Y: 20, X: 40 },
+      is_volume: true,
+      phys: {
+        ...viewerInfo.phys,
+        pixel_units: ["um", "um", "pixel", "frame"],
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        dims_order: "ZYX",
+        array_shape: [8, 20, 40],
+        physical_spacing: { x: 0.5, y: 0.5, z: 1 },
+        physical_spacing_unit: undefined,
+        spacing_units: undefined,
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        available_surfaces: ["metadata"],
+        default_surface: "metadata",
+        display_capabilities: [],
+        viewer_capabilities: ["metadata"],
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/file-123/preview"),
+    } as unknown as ApiClient;
+
+    render(
+      <ImageViewerShell
+        viewerInfo={mixedUnitViewerInfo}
+        apiClient={apiClient}
+        selectedSurface="metadata"
+        onSurfaceChange={() => {}}
+        selectedDisplayState={mixedUnitViewerInfo.display_defaults ?? null}
+        updateSelectedDisplay={() => {}}
+        clampedIndices={{ x: 0, y: 0, z: 0, t: 0 }}
+        debouncedX={0}
+        debouncedY={0}
+        debouncedZ={0}
+        debouncedT={0}
+        xAxisSize={40}
+        yAxisSize={20}
+        zAxisSize={8}
+        tAxisSize={1}
+        setSelectedIndex={() => {}}
+        selectedCaption=""
+        captionLoading={false}
+      />
+    );
+
+    const metadataSummary = screen.getByLabelText("Image metadata");
+    expect(
+      within(metadataSummary).getByText("X 0.500 um · Y 0.500 um · Z 1.000 pixel")
+    ).toBeInTheDocument();
+    expect(within(metadataSummary).queryByText("Field of view")).not.toBeInTheDocument();
+    expect(within(metadataSummary).queryByText("Sampling")).not.toBeInTheDocument();
+    expect(
+      within(metadataSummary).queryByText("X 0.500 · Y 0.500 · Z 1.000")
+    ).not.toBeInTheDocument();
+  });
+
+  it("hydrates same-file NGFF LUT transport into the actual rendered slice URL", async () => {
+    const baseNgffInfo: UploadViewerInfo = {
+      ...viewerInfo,
+      file_id: "same-ngff-file",
+      original_name: "channels.ome.zarr",
+      dims_order: "CYX",
+      axis_sizes: { T: 1, C: 2, Z: 1, Y: 8, X: 12 },
+      is_multichannel: true,
+      phys: {
+        ...viewerInfo.phys,
+        channel_names: ["DAPI", "EGFP"],
+        channel_colors: [
+          { index: 0, hex: "#0000ff", rgb: [0, 0, 255] },
+          { index: 1, hex: "#00ff00", rgb: [0, 255, 0] },
+        ],
+      },
+      display_defaults: {
+        ...viewerInfo.display_defaults!,
+        channel_mode: "composite",
+        channels: [0, 1],
+        channel_colors: ["#0000ff", "#00ff00"],
+      },
+      metadata: {
+        ...viewerInfo.metadata,
+        reader: "ngff",
+        dims_order: "CYX",
+        array_shape: [2, 8, 12],
+      },
+      viewer: {
+        ...viewerInfo.viewer,
+        render_policy: "scalar",
+        channel_mode: "composite",
+        display_capabilities: ["channel_visibility", "channel_color"],
+      },
+    };
+    const apiClient = {
+      getUploadHistogram: vi.fn(async () => histogram),
+      uploadSliceUrl: vi.fn(buildSliceUrl),
+      uploadPreviewUrl: vi.fn(() => "https://ultra.example.org/v2/uploads/same-ngff-file/preview"),
+    } as unknown as ApiClient;
+    const props = {
+      apiClient,
+      selectedSurface: "2d" as const,
+      onSurfaceChange: () => {},
+      selectedDisplayState: baseNgffInfo.display_defaults ?? null,
+      updateSelectedDisplay: () => {},
+      clampedIndices: { x: 0, y: 0, z: 0, t: 0 },
+      debouncedX: 0,
+      debouncedY: 0,
+      debouncedZ: 0,
+      debouncedT: 0,
+      xAxisSize: 12,
+      yAxisSize: 8,
+      zAxisSize: 1,
+      tAxisSize: 1,
+      setSelectedIndex: () => {},
+      selectedCaption: "",
+      captionLoading: false,
+    };
+
+    const { rerender } = render(<ImageViewerShell {...props} viewerInfo={baseNgffInfo} />);
+    expect(screen.getByTestId("direct-plane-image").dataset.imageUrl).not.toContain(
+      "channel_colors="
+    );
+
+    const hydratedNgffInfo: UploadViewerInfo = {
+      ...baseNgffInfo,
+      viewer: {
+        ...baseNgffInfo.viewer,
+        display_capabilities: [
+          "channel_visibility",
+          "channel_color",
+          "channel_lut_transport",
+        ],
+      },
+    };
+    rerender(<ImageViewerShell {...props} viewerInfo={hydratedNgffInfo} />);
+
+    await waitFor(() => {
+      const renderedUrl = new URL(
+        screen.getByTestId("direct-plane-image").dataset.imageUrl ?? ""
+      );
+      expect(renderedUrl.searchParams.get("channels")).toBe("0,1");
+      expect(renderedUrl.searchParams.get("channel_colors")).toBe("#0000ff,#00ff00");
+    });
   });
 });

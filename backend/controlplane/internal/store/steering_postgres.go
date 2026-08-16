@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -10,11 +11,26 @@ import (
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 )
 
-const runSteerMessageColumns = `steer_id, run_id, thread_id, user_id, message_id, content, status, created_at, applied_at, updated_at`
+const runSteerMessageColumns = `steer_id, run_id, thread_id, user_id, message_id, content, file_ids, status, created_at, applied_at, updated_at`
+
+// steerFileIDsJSON encodes the attached upload ids for the jsonb column with
+// an explicit '[]' for empty — the column is NOT NULL and a nil slice would
+// otherwise marshal to SQL NULL.
+func steerFileIDsJSON(fileIDs []string) []byte {
+	if len(fileIDs) == 0 {
+		return []byte("[]")
+	}
+	encoded, err := json.Marshal(fileIDs)
+	if err != nil {
+		return []byte("[]")
+	}
+	return encoded
+}
 
 func scanRunSteerMessage(row pgx.Row) (domain.RunSteerMessageRecord, error) {
 	var record domain.RunSteerMessageRecord
 	var appliedAt *time.Time
+	var fileIDs []byte
 	if err := row.Scan(
 		&record.SteerID,
 		&record.RunID,
@@ -22,6 +38,7 @@ func scanRunSteerMessage(row pgx.Row) (domain.RunSteerMessageRecord, error) {
 		&record.UserID,
 		&record.MessageID,
 		&record.Content,
+		&fileIDs,
 		&record.Status,
 		&record.CreatedAt,
 		&appliedAt,
@@ -31,6 +48,12 @@ func scanRunSteerMessage(row pgx.Row) (domain.RunSteerMessageRecord, error) {
 			return domain.RunSteerMessageRecord{}, ErrNotFound
 		}
 		return domain.RunSteerMessageRecord{}, err
+	}
+	if len(fileIDs) > 0 {
+		var decoded []string
+		if err := json.Unmarshal(fileIDs, &decoded); err == nil && len(decoded) > 0 {
+			record.FileIDs = decoded
+		}
 	}
 	record.AppliedAt = appliedAt
 	return record, nil
@@ -105,8 +128,8 @@ func (s *PostgresStore) CreateRunSteerMessage(
 	}
 	record, err := scanRunSteerMessage(tx.QueryRow(ctx, `
 INSERT INTO control_run_steer_messages
-  (steer_id, run_id, thread_id, user_id, message_id, content, status, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+  (steer_id, run_id, thread_id, user_id, message_id, content, file_ids, status, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
 RETURNING `+runSteerMessageColumns,
 		input.SteerID,
 		input.RunID,
@@ -114,11 +137,19 @@ RETURNING `+runSteerMessageColumns,
 		input.UserID,
 		input.MessageID,
 		input.Content,
+		steerFileIDsJSON(input.FileIDs),
 		domain.RunSteerStatusPending,
 		now,
 	))
 	if err != nil {
 		return domain.RunSteerMessageRecord{}, mapPgError(err)
+	}
+	// The transcript metadata carries the same file ids: requeue reseeds jobs
+	// from the transcript, and the fresh attempt must re-learn which uploads
+	// this steer authorized.
+	transcriptMetadata := domain.JSONMap{"kind": "steering", "steer_id": input.SteerID}
+	if len(input.FileIDs) > 0 {
+		transcriptMetadata["file_ids"] = append([]string(nil), input.FileIDs...)
 	}
 	if _, err := tx.Exec(ctx, `
 INSERT INTO control_thread_messages (message_id, thread_id, role, content, created_at, metadata, run_id)
@@ -128,7 +159,7 @@ ON CONFLICT (message_id) DO NOTHING`,
 		input.ThreadID,
 		input.Content,
 		now,
-		jsonBytes(domain.JSONMap{"kind": "steering", "steer_id": input.SteerID}),
+		jsonBytes(transcriptMetadata),
 		input.RunID,
 	); err != nil {
 		return domain.RunSteerMessageRecord{}, mapPgError(err)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -176,6 +177,35 @@ func TestRetentionGCUploadRootResolvesRelativePath(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("default root = %q, want %q", got, want)
+	}
+}
+
+func TestAppStartBackfillsLegacyDeletedResourceFence(t *testing.T) {
+	t.Parallel()
+	uploadRoot := t.TempDir()
+	application, err := New(config.Config{AppVersion: "test-version", UploadRoot: uploadRoot})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mem, ok := application.Store.(*store.MemoryStore)
+	if !ok {
+		t.Fatalf("store = %T, want memory store", application.Store)
+	}
+	const resourceID = "file_preupgrade_deleted"
+	if _, err := mem.UpsertResource(context.Background(), domain.UpsertResourceInput{
+		ResourceID: resourceID, OwnerUserID: "u", OwnerOrgID: "o", Status: domain.ResourceStatusDeleted,
+	}); err != nil {
+		t.Fatalf("seed legacy deleted resource: %v", err)
+	}
+	if application.Start == nil {
+		t.Fatal("Start hook is nil; lifecycle backfill would not run before serving")
+	}
+	if err := application.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	marker := filepath.Join(uploadRoot, ".tombstones", "deleted", resourceID)
+	if info, err := os.Stat(marker); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("legacy deleted marker = %v err=%v, want regular reversible fence", info, err)
 	}
 }
 

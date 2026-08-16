@@ -1,17 +1,28 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"log/slog"
 	"math"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,33 +31,58 @@ import (
 
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/domain"
 	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/eventbus"
+	"github.com/amilworks/bisque-ultra/backend/controlplane/internal/store"
+	"github.com/go-chi/chi/v5"
+	_ "golang.org/x/image/bmp"
+	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/webp"
+	"golang.org/x/sync/singleflight"
 )
 
 // pyramidPlainImageMinBytes is the size past which a plain raster image (JPEG/PNG)
 // is worth converting into a tiled pyramid. Below it, the direct path is faster.
 const pyramidPlainImageMinBytes = 16 << 20 // 16 MiB
 
+const (
+	thumbnailMaxDimension    = 512
+	thumbnailMaxEncodedBytes = int64(8 << 20)
+	rasterThumbnailMaxInput  = int64(32 << 20)
+	rasterThumbnailMaxPixels = int64(32_000_000)
+	rasterThumbnailMaxAxis   = 32_768
+	rasterThumbnailHeaderCap = int64(256 << 10)
+	rasterThumbnailMaxChunks = 1_024
+
+	niftiThumbnailMaxPlaneBytes   = int64(24 << 20)
+	niftiThumbnailMaxAxis         = 16_384
+	niftiThumbnailMaxGzipWork     = int64(256 << 20)
+	thumbnailDecodeBytesPerPixel  = int64(8)
+	defaultThumbnailInFlightBytes = int64(256 << 20)
+)
+
+var errThumbnailAdmission = errors.New("thumbnail in-flight byte budget is exhausted")
+
+func newThumbnailInFlightBudgetFromEnv() *byteAdmissionBudget {
+	maxBytes := defaultThumbnailInFlightBytes
+	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_THUMBNAIL_INFLIGHT_BYTES")); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed >= 0 {
+			maxBytes = parsed
+		}
+	}
+	return newByteAdmissionBudget(maxBytes)
+}
+
+var thumbnailInFlightBudget = newThumbnailInFlightBudgetFromEnv()
+
 // This file routes the viewer-facing image endpoints (/viewer, /slice,
 // /scalar-volume) through the libbioimage image service when it is configured.
-// Every handler degrades gracefully: NIfTI keeps its dedicated medical path,
-// and any image-service error (or a missing sidecar) falls back to the legacy
-// native Go path, so enabling the sidecar never regresses existing behavior.
+// Interactive viewer handlers retain their legacy fallback behavior. Resource
+// thumbnails are deliberately fail-closed and never serve original source bytes
+// when a renderer or sidecar is unavailable.
 
-// derivedPyramidName is the deterministic filename the convert job writes for a
-// resource's tiled pyramid (see handleDeriveUploadPyramid). A plain BigTIFF (not
-// OME-TIFF) so every level — including the native level 0 — is tile-addressable,
-// and so pyramids of 50GB-class sources can exceed the 4GB classic-TIFF limit.
+// derivedPyramidName is the deterministic destination hint sent to the worker.
+// Publication never creates this mutable path: the worker commits an immutable,
+// digest-named artifact through derivedPyramidManifestName instead.
 func derivedPyramidName(fileID string) string { return fileID + "__pyramid.tif" }
-
-// derivedPyramidPath returns the on-disk path of a resource's derived pyramid if
-// one has been built (non-empty file), else "". Callers prefer it for tiles.
-func derivedPyramidPath(root, fileID string) string {
-	p := filepath.Join(root, "derived", derivedPyramidName(fileID))
-	if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
-		return p
-	}
-	return ""
-}
 
 // derivedPyramidFailedName is the sidecar the convert worker writes (see
 // imaging/worker.py _failure_marker_path) when a resource's pyramid derivation
@@ -65,6 +101,8 @@ func derivedPyramidFailedMarkerPath(root, fileID string) string {
 // ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS.
 const pyramidFailureBackoff = time.Hour
 
+var derivativeFailureCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
 func pyramidFailureBackoffWindow() time.Duration {
 	if raw := strings.TrimSpace(os.Getenv("ULTRA_CONTROL_PYRAMID_FAILURE_BACKOFF_SECONDS")); raw != "" {
 		if secs, err := strconv.Atoi(raw); err == nil && secs >= 0 {
@@ -77,16 +115,66 @@ func pyramidFailureBackoffWindow() time.Duration {
 // recentPyramidFailure reports whether a permanent derivation failure was recorded for
 // this resource within the backoff window. Failure-isolated: any stat error falls
 // through to false (never blocks serving). A zero/disabled window never suppresses.
-func recentPyramidFailure(root, fileID string, now time.Time) bool {
+type derivativeFailureMarker struct {
+	Schema          string                   `json:"schema"`
+	ResourceID      string                   `json:"resource_id"`
+	SourceSHA256    string                   `json:"source_sha256"`
+	SourceSizeBytes int64                    `json:"source_size_bytes"`
+	ConversionSpec  derivativeConversionSpec `json:"conversion_spec"`
+	Code            string                   `json:"code"`
+}
+
+func decodeDerivativeFailureMarker(data []byte) (derivativeFailureMarker, error) {
+	strict := json.NewDecoder(bytes.NewReader(data))
+	strict.UseNumber()
+	if err := consumeStrictJSONValue(strict); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if _, err := strict.Token(); err != io.EOF {
+		if err == nil {
+			return derivativeFailureMarker{}, errors.New("failure marker contains trailing JSON")
+		}
+		return derivativeFailureMarker{}, err
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if err := exactJSONKeys(raw, "schema", "resource_id", "source_sha256", "source_size_bytes", "conversion_spec", "code"); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	if err := exactJSONKeys(raw["conversion_spec"], "tile_size", "compression", "layout", "fmt"); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	var marker derivativeFailureMarker
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&marker); err != nil {
+		return derivativeFailureMarker{}, err
+	}
+	return marker, nil
+}
+
+func recentPyramidFailure(root string, record resourceRecord, now time.Time) bool {
 	window := pyramidFailureBackoffWindow()
 	if window <= 0 {
 		return false
 	}
-	fi, err := os.Stat(derivedPyramidFailedMarkerPath(root, fileID))
-	if err != nil || fi.IsDir() {
+	path := derivedPyramidFailedMarkerPath(root, record.FileID)
+	file, generation, err := openRegularNoFollow(path)
+	if err != nil || generation.SizeBytes <= 0 || generation.SizeBytes > 16<<10 {
 		return false
 	}
-	return now.Sub(fi.ModTime()) < window
+	data, readErr := io.ReadAll(io.LimitReader(file, (16<<10)+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) != generation.SizeBytes {
+		return false
+	}
+	marker, markerErr := decodeDerivativeFailureMarker(data)
+	if markerErr != nil || marker.Schema != "ultra.image-derived-pyramid-failure.v1" || marker.ResourceID != record.FileID || marker.SourceSHA256 != strings.ToLower(strings.TrimSpace(record.SHA256)) || marker.SourceSizeBytes != record.SizeBytes || marker.ConversionSpec != (derivativeConversionSpec{TileSize: 512, Compression: "lzw", Layout: "topdirs", Format: "auto"}) || !derivativeFailureCodePattern.MatchString(marker.Code) {
+		return false
+	}
+	return now.Sub(time.Unix(0, generation.MtimeNS)) < window
 }
 
 // clearPyramidFailureMarker removes the failure sidecar so a derivation can be retried
@@ -156,8 +244,17 @@ func (deps ServerDeps) imageServiceGetJSON(ctx context.Context, endpoint string,
 // given open lands warm only by luck. A single shared cache here makes repeat opens
 // reliably instant. Returns a freshly-decoded map each call so callers may mutate it.
 func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path string) (map[string]any, error) {
+	return deps.cachedImageServiceViewerInfoVia(ctx, path, deps.imageCache)
+}
+
+var imageViewerInfoFlights singleflight.Group
+
+func (deps ServerDeps) cachedImageServiceViewerInfoVia(
+	ctx context.Context,
+	path string,
+	cache *imageResponseCache,
+) (map[string]any, error) {
 	query := url.Values{"path": {path}}
-	cache := deps.imageCache
 	if cache == nil {
 		return deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
 	}
@@ -172,12 +269,31 @@ func (deps ServerDeps) cachedImageServiceViewerInfo(ctx context.Context, path st
 		}
 		// Corrupt cached entry: fall through and recompute.
 	}
-	out, err := deps.imageServiceGetJSON(ctx, "/viewerinfo", query)
+	flightKey := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/") + "|" + key
+	value, err, _ := imageViewerInfoFlights.Do(flightKey, func() (any, error) {
+		// The shared load must not inherit the first waiter's cancellation; otherwise
+		// one disconnected client cancels metadata delivery for every joined viewer.
+		out, fetchErr := deps.imageServiceGetJSON(context.WithoutCancel(ctx), "/viewerinfo", query)
+		if fetchErr != nil {
+			return nil, fetchErr
+		}
+		body, marshalErr := json.Marshal(out)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
+		return body, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if body, mErr := json.Marshal(out); mErr == nil {
-		cache.put(key, &cachedResponse{status: http.StatusOK, contentType: "application/json", body: body}, int64(len(body)))
+	body, ok := value.([]byte)
+	if !ok {
+		return nil, errors.New("image service viewer-info flight returned an invalid result")
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -216,6 +332,244 @@ func (deps ServerDeps) sourceImageServiceViewerInfo(
 	return info, t, c, z, nil
 }
 
+// committedThumbnailDerivative performs the source-bound manifest admission needed
+// to advertise or serve a thumbnail without doing a sidecar metadata read.
+func committedThumbnailDerivative(
+	root string,
+	record resourceRecord,
+	sourcePath string,
+) (string, bool) {
+	manifest, artifactPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted || !manifest.Capabilities.Thumbnail {
+		return "", false
+	}
+	if prefersBioioReader(record.OriginalName) && manifest.Producer.Reader != "bioio" {
+		return "", false
+	}
+	return artifactPath, true
+}
+
+// compatibleDerivedPyramid returns a derived artifact only when a strict, source-
+// bound manifest commits it; both source and derivative metadata match the exact
+// manifest semantics; and the manifest declares the requested serving capability.
+// Derived pyramids are accelerators, never semantic authority.
+func (deps ServerDeps) compatibleDerivedPyramid(
+	ctx context.Context,
+	root string,
+	record resourceRecord,
+	sourcePath string,
+	sourceInfo map[string]any,
+	use derivativeUse,
+) (string, map[string]any, bool) {
+	manifest, derivedPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted {
+		return "", nil, false
+	}
+	preferredBioio := prefersBioioReader(record.OriginalName)
+	if preferredBioio && manifest.Producer.Reader != "bioio" {
+		return "", nil, false
+	}
+	repairIncompatible := func() {
+		deps.enqueuePyramidDerivation(ctx, root, record, sourcePath, "repair-incompatible")
+	}
+	if !manifest.Capabilities.supports(use) {
+		// A valid derivative may intentionally lack route-specific selectors (for
+		// example T-aware tiles). That is an intrinsic delivery limitation, not
+		// corruption; use the source fallback without scheduling futile repair.
+		return "", nil, false
+	}
+	sourceStat, sourceErr := os.Stat(sourcePath)
+	derivedStat, derivedErr := os.Stat(derivedPath)
+	if sourceErr != nil || derivedErr != nil {
+		return "", nil, false
+	}
+	if sourceInfo == nil && !preferredBioio {
+		var err error
+		sourceInfo, err = deps.cachedImageServiceViewerInfoVia(ctx, sourcePath, deps.pyramidInfoCache)
+		if err != nil {
+			return "", nil, false
+		}
+	}
+	if !preferredBioio && !derivativeSemanticsMatch(sourceInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	derivedInfo, err := deps.cachedImageServiceViewerInfoVia(ctx, derivedPath, deps.pyramidInfoCache)
+	if err != nil {
+		return "", nil, false
+	}
+	if !derivativeArtifactSemanticsMatch(derivedInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	if manifest.Capabilities != derivativeCapabilitiesForViewer(derivedInfo, manifest.Semantics) {
+		repairIncompatible()
+		return "", nil, false
+	}
+	sourceAfter, sourceAfterErr := os.Stat(sourcePath)
+	derivedAfter, derivedAfterErr := os.Stat(derivedPath)
+	if sourceAfterErr != nil || derivedAfterErr != nil ||
+		sourceAfter.Size() != sourceStat.Size() ||
+		!sourceAfter.ModTime().Equal(sourceStat.ModTime()) ||
+		derivedAfter.Size() != derivedStat.Size() ||
+		!derivedAfter.ModTime().Equal(derivedStat.ModTime()) {
+		return "", nil, false
+	}
+	return derivedPath, derivedInfo, true
+}
+
+// preferredBioioDerivedViewerInfo admits a preferred-reader derivative without
+// consulting libbioimage for the proprietary source. The strict Go manifest is
+// the source/scene semantic authority; the derivative viewer-info contributes
+// only delivery fields after its pixel semantics and capabilities are verified.
+func (deps ServerDeps) preferredBioioDerivedViewerInfo(
+	ctx context.Context,
+	root string,
+	record resourceRecord,
+	sourcePath string,
+) (map[string]any, bool) {
+	manifest, derivedPath, admitted := readDerivativeManifest(root, record, sourcePath)
+	if !admitted || manifest.Producer.Reader != "bioio" || !manifest.Capabilities.Thumbnail {
+		return nil, false
+	}
+	derivedInfo, err := deps.cachedImageServiceViewerInfoVia(ctx, derivedPath, deps.pyramidInfoCache)
+	if err != nil || !derivativeArtifactSemanticsMatch(derivedInfo, manifest.Semantics) {
+		return nil, false
+	}
+	if manifest.Capabilities != derivativeCapabilitiesForViewer(derivedInfo, manifest.Semantics) {
+		return nil, false
+	}
+	return preferredReaderViewerInfo(manifest, derivedInfo), true
+}
+
+func preferredReaderViewerInfo(manifest derivativeManifest, delivery map[string]any) map[string]any {
+	core := make(map[string]any)
+	for _, key := range []string{
+		"kind", "modality", "backend_mode", "decodable", "is_volume", "is_timeseries",
+		"is_multichannel", "tile_scheme", "display_defaults", "selected_indices", "viewer",
+	} {
+		if value, present := delivery[key]; present {
+			core[key] = value
+		}
+	}
+	semantics := manifest.Semantics
+	core["dims_order"] = semantics.DimsOrder
+	core["dtype"] = semantics.DType
+	core["axis_sizes"] = map[string]any{
+		"T": semantics.AxisSizes.T,
+		"C": semantics.AxisSizes.C,
+		"Z": semantics.AxisSizes.Z,
+		"Y": semantics.AxisSizes.Y,
+		"X": semantics.AxisSizes.X,
+	}
+	channelNames := make([]string, len(semantics.Channels))
+	for index, channel := range semantics.Channels {
+		channelNames[index] = channel.Name
+	}
+	core["channel_names"] = channelNames
+	core["physical_spacing"] = map[string]any{
+		"x": semantics.Spacing.X.Value,
+		"y": semantics.Spacing.Y.Value,
+		"z": semantics.Spacing.Z.Value,
+	}
+	displayChannels := []int(nil)
+	if phys, ok := jsonObject(delivery["phys"]); ok {
+		displayChannels = preferredReaderDisplayChannels(
+			phys["display_channels"],
+			semantics.AxisSizes.C,
+		)
+	}
+	if len(displayChannels) == 0 {
+		if defaults, ok := jsonObject(delivery["display_defaults"]); ok {
+			displayChannels = preferredReaderDisplayChannels(
+				defaults["channels"],
+				semantics.AxisSizes.C,
+			)
+		}
+	}
+	if len(displayChannels) == 0 {
+		for channel := 0; channel < min(semantics.AxisSizes.C, 3); channel++ {
+			displayChannels = append(displayChannels, channel)
+		}
+	}
+	phys := map[string]any{
+		"x":                semantics.AxisSizes.X,
+		"y":                semantics.AxisSizes.Y,
+		"z":                semantics.AxisSizes.Z,
+		"t":                semantics.AxisSizes.T,
+		"ch":               semantics.AxisSizes.C,
+		"pixel_size":       []float64{semantics.Spacing.X.Value, semantics.Spacing.Y.Value, semantics.Spacing.Z.Value, 1},
+		"pixel_units":      []string{semantics.Spacing.X.Unit, semantics.Spacing.Y.Unit, semantics.Spacing.Z.Unit, "frame"},
+		"channel_names":    channelNames,
+		"display_channels": displayChannels,
+	}
+	if pixelDepth, pixelFormat, ok := preferredReaderDType(semantics.DType); ok {
+		phys["pixel_depth"] = pixelDepth
+		phys["pixel_format"] = pixelFormat
+	}
+	core["phys"] = phys
+	metadata := map[string]any{
+		"reader":               manifest.Producer.Reader,
+		"array_dtype":          semantics.DType,
+		"scene_count":          semantics.Scene.Count,
+		"selected_scene_index": semantics.Scene.Index,
+		"spacing_units": map[string]any{
+			"x": semantics.Spacing.X.Unit,
+			"y": semantics.Spacing.Y.Unit,
+			"z": semantics.Spacing.Z.Unit,
+		},
+	}
+	if semantics.Scene.ID != nil {
+		metadata["selected_scene_id"] = *semantics.Scene.ID
+		core["selected_scene_id"] = *semantics.Scene.ID
+	}
+	core["scene_count"] = semantics.Scene.Count
+	core["selected_scene_index"] = semantics.Scene.Index
+	core["metadata"] = metadata
+	return core
+}
+
+func preferredReaderDType(dtype string) (pixelDepth int, pixelFormat string, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(dtype)) {
+	case "uint8":
+		return 8, "u", true
+	case "uint16":
+		return 16, "u", true
+	case "int16":
+		return 16, "s", true
+	case "float32":
+		return 32, "f", true
+	case "float64":
+		return 64, "f", true
+	default:
+		return 0, "", false
+	}
+}
+
+func preferredReaderDisplayChannels(value any, channelCount int) []int {
+	var raw []any
+	switch values := value.(type) {
+	case []any:
+		raw = values
+	case []int:
+		raw = make([]any, len(values))
+		for index, channel := range values {
+			raw[index] = channel
+		}
+	default:
+		return nil
+	}
+	channels := make([]int, 0, len(raw))
+	for _, item := range raw {
+		channel, ok := jsonInt(item)
+		if !ok || channel < 0 || channel >= channelCount || slices.Contains(channels, channel) {
+			return nil
+		}
+		channels = append(channels, channel)
+	}
+	return channels
+}
+
 func writeImageSourceAuthorityError(w http.ResponseWriter, err error) {
 	status := http.StatusUnprocessableEntity
 	var serviceErr *imageServiceStatusError
@@ -242,7 +596,18 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 	}
 	// NIfTI keeps the dedicated, volume-specialized medical viewer.
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		deps.writeNiftiUploadViewer(w, record, path)
+		deps.writeNiftiUploadViewer(w, root, record, path)
+		return
+	}
+	// 3D scenes (Gaussian splats / point clouds) are served from a derived, chunked
+	// stream and must be routed BEFORE the libbioimage probe below: a .ply has no
+	// pixel geometry, so the engine can only 415 it and the undecodable path would
+	// then enqueue a pointless imgcnv transcode of a multi-gigabyte scene. See scene3d.go.
+	if info, isScene := scene3dPeek(record, path); isScene {
+		if scene3dCanDerive(record, info) {
+			deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		}
+		deps.writeScene3dViewer(w, record, info, path)
 		return
 	}
 	// OME-Zarr (and other ngff-served special formats) is served natively by the
@@ -268,6 +633,16 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
 		return
 	}
+	if prefersBioioReader(record.OriginalName) {
+		if preferred, admitted := deps.preferredBioioDerivedViewerInfo(r.Context(), root, record, path); admitted {
+			injectControlPlaneViewerFields(preferred, record)
+			writeJSON(w, http.StatusOK, preferred)
+			return
+		}
+		deps.enqueuePyramidDerivation(r.Context(), root, record, path, "prefer-bioio")
+		deps.writeUnsupportedFormatViewer(w, record)
+		return
+	}
 	core, err := deps.cachedImageServiceViewerInfo(r.Context(), path)
 	if err != nil {
 		// The engine recognized the file but cannot decode it (415/422): a permanent,
@@ -277,19 +652,9 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		// an explicit "unsupported" descriptor so the viewer shows a clear message +
 		// download instead of a broken 1x1 canvas with an endless spinner.
 		if imageServiceUndecodable(err) {
-			// A bioio transcode->pyramid may already exist for this source (the convert
-			// worker reads LIF/etc. via bioio and writes an OME-TIFF pyramid libbioimage
-			// CAN serve). The source itself is undecodable, so drive the viewer off the
-			// derived pyramid's metadata.
-			if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-				if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-					injectControlPlaneViewerFields(pcore, record)
-					writeJSON(w, http.StatusOK, pcore)
-					return
-				}
-			}
-			// No pyramid yet. The legacy native Go viewer reads only a small raster
-			// subset; if it can produce a real plane, use it.
+			// Without authoritative source axes, an existing derivative cannot prove
+			// that it preserved C/T/Z shape. The legacy native Go viewer reads only a
+			// small raster subset; if it can produce a real plane, use it.
 			if info := uploadImageDescriptorForPath(path, record.ContentType); info.Width >= 2 && info.Height >= 2 {
 				deps.handleGetUploadViewer(w, r)
 				return
@@ -306,42 +671,29 @@ func (deps ServerDeps) handleGetUploadViewerService(w http.ResponseWriter, r *ht
 		deps.handleGetUploadViewer(w, r)
 		return
 	}
-	// .czi / .zarr are preferentially read by bioio (the convert worker transcodes them to
-	// an OME-TIFF pyramid). libbioimage CAN decode a .czi, but renders Zeiss mosaics
-	// blocky/unstitched, so when the bioio pyramid exists drive the viewer entirely off it
-	// — its geometry/channels then match the pixels /slice and /thumbnail serve from that
-	// same pyramid. If it isn't converted yet, kick off the (preferred) derivation.
-	if prefersBioioReader(record.OriginalName) {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-			if pcore, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-				injectControlPlaneViewerFields(pcore, record)
-				writeJSON(w, http.StatusOK, pcore)
-				return
-			}
-		} else {
-			deps.enqueuePyramidDerivation(r.Context(), root, record, path, "prefer-bioio")
-		}
-	}
+	derivedPath, derivedInfo, derivedCompatible := deps.compatibleDerivedPyramid(
+		r.Context(), root, record, path, core, derivativeUse{capability: "thumbnail"},
+	)
 	// A slice_stack volume (microscopy z-stack) derives to an OME-BigTIFF whose
 	// embedded -tile reader is broken (the OME wrapper); it serves 3D via /atlas
 	// and 2D via /slice, so it must NOT advertise the derived pyramid's tile_scheme
 	// (that would route the viewer to the failing deferred-multiscale tile path).
 	if !viewerIsSliceStackVolume(core) {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+		if derivedCompatible {
 			// The derived pyramid serves the tile PIXELS (resolveUploadTilePathForImageService),
 			// so the viewer must use the PYRAMID's tile_scheme — its tile size and level grid —
 			// even when the source advertised its own. Otherwise the viewer fetches at the
 			// source geometry (e.g. 256-px / 8 levels) while pixels come from the pyramid
 			// (512-px / 11 levels): every pyramid tile is decoded 4x and the engine is
 			// needlessly overloaded on deep zoom. Overriding here aligns grid with data.
-			if pyramid, perr := deps.cachedImageServiceViewerInfo(r.Context(), dp); perr == nil {
-				mergePyramidTileScheme(core, pyramid)
-			}
+			mergePyramidTileScheme(core, derivedInfo)
 		} else if core["tile_scheme"] == nil {
 			// No derived pyramid and the source is not directly tile-servable: kick off
 			// derivation so a later open gets the bounded DeepZoom path; the direct/slice
 			// path still works meanwhile.
-			deps.ensurePyramidDerivation(r.Context(), root, record, path, "view")
+			if derivedPath == "" {
+				deps.ensurePyramidDerivation(r.Context(), root, record, path, "view")
+			}
 		}
 	}
 	injectControlPlaneViewerFields(core, record)
@@ -386,29 +738,93 @@ func (deps ServerDeps) writeUnsupportedFormatViewer(w http.ResponseWriter, recor
 // (honoring z/t/level), which is what makes z-scrub scrub actual planes. NIfTI
 // and the unconfigured case keep the legacy behavior.
 func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *http.Request) {
-	maskRequest, maskErr := parseMaskSliceRequest(r)
-	if maskErr != nil {
-		writeError(w, http.StatusBadRequest, maskErr)
-		return
-	}
-	if !deps.imageServiceConfigured() {
-		if maskRequest.enabled {
-			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
-			return
-		}
-		deps.handleServeUpload(w, r)
-		return
-	}
-	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
+	record := authorization.record
+	// NIfTI owns an exact native MPR contract and must be routed before the
+	// generic Z-only parser. Syntax and catalog-authoritative bounds are checked
+	// before resolving/statting the source path.
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		selection, selectionErr := parseNiftiMPRSelection(r.URL.Query())
+		if selectionErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, selectionErr)
+			return
+		}
+		maskRequest, maskErr := parseMaskSliceRequest(r)
+		if maskErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, maskErr)
+			return
+		}
 		if maskRequest.enabled {
 			writeError(w, http.StatusUnprocessableEntity, errors.New("mask slices are unsupported for NIfTI sources"))
 			return
 		}
-		deps.handleServeUpload(w, r) // serveNiftiSliceAsPNG honors slice params
+		catalogBounds, boundsErr := validateCatalogNiftiMPRBounds(record, selection)
+		if boundsErr != nil {
+			writeError(w, http.StatusUnprocessableEntity, boundsErr)
+			return
+		}
+		path, resolved := resolveAuthorizedUploadStorage(w, authorization)
+		if !resolved {
+			return
+		}
+		if !catalogBounds {
+			geometry, geometryErr := readNiftiHeaderGeometry(path)
+			if geometryErr != nil {
+				writeError(w, http.StatusUnsupportedMediaType, geometryErr)
+				return
+			}
+			if boundsErr := validateNiftiMPRBounds(
+				selection,
+				geometry.width,
+				geometry.height,
+				geometry.depth,
+				geometry.timeCount,
+				geometry.channelCount,
+			); boundsErr != nil {
+				writeError(w, http.StatusUnprocessableEntity, boundsErr)
+				return
+			}
+		}
+		if err := serveNiftiSliceAsPNG(w, path, r, niftiDecompressedSidecarIdentity{
+			root: authorization.root, resourceID: record.FileID, sourceSHA256: record.SHA256,
+		}); err != nil {
+			writeError(w, http.StatusUnsupportedMediaType, err)
+		}
+		return
+	}
+	selectors, selectorErr := parseScientificImageSelectors(r.URL.Query(), record)
+	if selectorErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, selectorErr)
+		return
+	}
+	sliceOptions, sliceOptionsErr := parseImageSliceOptions(r.URL.Query())
+	if sliceOptionsErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, sliceOptionsErr)
+		return
+	}
+	maskRequest, maskErr := parseMaskSliceRequest(r)
+	if maskErr != nil {
+		writeError(w, http.StatusUnprocessableEntity, maskErr)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
+		return
+	}
+	root := authorization.root
+	if !deps.imageServiceConfigured() && strings.TrimSpace(deps.NgffServiceURL) == "" {
+		if maskRequest.enabled {
+			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
+			return
+		}
+		if !legacyDisplayPhotoSliceAllowed(record, selectors, sliceOptions) {
+			deps.handleNotConfigured("scientific slices require the configured image service")(w, r)
+			return
+		}
+		deps.handleServeUpload(w, r)
 		return
 	}
 	// OME-Zarr is rendered natively by the ngff-service from the store (bundle dir path).
@@ -418,16 +834,28 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 			return
 		}
 		q := url.Values{"path": {path}}
-		for _, key := range []string{"z", "t", "level", "channels", "full_resolution"} {
-			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-				q.Set(key, v)
-			}
+		for key, values := range sliceOptions {
+			q.Set(key, values[0])
 		}
+		selectors.apply(q)
+		copyQueryValueIfPresent(q, r.URL.Query(), "cache_key")
 		deps.ngffDeps().proxyImageServiceCached(w, r, "/slice", q)
 		return
 	}
 	if deps.ngffServiceUnavailable(record, path) {
 		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
+		return
+	}
+	if !deps.imageServiceConfigured() {
+		if maskRequest.enabled {
+			deps.handleNotConfigured("mask slices require the configured source image service")(w, r)
+			return
+		}
+		if !legacyDisplayPhotoSliceAllowed(record, selectors, sliceOptions) {
+			deps.handleNotConfigured("scientific slices require the configured image service")(w, r)
+			return
+		}
+		deps.handleServeUpload(w, r)
 		return
 	}
 	maskMode := maskRequest.enabled
@@ -466,7 +894,15 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// even though its -tile reader does not (atlas/thumbnail read it the same way).
 	servePath := path
 	if !maskMode {
-		if dp := derivedPyramidPath(root, record.FileID); dp != "" {
+		if dp, _, compatible := deps.compatibleDerivedPyramid(
+			r.Context(), root, record, path, nil, derivativeUse{
+				capability:      "slice",
+				requireT:        selectors.tPresent,
+				requireZ:        selectors.zPresent,
+				requireChannels: selectors.channelsPresent,
+				requireLUT:      selectors.colorsPresent,
+			},
+		); compatible {
 			servePath = dp
 		}
 	}
@@ -475,16 +911,10 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 	// a bounded pyramid level for fast scrub frames; true reads the native plane.
 	buildSliceQuery := func(p string) url.Values {
 		q := url.Values{"path": {p}}
-		for _, key := range []string{
-			"z",
-			"level",
-			"channel_colors",
-			"full_resolution",
-		} {
-			if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-				q.Set(key, v)
-			}
+		for key, values := range sliceOptions {
+			q.Set(key, values[0])
 		}
+		copyQueryValueIfPresent(q, r.URL.Query(), "cache_key")
 		if maskRequest.enabled {
 			q.Set("channels", strconv.Itoa(maskRequest.channel))
 			q.Set("t", strconv.Itoa(maskRequest.time))
@@ -492,30 +922,40 @@ func (deps ServerDeps) handleServeUploadSliceService(w http.ResponseWriter, r *h
 			q.Set("scalar_threshold_value", maskRequest.thresholdRaw)
 			q.Set("scalar_threshold_foreground", "above")
 		} else {
-			for _, key := range []string{"t", "channels"} {
-				if v := strings.TrimSpace(r.URL.Query().Get(key)); v != "" {
-					q.Set(key, v)
-				}
-			}
+			selectors.apply(q)
 		}
 		return q
 	}
-	// Robustness: prefer the pyramid, but if it can't be served (a broken/unreadable
-	// derived pyramid -> 5xx) retry the SOURCE via the image service — slower but
-	// correct (honors z/channels) — then the native Go path. A bad pyramid degrades to
-	// a working read instead of "Failed to load image".
+	// A failed derived scientific read may retry the authoritative source through the
+	// same selector-aware /slice endpoint. It must never degrade to legacy /display,
+	// which can flatten T/Z/C and silently return the wrong plane.
 	var fallback http.HandlerFunc
-	if !maskMode {
-		fallback = deps.handleServeUpload
-	}
 	if servePath != path {
 		fallback = func(w http.ResponseWriter, r *http.Request) {
-			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path), deps.handleServeUpload)
+			deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(path))
 		}
 	}
 	// Route slices through the dedicated slice cache so a z-scrub burst can't evict
 	// the DeepZoom viewer's tile/atlas working set from the main image cache.
 	deps.proxyImageServiceSliceCached(w, r, "/slice", buildSliceQuery(servePath), fallback)
+}
+
+func legacyDisplayPhotoSliceAllowed(
+	record resourceRecord,
+	selectors scientificImageSelectors,
+	sliceOptions url.Values,
+) bool {
+	if selectors.present() || len(sliceOptions) > 0 || !goNativeThumbnailable(record) {
+		return false
+	}
+	if timeCount, _, depth, authoritative := catalogImageSelectorLimits(record); authoritative {
+		return timeCount == 1 && depth == 1
+	}
+	// Common still-image decoders are intrinsically two-dimensional. Animated GIF
+	// is intentionally excluded because serving its first frame is not an exact
+	// time-series slice contract.
+	return !strings.EqualFold(filepath.Ext(record.OriginalName), ".gif") &&
+		!strings.EqualFold(strings.TrimSpace(record.ContentType), "image/gif")
 }
 
 type maskSliceRequest struct {
@@ -628,12 +1068,17 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		deps.handleGetUploadScalarVolume(w, r)
 		return
 	}
-	_, record, path, ok := deps.resolveUploadServingRequest(w, r)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
 	if !ok {
 		return
 	}
+	record := authorization.record
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		deps.handleGetUploadScalarVolume(w, r)
+		deps.serveAuthorizedNiftiScalarVolume(w, r, authorization)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
 		return
 	}
 	channelIndex, err := parseExactScalarIndex(r, []string{"channel", "c"})
@@ -683,16 +1128,108 @@ func (deps ServerDeps) handleGetUploadScalarVolumeService(w http.ResponseWriter,
 		"channel": {strconv.Itoa(channelIndex)},
 		"t":       {strconv.Itoa(timeIndex)},
 	}
-	sampling := strings.TrimSpace(r.URL.Query().Get("sampling"))
+	sampling, _, samplingErr := exactRawQueryValue(
+		r.URL.Query(),
+		[]string{"sampling"},
+		"scalar volume sampling",
+	)
+	if samplingErr != nil {
+		writeError(w, http.StatusBadRequest, samplingErr)
+		return
+	}
 	if sampling == "" {
 		sampling = "box"
-	}
-	if sampling != "box" && sampling != "nearest" {
+	} else if sampling != "box" && sampling != "nearest" {
 		writeError(w, http.StatusBadRequest, errors.New("scalar volume sampling must be box or nearest"))
 		return
 	}
 	query.Set("sampling", sampling)
 	deps.proxyImageService(w, r, "/scalar-volume", query, deps.handleGetUploadScalarVolume)
+}
+
+type niftiScalarVolumeSelection struct {
+	time     int
+	channel  int
+	sampling string
+}
+
+func parseNiftiScalarVolumeSelection(query url.Values) (niftiScalarVolumeSelection, error) {
+	allowed := map[string]bool{
+		"t": true, "time": true, "timepoint": true,
+		"channel": true, "c": true, "sampling": true,
+	}
+	for key := range query {
+		if !allowed[key] {
+			return niftiScalarVolumeSelection{}, fmt.Errorf("unsupported NIfTI scalar volume selector %q", key)
+		}
+	}
+	selection := niftiScalarVolumeSelection{sampling: "box"}
+	timeRaw, timePresent, err := exactRawQueryValue(
+		query,
+		[]string{"t", "time", "timepoint"},
+		"NIfTI scalar volume time selector",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if timePresent {
+		selection.time, err = parseExactNonNegativeDecimal(
+			timeRaw,
+			"NIfTI scalar volume time selector",
+		)
+		if err != nil {
+			return niftiScalarVolumeSelection{}, err
+		}
+	}
+	channelRaw, channelPresent, err := exactRawQueryValue(
+		query,
+		[]string{"channel", "c"},
+		"NIfTI scalar volume channel selector",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if channelPresent {
+		selection.channel, err = parseExactNonNegativeDecimal(
+			channelRaw,
+			"NIfTI scalar volume channel selector",
+		)
+		if err != nil {
+			return niftiScalarVolumeSelection{}, err
+		}
+	}
+	sampling, samplingPresent, err := exactRawQueryValue(
+		query,
+		[]string{"sampling"},
+		"NIfTI scalar volume sampling",
+	)
+	if err != nil {
+		return niftiScalarVolumeSelection{}, err
+	}
+	if samplingPresent {
+		if sampling != "box" && sampling != "nearest" {
+			return niftiScalarVolumeSelection{}, errors.New("NIfTI scalar volume sampling must be box or nearest")
+		}
+		selection.sampling = sampling
+	}
+	return selection, nil
+}
+
+func validateCatalogNiftiScalarVolumeBounds(
+	record resourceRecord,
+	selection niftiScalarVolumeSelection,
+) (bool, error) {
+	timeCount, channelCount, _, authoritative := catalogImageSelectorLimits(record)
+	if !authoritative {
+		return false, nil
+	}
+	if selection.time >= timeCount {
+		return true, errors.New("NIfTI scalar volume time selector is out of range")
+	}
+	if selection.channel >= channelCount {
+		return true, errors.New("NIfTI scalar volume channel selector is out of range")
+	}
+	return true, nil
 }
 
 func exactRawQueryValue(
@@ -776,55 +1313,982 @@ func goNativeThumbnailable(record resourceRecord) bool {
 	return false
 }
 
-// handleServeResourceThumbnail produces a grid thumbnail for any supported format.
-// Common web images and NIfTI keep the fast native path; scientific containers the
-// native decoder can't read get a libbioimage thumbnail (preferring the derived
-// pyramid for a bounded read). Video has no server-side still — the client renders
-// a <video> poster — so we 415 quickly rather than stream the whole file.
-func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *http.Request) {
-	if !deps.imageServiceConfigured() {
-		deps.handleServeUpload(w, r)
+func writeThumbnailPNG(w http.ResponseWriter, body []byte) error {
+	if err := validateThumbnailPNG("image/png", body); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	return nil
+}
+
+func boundedRasterThumbnailConfig(file *os.File) (image.Config, string, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return image.Config{}, "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > rasterThumbnailMaxInput {
+		return image.Config{}, "", errors.New("raster thumbnail source exceeds the 32 MiB input limit")
+	}
+	width, height, format, err := boundedRasterThumbnailDimensions(file, info.Size())
+	if err != nil {
+		return image.Config{}, "", fmt.Errorf("raster thumbnail header could not be validated: %w", err)
+	}
+	if width <= 0 || height <= 0 || width > rasterThumbnailMaxAxis || height > rasterThumbnailMaxAxis {
+		return image.Config{}, "", errors.New("raster thumbnail dimensions are invalid")
+	}
+	pixels, ok := checkedNonNegativeProduct(int64(width), int64(height))
+	if !ok || pixels > rasterThumbnailMaxPixels {
+		return image.Config{}, "", errors.New("raster thumbnail exceeds the 32 megapixel limit")
+	}
+	return image.Config{Width: width, Height: height}, format, nil
+}
+
+func boundedRasterThumbnailPreflight(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	_, _, err = boundedRasterThumbnailConfig(file)
+	return err
+}
+
+func boundedRasterThumbnailDimensions(file *os.File, size int64) (int, int, string, error) {
+	prefixSize := int(min(size, int64(12)))
+	prefix := make([]byte, prefixSize)
+	if _, err := file.ReadAt(prefix, 0); err != nil && !errors.Is(err, io.EOF) {
+		return 0, 0, "", err
+	}
+	switch {
+	case len(prefix) >= 8 && bytes.Equal(prefix[:8], []byte("\x89PNG\r\n\x1a\n")):
+		width, height, err := boundedPNGThumbnailDimensions(file, size)
+		return width, height, "png", err
+	case len(prefix) >= 2 && prefix[0] == 0xff && prefix[1] == 0xd8:
+		width, height, err := boundedJPEGThumbnailDimensions(file, size)
+		return width, height, "jpeg", err
+	case len(prefix) >= 6 && (string(prefix[:6]) == "GIF87a" || string(prefix[:6]) == "GIF89a"):
+		width, height, err := boundedGIFThumbnailDimensions(file, size)
+		return width, height, "gif", err
+	case len(prefix) >= 2 && string(prefix[:2]) == "BM":
+		width, height, err := boundedBMPThumbnailDimensions(file, size)
+		return width, height, "bmp", err
+	case len(prefix) >= 12 && string(prefix[:4]) == "RIFF" && string(prefix[8:12]) == "WEBP":
+		width, height, err := boundedWebPThumbnailDimensions(file, size)
+		return width, height, "webp", err
+	default:
+		return 0, 0, "", errors.New("unsupported raster thumbnail format")
+	}
+}
+
+func readRasterHeaderAt(file *os.File, offset int64, body []byte) error {
+	if offset < 0 || int64(len(body)) > math.MaxInt64-offset {
+		return errors.New("raster thumbnail header offset overflows")
+	}
+	if _, err := file.ReadAt(body, offset); err != nil {
+		if errors.Is(err, io.EOF) {
+			return io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	return nil
+}
+
+func boundedPNGThumbnailDimensions(file *os.File, size int64) (int, int, error) {
+	const signatureSize = int64(8)
+	offset := signatureSize
+	headerBytes := signatureSize
+	sawHeader := false
+	sawImageData := false
+	width, height := 0, 0
+	for chunk := 0; chunk < rasterThumbnailMaxChunks; chunk++ {
+		if offset > size-12 || headerBytes > rasterThumbnailHeaderCap-8 {
+			return 0, 0, errors.New("PNG chunk header is truncated or exceeds the structural scan limit")
+		}
+		var header [8]byte
+		if err := readRasterHeaderAt(file, offset, header[:]); err != nil {
+			return 0, 0, err
+		}
+		headerBytes += 8
+		length := int64(binary.BigEndian.Uint32(header[0:4]))
+		if length > math.MaxInt64-offset-12 {
+			return 0, 0, errors.New("PNG chunk length overflows")
+		}
+		next := offset + 12 + length
+		if next > size {
+			return 0, 0, errors.New("PNG chunk is truncated")
+		}
+		chunkType := string(header[4:8])
+		switch chunkType {
+		case "IHDR":
+			if sawHeader || chunk != 0 || length != 13 || headerBytes > rasterThumbnailHeaderCap-17 {
+				return 0, 0, errors.New("PNG IHDR is invalid")
+			}
+			var body [13]byte
+			if err := readRasterHeaderAt(file, offset+8, body[:]); err != nil {
+				return 0, 0, err
+			}
+			var checksum [4]byte
+			if err := readRasterHeaderAt(file, offset+8+int64(len(body)), checksum[:]); err != nil {
+				return 0, 0, err
+			}
+			hash := crc32.NewIEEE()
+			_, _ = hash.Write(header[4:8])
+			_, _ = hash.Write(body[:])
+			if hash.Sum32() != binary.BigEndian.Uint32(checksum[:]) {
+				return 0, 0, errors.New("PNG IHDR checksum is invalid")
+			}
+			headerBytes += 17
+			width64 := int64(binary.BigEndian.Uint32(body[0:4]))
+			height64 := int64(binary.BigEndian.Uint32(body[4:8]))
+			if width64 <= 0 || height64 <= 0 || width64 > math.MaxInt32 || height64 > math.MaxInt32 || !validPNGHeaderFields(body) {
+				return 0, 0, errors.New("PNG IHDR fields are invalid")
+			}
+			width, height = int(width64), int(height64)
+			sawHeader = true
+		case "IDAT":
+			if !sawHeader {
+				return 0, 0, errors.New("PNG image data precedes IHDR")
+			}
+			if length > 0 {
+				sawImageData = true
+			}
+		case "IEND":
+			if length != 0 || !sawHeader || !sawImageData || next != size {
+				return 0, 0, errors.New("PNG IEND is invalid or the source is truncated")
+			}
+			var checksum [4]byte
+			if err := readRasterHeaderAt(file, offset+8, checksum[:]); err != nil {
+				return 0, 0, err
+			}
+			if crc32.ChecksumIEEE(header[4:8]) != binary.BigEndian.Uint32(checksum[:]) {
+				return 0, 0, errors.New("PNG IEND checksum is invalid")
+			}
+			return width, height, nil
+		}
+		offset = next
+	}
+	return 0, 0, errors.New("PNG has too many chunks")
+}
+
+func validPNGHeaderFields(body [13]byte) bool {
+	bitDepth := body[8]
+	colorType := body[9]
+	validDepth := false
+	switch colorType {
+	case 0:
+		validDepth = bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8 || bitDepth == 16
+	case 2, 4, 6:
+		validDepth = bitDepth == 8 || bitDepth == 16
+	case 3:
+		validDepth = bitDepth == 1 || bitDepth == 2 || bitDepth == 4 || bitDepth == 8
+	}
+	return validDepth && body[10] == 0 && body[11] == 0 && body[12] <= 1
+}
+
+func boundedJPEGThumbnailDimensions(file *os.File, size int64) (int, int, error) {
+	offset := int64(2)
+	width, height := 0, 0
+	sawStartOfFrame := false
+	for markerCount := 0; markerCount < rasterThumbnailMaxChunks; markerCount++ {
+		if offset >= size || offset >= rasterThumbnailHeaderCap {
+			return 0, 0, errors.New("JPEG header is truncated or exceeds the structural scan limit")
+		}
+		var markerPrefix [1]byte
+		if err := readRasterHeaderAt(file, offset, markerPrefix[:]); err != nil {
+			return 0, 0, err
+		}
+		offset++
+		if markerPrefix[0] != 0xff {
+			return 0, 0, errors.New("JPEG marker prefix is invalid")
+		}
+		marker := byte(0xff)
+		for marker == 0xff {
+			if offset >= size || offset >= rasterThumbnailHeaderCap {
+				return 0, 0, errors.New("JPEG marker is truncated")
+			}
+			if err := readRasterHeaderAt(file, offset, markerPrefix[:]); err != nil {
+				return 0, 0, err
+			}
+			marker = markerPrefix[0]
+			offset++
+		}
+		if marker == 0x00 || marker == 0xd8 || marker == 0xd9 {
+			return 0, 0, errors.New("JPEG marker sequence is invalid")
+		}
+		if marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7) {
+			continue
+		}
+		var lengthBytes [2]byte
+		if err := readRasterHeaderAt(file, offset, lengthBytes[:]); err != nil {
+			return 0, 0, err
+		}
+		segmentLength := int64(binary.BigEndian.Uint16(lengthBytes[:]))
+		if segmentLength < 2 || segmentLength > math.MaxInt64-offset {
+			return 0, 0, errors.New("JPEG segment length is invalid")
+		}
+		segmentEnd := offset + segmentLength
+		if segmentEnd > size || segmentEnd > rasterThumbnailHeaderCap {
+			return 0, 0, errors.New("JPEG segment is truncated or exceeds the structural scan limit")
+		}
+		if jpegStartOfFrameMarker(marker) {
+			if segmentLength < 8 {
+				return 0, 0, errors.New("JPEG start-of-frame segment is truncated")
+			}
+			var dimensions [5]byte
+			if err := readRasterHeaderAt(file, offset+2, dimensions[:]); err != nil {
+				return 0, 0, err
+			}
+			height = int(binary.BigEndian.Uint16(dimensions[1:3]))
+			width = int(binary.BigEndian.Uint16(dimensions[3:5]))
+			sawStartOfFrame = width > 0 && height > 0
+		}
+		if marker == 0xda {
+			if !sawStartOfFrame || segmentLength < 6 || size <= segmentEnd+2 {
+				return 0, 0, errors.New("JPEG scan header is invalid")
+			}
+			var end [2]byte
+			if err := readRasterHeaderAt(file, size-2, end[:]); err != nil {
+				return 0, 0, err
+			}
+			if end != [2]byte{0xff, 0xd9} {
+				return 0, 0, errors.New("JPEG end marker is missing")
+			}
+			return width, height, nil
+		}
+		offset = segmentEnd
+	}
+	return 0, 0, errors.New("JPEG has too many header segments")
+}
+
+func jpegStartOfFrameMarker(marker byte) bool {
+	return marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc
+}
+
+func boundedGIFThumbnailDimensions(file *os.File, size int64) (int, int, error) {
+	if size < 14 {
+		return 0, 0, errors.New("GIF header is truncated")
+	}
+	var header [13]byte
+	if err := readRasterHeaderAt(file, 0, header[:]); err != nil {
+		return 0, 0, err
+	}
+	width := int(binary.LittleEndian.Uint16(header[6:8]))
+	height := int(binary.LittleEndian.Uint16(header[8:10]))
+	offset := int64(13)
+	if header[10]&0x80 != 0 {
+		offset += int64(3 * (1 << ((header[10] & 0x07) + 1)))
+	}
+	if offset >= size {
+		return 0, 0, errors.New("GIF color table is truncated")
+	}
+	sawImage := false
+	operations := 0
+	for operations < rasterThumbnailMaxChunks {
+		operations++
+		var introducer [1]byte
+		if err := readRasterHeaderAt(file, offset, introducer[:]); err != nil {
+			return 0, 0, err
+		}
+		offset++
+		switch introducer[0] {
+		case 0x2c:
+			var descriptor [9]byte
+			if err := readRasterHeaderAt(file, offset, descriptor[:]); err != nil {
+				return 0, 0, err
+			}
+			offset += int64(len(descriptor))
+			if descriptor[8]&0x80 != 0 {
+				offset += int64(3 * (1 << ((descriptor[8] & 0x07) + 1)))
+			}
+			if offset >= size {
+				return 0, 0, errors.New("GIF image descriptor is truncated")
+			}
+			offset++ // LZW minimum code size.
+			var err error
+			offset, operations, err = skipGIFSubBlocks(file, size, offset, operations)
+			if err != nil {
+				return 0, 0, err
+			}
+			sawImage = true
+		case 0x21:
+			if offset >= size {
+				return 0, 0, errors.New("GIF extension is truncated")
+			}
+			offset++ // Extension label.
+			var err error
+			offset, operations, err = skipGIFSubBlocks(file, size, offset, operations)
+			if err != nil {
+				return 0, 0, err
+			}
+		case 0x3b:
+			if !sawImage || offset != size {
+				return 0, 0, errors.New("GIF trailer is invalid or the source is truncated")
+			}
+			return width, height, nil
+		default:
+			return 0, 0, errors.New("GIF block introducer is invalid")
+		}
+	}
+	return 0, 0, errors.New("GIF has too many structural blocks")
+}
+
+func skipGIFSubBlocks(file *os.File, size, offset int64, operations int) (int64, int, error) {
+	for operations < rasterThumbnailMaxChunks {
+		operations++
+		var length [1]byte
+		if err := readRasterHeaderAt(file, offset, length[:]); err != nil {
+			return 0, operations, err
+		}
+		offset++
+		if length[0] == 0 {
+			return offset, operations, nil
+		}
+		if int64(length[0]) > size-offset {
+			return 0, operations, errors.New("GIF data sub-block is truncated")
+		}
+		offset += int64(length[0])
+	}
+	return 0, operations, errors.New("GIF has too many data sub-blocks")
+}
+
+func boundedBMPThumbnailDimensions(file *os.File, size int64) (int, int, error) {
+	if size < 26 || size > math.MaxUint32 {
+		return 0, 0, errors.New("BMP header is truncated")
+	}
+	var prefix [26]byte
+	if err := readRasterHeaderAt(file, 0, prefix[:]); err != nil {
+		return 0, 0, err
+	}
+	if string(prefix[0:2]) != "BM" || int64(binary.LittleEndian.Uint32(prefix[2:6])) != size {
+		return 0, 0, errors.New("BMP file-size declaration is invalid")
+	}
+	pixelOffset := int64(binary.LittleEndian.Uint32(prefix[10:14]))
+	dibSize := int64(binary.LittleEndian.Uint32(prefix[14:18]))
+	if dibSize < 12 || dibSize > rasterThumbnailHeaderCap || pixelOffset < 14+dibSize || pixelOffset >= size {
+		return 0, 0, errors.New("BMP data offset or DIB header is invalid")
+	}
+	if dibSize == 12 {
+		width := int(binary.LittleEndian.Uint16(prefix[18:20]))
+		height := int(binary.LittleEndian.Uint16(prefix[20:22]))
+		bitsPerPixel := binary.LittleEndian.Uint16(prefix[24:26])
+		if binary.LittleEndian.Uint16(prefix[22:24]) != 1 || !validBMPBitsPerPixel(bitsPerPixel) || width <= 0 || height <= 0 {
+			return 0, 0, errors.New("BMP core header is invalid")
+		}
+		return width, height, nil
+	}
+	if dibSize < 40 {
+		return 0, 0, errors.New("unsupported BMP DIB header")
+	}
+	var info [40]byte
+	if err := readRasterHeaderAt(file, 14, info[:]); err != nil {
+		return 0, 0, err
+	}
+	width64 := int64(int32(binary.LittleEndian.Uint32(info[4:8])))
+	height64 := int64(int32(binary.LittleEndian.Uint32(info[8:12])))
+	if height64 == math.MinInt32 {
+		return 0, 0, errors.New("BMP height overflows")
+	}
+	if height64 < 0 {
+		height64 = -height64
+	}
+	if width64 <= 0 || height64 <= 0 || width64 > math.MaxInt32 || height64 > math.MaxInt32 || binary.LittleEndian.Uint16(info[12:14]) != 1 || !validBMPBitsPerPixel(binary.LittleEndian.Uint16(info[14:16])) {
+		return 0, 0, errors.New("BMP info header dimensions are invalid")
+	}
+	return int(width64), int(height64), nil
+}
+
+func validBMPBitsPerPixel(bits uint16) bool {
+	switch bits {
+	case 1, 2, 4, 8, 16, 24, 32:
+		return true
+	default:
+		return false
+	}
+}
+
+func boundedWebPThumbnailDimensions(file *os.File, size int64) (int, int, error) {
+	if size < 20 || size > math.MaxUint32+8 {
+		return 0, 0, errors.New("WebP RIFF header is truncated")
+	}
+	var riff [12]byte
+	if err := readRasterHeaderAt(file, 0, riff[:]); err != nil {
+		return 0, 0, err
+	}
+	declaredSize := int64(binary.LittleEndian.Uint32(riff[4:8])) + 8
+	if string(riff[0:4]) != "RIFF" || string(riff[8:12]) != "WEBP" || declaredSize != size {
+		return 0, 0, errors.New("WebP RIFF size is invalid")
+	}
+	offset := int64(12)
+	canvasWidth, canvasHeight := 0, 0
+	imageWidth, imageHeight := 0, 0
+	for chunk := 0; chunk < rasterThumbnailMaxChunks; chunk++ {
+		if offset > size-8 || offset > rasterThumbnailHeaderCap {
+			return 0, 0, errors.New("WebP chunk header is truncated or exceeds the structural scan limit")
+		}
+		var header [8]byte
+		if err := readRasterHeaderAt(file, offset, header[:]); err != nil {
+			return 0, 0, err
+		}
+		chunkSize := int64(binary.LittleEndian.Uint32(header[4:8]))
+		dataOffset := offset + 8
+		paddedSize := chunkSize + chunkSize%2
+		if paddedSize > math.MaxInt64-dataOffset || dataOffset+paddedSize > size {
+			return 0, 0, errors.New("WebP chunk is truncated")
+		}
+		switch string(header[0:4]) {
+		case "VP8X":
+			if chunkSize < 10 {
+				return 0, 0, errors.New("WebP VP8X header is truncated")
+			}
+			var body [10]byte
+			if err := readRasterHeaderAt(file, dataOffset, body[:]); err != nil {
+				return 0, 0, err
+			}
+			if body[0]&0x02 != 0 {
+				return 0, 0, errors.New("animated WebP thumbnails require a derived raster")
+			}
+			canvasWidth = 1 + int(uint24LittleEndian(body[4:7]))
+			canvasHeight = 1 + int(uint24LittleEndian(body[7:10]))
+		case "VP8 ":
+			if chunkSize < 10 {
+				return 0, 0, errors.New("WebP VP8 header is truncated")
+			}
+			var body [10]byte
+			if err := readRasterHeaderAt(file, dataOffset, body[:]); err != nil {
+				return 0, 0, err
+			}
+			if body[3] != 0x9d || body[4] != 0x01 || body[5] != 0x2a {
+				return 0, 0, errors.New("WebP VP8 frame signature is invalid")
+			}
+			imageWidth = int(binary.LittleEndian.Uint16(body[6:8]) & 0x3fff)
+			imageHeight = int(binary.LittleEndian.Uint16(body[8:10]) & 0x3fff)
+		case "VP8L":
+			if chunkSize < 5 {
+				return 0, 0, errors.New("WebP VP8L header is truncated")
+			}
+			var body [5]byte
+			if err := readRasterHeaderAt(file, dataOffset, body[:]); err != nil {
+				return 0, 0, err
+			}
+			if body[0] != 0x2f {
+				return 0, 0, errors.New("WebP VP8L signature is invalid")
+			}
+			imageWidth = 1 + int(body[1]) + int(body[2]&0x3f)<<8
+			imageHeight = 1 + int(body[2]>>6) + int(body[3])<<2 + int(body[4]&0x0f)<<10
+		}
+		offset = dataOffset + paddedSize
+		if offset == size {
+			if imageWidth <= 0 || imageHeight <= 0 {
+				return 0, 0, errors.New("WebP image payload is missing")
+			}
+			if canvasWidth > 0 || canvasHeight > 0 {
+				if canvasWidth <= 0 || canvasHeight <= 0 || imageWidth > canvasWidth || imageHeight > canvasHeight {
+					return 0, 0, errors.New("WebP canvas dimensions are invalid")
+				}
+				return canvasWidth, canvasHeight, nil
+			}
+			return imageWidth, imageHeight, nil
+		}
+	}
+	return 0, 0, errors.New("WebP has too many chunks")
+}
+
+func uint24LittleEndian(body []byte) uint32 {
+	return uint32(body[0]) | uint32(body[1])<<8 | uint32(body[2])<<16
+}
+
+func renderBoundedRasterThumbnailPNG(path string, budget *byteAdmissionBudget) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	config, format, err := boundedRasterThumbnailConfig(file)
+	if err != nil {
+		return nil, err
+	}
+	pixels, ok := checkedNonNegativeProduct(int64(config.Width), int64(config.Height))
+	if !ok {
+		return nil, errors.New("raster thumbnail pixel count overflows")
+	}
+	reservation, ok := checkedNonNegativeProduct(pixels, thumbnailDecodeBytesPerPixel)
+	if !ok || !budget.tryAcquire(reservation) {
+		return nil, errThumbnailAdmission
+	}
+	defer budget.release(reservation)
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	source, decodedFormat, err := image.Decode(io.LimitReader(file, rasterThumbnailMaxInput+1))
+	if err != nil {
+		return nil, fmt.Errorf("raster thumbnail pixels could not be decoded: %w", err)
+	}
+	if decodedFormat != format {
+		return nil, errors.New("raster thumbnail format changed between header and pixel decode")
+	}
+	bounds := source.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	decodedPixels, ok := checkedNonNegativeProduct(int64(width), int64(height))
+	if !ok || width <= 0 || height <= 0 || width > rasterThumbnailMaxAxis || height > rasterThumbnailMaxAxis || decodedPixels > rasterThumbnailMaxPixels {
+		return nil, errors.New("decoded raster thumbnail dimensions are invalid")
+	}
+	targetWidth, targetHeight := boundedThumbnailDimensions(width, height)
+	target := image.NewRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+	xdraw.ApproxBiLinear.Scale(target, target.Bounds(), source, bounds, xdraw.Src, nil)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, target); err != nil {
+		return nil, err
+	}
+	body := encoded.Bytes()
+	if err := validateThumbnailPNG("image/png", body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func boundedThumbnailDimensions(width, height int) (int, int) {
+	if width <= 0 || height <= 0 {
+		return 0, 0
+	}
+	if width <= thumbnailMaxDimension && height <= thumbnailMaxDimension {
+		return width, height
+	}
+	if width >= height {
+		return thumbnailMaxDimension, max(1, int(int64(height)*thumbnailMaxDimension/int64(width)))
+	}
+	return max(1, int(int64(width)*thumbnailMaxDimension/int64(height))), thumbnailMaxDimension
+}
+
+type niftiThumbnailPlan struct {
+	path              string
+	geometry          niftiGeometry
+	gzipped           bool
+	headerConsumed    int
+	planeOffset       int64
+	planeBytes        int64
+	decompressionWork int64
+	reservation       int64
+}
+
+func niftiThumbnailPreflight(path string) (niftiThumbnailPlan, error) {
+	gzipped := isGzipPath(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return niftiThumbnailPlan{}, err
+	}
+	defer func() { _ = file.Close() }()
+	var reader io.Reader = file
+	var gzipReader *gzip.Reader
+	if gzipped {
+		gzipReader, err = gzip.NewReader(file)
+		if err != nil {
+			return niftiThumbnailPlan{}, err
+		}
+		defer func() { _ = gzipReader.Close() }()
+		reader = gzipReader
+	}
+	header, consumed, err := readNiftiHeaderBytes(reader)
+	if err != nil {
+		return niftiThumbnailPlan{}, fmt.Errorf("read NIfTI thumbnail header: %w", err)
+	}
+	geometry, err := parseNiftiGeometry(header)
+	if err != nil {
+		return niftiThumbnailPlan{}, err
+	}
+	if geometry.width > niftiThumbnailMaxAxis || geometry.height > niftiThumbnailMaxAxis {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail plane dimensions exceed the limit")
+	}
+	planePixels, ok := checkedNonNegativeProduct(int64(geometry.width), int64(geometry.height))
+	if !ok || planePixels <= 0 {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail plane dimensions overflow")
+	}
+	planeBytes, ok := checkedNonNegativeProduct(planePixels, int64(geometry.bytesPerVoxel))
+	if !ok || planeBytes <= 0 || planeBytes > niftiThumbnailMaxPlaneBytes {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail plane exceeds the byte limit")
+	}
+	zOffset, ok := checkedNonNegativeProduct(int64(geometry.depth/2), planeBytes)
+	if !ok || geometry.voxOffset > math.MaxInt64-zOffset {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail plane offset overflows")
+	}
+	planeOffset := geometry.voxOffset + zOffset
+	if planeOffset > math.MaxInt64-planeBytes {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail work estimate overflows")
+	}
+	workBytes := planeOffset + planeBytes
+	decompressionWork := int64(0)
+	if gzipped && workBytes > niftiThumbnailMaxGzipWork {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail gzip work exceeds the limit")
+	}
+	if gzipped {
+		decompressionWork = workBytes
+	}
+	if !gzipped {
+		info, err := file.Stat()
+		if err != nil {
+			return niftiThumbnailPlan{}, err
+		}
+		if !info.Mode().IsRegular() || workBytes > info.Size() {
+			return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail plane is truncated")
+		}
+	}
+	decodedEstimate, ok := checkedNonNegativeProduct(planePixels, thumbnailDecodeBytesPerPixel)
+	if !ok {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail decode estimate overflows")
+	}
+	reservation, ok := checkedThumbnailReservation(decodedEstimate, planeBytes, decompressionWork)
+	if !ok {
+		return niftiThumbnailPlan{}, errors.New("NIfTI thumbnail admission estimate overflows")
+	}
+	return niftiThumbnailPlan{
+		path: path, geometry: geometry, gzipped: gzipped, headerConsumed: consumed,
+		planeOffset: planeOffset, planeBytes: planeBytes, decompressionWork: decompressionWork,
+		reservation: reservation,
+	}, nil
+}
+
+func checkedThumbnailReservation(costs ...int64) (int64, bool) {
+	total := int64(0)
+	for _, cost := range costs {
+		if cost < 0 || cost > math.MaxInt64-total {
+			return 0, false
+		}
+		total += cost
+	}
+	return total, total > 0
+}
+
+func readNiftiThumbnailPlane(plan niftiThumbnailPlan) ([]byte, error) {
+	file, err := os.Open(plan.path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	if !plan.gzipped {
+		plane := make([]byte, int(plan.planeBytes))
+		if _, err := file.ReadAt(plane, plan.planeOffset); err != nil {
+			return nil, fmt.Errorf("read NIfTI thumbnail plane: %w", err)
+		}
+		return plane, nil
+	}
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = gzipReader.Close() }()
+	header, consumed, err := readNiftiHeaderBytes(gzipReader)
+	if err != nil {
+		return nil, fmt.Errorf("read NIfTI thumbnail header: %w", err)
+	}
+	geometry, err := parseNiftiGeometry(header)
+	if err != nil {
+		return nil, err
+	}
+	if geometry.width != plan.geometry.width || geometry.height != plan.geometry.height || geometry.depth != plan.geometry.depth || geometry.bytesPerVoxel != plan.geometry.bytesPerVoxel || consumed != plan.headerConsumed {
+		return nil, errors.New("NIfTI thumbnail geometry changed during read")
+	}
+	skip := plan.planeOffset - int64(consumed)
+	if skip < 0 || plan.decompressionWork <= 0 || plan.decompressionWork > niftiThumbnailMaxGzipWork {
+		return nil, errors.New("NIfTI thumbnail gzip work exceeds the limit")
+	}
+	if skip > 0 {
+		if _, err := io.CopyN(io.Discard, gzipReader, skip); err != nil {
+			return nil, fmt.Errorf("skip to NIfTI thumbnail plane: %w", err)
+		}
+	}
+	plane := make([]byte, int(plan.planeBytes))
+	if _, err := io.ReadFull(gzipReader, plane); err != nil {
+		return nil, fmt.Errorf("read NIfTI thumbnail plane: %w", err)
+	}
+	return plane, nil
+}
+
+func renderNiftiThumbnailPNG(path string, request *http.Request, budget *byteAdmissionBudget) ([]byte, error) {
+	plan, err := niftiThumbnailPreflight(path)
+	if err != nil {
+		return nil, err
+	}
+	if !budget.tryAcquire(plan.reservation) {
+		return nil, errThumbnailAdmission
+	}
+	defer budget.release(plan.reservation)
+	plane, err := readNiftiThumbnailPlane(plan)
+	if err != nil {
+		return nil, err
+	}
+	if plan.geometry.bytesPerVoxel > 1 && plan.geometry.order != binary.LittleEndian {
+		normalizeScalarPayloadToLittleEndian(plane, plan.geometry.bytesPerVoxel)
+	}
+	minValue, maxValue := niftiScalarRange(plane, plan.geometry.dtype, plan.geometry.bytesPerVoxel)
+	volume := niftiScalarVolume{
+		Width: plan.geometry.width, Height: plan.geometry.height, Depth: 1,
+		DType: plan.geometry.dtype, BytesPerVoxel: plan.geometry.bytesPerVoxel, Data: plane,
+		RawMin: minValue, RawMax: maxValue, SclSlope: plan.geometry.sclSlope, SclInter: plan.geometry.sclInter,
+	}
+	transform := uploadPreviewTransformFromRequest(request)
+	if !transform.WindowActive && !transform.FullRange && niftiScalarRangeLooksCTLike(volume) {
+		transform.WindowMin = 0
+		transform.WindowMax = 80
+		transform.WindowActive = true
+		transform.WindowIsPhysical = true
+	}
+	windowCodeMin, windowCodeMax := scalarPreviewWindow(volume, transform)
+	windowMin := volume.physical(windowCodeMin)
+	windowMax := volume.physical(windowCodeMax)
+	if windowMax < windowMin {
+		windowMin, windowMax = windowMax, windowMin
+	}
+	source := image.NewGray(image.Rect(0, 0, volume.Width, volume.Height))
+	gamma := transform.Gamma
+	if gamma <= 0 {
+		gamma = 1
+	}
+	scale := windowMax - windowMin
+	for y := 0; y < volume.Height; y++ {
+		for x := 0; x < volume.Width; x++ {
+			code := niftiScalarDataValue(plane, (y*volume.Width+x)*volume.BytesPerVoxel, volume.DType, volume.BytesPerVoxel)
+			value := volume.physical(code)
+			normalized := 0.0
+			if scale > 0 && numberIsFinite(value) {
+				normalized = (value - windowMin) / scale
+			}
+			normalized = math.Max(0, math.Min(1, normalized))
+			if gamma != 1 {
+				normalized = math.Pow(normalized, 1/gamma)
+			}
+			pixel := uint8(math.Round(normalized * 255))
+			if transform.Negative {
+				pixel = 255 - pixel
+			}
+			source.SetGray(x, y, color.Gray{Y: pixel})
+		}
+	}
+	targetWidth, targetHeight := boundedThumbnailDimensions(volume.Width, volume.Height)
+	var output image.Image = source
+	if targetWidth != volume.Width || targetHeight != volume.Height {
+		target := image.NewGray(image.Rect(0, 0, targetWidth, targetHeight))
+		xdraw.ApproxBiLinear.Scale(target, target.Bounds(), source, source.Bounds(), xdraw.Src, nil)
+		output = target
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, output); err != nil {
+		return nil, err
+	}
+	body := encoded.Bytes()
+	if err := validateThumbnailPNG("image/png", body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func validateThumbnailPNG(contentType string, body []byte) error {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "image/png" {
+		return errors.New("thumbnail service returned a non-PNG response")
+	}
+	if len(body) == 0 || int64(len(body)) > thumbnailMaxEncodedBytes {
+		return errors.New("thumbnail service response exceeds the 8 MiB encoded limit")
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return errors.New("thumbnail service returned malformed PNG data")
+	}
+	if config.Width <= 0 || config.Height <= 0 || config.Width > thumbnailMaxDimension || config.Height > thumbnailMaxDimension {
+		return errors.New("thumbnail service returned out-of-bounds PNG dimensions")
+	}
+	if _, err := png.Decode(bytes.NewReader(body)); err != nil {
+		return errors.New("thumbnail service returned malformed PNG data")
+	}
+	return nil
+}
+
+func writeResourceThumbnailError(w http.ResponseWriter, resourceID, renderer string, status int, err error) {
+	slog.Error("resource thumbnail render failed", "resource_id", resourceID, "renderer", renderer, "status", status, "error", err)
+	if errors.Is(err, errThumbnailAdmission) {
+		w.Header().Set("Retry-After", "1")
+	}
+	message := "thumbnail is unavailable for this resource"
+	if status == http.StatusServiceUnavailable {
+		message = "thumbnail rendering is temporarily unavailable"
+	}
+	writeError(w, status, errors.New(message))
+}
+
+func writeRenderedThumbnailPNG(w http.ResponseWriter, resourceID, renderer string, body []byte) bool {
+	if err := writeThumbnailPNG(w, body); err != nil {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, err)
+		return false
+	}
+	return true
+}
+
+func (deps ServerDeps) proxyBoundedThumbnailPNG(w http.ResponseWriter, r *http.Request, resourceID, renderer, endpoint string, query url.Values) {
+	cacheKey, cacheable := imageCacheKey(endpoint, query)
+	if deps.imageCache != nil && cacheable {
+		if cached, hit := deps.imageCache.get(cacheKey); hit && cached.status == http.StatusOK && validateThumbnailPNG(cached.contentType, cached.body) == nil {
+			writeCachedResponse(w, cached, "hit")
+			return
+		}
+	}
+	base := strings.TrimRight(strings.TrimSpace(deps.ImageServiceURL), "/")
+	target := base + endpoint
+	if encoded := query.Encode(); encoded != "" {
+		target += "?" + encoded
+	}
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, err)
 		return
 	}
-	root, record, path, ok := deps.resolveUploadServingRequest(w, r)
-	if !ok {
+	response, err := imageServiceHTTPClient.Do(request)
+	if err != nil {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, err)
+		return
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		status := http.StatusServiceUnavailable
+		if response.StatusCode == http.StatusUnsupportedMediaType || response.StatusCode == http.StatusUnprocessableEntity {
+			status = http.StatusUnsupportedMediaType
+		}
+		writeResourceThumbnailError(w, resourceID, renderer, status, fmt.Errorf("thumbnail service returned HTTP %d", response.StatusCode))
+		return
+	}
+	if response.ContentLength > thumbnailMaxEncodedBytes {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, errors.New("thumbnail service returned an oversized response"))
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, thumbnailMaxEncodedBytes+1))
+	if err != nil {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, err)
+		return
+	}
+	if err := validateThumbnailPNG(response.Header.Get("Content-Type"), body); err != nil {
+		writeResourceThumbnailError(w, resourceID, renderer, http.StatusServiceUnavailable, err)
+		return
+	}
+	w.Header().Set("X-Ultra-Cache", "miss")
+	if !writeRenderedThumbnailPNG(w, resourceID, renderer, body) {
+		return
+	}
+	if deps.imageCache != nil && cacheable {
+		deps.imageCache.put(cacheKey, &cachedResponse{
+			status: http.StatusOK, contentType: "image/png", body: body,
+		}, int64(len(body)))
+	}
+}
+
+func resourceIsCifti(record resourceRecord, path string) bool {
+	if isCiftiName(record.OriginalName) {
+		return true
+	}
+	if !isNiftiUpload(record.OriginalName, record.ContentType) {
+		return false
+	}
+	_, ok := niftiCiftiPeek(path, record.OriginalName)
+	return ok
+}
+
+func isScientificThumbnailCandidate(record resourceRecord) bool {
+	return isTIFFUpload(record.OriginalName, record.ContentType) ||
+		hasPyramidMicroscopyExtension(record.OriginalName) ||
+		strings.EqualFold(strings.TrimSpace(record.ResourceKind), "image") ||
+		strings.HasPrefix(strings.ToLower(strings.TrimSpace(record.ContentType)), "image/")
+}
+
+// handleServeResourceThumbnail authenticates and resolves the resource before
+// dispatch. Every successful response is a bounded PNG; no failure path serves
+// or falls back to the original upload bytes.
+func (deps ServerDeps) handleServeResourceThumbnail(w http.ResponseWriter, r *http.Request) {
+	resourceID := chi.URLParam(r, "file_id")
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeResourceThumbnailError(w, resourceID, "resource_resolution", http.StatusServiceUnavailable, err)
+		return
+	}
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), resourceID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, errors.New("resource not found"))
+			return
+		}
+		writeResourceThumbnailError(w, resourceID, "resource_resolution", http.StatusServiceUnavailable, err)
+		return
+	}
+	if resourceIsCifti(record, path) {
+		body, err := renderCiftiThumbnailPNG(path)
+		if err != nil {
+			writeResourceThumbnailError(w, record.FileID, "cifti", http.StatusUnsupportedMediaType, err)
+			return
+		}
+		writeRenderedThumbnailPNG(w, record.FileID, "cifti", body)
+		return
+	}
+	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		body, err := renderNiftiThumbnailPNG(path, r, thumbnailInFlightBudget)
+		if err != nil {
+			status := http.StatusUnsupportedMediaType
+			if errors.Is(err, errThumbnailAdmission) {
+				status = http.StatusServiceUnavailable
+			}
+			writeResourceThumbnailError(w, record.FileID, "nifti", status, err)
+			return
+		}
+		writeRenderedThumbnailPNG(w, record.FileID, "nifti", body)
+		return
+	}
+	if goNativeThumbnailable(record) {
+		body, err := renderBoundedRasterThumbnailPNG(path, thumbnailInFlightBudget)
+		if err == nil {
+			writeRenderedThumbnailPNG(w, record.FileID, "native_raster", body)
+			return
+		}
+		if deps.imageServiceConfigured() {
+			if derivative, committed := committedThumbnailDerivative(root, record, path); committed {
+				deps.proxyBoundedThumbnailPNG(w, r, record.FileID, "derived_raster", "/thumbnail", url.Values{"path": {derivative}, "max_size": {"512"}})
+				return
+			}
+		}
+		status := http.StatusUnsupportedMediaType
+		if errors.Is(err, errThumbnailAdmission) {
+			status = http.StatusServiceUnavailable
+		}
+		writeResourceThumbnailError(w, record.FileID, "native_raster", status, err)
 		return
 	}
 	if isVideoUpload(record.OriginalName, record.ContentType) {
-		// Server-side ffmpeg poster frame (cacheable PNG). If the sidecar can't
-		// decode the video it streams a 415, and the client falls back to its own
-		// <video> poster on the <img> error.
-		deps.proxyImageService(w, r, "/video-poster", url.Values{"path": {path}, "max_size": {"512"}})
-		return
-	}
-	if isNiftiUpload(record.OriginalName, record.ContentType) || goNativeThumbnailable(record) {
-		deps.handleServeUpload(w, r)
+		if !deps.imageServiceConfigured() {
+			writeResourceThumbnailError(w, record.FileID, "video_poster", http.StatusServiceUnavailable, errors.New("video thumbnail service is not configured"))
+			return
+		}
+		deps.proxyBoundedThumbnailPNG(w, r, record.FileID, "video_poster", "/video-poster", url.Values{"path": {path}, "max_size": {"512"}})
 		return
 	}
 	// OME-Zarr thumbnails come from the ngff-service (smallest multiscale level).
 	if deps.servesViaNgff(record, path) {
-		deps.ngffDeps().proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}})
+		deps.ngffDeps().proxyBoundedThumbnailPNG(w, r, record.FileID, "ngff", "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}})
 		return
 	}
 	if deps.ngffServiceUnavailable(record, path) {
-		writeError(w, http.StatusServiceUnavailable, errNgffServiceNotConfigured)
+		writeResourceThumbnailError(w, record.FileID, "ngff", http.StatusServiceUnavailable, errNgffServiceNotConfigured)
 		return
 	}
-	servePath := path
-	if dp := derivedPyramidPath(root, record.FileID); dp != "" {
-		servePath = dp // bounded read from a low pyramid level
-	}
-	// Same robustness as /slice, but only when a pyramid is actually in use: if the
-	// pyramid read stalls/fails (unreachable or the client-timeout the NFS hang trips),
-	// retry the source thumbnail via the image service, then the native Go path. The
-	// no-pyramid path keeps its original behavior (a clean upstream error).
-	if servePath != path {
-		deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {servePath}, "max_size": {"512"}}, func(w http.ResponseWriter, r *http.Request) {
-			deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {path}, "max_size": {"512"}}, deps.handleServeUpload)
-		})
+	if !isScientificThumbnailCandidate(record) {
+		writeResourceThumbnailError(w, record.FileID, "unsupported", http.StatusUnsupportedMediaType, errors.New("resource format does not support thumbnails"))
 		return
 	}
-	deps.proxyImageServiceCached(w, r, "/thumbnail", url.Values{"path": {servePath}, "max_size": {"512"}})
+	if !deps.imageServiceConfigured() {
+		writeResourceThumbnailError(w, record.FileID, "derived_scientific", http.StatusServiceUnavailable, errors.New("scientific thumbnail service is not configured"))
+		return
+	}
+	servePath, committed := committedThumbnailDerivative(root, record, path)
+	if !committed {
+		writeResourceThumbnailError(w, record.FileID, "derived_scientific", http.StatusUnsupportedMediaType, errors.New("scientific thumbnail derivative is not ready"))
+		return
+	}
+	deps.proxyBoundedThumbnailPNG(w, r, record.FileID, "derived_scientific", "/thumbnail", url.Values{"path": {servePath}, "max_size": {"512"}})
 }
 
 // goCanDecodeHistogram reports whether the native Go decoder can read this
@@ -1991,13 +3455,14 @@ func hasPyramidMicroscopyExtension(name string) bool {
 
 // prefersBioioReader reports whether a resource's format should be read via bioio (the
 // convert worker transcodes it to a pyramid) in preference to libbioimage's native read:
-// Zeiss .czi, where libbioimage renders mosaics blocky/unstitched. Mirrors the Python
+// Proprietary microscopy readers whose native path is absent or semantically
+// unreliable. Mirrors the Python
 // PREFER_BIOIO_EXTENSIONS default in imaging/job.py. (.zarr is intentionally excluded:
 // OME-Zarr directory bundles are served natively by the ngff-service from the store, so
 // they never enter the bioio transcode lane — see shouldDerivePyramid / servesViaNgff.)
 func prefersBioioReader(name string) bool {
 	lower := strings.ToLower(strings.TrimSpace(name))
-	for _, ext := range []string{".czi"} {
+	for _, ext := range []string{".czi", ".nd2", ".lif", ".dv", ".r3d"} {
 		if strings.HasSuffix(lower, ext) || strings.Contains(lower, ext+"_") {
 			return true
 		}
@@ -2110,10 +3575,12 @@ func (deps ServerDeps) enqueuePyramidDerivation(ctx context.Context, root string
 	if deps.DataAgentJobs == nil || !deps.imageServiceConfigured() {
 		return
 	}
-	if derivedPyramidPath(root, record.FileID) != "" {
-		return // already derived
+	if !lowercaseSHA256Pattern.MatchString(strings.ToLower(strings.TrimSpace(record.SHA256))) || record.SizeBytes < 0 {
+		slog.WarnContext(ctx, "pyramid derivation skipped: resource has no immutable source identity",
+			"resource_id", record.FileID, "trigger", trigger)
+		return
 	}
-	if recentPyramidFailure(root, record.FileID, time.Now()) {
+	if recentPyramidFailure(root, record, time.Now()) {
 		// A recent derivation PERMANENTLY failed (a source this engine build can't
 		// convert). Back off instead of re-minting a doomed convert on every viewer
 		// open — that repeated heavy imgcnv work is exactly what starved the engine
@@ -2133,14 +3600,16 @@ func (deps ServerDeps) enqueuePyramidDerivation(ctx context.Context, root string
 		ResourceIDs:   []string{record.FileID},
 		ResourceCount: 1,
 		Metadata: domain.JSONMap{
-			"resource_id": record.FileID,
-			"src_path":    path,
-			"dst_path":    dst,
-			"tile_size":   512,
-			"compression": "lzw",
-			"layout":      "topdirs", // native level stays tile-addressable (see handleDeriveUploadPyramid)
-			"fmt":         "auto",    // z-stack/volume -> OME-BigTIFF (preserves Z); flat 2D -> BigTIFF
-			"trigger":     trigger,
+			"resource_id":       record.FileID,
+			"src_path":          path,
+			"dst_path":          dst,
+			"source_sha256":     strings.ToLower(strings.TrimSpace(record.SHA256)),
+			"source_size_bytes": record.SizeBytes,
+			"tile_size":         512,
+			"compression":       "lzw",
+			"layout":            "topdirs", // native level stays tile-addressable (see handleDeriveUploadPyramid)
+			"fmt":               "auto",    // z-stack/volume -> OME-BigTIFF (preserves Z); flat 2D -> BigTIFF
+			"trigger":           trigger,
 		},
 	}); err != nil {
 		// Visible, not silent: the image stays viewable via the direct/slice fallback

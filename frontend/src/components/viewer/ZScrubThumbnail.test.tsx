@@ -170,4 +170,84 @@ describe("ZScrubThumbnail", () => {
     expect(img).toHaveAttribute("src", "/thumb/f3");
     expect(img).toHaveAttribute("data-z", "0");
   });
+
+  it("restores the static thumbnail after a failed dynamic slice without failing the card", async () => {
+    const onError = vi.fn();
+    const dynamicSliceUrl = vi.fn(sliceUrlFor);
+    render(
+      <ZScrubThumbnail
+        fileId="f4"
+        alt="recovering stack"
+        staticThumbnailUrl="/thumb/f4"
+        sliceUrlFor={dynamicSliceUrl}
+        loadZCount={vi.fn().mockResolvedValue(8)}
+        prefetch={vi.fn()}
+        onError={onError}
+      />,
+    );
+    const img = screen.getByAltText("recovering stack");
+    fireEvent.mouseEnter(img);
+    await waitFor(() => expect(img).toHaveAttribute("data-zscrub", "true"));
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    expect(img).toHaveAttribute("src", "/slice?z=2");
+
+    fireEvent.error(img);
+    expect(img).toHaveAttribute("src", "/thumb/f4");
+    expect(img).toHaveAttribute("data-z", "0");
+    expect(onError).not.toHaveBeenCalled();
+    expect(img).toHaveAttribute("data-zscrub", "false");
+
+    const callsAfterFailure = dynamicSliceUrl.mock.calls.length;
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    fireEvent.mouseLeave(img);
+    fireEvent.mouseEnter(img);
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    expect(dynamicSliceUrl).toHaveBeenCalledTimes(callsAfterFailure);
+    expect(img).toHaveAttribute("src", "/thumb/f4");
+
+    fireEvent.error(img);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it("reenables dynamic slices only when the static thumbnail identity changes", async () => {
+    const loadZCount = vi.fn().mockResolvedValue(8);
+    const dynamicSliceUrl = vi.fn(sliceUrlFor);
+    const { rerender } = render(
+      <ZScrubThumbnail
+        fileId="f5"
+        alt="identity stack"
+        staticThumbnailUrl="/thumb/f5?sha=old"
+        sliceUrlFor={dynamicSliceUrl}
+        loadZCount={loadZCount}
+        prefetch={vi.fn()}
+      />,
+    );
+    let img = screen.getByAltText("identity stack");
+    fireEvent.mouseEnter(img);
+    await waitFor(() => expect(img).toHaveAttribute("data-zscrub", "true"));
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    fireEvent.error(img);
+    const callsAfterFailure = dynamicSliceUrl.mock.calls.length;
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    expect(dynamicSliceUrl).toHaveBeenCalledTimes(callsAfterFailure);
+
+    rerender(
+      <ZScrubThumbnail
+        fileId="f5"
+        alt="identity stack"
+        staticThumbnailUrl="/thumb/f5?sha=new"
+        sliceUrlFor={dynamicSliceUrl}
+        loadZCount={loadZCount}
+        prefetch={vi.fn()}
+      />,
+    );
+    img = screen.getByAltText("identity stack");
+    expect(img).toHaveAttribute("src", "/thumb/f5?sha=new");
+    fireEvent.mouseEnter(img);
+    await waitFor(() => expect(img).toHaveAttribute("data-zscrub", "true"));
+    fireEvent.wheel(img, { deltaY: 100, deltaMode: 0 });
+    expect(dynamicSliceUrl.mock.calls.length).toBeGreaterThan(callsAfterFailure);
+    expect(img).toHaveAttribute("src", "/slice?z=2");
+    expect(loadZCount).toHaveBeenCalledTimes(2);
+  });
 });

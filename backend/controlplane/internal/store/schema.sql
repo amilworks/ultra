@@ -188,6 +188,27 @@ CREATE TABLE IF NOT EXISTS control_worker_heartbeats (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+-- Personal notes: markdown is the source of truth; owner-scoped reads
+-- everywhere; DELETE is hard deletion (erasure, not concealment).
+CREATE TABLE IF NOT EXISTS control_notes (
+  note_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  org_id text,
+  title text NOT NULL DEFAULT '',
+  body_markdown text NOT NULL DEFAULT '',
+  pinned boolean NOT NULL DEFAULT false,
+  -- How the owner edits this note: 'markdown' (rich surface) or 'plaintext'
+  -- (raw mono). Presentation preference only — the body is always markdown.
+  editor_mode text NOT NULL DEFAULT 'markdown',
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
+  ON control_notes(user_id, pinned DESC, updated_at DESC);
+
+ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS editor_mode text NOT NULL DEFAULT 'markdown';
+
 -- Mid-run steering (Phase 1). One row per accepted steering message. The
 -- message_id references the steer's control_thread_messages row AND doubles as
 -- the LangGraph message id, so every copy of the steer — middleware-injected,
@@ -200,11 +221,15 @@ CREATE TABLE IF NOT EXISTS control_run_steer_messages (
   user_id text NOT NULL,
   message_id text NOT NULL,
   content text NOT NULL,
+  file_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
   status text NOT NULL DEFAULT 'pending',
   created_at timestamptz NOT NULL,
   applied_at timestamptz,
   updated_at timestamptz NOT NULL
 );
+
+ALTER TABLE control_run_steer_messages
+  ADD COLUMN IF NOT EXISTS file_ids jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_control_run_steer_messages_run
   ON control_run_steer_messages(run_id);
@@ -259,6 +284,13 @@ CREATE TABLE IF NOT EXISTS control_resources (
   deleted_at timestamptz,
   retention_expires_at timestamptz,
   metadata jsonb NOT NULL DEFAULT '{}'
+);
+
+-- Resource IDs are globally single-use. This minimal tombstone closes the
+-- purge-vs-upsert race without retaining user metadata or storage locators.
+CREATE TABLE IF NOT EXISTS control_resource_purge_tombstones (
+  resource_id text PRIMARY KEY,
+  purged_at timestamptz NOT NULL
 );
 
 ALTER TABLE control_resources ADD COLUMN IF NOT EXISTS project_id text;
@@ -606,6 +638,46 @@ CREATE INDEX IF NOT EXISTS control_artifacts_sha_idx ON control_artifacts(sha256
 CREATE INDEX IF NOT EXISTS control_resources_owner_status_created_idx ON control_resources(owner_user_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS control_resources_owner_org_status_idx ON control_resources(owner_user_id, owner_org_id, status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS control_resources_project_status_idx ON control_resources(project_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS control_resources_retention_expiry_idx
+  ON control_resources(retention_expires_at, resource_id)
+  WHERE status = 'deleted' AND retention_expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS control_resources_purging_lease_idx
+  ON control_resources(updated_at, resource_id)
+  WHERE status = 'purging';
+CREATE INDEX IF NOT EXISTS control_resources_retention_claim_idx
+  ON control_resources(
+    (CASE
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..')
+        AND btrim(COALESCE(storage_uri, '')) = '' AND btrim(COALESCE(storage_path, '')) <> '' THEN 0
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..')
+        AND lower(btrim(COALESCE(storage_uri, ''))) LIKE 'file://%' THEN 1
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..') THEN 2
+      ELSE 3
+    END),
+    retention_expires_at,
+    resource_id
+  )
+  WHERE status = 'deleted' AND retention_expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS control_resources_purging_claim_idx
+  ON control_resources(
+    (CASE
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..')
+        AND btrim(COALESCE(storage_uri, '')) = '' AND btrim(COALESCE(storage_path, '')) <> '' THEN 0
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..')
+        AND lower(btrim(COALESCE(storage_uri, ''))) LIKE 'file://%' THEN 1
+      WHEN resource_id ~ '^[A-Za-z0-9_.:-]+$' AND resource_id NOT IN ('.', '..') THEN 2
+      ELSE 3
+    END),
+    updated_at,
+    resource_id
+  )
+  WHERE status = 'purging';
+CREATE INDEX IF NOT EXISTS control_resources_retention_blocked_idx
+  ON control_resources(resource_id) INCLUDE (size_bytes)
+  WHERE status = 'retention_blocked';
+CREATE INDEX IF NOT EXISTS control_resources_lifecycle_fence_idx
+  ON control_resources((resource_id COLLATE "C"))
+  WHERE status IN ('deleted', 'purging', 'retention_blocked');
 CREATE INDEX IF NOT EXISTS control_resources_sha_idx ON control_resources(sha256);
 CREATE INDEX IF NOT EXISTS control_resources_source_uri_idx ON control_resources(source_uri);
 CREATE INDEX IF NOT EXISTS control_resources_tag_keys_idx ON control_resources USING GIN ((metadata->'tag_keys'));

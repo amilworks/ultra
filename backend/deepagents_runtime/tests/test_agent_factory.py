@@ -1,10 +1,13 @@
 import json
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
-from deepagents.backends import CompositeBackend, StateBackend
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 from ultra_deepagents.agent import (
@@ -32,7 +35,10 @@ from ultra_deepagents.context_tools import (
     stage_uploaded_files,
     stage_uploaded_files_for_analysis_text,
 )
-from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
+from ultra_deepagents.multimodal import (
+    BoundedImageMultimodalMiddleware,
+    TextOnlyMultimodalMiddleware,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -63,6 +69,10 @@ class ToolCallingFakeOpenAIModel(FakeMessagesListChatModel):
     def _get_ls_params(self, stop=None, **kwargs):
         _ = stop, kwargs
         return {"ls_provider": "openai", "ls_model_name": "fake-ultra-model"}
+
+
+def test_runtime_installs_exact_deepagents_075():
+    assert version("deepagents") == "0.7.5"
 
 
 def test_resolve_user_memory_root_is_scoped_and_path_safe(tmp_path):
@@ -183,6 +193,253 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert captured["subagents"] == []
 
 
+def test_coordinator_restores_todos_and_restricts_filesystem_middleware(monkeypatch):
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    backend = StateBackend()
+
+    build_research_agent(settings, model=object(), backend=backend)
+
+    todo = [item for item in captured["middleware"] if isinstance(item, TodoListMiddleware)]
+    filesystem = [item for item in captured["middleware"] if isinstance(item, FilesystemMiddleware)]
+    assert len(todo) == 1
+    assert len(filesystem) == 1
+    assert filesystem[0].backend is backend
+    assert filesystem[0]._enabled_tools == frozenset(
+        {"ls", "read_file", "write_file", "edit_file", "glob", "grep", "execute"}
+    )
+    assert "delete" not in {tool.name for tool in filesystem[0].tools}
+    assert filesystem[0]._permissions == captured["permissions"]
+
+
+def test_each_local_declarative_subagent_gets_fresh_local_middleware(
+    monkeypatch,
+    tmp_path: Path,
+):
+    captured = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return "compiled-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+        memory_root=str(tmp_path / "memory"),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="o",
+        user_id="u",
+        project_id="p",
+        thread_id="t",
+        run_id="run-local-middleware",
+        goal="Reproduce the simulation from https://arxiv.org/abs/1706.03762 and analyze metrics.",
+    )
+    backend = StateBackend()
+
+    build_research_agent(settings, model=object(), backend=backend, context=context)
+
+    local_specs = [spec for spec in captured["subagents"] if "graph_id" not in spec]
+    assert len(local_specs) >= 2
+    todo_instances = []
+    filesystem_instances = []
+    for spec in local_specs:
+        todo = [item for item in spec["middleware"] if isinstance(item, TodoListMiddleware)]
+        filesystem = [item for item in spec["middleware"] if isinstance(item, FilesystemMiddleware)]
+        assert len(todo) == 1, spec["name"]
+        assert len(filesystem) == 1, spec["name"]
+        assert filesystem[0].backend is backend
+        assert "delete" not in {tool.name for tool in filesystem[0].tools}
+        assert filesystem[0]._permissions == captured["permissions"]
+        todo_instances.extend(todo)
+        filesystem_instances.extend(filesystem)
+    assert len({id(item) for item in todo_instances}) == len(todo_instances)
+    assert len({id(item) for item in filesystem_instances}) == len(filesystem_instances)
+    coordinator_todo = next(
+        item for item in captured["middleware"] if isinstance(item, TodoListMiddleware)
+    )
+    coordinator_filesystem = next(
+        item for item in captured["middleware"] if isinstance(item, FilesystemMiddleware)
+    )
+    assert all(coordinator_todo is not item for item in todo_instances)
+    assert all(coordinator_filesystem is not item for item in filesystem_instances)
+
+
+def test_delete_tool_call_is_rejected_and_preserves_exact_file_bytes(tmp_path: Path):
+    sentinel = tmp_path / "sentinel.bin"
+    expected = b"\x00ultra-delete-guard\xff"
+    sentinel.write_bytes(expected)
+    model = ToolCallingFakeOpenAIModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "delete",
+                        "args": {"file_path": "/sentinel.bin"},
+                        "id": "delete-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Deletion was rejected."),
+        ]
+    )
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    agent = build_research_agent(
+        settings,
+        model=model,
+        backend=FilesystemBackend(tmp_path, virtual_mode=True),
+    )
+
+    result = agent.invoke({"messages": [HumanMessage(content="Delete /sentinel.bin")]})
+
+    assert model.bound_tool_names
+    assert all("delete" not in names for names in model.bound_tool_names)
+    assert all("write_todos" in names for names in model.bound_tool_names)
+    rejection = next(
+        message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage) and message.tool_call_id == "delete-1"
+    )
+    assert rejection.status == "error"
+    assert "delete" in str(rejection.content)
+    assert sentinel.read_bytes() == expected
+
+
+def test_protected_profile_rejects_write_and_edit_without_changing_exact_bytes():
+    profile_path = "/memories/user_profile.md"
+    protected = b"profile-authority:\n  instrument: microscope-7\n"
+    model = ToolCallingFakeOpenAIModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "file_path": profile_path,
+                            "content": "replacement",
+                        },
+                        "id": "write-protected",
+                        "type": "tool_call",
+                    },
+                    {
+                        "name": "edit_file",
+                        "args": {
+                            "file_path": profile_path,
+                            "old_string": "microscope-7",
+                            "new_string": "microscope-8",
+                        },
+                        "id": "edit-protected",
+                        "type": "tool_call",
+                    },
+                ],
+            ),
+            AIMessage(content="Protected profile changes were rejected."),
+        ]
+    )
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    agent = build_research_agent(
+        settings,
+        model=model,
+        backend=StateBackend(),
+    )
+
+    result = agent.invoke(
+        {
+            "messages": [HumanMessage(content="Change the protected profile.")],
+            "files": {
+                profile_path: {
+                    "content": protected.decode("utf-8"),
+                    "encoding": "utf-8",
+                }
+            },
+        }
+    )
+
+    rejected = {
+        message.tool_call_id: message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage)
+        and message.tool_call_id in {"write-protected", "edit-protected"}
+    }
+    assert set(rejected) == {"write-protected", "edit-protected"}
+    assert all(message.status == "error" for message in rejected.values())
+    assert all("permission" in str(message.content).lower() for message in rejected.values())
+    assert result["files"][profile_path]["content"].encode("utf-8") == protected
+
+
+def test_todos_round_trip_through_checkpoint_and_resume():
+    todos = [
+        {"content": "Inspect evidence", "status": "completed"},
+        {"content": "Write report", "status": "in_progress"},
+    ]
+    checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": "todos-checkpoint"}}
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    first_model = ToolCallingFakeOpenAIModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_todos",
+                        "args": {"todos": todos},
+                        "id": "todos-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Plan recorded."),
+        ]
+    )
+    first_agent = build_research_agent(
+        settings,
+        model=first_model,
+        backend=StateBackend(),
+        checkpointer=checkpointer,
+    )
+
+    first = first_agent.invoke(
+        {"messages": [HumanMessage(content="Make a plan.")]},
+        config=config,
+    )
+    assert first["todos"] == todos
+
+    resumed_agent = build_research_agent(
+        settings,
+        model=ToolCallingFakeOpenAIModel(responses=[AIMessage(content="Resumed.")]),
+        backend=StateBackend(),
+        checkpointer=checkpointer,
+    )
+    resumed = resumed_agent.invoke(
+        {"messages": [HumanMessage(content="Continue from the plan.")]},
+        config=config,
+    )
+    assert resumed["todos"] == todos
+
+
 def test_tool_capability_manifest_describes_builtin_storage_and_registered_tools():
     class FakeTool:
         def __init__(self, name: str) -> None:
@@ -213,6 +470,17 @@ def test_tool_capability_manifest_describes_builtin_storage_and_registered_tools
         "write_todos",
     }.issubset(builtin_names)
     assert "task" not in builtin_names
+    assert "delete" not in builtin_names
+    write_file = next(
+        tool
+        for tool in manifest["deepagents_builtin_tools"]
+        if isinstance(tool, dict) and tool.get("name") == "write_file"
+    )
+    assert "deliberately replace the entire contents" in write_file["purpose"]
+    assert "Never use write_file on an existing file" in write_file["purpose"]
+    assert "whole-file replacement" in write_file["purpose"]
+    assert "read_file" in write_file["purpose"]
+    assert "edit_file" in write_file["purpose"]
     assert manifest["available_subagents"] == []
     assert manifest["available_async_subagents"] == []
     assert manifest["registered_tools"] == [
@@ -518,9 +786,7 @@ def test_research_agent_registers_configured_async_subagents_and_manifest(monkey
         "list_async_tasks",
     }.issubset(builtin_names)
     assert "task" in builtin_names  # built-in general-purpose always exists
-    assert [entry["name"] for entry in manifest["available_subagents"]] == [
-        "general-purpose"
-    ]
+    assert [entry["name"] for entry in manifest["available_subagents"]] == ["general-purpose"]
     assert manifest["available_async_subagents"] == [
         {
             "name": "remote-training-runner",
@@ -873,7 +1139,7 @@ def test_research_agent_registers_scoped_subagents_for_code_execution_context(mo
     # code-runner absorbed the data-inspection role and carries an anti-bloat instruction.
     assert "data-inspection" in code_runner["system_prompt"].lower()
     assert "do not paste raw stdout" in code_runner["system_prompt"].lower()
-    assert all(
+    assert any(
         isinstance(item, TextOnlyMultimodalMiddleware) for item in code_runner.get("middleware", [])
     )
     manifest_tool = next(
@@ -950,6 +1216,8 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
         qwen_vlm_base_url="http://tesla.test:8000/v1",
         qwen_vlm_model="Qwen3.6-27B",
         qwen_vlm_api_key="test-key",
+        qwen_vlm_max_images_per_call=3,
+        qwen_vlm_request_timeout_seconds=10.0,
     )
     context = AgentRunContext(
         assistant_id="ultra-research-agent",
@@ -980,6 +1248,18 @@ def test_research_agent_registers_qwen_code_runner_alongside_code_runner(monkeyp
     assert all(
         not isinstance(item, TextOnlyMultimodalMiddleware)
         for item in by_name["qwen-code-runner"].get("middleware", [])
+    )
+    qwen_image_middleware = [
+        item
+        for item in by_name["qwen-code-runner"].get("middleware", [])
+        if isinstance(item, BoundedImageMultimodalMiddleware)
+    ]
+    assert len(qwen_image_middleware) == 1
+    assert qwen_image_middleware[0].max_images == 3
+    assert qwen_image_middleware[0].async_timeout_seconds == 15.0
+    assert all(
+        not isinstance(item, BoundedImageMultimodalMiddleware)
+        for item in by_name["code-runner"].get("middleware", [])
     )
     qwen_tool_names = {getattr(tool, "name", "") for tool in by_name["qwen-code-runner"]["tools"]}
     assert qwen_tool_names == {
@@ -1475,7 +1755,7 @@ def test_research_agent_keeps_paper_tools_when_paper_context_exists(monkeypatch)
     literature = captured["subagents"][0]
     literature_tool_names = {getattr(tool, "name", "") for tool in literature["tools"]}
     assert "read_paper_pages" in literature_tool_names
-    assert all(
+    assert any(
         isinstance(item, TextOnlyMultimodalMiddleware) for item in literature.get("middleware", [])
     )
 

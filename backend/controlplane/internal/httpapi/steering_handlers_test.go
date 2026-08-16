@@ -161,3 +161,101 @@ func TestSteerListVisibleToWorkerAndOwnerOnly(t *testing.T) {
 		}
 	}
 }
+
+// Attachments ride the steer through the trusted channel: the record echoes
+// the sanitized ids, the worker-visible list carries them, and the transcript
+// row's metadata preserves them for requeue reseeding. Malformed and oversized
+// id lists are rejected before anything persists.
+func TestSteerAttachmentsFlowThroughRecordAndTranscript(t *testing.T) {
+	t.Parallel()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		WorkerToken: "steer-worker-secret",
+	})
+	thread, err := service.CreateThread(context.Background(), runcontrol.CreateThreadRequest{
+		UserID: "ada", Title: "steering attachments",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(context.Background(), runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "ada",
+		Goal:     "long analysis",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "long analysis"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	post := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v2/runs/"+run.RunID+"/steer", strings.NewReader(body))
+		req.Header.Set("X-Ultra-User-Id", "ada")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Duplicates collapse; blanks drop; order is preserved.
+	rec := post(`{"steer_id":"steer_files","text":"Use this image instead.","file_ids":["file_abc123"," ","file_def456","file_abc123"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("steer with files = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var record domain.RunSteerMessageRecord
+	if err := json.Unmarshal(rec.Body.Bytes(), &record); err != nil {
+		t.Fatalf("decode steer: %v", err)
+	}
+	if len(record.FileIDs) != 2 || record.FileIDs[0] != "file_abc123" || record.FileIDs[1] != "file_def456" {
+		t.Fatalf("record.FileIDs = %v, want [file_abc123 file_def456]", record.FileIDs)
+	}
+
+	// The worker's list view (the injection source) sees the same ids.
+	listed, err := service.ListRunSteerMessages(context.Background(), run.RunID)
+	if err != nil {
+		t.Fatalf("ListRunSteerMessages: %v", err)
+	}
+	if len(listed) != 1 || len(listed[0].FileIDs) != 2 {
+		t.Fatalf("listed steers = %+v, want one with two file ids", listed)
+	}
+
+	// The transcript message metadata carries the ids for requeue reseeding.
+	messages, err := mem.ListThreadMessages(context.Background(), run.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	var steerMessage *domain.ThreadMessage
+	for i := range messages {
+		if messages[i].MessageID == record.MessageID {
+			steerMessage = &messages[i]
+			break
+		}
+	}
+	if steerMessage == nil {
+		t.Fatalf("steer transcript message %q not found", record.MessageID)
+	}
+	metadataFileIDs, _ := steerMessage.Metadata["file_ids"].([]string)
+	if len(metadataFileIDs) != 2 {
+		t.Fatalf("transcript metadata file_ids = %#v, want two entries", steerMessage.Metadata["file_ids"])
+	}
+
+	// Path-hostile ids are rejected up front.
+	if rec := post(`{"text":"bad","file_ids":["../../etc/passwd"]}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("hostile file id = %d, want 400", rec.Code)
+	}
+	// So are oversized attachment lists.
+	oversized := `{"text":"too many","file_ids":[`
+	for i := 0; i < 17; i++ {
+		if i > 0 {
+			oversized += ","
+		}
+		oversized += `"file_` + strings.Repeat("a", 3) + string(rune('a'+i)) + `"`
+	}
+	oversized += `]}`
+	if rec := post(oversized); rec.Code != http.StatusBadRequest {
+		t.Fatalf("oversized file list = %d, want 400", rec.Code)
+	}
+}

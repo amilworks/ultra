@@ -63,6 +63,92 @@ describe("ApiClient browser auth hardening", () => {
     );
   });
 
+  it("hands Spark an authenticated, credentialed RAD source without query secrets", () => {
+    const client = new ApiClient({
+      baseUrl: "https://ultra.example.org/control",
+      apiKey: "dev-secret",
+    });
+
+    const source = client.getScene3dPagedLodSource("file/with spaces");
+
+    expect(source).toEqual({
+      url: "https://ultra.example.org/v2/uploads/file%2Fwith%20spaces/scene3d/lod/scene-lod.rad",
+      requestHeader: { "X-API-Key": "dev-secret" },
+      withCredentials: true,
+    });
+    expect(new URL(source.url).searchParams.has("api_key")).toBe(false);
+  });
+
+  it("fetches an exact reconstruction camera preview and rejects malformed indices", async () => {
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(jpeg, {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org", apiKey: "dev-secret" });
+
+    await expect(client.fetchScene3dCameraImage("file/with spaces", 7)).resolves.toHaveProperty(
+      "type",
+      "image/jpeg"
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://ultra.example.org/v2/uploads/file%2Fwith%20spaces/scene3d/image/7",
+      expect.objectContaining({
+        method: "GET",
+        credentials: "include",
+        headers: expect.objectContaining({ "X-API-Key": "dev-secret" }),
+      })
+    );
+    await expect(client.fetchScene3dCameraImage("file-123", -1)).rejects.toThrow(
+      /non-negative integer/
+    );
+    await expect(client.fetchScene3dCameraImage("file-123", 1.5)).rejects.toThrow(
+      /non-negative integer/
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors same-origin advertised thumbnail URLs only when capability is ready", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org/control" });
+
+    expect(
+      client.resourceThumbnailUrl({
+        file_id: "file-123",
+        has_thumbnail: true,
+        thumbnail_url: "/v2/resources/file-123/thumbnail?variant=carpet",
+      })
+    ).toBe("https://ultra.example.org/v2/resources/file-123/thumbnail?variant=carpet");
+    expect(
+      client.resourceThumbnailUrl({
+        file_id: "file-123",
+        has_thumbnail: false,
+        thumbnail_url: "/advertised-but-not-ready",
+      })
+    ).toBe("https://ultra.example.org/v2/resources/file-123/thumbnail");
+  });
+
+  it("rejects unsafe advertised thumbnail URLs without appending credentials", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org", apiKey: "dev-secret" });
+    const canonical = "https://ultra.example.org/v2/resources/file-123/thumbnail";
+
+    for (const thumbnail_url of [
+      "https://attacker.example/thumbnail.png",
+      "//attacker.example/thumbnail.png",
+      "javascript:alert(1)",
+      "ftp://ultra.example.org/thumbnail.png",
+      "https://user:password@ultra.example.org/thumbnail.png",
+    ]) {
+      expect(
+        client.resourceThumbnailUrl({ file_id: "file-123", has_thumbnail: true, thumbnail_url })
+      ).toBe(canonical);
+    }
+    expect(new URL(canonical).searchParams.has("api_key")).toBe(false);
+  });
+
   it("builds uploaded image slice URLs through the V2 upload API", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
 
@@ -116,7 +202,7 @@ describe("ApiClient browser auth hardening", () => {
 
   it("projects source-channel colors into selected order for image-service URLs", () => {
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
-    const channels = [1, 3, 5];
+    const channels = [5, 1, 3];
     const channelColors = [
       "#1e90ff",
       "#00ff66",
@@ -129,14 +215,24 @@ describe("ApiClient browser auth hardening", () => {
     const urls = [
       client.uploadDisplayUrl("file-123", undefined, { channels, channelColors }),
       client.uploadSliceUrl("file-123", { axis: "z", z: 40, channels, channelColors }),
+      client.uploadTileUrl("file-123", {
+        axis: "z",
+        level: 2,
+        tileX: 3,
+        tileY: 4,
+        channels,
+        channelColors,
+        cacheKey: "windowed-v2:channels",
+      }),
       client.uploadAtlasUrl("file-123", { channels, channelColors }),
     ];
 
     urls.forEach((value) => {
       const parsed = new URL(value);
-      expect(parsed.searchParams.get("channels")).toBe("1,3,5");
-      expect(parsed.searchParams.get("channel_colors")).toBe("#00ff66,#ff00ff,#00e5ff");
+      expect(parsed.searchParams.get("channels")).toBe("5,1,3");
+      expect(parsed.searchParams.get("channel_colors")).toBe("#00e5ff,#00ff66,#ff00ff");
     });
+    expect(new URL(urls[2]).searchParams.get("cache_key")).toBe("windowed-v2:channels");
   });
 
   it("omits an incomplete color projection instead of sending invalid cardinality", () => {
@@ -151,6 +247,37 @@ describe("ApiClient browser auth hardening", () => {
 
     expect(parsed.searchParams.get("channels")).toBe("1,3");
     expect(parsed.searchParams.has("channel_colors")).toBe(false);
+  });
+
+  it("rejects invalid channel arrays consistently across image URL builders", () => {
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const builders = [
+      (channels: number[]) => client.uploadDisplayUrl("file-123", undefined, { channels }),
+      (channels: number[]) => client.uploadSliceUrl("file-123", { axis: "z", channels }),
+      (channels: number[]) =>
+        client.uploadTileUrl("file-123", {
+          axis: "z",
+          level: 0,
+          tileX: 0,
+          tileY: 0,
+          channels,
+        }),
+      (channels: number[]) => client.uploadAtlasUrl("file-123", { channels }),
+    ];
+    const invalidSelections = [
+      [Number.NaN],
+      [Number.POSITIVE_INFINITY],
+      [1.5],
+      [-1],
+      [3, 3],
+      [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    ];
+
+    builders.forEach((build) => {
+      invalidSelections.forEach((channels) => {
+        expect(() => build(channels)).toThrow(RangeError);
+      });
+    });
   });
 
   it("builds scientific upload viewer URLs through the V2 upload API", () => {

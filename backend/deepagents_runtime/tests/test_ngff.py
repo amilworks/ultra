@@ -418,12 +418,114 @@ def test_reader_rejects_out_of_range_plane_and_level_indices(tmp_path):
 
 
 def test_service_channel_parser_rejects_malformed_tokens_instead_of_selecting_all():
+    from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS
     from ultra_deepagents.ngff.service import _parse_channels
 
     assert _parse_channels("0, 2") == [0, 2]
-    for malformed in ("abc", "0,bad", "-1", "0,,1"):
-        with pytest.raises(ValueError, match="comma-separated"):
+    for malformed in ("", ",", "abc", "0,bad", "-1", "0,,1"):
+        with pytest.raises(ValueError):
             _parse_channels(malformed)
+    with pytest.raises(ValueError, match="duplicates"):
+        _parse_channels("0,0")
+    with pytest.raises(ValueError, match=rf"at most {MAX_COMPOSITE_CHANNELS}"):
+        _parse_channels(",".join(str(index) for index in range(MAX_COMPOSITE_CHANNELS + 1)))
+
+
+@pytest.mark.parametrize("route", ["/slice", "/tile"])
+def test_service_rejects_over_limit_channels_before_opening_storage(monkeypatch, route):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from ultra_deepagents.ngff import service
+
+    opened: list[str] = []
+
+    def record_open(path: str):
+        opened.append(path)
+        raise AssertionError("storage must not open for an oversized channel selection")
+
+    monkeypatch.setattr(service, "_get_image", record_open)
+    client = TestClient(service.create_app())
+    response = client.get(
+        route,
+        params={"path": "/untrusted/store", "channels": ",".join(str(i) for i in range(9))},
+    )
+
+    assert response.status_code == 422
+    assert opened == []
+
+
+@pytest.mark.parametrize("size", [0, -1, 1025])
+def test_ngff_service_rejects_unbounded_tile_size_before_opening_storage(monkeypatch, size):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from ultra_deepagents.ngff import service
+
+    opened: list[str] = []
+
+    def record_open(path: str):
+        opened.append(path)
+        raise AssertionError("storage must not open for an invalid tile size")
+
+    monkeypatch.setattr(service, "_get_image", record_open)
+    client = TestClient(service.create_app())
+
+    response = client.get("/tile", params={"path": "/untrusted/store", "size": size})
+
+    assert response.status_code == 422
+    assert opened == []
+
+
+def test_ngff_viewerinfo_preserves_ome_channel_defaults_in_canonical_shape(tmp_path):
+    import zarr
+    from ultra_deepagents.ngff.reader import open_ngff
+    from ultra_deepagents.ngff.viewerinfo import build_ngff_viewer_info
+
+    path = str(tmp_path / "ome-colors.ome.zarr")
+    _make_zarr(path, [16], channels=3)
+    group = zarr.open_group(path, mode="a")
+    group.attrs["omero"] = {
+        "channels": [
+            {"label": "DAPI", "color": "0000FF", "active": True},
+            {"label": "FITC", "color": "00FF00", "active": False},
+            {"label": "TRITC", "color": "FF0000", "active": True},
+        ]
+    }
+
+    viewer = build_ngff_viewer_info(open_ngff(path))
+
+    expected_colors = [
+        {"index": 0, "hex": "#0000FF", "rgb": [0, 0, 255]},
+        {"index": 1, "hex": "#00FF00", "rgb": [0, 255, 0]},
+        {"index": 2, "hex": "#FF0000", "rgb": [255, 0, 0]},
+    ]
+    assert viewer["phys"]["channel_colors"] == expected_colors
+    assert viewer["channel_colors"] == expected_colors
+    assert viewer["display_defaults"]["channels"] == [0, 2]
+    assert viewer["display_defaults"]["channel_colors"] == ["#0000FF", "#00FF00", "#FF0000"]
+    assert "channel_color" in viewer["viewer"]["display_capabilities"]
+    assert "channel_lut_transport" in viewer["viewer"]["display_capabilities"]
+
+
+def test_ngff_default_policy_caps_viewer_and_thumbnail_plane_reads(tmp_path, monkeypatch):
+    from ultra_deepagents.ngff.reader import open_ngff
+    from ultra_deepagents.ngff.render import render_thumbnail_png
+    from ultra_deepagents.ngff.viewerinfo import build_ngff_viewer_info
+
+    path = str(tmp_path / "nine-channel.ome.zarr")
+    _make_zarr(path, [8], channels=9)
+    image = open_ngff(path)
+    original_read_plane = image.read_plane
+    read_channels: list[int] = []
+
+    def record_read_plane(**kwargs):
+        read_channels.append(int(kwargs.get("c", 0)))
+        return original_read_plane(**kwargs)
+
+    monkeypatch.setattr(image, "read_plane", record_read_plane)
+    render_thumbnail_png(image)
+
+    assert read_channels == list(range(8))
+    assert build_ngff_viewer_info(image)["display_defaults"]["channels"] == list(range(8))
 
 
 def test_intensity_range_is_exact_over_complete_smallest_level_or_unknown(tmp_path, monkeypatch):

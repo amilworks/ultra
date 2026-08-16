@@ -1,4 +1,8 @@
 import type { UploadViewerInfo } from "@/types";
+import {
+  supportsSliceChannelColor,
+  usesStrictScalarSliceContract,
+} from "./viewerSliceContract";
 
 export type ThumbnailScrubConfig = {
   axis: "z" | "t";
@@ -11,6 +15,8 @@ export type ThumbnailScrubConfig = {
   enhancement: string;
   fusionMethod: string;
   negative: boolean;
+  strictScalarSlice: boolean;
+  supportsChannelColor: boolean;
 };
 
 export type ThumbnailScrubSliceRequest = {
@@ -20,8 +26,9 @@ export type ThumbnailScrubSliceRequest = {
   enhancement: string;
   fusionMethod: string;
   negative: boolean;
-  channels: number[];
-  channelColors: string[];
+  c?: number;
+  channels?: number[];
+  channelColors?: string[];
   fullResolution: false;
   cacheKey: string;
 };
@@ -29,7 +36,7 @@ export type ThumbnailScrubSliceRequest = {
 type ThumbnailScrubViewerInfo = Pick<
   UploadViewerInfo,
   "axis_sizes" | "selected_indices" | "display_defaults" | "phys"
->;
+> & { viewer?: UploadViewerInfo["viewer"] };
 
 const boundedIndex = (value: unknown, count: number, fallback = 0): number => {
   const numeric = Number(value);
@@ -123,6 +130,12 @@ export function thumbnailScrubConfig(info: ThumbnailScrubViewerInfo): ThumbnailS
     enhancement: String(defaults?.enhancement ?? "d"),
     fusionMethod: String(defaults?.fusion_method ?? "m"),
     negative: Boolean(defaults?.negative ?? false),
+    strictScalarSlice: info.viewer
+      ? usesStrictScalarSliceContract({ viewer: info.viewer })
+      : false,
+    supportsChannelColor: info.viewer
+      ? supportsSliceChannelColor({ viewer: info.viewer })
+      : false,
   };
 }
 
@@ -132,6 +145,12 @@ export function thumbnailScrubSliceRequest(
   index: number
 ): ThumbnailScrubSliceRequest {
   const scrubIndex = boundedIndex(index, config.count);
+  const channelSelection = config.strictScalarSlice
+    ? { c: config.channels[0] ?? 0 }
+    : {
+      channels: config.channels,
+      channelColors: config.supportsChannelColor ? config.channelColors : undefined,
+    };
   return {
     axis: "z",
     z: config.axis === "z" ? scrubIndex : config.zIndex,
@@ -139,8 +158,7 @@ export function thumbnailScrubSliceRequest(
     enhancement: config.enhancement,
     fusionMethod: config.fusionMethod,
     negative: config.negative,
-    channels: config.channels,
-    channelColors: config.channelColors,
+    ...channelSelection,
     fullResolution: false,
     cacheKey: "metadata-zscrub-v1",
   };

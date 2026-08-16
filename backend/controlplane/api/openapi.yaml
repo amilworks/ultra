@@ -1167,19 +1167,122 @@ paths:
                   released: { type: boolean }
         "409":
           description: Lease token is invalid
+  /v2/uploads/{file_id}/derive-pyramid:
+    post:
+      operationId: deriveUploadPyramid
+      description: >-
+        Authorize the upload first, then enqueue strict source-bound pyramid
+        publication. The destination hint names the immutable manifest contract;
+        it is not a readable server filesystem path.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "202":
+          description: Strict pyramid derivation queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2PyramidDerivationResponse"
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: Background job queue is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "422":
+          description: Upload has no immutable source identity for strict derivation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Pyramid derivation could not be published to the background job queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/preview:
     get:
       operationId: getUploadPreview
       parameters:
         - $ref: "#/components/parameters/FileID"
+        - name: Range
+          in: header
+          description: Optional byte range for native PDF/video/original-file delivery.
+          schema: { type: string }
       responses:
         "200":
-          description: Upload preview bytes
+          description: Native browser-displayable bytes, or a rendered PNG for scientific formats
           content:
+            "*/*":
+              schema: { type: string, format: binary }
             application/octet-stream:
               schema:
                 type: string
                 format: binary
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "206":
+          description: Byte range of native PDF, video, or original browser-displayable bytes
+          headers:
+            Content-Range:
+              required: true
+              schema: { type: string }
+            Accept-Ranges:
+              required: true
+              schema: { type: string, enum: [bytes] }
+          content:
+            "*/*":
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned upload cannot be rendered as a browser preview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The owned upload has malformed preview metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/viewer:
     get:
       operationId: getUploadViewer
@@ -1234,6 +1337,26 @@ paths:
                         maxItems: 3
                         uniqueItems: true
                         items: { type: string, enum: [2d, mpr, volume] }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Upload viewer metadata is malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Source viewer metadata is temporarily unavailable or malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Upload viewer dependencies are temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/display:
     get:
       operationId: getUploadDisplay
@@ -1267,14 +1390,83 @@ paths:
           in: query
           description: Explicit source-value upper window bound for grayscale preview output.
           schema: { type: number }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached representations.
+          schema: { type: string }
+        - name: Range
+          in: header
+          description: Optional byte range for native PDF/video/original-file delivery.
+          schema: { type: string }
       responses:
         "200":
-          description: Upload display bytes
+          description: Native browser-displayable bytes, or a transformed PNG
           content:
-            application/octet-stream:
+            "*/*":
+              schema: { type: string, format: binary }
+            image/png:
               schema:
                 type: string
                 format: binary
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "206":
+          description: Byte range of native PDF, video, or original browser-displayable bytes
+          headers:
+            Content-Range:
+              required: true
+              schema: { type: string }
+            Accept-Ranges:
+              required: true
+              schema: { type: string, enum: [bytes] }
+          content:
+            "*/*":
+              schema: { type: string, format: binary }
+            application/octet-stream:
+              schema: { type: string, format: binary }
+            application/pdf:
+              schema: { type: string, format: binary }
+            video/mp4:
+              schema: { type: string, format: binary }
+            video/quicktime:
+              schema: { type: string, format: binary }
+            video/webm:
+              schema: { type: string, format: binary }
+            video/x-msvideo:
+              schema: { type: string, format: binary }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned upload cannot be rendered with the requested transform
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The requested display transform is malformed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/slice:
     get:
       operationId: getUploadSlice
@@ -1282,15 +1474,23 @@ paths:
         - $ref: "#/components/parameters/FileID"
         - name: axis
           in: query
-          schema: { type: string }
-        - name: z
+          description: Exact scientific slice axis. NIfTI MPR requires x, y, or z; other scientific sources support z only.
+          schema: { type: string, enum: [x, y, z] }
+        - name: x
           in: query
+          description: Exact NIfTI X coordinate; required only when axis=x and cannot be mixed with y or z.
           schema: { type: integer, minimum: 0 }
         - name: y
           in: query
+          description: Exact NIfTI Y coordinate; required only when axis=y and cannot be mixed with x or z.
           schema: { type: integer, minimum: 0 }
-        - name: x
+        - name: z
           in: query
+          description: Exact Z coordinate. NIfTI requires it only when axis=z.
+          schema: { type: integer, minimum: 0 }
+        - name: level
+          in: query
+          description: Exact nonnegative source pyramid level. When present, this overrides full_resolution.
           schema: { type: integer, minimum: 0 }
         - name: c
           in: query
@@ -1302,31 +1502,28 @@ paths:
           schema: { type: integer, minimum: 0 }
         - name: channels
           in: query
-          description: Comma-separated zero-based source channels. Mask rendering requires exactly one.
+          description: Ordered comma-separated zero-based source channels (maximum 8). Mask rendering requires exactly one.
+          schema: { type: string }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels.
+          schema: { type: string }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached slice representations.
           schema: { type: string }
         - name: t
           in: query
+          description: Zero-based time index. For NIfTI, alias of time and timepoint; do not mix aliases.
           schema: { type: integer, minimum: 0 }
-        - name: enhancement
+        - name: time
           in: query
-          description: Display enhancement mode. hounsfield:center:width applies a source-value intensity window for 16-bit grayscale uploads.
-          schema: { type: string }
-        - name: negative
+          description: NIfTI-only alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
           in: query
-          description: Invert grayscale preview output.
-          schema: { type: boolean }
-        - name: gamma
-          in: query
-          description: Gamma adjustment for grayscale preview output.
-          schema: { type: number, minimum: 0.05, maximum: 8 }
-        - name: window_min
-          in: query
-          description: Explicit source-value lower window bound for grayscale preview output.
-          schema: { type: number }
-        - name: window_max
-          in: query
-          description: Explicit source-value upper window bound for grayscale preview output.
-          schema: { type: number }
+          description: NIfTI-only alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: scalar_render_mode
           in: query
           description: Scalar slice rendering mode. Mask thresholds the raw source plane before display mapping.
@@ -1339,14 +1536,67 @@ paths:
           in: query
           description: Strict foreground comparison for mask rendering.
           schema: { type: string, enum: [above], default: above }
+        - name: full_resolution
+          in: query
+          description: Whether to render the native plane rather than a bounded scrub frame.
+          schema: { type: boolean, default: true }
       responses:
         "200":
-          description: Upload slice bytes
+          description: Exact scientific PNG slice, or native browser bytes for an unselected 2D photo fallback
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/bmp:
+              schema: { type: string, format: binary }
+        "400":
+          description: Slice selection or mask parameters are malformed or out of range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: The owned source format cannot render the requested slice
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid or ambiguous scientific selector or source metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "501":
+          description: Scientific slice delivery is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2NotConfiguredResponse" }
+        "502":
+          description: Source image metadata or rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF scientific slice delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "500":
+          description: Scientific slice rendering failed unexpectedly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/scalar-volume:
     get:
       operationId: getUploadScalarVolume
@@ -1356,9 +1606,21 @@ paths:
           in: query
           description: Zero-based time index in the authoritative source image.
           schema: { type: integer, minimum: 0 }
+        - name: time
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: channel
           in: query
           description: Zero-based channel index in the authoritative source image.
+          schema: { type: integer, minimum: 0 }
+        - name: c
+          in: query
+          description: Alias of channel; do not mix channel aliases.
           schema: { type: integer, minimum: 0 }
         - name: sampling
           in: query
@@ -1401,6 +1663,9 @@ paths:
             x-volume-time:
               required: true
               schema: { type: integer, minimum: 0 }
+            x-volume-time-count:
+              required: true
+              schema: { type: integer, minimum: 1 }
             x-volume-source-width:
               required: true
               schema: { type: integer, minimum: 1 }
@@ -1423,8 +1688,8 @@ paths:
               required: true
               schema: { type: string, minLength: 1 }
             x-volume-sampling:
-              required: false
-              description: Explicit scalar-volume sampling policy. Older box-sampling responses may omit it.
+              required: true
+              description: Exact scalar-volume sampling policy echoed from the request (default box).
               schema: { type: string, enum: [box, nearest] }
           content:
             application/octet-stream:
@@ -1437,24 +1702,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "422":
           description: Authoritative source axis metadata is malformed or the source cannot be rendered
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
+        "415":
+          description: Upload is not a supported NIfTI scalar volume or cannot be decoded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scalar-volume admission is temporarily saturated or NGFF delivery is unavailable
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "502":
           description: Authoritative source metadata is temporarily unavailable
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2APIErrorResponse"
-        "501":
-          description: Upload scalar volume preparation is not configured
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}:
     get:
       operationId: getUploadTile
@@ -1463,7 +1740,8 @@ paths:
         - name: axis
           in: path
           required: true
-          schema: { type: string }
+          description: Exact tile axis. Only z is supported by both libbioimage and NGFF delivery.
+          schema: { type: string, enum: [z] }
         - name: level
           in: path
           required: true
@@ -1479,50 +1757,138 @@ paths:
         - name: z
           in: query
           schema: { type: integer, minimum: 0 }
-        - name: c
-          in: query
-          schema: { type: integer, minimum: 0 }
         - name: t
           in: query
           schema: { type: integer, minimum: 0 }
+        - name: size
+          in: query
+          description: Requested square tile edge in pixels.
+          schema: { type: integer, minimum: 1, maximum: 1024 }
+        - name: channels
+          in: query
+          description: Ordered comma-separated zero-based source channel indices (maximum 8).
+          schema: { type: string }
+        - name: c
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with channel or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with c or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels.
+          schema: { type: string }
+        - name: cache_key
+          in: query
+          description: Display-transform identity used to isolate cached tile representations.
+          schema: { type: string }
       responses:
         "200":
           description: Upload tile bytes
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid tile axis, size, selector, or missing owned storage object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "501":
           description: Upload tile pyramid preparation is not configured
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "502":
+          description: Tile rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF tile delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/atlas:
     get:
       operationId: getUploadAtlas
       parameters:
         - $ref: "#/components/parameters/FileID"
-        - name: enhancement
-          in: query
-          schema: { type: string }
         - name: t
           in: query
+          description: Exact zero-based source timepoint for the atlas.
           schema: { type: integer, minimum: 0 }
+        - name: level
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: grid_rows
+          in: query
+          description: Grid rows; must be paired with grid_cols and the product must not exceed 65536.
+          schema: { type: integer, minimum: 1, maximum: 4096 }
+        - name: grid_cols
+          in: query
+          description: Grid columns; must be paired with grid_rows and the product must not exceed 65536.
+          schema: { type: integer, minimum: 1, maximum: 4096 }
+        - name: scale
+          in: query
+          description: Finite atlas scale greater than zero and at most one.
+          schema: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 1 }
+        - name: channels
+          in: query
+          description: Ordered comma-separated zero-based source channel indices (maximum 8).
+          schema: { type: string }
+        - name: c
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with channel or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel
+          in: query
+          description: Singular zero-based source channel alias. Do not mix with c or channels.
+          schema: { type: integer, minimum: 0 }
+        - name: channel_colors
+          in: query
+          description: Ordered comma-separated LUT colors projected to match channels, including explicit single-channel LUTs.
+          schema: { type: string }
       responses:
         "200":
           description: Upload atlas payload
           content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid time, channel, LUT, grid, or missing owned storage object
+          content:
             application/json:
               schema:
-                type: object
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "501":
           description: Upload atlas preparation is not configured
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+        "502":
+          description: Atlas rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/histogram:
     get:
       operationId: getUploadHistogram
@@ -1547,6 +1913,14 @@ paths:
           in: query
           description: Exact zero-based source time index to profile.
           schema: { type: integer, minimum: 0, default: 0 }
+        - name: time
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
+        - name: timepoint
+          in: query
+          description: Alias of t; do not mix time aliases.
+          schema: { type: integer, minimum: 0 }
         - name: scope
           in: query
           description: >-
@@ -1651,15 +2025,31 @@ paths:
                       threshold:
                         type: object
                         additionalProperties: true
+        "400":
+          description: Histogram selectors are malformed, ambiguous, or out of range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
         "415":
           description: Upload histogram could not be decoded for this resource
           content:
             application/json:
-              schema:
-                type: object
-                required: [error]
-                properties:
-                  error: { type: string }
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Source histogram metadata is malformed or owned storage is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Source histogram dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/cifti/carpet:
     get:
       operationId: getUploadCiftiCarpet
@@ -1762,6 +2152,368 @@ paths:
                 required: [error]
                 properties:
                   error: { type: string }
+  /v2/uploads/{file_id}/scene3d/manifest:
+    get:
+      operationId: getUploadScene3dManifest
+      description: >-
+        Manifest (schema ultra.scene3d.v1) of a source-bound derived 3D scene —
+        Gaussian splats, a point cloud, or a zipped COLMAP/HLOC model. The
+        control plane only performs a bounded header or archive-directory probe,
+        then enqueues scene.derive and serves the digest-named derived bytes.
+        Until the derive lands this returns 202 with a status field.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      responses:
+        "200":
+          description: The derived scene manifest, with a strong ETag over the artifact's size and mtime.
+          headers:
+            ETag:
+              required: true
+              schema: { type: string }
+            Cache-Control:
+              required: true
+              schema: { type: string, example: "private, max-age=60" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [schema, generator_revision, scene_kind, source, world, layers, service_urls]
+                properties:
+                  schema: { type: string, example: ultra.scene3d.v1 }
+                  generator_revision: { type: string, example: scene3d-rad-v5 }
+                  scene_kind: { type: string, enum: [splat, pointcloud, colmap, reconstruction] }
+                  source:
+                    type: object
+                    description: Header-derived source facts; measured_sh_degree is the highest non-zero band from the derive job's exact full-source scan, never the declared value.
+                    properties:
+                      format: { type: string, example: ply }
+                      writer: { type: string, example: postshot }
+                      vertex_count: { type: integer, format: int64 }
+                      bytes: { type: integer, format: int64 }
+                      sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+                      declared_sh_degree: { type: integer }
+                      measured_sh_degree: { type: integer }
+                      stride_bytes: { type: integer }
+                      geometry_member:
+                        type: string
+                        description: Exact archive member used as primary geometry for a reconstruction bundle.
+                      geometry_bytes:
+                        type: integer
+                        format: int64
+                        description: Uncompressed byte size of the primary geometry member.
+                      colmap_model_path:
+                        type: string
+                        description: Exact archive directory containing the unique COLMAP model.
+                      container_bytes:
+                        type: integer
+                        format: int64
+                        description: Byte size of the immutable reconstruction archive.
+                      property_provenance:
+                        type: object
+                        description: Exact accounting of declared, synthesized, and omitted PLY data.
+                        required: [preserved, synthesized, omitted, omitted_elements]
+                        properties:
+                          preserved:
+                            type: array
+                            items: { type: string }
+                          synthesized:
+                            type: array
+                            items: { type: string }
+                          omitted:
+                            type: array
+                            items: { type: string }
+                          omitted_elements:
+                            type: array
+                            items:
+                              type: object
+                              required: [name, count]
+                              properties:
+                                name: { type: string }
+                                count: { type: integer, format: int64, minimum: 0 }
+                  world:
+                    type: object
+                    description: Source world frame; geometry is never rotated and up_axis is a camera hint only.
+                    properties:
+                      units: { type: string, example: arbitrary }
+                      up_axis: { type: string, enum: [unknown, y, z] }
+                      up_axis_basis: { type: string, enum: [unknown, heuristic, declared, user] }
+                      frame: { type: string, example: source }
+                      bbox:
+                        type: array
+                        items: { type: number }
+                      bbox_robust:
+                        type: array
+                        description: Approximate 1st-to-99th percentile source box used only for initial camera framing.
+                        items: { type: number }
+                  layers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type: { type: string, enum: [splats, points, cameras] }
+                        encoding: { type: string, enum: [spark-rad-v1, usx-v1, upc-v1, json] }
+                        total: { type: integer, format: int64 }
+                        chunks:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              index: { type: integer, minimum: 0 }
+                              count: { type: integer }
+                              bytes: { type: integer, format: int64 }
+                              origin:
+                                type: array
+                                items: { type: number }
+                              bbox:
+                                type: array
+                                items: { type: number }
+                        tiers:
+                          type: array
+                          description: tiers[k] lists the additive chunks at level k; the complete cumulative tiers are deterministic whole-source density refinements and their union contains every finite source record.
+                          items:
+                            type: array
+                            items: { type: integer }
+                        activation_domain: { type: string }
+                        source_frame: { type: string, enum: [rdf, rub, source] }
+                        quantization: { type: object }
+                        lod:
+                          type: object
+                          description: Present for a paged, appearance-preserving Spark RAD Gaussian layer.
+                          properties:
+                            format: { type: string, enum: [spark-rad-v1] }
+                            method: { type: string, example: bhatt-lod-quality }
+                            builder_revision: { type: string }
+                            paged: { type: boolean }
+                            source_elements: { type: integer, format: int64 }
+                            max_sh_degree:
+                              type: integer
+                              minimum: 0
+                              maximum: 3
+                              description: Highest source spherical-harmonic band retained by the RAD artifact.
+                            header: { type: object }
+                            chunks:
+                              type: array
+                              items: { type: object }
+                  limitations:
+                    type: array
+                    description: Plain sentences stating what the viewer is not doing; rendered verbatim.
+                    items: { type: string }
+                  reconstruction:
+                    type: object
+                    description: Bounded camera-image matching and preview publication facts for a reconstruction bundle.
+                    properties:
+                      registered_images: { type: integer, minimum: 0 }
+                      matched_images:
+                        type: integer
+                        minimum: 0
+                        description: Exact unique archive-member matches across every registered image.
+                      preview_images: { type: integer, minimum: 0 }
+                      preview_limit: { type: integer, minimum: 0, maximum: 64 }
+                      ambiguous_images: { type: integer, minimum: 0 }
+                      unreadable_images:
+                        type: integer
+                        minimum: 0
+                        description: Matched candidates rejected while filling the bounded preview publication budget; images after the full budget are not decoded.
+                  service_urls:
+                    type: object
+                    properties:
+                      chunk: { type: string }
+                      lod: { type: string }
+                      camera_image: { type: string }
+                      download: { type: string }
+        "202":
+          description: >-
+            The derived scene is not available yet. status is "deriving" once the
+            scene.derive job is queued, or "failed" while a permanent-failure
+            marker is in its backoff window (which also suppresses re-enqueueing).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, file_id]
+                properties:
+                  status: { type: string, enum: [deriving, failed] }
+                  file_id: { type: string }
+                  error:
+                    type: string
+                    description: Stable user-facing reason when status is failed.
+        "304":
+          description: The client's If-None-Match matches the current manifest.
+        "404":
+          description: Upload is not visible to the current principal or its storage object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a recognized 3D scene container
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/scene3d/chunk/{index}:
+    get:
+      operationId: getUploadScene3dChunk
+      description: >-
+        One derived scene chunk — planar USX1 (splats) or UPC1 (points) bytes
+        behind a 64-byte header. The source-digest-bound artifacts support Range
+        and conditional requests under the shared in-flight byte budget. The
+        public authenticated URL is stable, so clients must revalidate rather
+        than cache it as immutable across catalog repairs.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: index
+          in: path
+          required: true
+          description: Chunk index as a plain non-negative decimal (no sign, no leading zeros, no separators).
+          schema: { type: integer, minimum: 0, maximum: 999999 }
+      responses:
+        "200":
+          description: Chunk bytes
+          headers:
+            ETag:
+              required: true
+              schema: { type: string }
+            Cache-Control:
+              required: true
+              schema: { type: string, example: "private, max-age=60, must-revalidate" }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: Requested byte range of the chunk
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "304":
+          description: The client's If-None-Match matches the current chunk.
+        "400":
+          description: Chunk index is not a plain non-negative decimal, or resolves outside the derived scene directory
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible to the current principal, or this chunk has not been derived
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scene-chunk admission is temporarily saturated
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/scene3d/lod/{artifact}:
+    get:
+      operationId: getUploadScene3dLodArtifact
+      description: >-
+        One source-bound Spark RAD header or RADC page for view-adaptive Gaussian
+        level of detail. Only scene-lod.rad and canonical scene-lod-N.radc names
+        are addressable. Range, conditional requests, authorization, and the shared
+        scene delivery byte budget are enforced identically to ordinary chunks.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: artifact
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^scene-lod(?:-[0-9]+\\.radc|\\.rad)$"
+      responses:
+        "200":
+          description: RAD artifact bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "206":
+          description: Requested byte range of the RAD artifact
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "304":
+          description: The client's If-None-Match matches the current artifact.
+        "400":
+          description: Artifact name is not canonical
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible or the artifact has not been derived
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scene-artifact admission is temporarily saturated
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/scene3d/image/{index}:
+    get:
+      operationId: getUploadScene3dCameraImage
+      description: >-
+        One bounded JPEG display preview for an exact, unique match between a
+        registered COLMAP image name and an archive member. Preview indices are
+        assigned by the source-bound derive and capped at 64. The preview is a
+        validation reference; it is never substituted for reconstruction geometry.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0, maximum: 63 }
+      responses:
+        "200":
+          description: Bounded camera-image JPEG preview
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "206":
+          description: Requested byte range of the camera preview
+          content:
+            image/jpeg:
+              schema: { type: string, format: binary }
+        "304":
+          description: The client's If-None-Match matches the current preview.
+        "400":
+          description: Preview index is malformed or outside the bounded publication range
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "404":
+          description: Upload is not visible or no preview was published at this index
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource is not a 3D scene file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Scene-artifact admission is temporarily saturated
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/hdf5/dataset:
     get:
       operationId: getUploadHdf5Dataset
@@ -2572,6 +3324,76 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2TokenUsageResponse"
+  /v2/notes:
+    get:
+      operationId: listNotes
+      parameters:
+        - in: query
+          name: query
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer }
+        - in: query
+          name: offset
+          schema: { type: integer }
+      responses:
+        "200":
+          description: The caller's notes, pinned first then most recent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteListResponse"
+    post:
+      operationId: createNote
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteWriteRequest"
+      responses:
+        "201":
+          description: Created note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+  /v2/notes/{note_id}:
+    parameters:
+      - in: path
+        name: note_id
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: The note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+    patch:
+      operationId: updateNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteWriteRequest"
+      responses:
+        "200":
+          description: Updated note
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+    delete:
+      operationId: deleteNote
+      responses:
+        "200":
+          description: Note hard-deleted
   /v2/resources:
     get:
       operationId: listResources
@@ -2717,6 +3539,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
+        "503":
+          description: A publication currently owns one of the requested resource lifecycle locks; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/restore/bulk:
     post:
       operationId: bulkRestoreResources
@@ -2733,6 +3563,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceBulkLifecycleResponse"
+        "503":
+          description: A publication currently owns one of the requested resource lifecycle locks; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}:
     get:
       operationId: getResource
@@ -2777,6 +3615,14 @@ paths:
                 properties:
                   deleted: { type: boolean }
                   file_id: { type: string }
+        "503":
+          description: A publication currently owns the resource lifecycle lock; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}/download:
     get:
       operationId: downloadResource
@@ -2850,6 +3696,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2ResourceResponse"
+        "503":
+          description: A publication currently owns the resource lifecycle lock; retry the request
+          headers:
+            Retry-After:
+              schema: { type: integer, minimum: 1 }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/resources/{file_id}/events:
     get:
       operationId: listResourceEvents
@@ -2939,12 +3793,37 @@ paths:
         - $ref: "#/components/parameters/FileID"
       responses:
         "200":
-          description: Resource thumbnail bytes
+          description: Rendered PNG thumbnail
           content:
-            application/octet-stream:
+            image/png:
               schema:
                 type: string
                 format: binary
+        "404":
+          description: Resource is not visible to the current principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "415":
+          description: Resource cannot be decoded as a thumbnail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: The owned catalog resource has no valid storage object
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "502":
+          description: Thumbnail rendering dependency is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: NGFF thumbnail delivery is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/runs:
     get:
       operationId: listRuns
@@ -4613,13 +5492,15 @@ components:
           $ref: "#/components/schemas/JsonObject"
     V2AdminOverviewResponse:
       type: object
-      required: [generated_at, runtime, queue, kpis, upload_sessions, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
+      required: [generated_at, runtime, queue, retention_backlog, kpis, upload_sessions, activity, usage_last_24h, tool_usage_7d, workers, top_users, resource_projects, recent_issues]
       properties:
         generated_at: { type: string }
         runtime:
           $ref: "#/components/schemas/V2AdminRuntimeSummary"
         queue:
           $ref: "#/components/schemas/V2AdminQueueDiagnostics"
+        retention_backlog:
+          $ref: "#/components/schemas/V2AdminRetentionBacklog"
         kpis:
           $ref: "#/components/schemas/V2AdminPlatformKpis"
         upload_sessions:
@@ -4652,6 +5533,16 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2AdminIssueRecord"
+    V2AdminRetentionBacklog:
+      type: object
+      required: [expired_resources, reclaimable_bytes, blocked_resources, blocked_bytes, purging_resources, purging_bytes]
+      properties:
+        expired_resources: { type: integer, format: int64 }
+        reclaimable_bytes: { type: integer, format: int64 }
+        blocked_resources: { type: integer, format: int64 }
+        blocked_bytes: { type: integer, format: int64 }
+        purging_resources: { type: integer, format: int64 }
+        purging_bytes: { type: integer, format: int64 }
     V2AdminUploadSessionMetrics:
       type: object
       required: [total, active, paused, completed, failed, canceled, other, bytes_total, bytes_received, bytes_verified, bytes_committed]
@@ -4920,6 +5811,44 @@ components:
           nullable: true
           $ref: "#/components/schemas/JsonObject"
         run_id: { type: string, nullable: true }
+    V2NoteRecord:
+      type: object
+      required: [note_id, title, body_markdown, pinned, editor_mode, created_at, updated_at]
+      properties:
+        note_id: { type: string }
+        user_id: { type: string, nullable: true }
+        org_id: { type: string, nullable: true }
+        title: { type: string }
+        body_markdown: { type: string }
+        pinned: { type: boolean }
+        editor_mode: { type: string, enum: [markdown, plaintext] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    V2NoteListItem:
+      type: object
+      required: [note_id, title, snippet, pinned, updated_at]
+      properties:
+        note_id: { type: string }
+        title: { type: string }
+        snippet: { type: string }
+        pinned: { type: boolean }
+        updated_at: { type: string, format: date-time }
+    V2NoteListResponse:
+      type: object
+      required: [notes, total_count]
+      properties:
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2NoteListItem"
+        total_count: { type: integer }
+    V2NoteWriteRequest:
+      type: object
+      properties:
+        title: { type: string, nullable: true }
+        body_markdown: { type: string, nullable: true }
+        pinned: { type: boolean, nullable: true }
+        editor_mode: { type: string, enum: [markdown, plaintext], nullable: true }
     V2ThreadRecord:
       type: object
       required: [thread_id, status, created_at, updated_at, metadata]
@@ -5069,6 +5998,11 @@ components:
       properties:
         steer_id: { type: string, nullable: true }
         text: { type: string }
+        file_ids:
+          type: array
+          nullable: true
+          maxItems: 16
+          items: { type: string }
     V2RunSteerMessageRecord:
       type: object
       required: [steer_id, run_id, thread_id, message_id, content, status, created_at, updated_at]
@@ -5079,6 +6013,10 @@ components:
         user_id: { type: string, nullable: true }
         message_id: { type: string }
         content: { type: string }
+        file_ids:
+          type: array
+          nullable: true
+          items: { type: string }
         status: { type: string, enum: [pending, applied, missed] }
         created_at: { type: string, format: date-time }
         applied_at: { type: string, format: date-time, nullable: true }
@@ -5108,6 +6046,17 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/V2UploadedFileRecord"
+    V2PyramidDerivationResponse:
+      type: object
+      required: [job_id, job_type, resource_id, destination_hint, status]
+      properties:
+        job_id: { type: string }
+        job_type: { type: string, enum: [image.derive_pyramid] }
+        resource_id: { type: string }
+        destination_hint:
+          type: string
+          description: Basename of the strict publication manifest; never an absolute storage path.
+        status: { type: string, enum: [queued] }
     V2UploadBundleFinalizeResponse:
       type: object
       required: [bundles]
@@ -5578,6 +6527,10 @@ components:
         project_id: { type: string, nullable: true }
         has_thumbnail: { type: boolean }
         thumbnail_url: { type: string, nullable: true }
+        thumbnail_interaction:
+          type: string
+          nullable: true
+          enum: [static, z_scrub, video_hover]
         preview_url: { type: string, nullable: true }
         cache_ready: { type: boolean, nullable: true }
         staged_locally: { type: boolean, nullable: true }
@@ -5641,6 +6594,10 @@ components:
             selection must include expected_revision. Successful writes replace
             expected_revision with a monotonically increasing revision; stale
             revisions return 409 without overwriting newer calibration state.
+            ultra_scene3d_calibration_v1 similarly requires the active source
+            SHA-256, expected_revision, signed up-axis, handedness, unit, and
+            units-per-source-unit; it changes view framing and scale only and
+            never rewrites source geometry or COLMAP poses.
           additionalProperties: true
     V2ResourceTextHeadResponse:
       type: object

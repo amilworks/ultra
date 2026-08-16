@@ -36,7 +36,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import nats
 from longhorizon_harness import (
@@ -45,7 +45,6 @@ from longhorizon_harness import (
     ScriptedSandbox,
     TurnPolicy,
 )
-
 from ultra_deepagents.agent import build_research_agent
 from ultra_deepagents.checkpointing import DurableCheckpointer, InMemoryCheckpointStateStore
 from ultra_deepagents.config import RuntimeSettings
@@ -312,9 +311,7 @@ class EventCollector:
         return [str(event.get("event_kind")) for event in self.for_run(run_id)]
 
     def of_kind(self, run_id: str, kind: str) -> list[dict[str, Any]]:
-        return [
-            event for event in self.for_run(run_id) if event.get("event_kind") == kind
-        ]
+        return [event for event in self.for_run(run_id) if event.get("event_kind") == kind]
 
     def terminal_kind(self, run_id: str) -> str | None:
         for event in self.for_run(run_id):
@@ -343,7 +340,7 @@ class EventCollector:
             await asyncio.sleep(0.05)
         raise AssertionError(
             f"timed out after {timeout:g}s waiting for {description}; "
-            f"observed events: {[ (e.get('run_id'), e.get('event_kind')) for e in self.events ]}"
+            f"observed events: {[(e.get('run_id'), e.get('event_kind')) for e in self.events]}"
         )
 
 
@@ -367,6 +364,7 @@ class ChaosControlPlane:
         self.lease_tenures = 0
         self.lease_renewals = 0
         self.conflict_after_renewals: int | None = None
+        self.renewal_conflict_gate: Callable[[], bool] | None = None
 
     async def run_status(self, run_id: str, settings: RuntimeSettings) -> str | None:
         del settings
@@ -387,13 +385,12 @@ class ChaosControlPlane:
         }[terminal]
 
     async def run_lease(self, run_id: str, settings: RuntimeSettings):
-        del settings
         if not self._grant_leases:
             return None
         self.lease_tenures += 1
         return ControlPlaneRunLease(
             run_id=run_id,
-            worker_id=f"chaos-worker-tenure-{self.lease_tenures}",
+            worker_id=settings.worker_id,
             lease_token=f"lease-{self.lease_tenures}",
         )
 
@@ -404,7 +401,9 @@ class ChaosControlPlane:
         # Runs on the _LeaseKeepalive thread, mirroring the sync HTTP renewal.
         del settings
         self.lease_renewals += 1
-        if self.conflict_after_renewals is not None:
+        if self.conflict_after_renewals is not None and (
+            self.renewal_conflict_gate is None or self.renewal_conflict_gate()
+        ):
             self.conflict_after_renewals -= 1
             if self.conflict_after_renewals < 0:
                 self.conflict_after_renewals = None  # one-shot: later tenures renew fine
@@ -448,9 +447,7 @@ class ChaosWorker(NATSDeepAgentsWorker):
             **kwargs: Any,
         ) -> str:
             def factory(factory_settings: RuntimeSettings, **factory_kwargs: Any) -> Any:
-                return build_research_agent(
-                    factory_settings, model=model, **factory_kwargs
-                )
+                return build_research_agent(factory_settings, model=model, **factory_kwargs)
 
             return await run_job(
                 job,

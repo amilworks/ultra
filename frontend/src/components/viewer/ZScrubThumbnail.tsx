@@ -63,7 +63,16 @@ const cancelPendingPrefetchesLazily = (): void => {
  * (single-plane) images render as an ordinary thumbnail. The component is purely
  * additive — drop it into a card in place of a plain `<img>`.
  */
-export function ZScrubThumbnail({
+export function ZScrubThumbnail(props: ZScrubThumbnailProps) {
+  return (
+    <ZScrubThumbnailSession
+      key={JSON.stringify([props.fileId, props.staticThumbnailUrl])}
+      {...props}
+    />
+  );
+}
+
+function ZScrubThumbnailSession({
   fileId,
   alt,
   staticThumbnailUrl,
@@ -77,10 +86,12 @@ export function ZScrubThumbnail({
   const [zCount, setZCount] = useState<number | null>(null);
   const [z, setZ] = useState(0);
   const [src, setSrc] = useState(staticThumbnailUrl);
+  const [dynamicDisabled, setDynamicDisabled] = useState(false);
   const loadingRef = useRef(false);
+  const dynamicFailedRef = useRef(false);
 
   const ensureZCount = useCallback(async () => {
-    if (zCount !== null || loadingRef.current) {
+    if (dynamicFailedRef.current || zCount !== null || loadingRef.current) {
       return;
     }
     loadingRef.current = true;
@@ -122,6 +133,9 @@ export function ZScrubThumbnail({
 
   const applyZ = useCallback(
     (next: number, count: number) => {
+      if (dynamicFailedRef.current) {
+        return;
+      }
       if (activeScrubRef.current && next === zRef.current) {
         return;
       }
@@ -145,6 +159,9 @@ export function ZScrubThumbnail({
 
   const scheduleZ = useCallback(
     (next: number, count: number) => {
+      if (dynamicFailedRef.current) {
+        return;
+      }
       pendingZRef.current = { z: next, count };
       if (rafRef.current === null) {
         rafRef.current = requestAnimationFrame(flushScheduledZ);
@@ -163,6 +180,9 @@ export function ZScrubThumbnail({
 
   const handleMouseEnter = useCallback(
     (event: MouseEvent<HTMLImageElement>) => {
+      if (dynamicFailedRef.current) {
+        return;
+      }
       hoveredRef.current = true;
       rememberPointerPosition(event);
       const pointer = pointerPositionRef.current;
@@ -179,7 +199,13 @@ export function ZScrubThumbnail({
   // need to leave and re-enter (or keep moving) to begin scrubbing.
   useEffect(() => {
     const pointer = pointerPositionRef.current;
-    if (!hoveredRef.current || !pointer || zCount === null || !isScrubbable(zCount)) {
+    if (
+      dynamicFailedRef.current ||
+      !hoveredRef.current ||
+      !pointer ||
+      zCount === null ||
+      !isScrubbable(zCount)
+    ) {
       return;
     }
     scheduleZ(zFromPointerY(pointer.offsetY, pointer.height, zCount), zCount);
@@ -197,6 +223,9 @@ export function ZScrubThumbnail({
 
   const handleMouseMove = useCallback(
     (event: MouseEvent<HTMLImageElement>) => {
+      if (dynamicFailedRef.current) {
+        return;
+      }
       rememberPointerPosition(event);
       const count = zCount ?? 0;
       if (!isScrubbable(count)) {
@@ -212,6 +241,9 @@ export function ZScrubThumbnail({
 
   const handleWheel = useCallback(
     (event: WheelEvent<HTMLImageElement>) => {
+      if (dynamicFailedRef.current) {
+        return;
+      }
       const count = zCount ?? 0;
       if (!isScrubbable(count)) {
         return;
@@ -222,7 +254,28 @@ export function ZScrubThumbnail({
     [zCount, applyZ],
   );
 
-  const scrubbable = zCount !== null && isScrubbable(zCount);
+  const handleImageError = useCallback(() => {
+    if (src !== staticThumbnailUrl) {
+      dynamicFailedRef.current = true;
+      setDynamicDisabled(true);
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      activeScrubRef.current = false;
+      pendingZRef.current = null;
+      hoveredRef.current = false;
+      pointerPositionRef.current = null;
+      cancelPendingPrefetchesLazily();
+      zRef.current = 0;
+      setZ(0);
+      setSrc(staticThumbnailUrl);
+      return;
+    }
+    onError?.();
+  }, [onError, src, staticThumbnailUrl]);
+
+  const scrubbable = !dynamicDisabled && zCount !== null && isScrubbable(zCount);
 
   return (
     <img
@@ -230,7 +283,7 @@ export function ZScrubThumbnail({
       alt={alt}
       src={src}
       draggable={false}
-      onError={onError}
+      onError={handleImageError}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       onMouseMove={handleMouseMove}

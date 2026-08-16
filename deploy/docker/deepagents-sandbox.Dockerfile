@@ -17,6 +17,26 @@ RUN npm install --no-audit --no-fund three@0.172.0 esbuild@0.24.2 \
     && cp node_modules/three/LICENSE THREE_LICENSE \
     && node -e "const s=require('fs').statSync('three.iife.min.js').size; if (s < 400000 || s > 1400000) { throw new Error('three bundle size out of expected range: ' + s); } console.log('three.iife.min.js', s, 'bytes')"
 
+# --- Chart.js bundle builder (same build-time-network-only pattern). ONE
+# classic-script IIFE that assigns the Chart constructor to `window.Chart` —
+# the exact global shape of the official UMD build every tutorial assumes —
+# with `chart.js/auto` (all controllers/scales/elements registered) plus the
+# date-fns adapter baked in, so `type: "time"` axes work out of the box
+# instead of being the classic silent dead-page trap. Versions pinned; MIT
+# license ships beside the bundle.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS chartjs-bundle
+WORKDIR /build
+RUN npm install --no-audit --no-fund chart.js@4.5.1 chartjs-adapter-date-fns@3.0.0 date-fns@3.6.0 esbuild@0.24.2 \
+    && printf '%s\n' \
+        "import Chart from 'chart.js/auto';" \
+        "import 'chartjs-adapter-date-fns';" \
+        "window.Chart = Chart;" \
+        > entry.js \
+    && npx esbuild entry.js --bundle --minify --format=iife \
+        --legal-comments=none --outfile=chart.iife.min.js \
+    && cp node_modules/chart.js/LICENSE.md CHART_LICENSE \
+    && node -e "const s=require('fs').statSync('chart.iife.min.js').size; if (s < 150000 || s > 900000) { throw new Error('chart bundle size out of expected range: ' + s); } console.log('chart.iife.min.js', s, 'bytes')"
+
 # Multi-architecture python:3.11-slim index resolved 2026-07-11
 # (3.11.15-slim-trixie). Revisions require an explicit reviewed digest update.
 FROM python:3.11-slim@sha256:e031123e3d85762b141ad1cbc56452ba69c6e722ebf2f042cc0dc86c47c0d8b3
@@ -276,6 +296,12 @@ RUN python -m pip install --no-cache-dir latex2mathml plotly
 # tag under the reading canvas's CSP. ~0.7MB minified; MIT license alongside.
 COPY --from=threejs-bundle /build/three.iife.min.js /opt/report-assets/three.iife.min.js
 COPY --from=threejs-bundle /build/THREE_LICENSE /opt/report-assets/THREE_LICENSE
+
+# 2D charts for reports/dashboards: the vendored Chart.js IIFE (global
+# `Chart`, all chart types + time scale via the bundled date adapter). Same
+# inline-the-file-contents contract as three.js above. MIT license alongside.
+COPY --from=chartjs-bundle /build/chart.iife.min.js /opt/report-assets/chart.iife.min.js
+COPY --from=chartjs-bundle /build/CHART_LICENSE /opt/report-assets/CHART_LICENSE
 
 # compile — which hard-crashes every numba-JIT path: umap / scanpy neighbors (bio),
 # xarray-spatial terrain (ecology), esda conditional permutations. Forcing

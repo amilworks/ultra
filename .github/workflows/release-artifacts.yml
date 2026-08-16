@@ -31,6 +31,14 @@ jobs:
           python-version: "3.11"
 
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.30"
+
+      - name: Verify Deep Agents worker lock
+        run: make deepagents-worker-lock-check
+
+      - name: Verify Deep Agents worker environment
+        run: make deepagents-worker-env-check
 
       - uses: pnpm/action-setup@v4
         with:
@@ -62,7 +70,7 @@ jobs:
       - name: Test run-bound remote mutation authority and trace scoring
         working-directory: backend/deepagents_runtime
         run: >-
-          uv run --extra dev pytest -q
+          uv run --frozen --extra dev pytest -q
           tests/test_bisque_tools.py
           tests/test_worker_transport.py
 

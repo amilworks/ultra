@@ -1,7 +1,8 @@
-.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image roll-workers ocr-golden-eval frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
+.PHONY: help install dev dev-stack run run-reload run-frontend restart-dev stop-dev status-dev restart-control-stack stop-control-stack status-control-stack deploy-control-stack release-artifact test test-chat-stack verify-integration postgres-up postgres-init postgres-down postgres-logs postgres-psql postgres-reset test-postgres-store migrate-run-store-postgres control-migrate lint format clean codeexec-image roll-workers ocr-golden-eval frontend-lint frontend-type-check frontend-test-unit frontend-test-smoke frontend-quality frontend-autonomy-test control-test control-integration control-soak control-run control-tidy control-generate deepagents-worker-lock deepagents-worker-lock-check deepagents-worker-env-check deepagents-test deepagents-worker-test deepagents-autonomy-test deepagents-smoke autonomy-live-smoke delegation-live-smoke async-delegation-live-smoke rigor-live-smoke episodic-live-smoke autonomy-gate up up-detached down down-clean logs ps scale-workers
 
 ENV_FILE := $(if $(wildcard .env),.env,.env.example)
 COMPOSE_ENV_FILE := $(if $(wildcard .env.docker),.env.docker,.env.docker.example)
+DEEPAGENTS_WORKER_LOCK_OUTPUT ?= requirements.worker.lock
 PYTHON_QUALITY_SCOPE := backend/deepagents_runtime/src backend/deepagents_runtime/tests tests
 PYTHON_TYPECHECK_SCOPE := backend/deepagents_runtime/src
 PYTHON_STRICT_SCOPE := backend/deepagents_runtime/src
@@ -229,14 +230,80 @@ control-tidy: ## Tidy Go control plane module
 control-generate: ## Regenerate Go control plane OpenAPI and sqlc code
 	$(MAKE) -C backend/controlplane generate
 
+deepagents-worker-lock: ## Regenerate the hash-locked production Deep Agents worker closure
+	@set -eu; \
+	worker_lock_tmp_dir="$$(mktemp -d /tmp/ultra-worker-lock.XXXXXX)"; \
+	case "$$worker_lock_tmp_dir" in \
+		/tmp/ultra-worker-lock.*) ;; \
+		*) echo "Refusing unsafe worker lock temp path: $$worker_lock_tmp_dir" >&2; exit 1 ;; \
+	esac; \
+	trap 'rm -rf -- "$$worker_lock_tmp_dir"' EXIT; \
+	cd backend/deepagents_runtime; \
+	uv lock --check; \
+	uv export --quiet --frozen --no-dev --no-hashes --no-header \
+		--no-emit-project --no-annotate \
+		--output-file "$$worker_lock_tmp_dir/canonical-export.txt"; \
+	awk 'BEGIN { numpy_count = 0 } /^numpy==/ { numpy_count++; next } { print } END { if (numpy_count != 1) { print "expected exactly one canonical numpy pin" > "/dev/stderr"; exit 1 } }' \
+		"$$worker_lock_tmp_dir/canonical-export.txt" \
+		> "$$worker_lock_tmp_dir/canonical-constraints.txt"; \
+	uv pip compile pyproject.toml requirements.worker-build.txt \
+		--constraint "$$worker_lock_tmp_dir/canonical-constraints.txt" \
+		--constraint requirements.worker-constraints.txt \
+		--python-version 3.11 \
+		--python-platform x86_64-manylinux_2_28 \
+		--only-binary=:all: \
+		--generate-hashes \
+		--no-annotate \
+		--custom-compile-command "make deepagents-worker-lock" \
+		--output-file "$(DEEPAGENTS_WORKER_LOCK_OUTPUT)"
+
+deepagents-worker-lock-check: ## Fail when the production Deep Agents worker lock has drifted
+	@set -eu; \
+	worker_lock_candidate="$$(mktemp /tmp/ultra-worker-lock-candidate.XXXXXX)"; \
+	case "$$worker_lock_candidate" in \
+		/tmp/ultra-worker-lock-candidate.*) ;; \
+		*) echo "Refusing unsafe worker lock candidate: $$worker_lock_candidate" >&2; exit 1 ;; \
+	esac; \
+	trap 'rm -f -- "$$worker_lock_candidate"' EXIT; \
+	cp backend/deepagents_runtime/requirements.worker.lock "$$worker_lock_candidate"; \
+	$(MAKE) deepagents-worker-lock \
+		DEEPAGENTS_WORKER_LOCK_OUTPUT="$$worker_lock_candidate"; \
+	if ! cmp -s backend/deepagents_runtime/requirements.worker.lock "$$worker_lock_candidate"; then \
+		diff -u backend/deepagents_runtime/requirements.worker.lock "$$worker_lock_candidate"; \
+		exit 1; \
+	fi
+
+deepagents-worker-env-check: ## Prove the hash-locked worker closure and local build in a disposable environment
+	@set -eu; \
+	worker_env_dir="$$(mktemp -d /tmp/ultra-worker-env.XXXXXX)"; \
+	case "$$worker_env_dir" in \
+		/tmp/ultra-worker-env.*) ;; \
+		*) echo "Refusing unsafe worker environment path: $$worker_env_dir" >&2; exit 1 ;; \
+	esac; \
+	trap 'rm -rf -- "$$worker_env_dir"' EXIT; \
+	uv venv --python 3.11 "$$worker_env_dir/venv"; \
+	uv pip sync \
+		--python "$$worker_env_dir/venv/bin/python" \
+		--require-hashes \
+		--only-binary=:all: \
+		backend/deepagents_runtime/requirements.worker.lock; \
+	uv pip install \
+		--python "$$worker_env_dir/venv/bin/python" \
+		--no-build-isolation \
+		--no-deps \
+		backend/deepagents_runtime; \
+	uv pip check --python "$$worker_env_dir/venv/bin/python"; \
+	"$$worker_env_dir/venv/bin/python" -c \
+		"import numpy; assert numpy.__version__ == '1.26.4'; import ultra_deepagents.agent; import ultra_deepagents.nats_worker"
+
 deepagents-test: ## Run Python Deep Agents runtime tests
-	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q
+	cd backend/deepagents_runtime && uv run --frozen --python 3.11 --extra dev pytest -q
 
 deepagents-worker-test: ## Run Deep Agents worker transport, lease, and redelivery tests
-	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q tests/test_worker_transport.py
+	cd backend/deepagents_runtime && uv run --frozen --python 3.11 --extra dev pytest -q tests/test_worker_transport.py
 
 deepagents-autonomy-test: ## Run deterministic Deep Agents autonomy quality and routing tests
-	cd backend/deepagents_runtime && uv run --python 3.11 --extra dev pytest -q \
+	cd backend/deepagents_runtime && uv run --frozen --python 3.11 --extra dev pytest -q \
 		tests/test_live_trace.py \
 		tests/test_runner_paper_preload.py
 

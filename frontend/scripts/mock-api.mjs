@@ -299,6 +299,43 @@ const mockViewerRasterPng = Buffer.from(
 // OFF by default (mobile-smoke needs the stock resource list); opt in with
 // MOCK_SEED_HDF5=1 (the `mock-api-hdf5` launch entry does).
 // ---------------------------------------------------------------------------
+// In-memory Notes store: always on — Notes is a core surface and every
+// harness run should exercise it. Three seeds cover pinned ordering, search,
+// and markdown breadth (headings, todos, table, code).
+let mockNoteCounter = 3;
+const mockNotes = [
+  {
+    note_id: "note_seed_protocol",
+    title: "Prairie dog survey — field protocol",
+    body_markdown: "## Transects\n- Spacing 40 m\n- [x] Flag GSD < 1.2 cm\n- [ ] Re-fly plot 7\n\n| Plot | GSD | Pass |\n| --- | --- | --- |\n| 3 | 1.1 cm | yes |\n| 7 | 1.4 cm | no |",
+    pinned: true,
+    editor_mode: "markdown",
+    created_at: new Date(Date.now() - 86400e3 * 6).toISOString(),
+    updated_at: new Date(Date.now() - 86400e3 * 2).toISOString(),
+  },
+  {
+    note_id: "note_seed_teaching",
+    title: "Max pooling teaching notes",
+    body_markdown: "Working notes for the CNN workshop. The ==argmax provenance== demo lands hardest.\n\n```python\nout[r][c] = max(x[2r][2c], x[2r][2c+1], x[2r+1][2c], x[2r+1][2c+1])\n```",
+    pinned: false,
+    editor_mode: "markdown",
+    created_at: new Date(Date.now() - 3600e3 * 5).toISOString(),
+    updated_at: new Date(Date.now() - 3600e3).toISOString(),
+  },
+  {
+    note_id: "note_seed_reading",
+    title: "Reading list — spatial transcriptomics",
+    body_markdown: "- liana notebook\n- the two Nature methods papers",
+    pinned: false,
+    editor_mode: "plaintext",
+    created_at: new Date(Date.now() - 86400e3 * 9).toISOString(),
+    updated_at: new Date(Date.now() - 86400e3 * 8).toISOString(),
+  },
+];
+const sortedMockNotes = () =>
+  [...mockNotes].sort((a, b) =>
+    a.pinned === b.pinned ? (a.updated_at < b.updated_at ? 1 : -1) : a.pinned ? -1 : 1
+  );
 const seedHdf5Lens = process.env.MOCK_SEED_HDF5 === "1";
 const hdf5LensFileId = "file_hdf5_dream3d";
 const hdf5LensDefaultDataset = "/DataContainers/SyntheticVolumeDataContainer/CellData/IPFColor";
@@ -2201,6 +2238,82 @@ const server = http.createServer(async (request, response) => {
     }
     sendJson(response, 200, mockUploadViewerInfo(resource));
     return;
+  }
+
+  if (url.pathname === "/v2/notes" && request.method === "GET") {
+    const query = (url.searchParams.get("query") || "").toLowerCase();
+    const matched = sortedMockNotes().filter(
+      (note) =>
+        !query ||
+        note.title.toLowerCase().includes(query) ||
+        note.body_markdown.toLowerCase().includes(query)
+    );
+    sendJson(response, 200, {
+      notes: matched.map((note) => ({
+        note_id: note.note_id,
+        title: note.title,
+        snippet: note.body_markdown.slice(0, 300),
+        pinned: note.pinned,
+        updated_at: note.updated_at,
+      })),
+      total_count: matched.length,
+    });
+    return;
+  }
+  if (url.pathname === "/v2/notes" && request.method === "POST") {
+    let body = "";
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      let payload = {};
+      try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
+      const note = {
+        note_id: `note_mock_${++mockNoteCounter}`,
+        title: payload.title || "",
+        body_markdown: payload.body_markdown || "",
+        pinned: Boolean(payload.pinned),
+        editor_mode: payload.editor_mode === "plaintext" ? "plaintext" : "markdown",
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      mockNotes.push(note);
+      sendJson(response, 201, note);
+    });
+    return;
+  }
+  const noteMatch = url.pathname.match(/^\/v2\/notes\/([^/]+)$/);
+  if (noteMatch) {
+    const note = mockNotes.find((item) => item.note_id === noteMatch[1]);
+    if (!note) {
+      sendJson(response, 404, { error: "note not found" });
+      return;
+    }
+    if (request.method === "GET") {
+      sendJson(response, 200, note);
+      return;
+    }
+    if (request.method === "PATCH") {
+      let body = "";
+      request.on("data", (chunk) => { body += chunk; });
+      request.on("end", () => {
+        let payload = {};
+        try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
+        if (typeof payload.title === "string") note.title = payload.title;
+        if (typeof payload.body_markdown === "string") note.body_markdown = payload.body_markdown;
+        if (typeof payload.pinned === "boolean") note.pinned = payload.pinned;
+        if (payload.editor_mode === "markdown" || payload.editor_mode === "plaintext") {
+          note.editor_mode = payload.editor_mode;
+        }
+        note.updated_at = new Date().toISOString();
+        sendJson(response, 200, note);
+      });
+      return;
+    }
+    if (request.method === "DELETE") {
+      const index = mockNotes.findIndex((item) => item.note_id === noteMatch[1]);
+      if (index >= 0) mockNotes.splice(index, 1);
+      sendJson(response, 200, { status: "deleted" });
+      return;
+    }
   }
 
   const hdf5DatasetMatch = url.pathname.match(/^\/v2\/uploads\/([^/]+)\/hdf5\/dataset$/);

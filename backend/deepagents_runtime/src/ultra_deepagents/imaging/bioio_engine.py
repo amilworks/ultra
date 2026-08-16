@@ -51,6 +51,10 @@ from typing import Any, NoReturn
 
 from ultra_deepagents.imaging import atlas as atlas_mod
 from ultra_deepagents.imaging import fusion, scalar_semantics, viewerinfo
+from ultra_deepagents.imaging.constants import (
+    MAX_COMPOSITE_CHANNELS,
+    MAX_VIEWERINFO_SIGNAL_CHANNELS,
+)
 from ultra_deepagents.imaging.engine import (
     SCRUB_MAX_DIMENSION,
     EngineUnavailable,
@@ -361,15 +365,18 @@ def _decoded_selection_work_bytes(
 def _zero_based(channels: Sequence[int] | None, count: int) -> list[int]:
     """Convert the interface's 1-BASED channel indices to 0-based array indices.
 
-    ``None`` means "every channel". Empty, duplicate, or out-of-range selections
-    are rejected before any pixel read so a malformed request cannot silently
-    render a neighboring channel.
+    ``None`` means every source channel for shared callers such as histograms.
+    Pixel-render entry points choose their own bounded defaults before reading.
+    Empty, duplicate, oversized, or out-of-range selections are rejected before
+    any pixel read.
     """
     if channels is None:
         return list(range(max(count, 1)))
     values = list(channels)
     if not values:
         raise ValueError("channel selection must not be empty")
+    if len(values) > MAX_COMPOSITE_CHANNELS:
+        raise ValueError(f"channel selection supports at most {MAX_COMPOSITE_CHANNELS} channels")
     out: list[int] = []
     seen: set[int] = set()
     for raw in values:
@@ -546,8 +553,7 @@ def _complete_exact_mask_decode_admission(
                 int(plan["channel"]),
                 min(
                     int(source.z) - 1,
-                    output_z * int(plan["downsample_z"])
-                    + int(plan["downsample_z"]) // 2,
+                    output_z * int(plan["downsample_z"]) + int(plan["downsample_z"]) // 2,
                 ),
                 region,
             )
@@ -879,17 +885,34 @@ class _BioioPlane(_Plane):
 
         self._img = BioImage(path)
         scene_count = 1
+        scenes: list[Any] = []
         source_order = ""
         try:
             scenes = list(self._img.scenes)
             scene_count = max(1, len(scenes))
         except Exception:  # noqa: BLE001 - single-scene sources
             pass
+        # BioIO readers may restore a plugin-specific current scene rather than
+        # starting at zero. Derivation semantics explicitly bind the first scene,
+        # so select it before reading dims, pixels, names, or physical spacing.
+        # Passing the index is supported consistently across the installed CZI,
+        # ND2, LIF, DV, and R3D plugins.
+        if scenes:
+            self._img.set_scene(0)
         try:
             source_order = str(self._img.dims.order or "")
         except Exception:  # noqa: BLE001
             source_order = ""
         self._dask = self._img.get_image_dask_data("TCZYX")
+        # BioImage starts on scene 0 and the derivation lane explicitly converts
+        # the first series. Preserve that exact producer selection even when the
+        # container has multiple scenes; omitting it lets a replay silently bind
+        # the committed artifact to a different source series.
+        self.selected_scene_index = 0
+        try:
+            self.selected_scene_id = str(self._img.current_scene)
+        except Exception:  # noqa: BLE001 - some plugins expose only ``scenes``
+            self.selected_scene_id = str(scenes[0]) if scenes else ""
         shape = tuple(int(n) for n in self._dask.shape)
         try:
             names = [str(n) for n in (self._img.channel_names or [])]
@@ -904,12 +927,6 @@ class _BioioPlane(_Plane):
             spacing_units = tuple("um" if value is not None else "voxel" for value in values)
         except Exception:  # noqa: BLE001
             pass
-        if scene_count > 1:
-            # BioIO channel names and physical sizes are scene-local only after a
-            # scene has been selected. Do not attach scene-0 values to the whole file.
-            names = []
-            spacing = (1.0, 1.0, 1.0)
-            spacing_units = ("voxel", "voxel", "voxel")
         prepared_chunk_geometry = _prepare_decoded_chunk_geometry(
             self._dask.shape,
             self._dask.chunks,
@@ -1299,7 +1316,10 @@ class BioioEngine(_Hdf5EngineMixin):
         box: tuple[int, int, int, int] | None = None,
         max_dim: int | None = None,
     ) -> bytes:
-        zero_based = _zero_based(channels, source.c)
+        if channels is None:
+            zero_based = list(range(min(source.c, 3))) if source.is_photo else [0]
+        else:
+            zero_based = _zero_based(channels, source.c)
         out = self._planes_uint8(
             source, path, t=t, z=z, level=level, zero_based=zero_based, colors=colors, box=box
         )
@@ -1370,8 +1390,14 @@ class BioioEngine(_Hdf5EngineMixin):
             "pixel_resolution_unit_y": source.spacing_units_zyx[1],
             "pixel_resolution_unit_x": source.spacing_units_zyx[2],
         }
-        if source.scene_count == 1:
+        selected_scene_index = getattr(source, "selected_scene_index", None)
+        selected_scene_id = getattr(source, "selected_scene_id", None)
+        if selected_scene_index is not None:
+            meta["selected_scene_index"] = selected_scene_index
+        elif source.scene_count == 1:
             meta["selected_scene_index"] = 0
+        if selected_scene_id is not None:
+            meta["selected_scene_id"] = selected_scene_id
         if source.tile_size:
             meta["tile_size_x"] = str(source.tile_size)
         for i, name in enumerate(source.channel_names[: source.c]):
@@ -1431,6 +1457,46 @@ class BioioEngine(_Hdf5EngineMixin):
             data_semantics=data_semantics,
             scalar_mask_capability=scalar_mask_capability,
         )
+
+    def strict_publication_viewer_info(
+        self, path: str, name: str | None = None
+    ) -> dict[str, Any]:
+        """Describe the explicitly selected scene 0 for strict derivative publication.
+
+        The public descriptor remains metadata-only for a multi-scene container. The
+        publication worker is different: ``_BioioPlane`` has already bound scene 0,
+        and needs a pixel-bearing semantic fingerprint for exactly that selection.
+        Container scene provenance is restored after deriving the scene-0 surface.
+        """
+        hdf5_info = self._maybe_hdf5_viewer_info(path, name)
+        if hdf5_info is not None:
+            return hdf5_info
+        meta = self.meta(path)
+        container_scene_count = int(meta.get("image_num_scenes", 1) or 1)
+        selected_scene_index = int(meta.get("selected_scene_index", 0) or 0)
+        selected_scene_id = meta.get("selected_scene_id")
+        publication_meta = dict(meta)
+        publication_meta["image_num_scenes"] = 1
+        publication_meta["volume_preview_supported"] = True
+        reader = "tifffile" if _lower_ext(path) in TIFF_EXTENSIONS else "bioio"
+        descriptor = viewerinfo.build_viewer_info(
+            publication_meta,
+            signal_scores=None,
+            reader=reader,
+        )
+        descriptor["scene_count"] = container_scene_count
+        descriptor["selected_scene_index"] = selected_scene_index
+        metadata = descriptor.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            descriptor["metadata"] = metadata
+        metadata["scene_count"] = container_scene_count
+        metadata["selected_scene_index"] = selected_scene_index
+        if selected_scene_id is not None:
+            scene_id = str(selected_scene_id)
+            descriptor["selected_scene_id"] = scene_id
+            metadata["selected_scene_id"] = scene_id
+        return descriptor
 
     def _admit_scalar_mask_surfaces(self, path: str, source: _Plane) -> dict[str, Any]:
         if (
@@ -1504,6 +1570,8 @@ class BioioEngine(_Hdf5EngineMixin):
         source = self._source(path)
         if source.c <= 1:
             return None
+        if source.c > MAX_VIEWERINFO_SIGNAL_CHANNELS:
+            return None
         try:
             stamp = os.stat(path).st_mtime_ns
         except OSError:
@@ -1554,12 +1622,16 @@ class BioioEngine(_Hdf5EngineMixin):
         col=0,
         row=0,
         tile_size=512,
+        t=0,
+        z=0,
         channels=None,
         colors=None,
         windows=None,
     ) -> bytes:
         source = self._source(path)
         _require_single_scene(source)
+        time_index = _axis_index(t, "time", source.t)
+        depth_index = _axis_index(z, "z", source.z)
         lvl = max(0, min(int(level), source.level_count - 1))
         height, width = source.level_shapes[lvl]
         y0, x0 = int(row) * int(tile_size), int(col) * int(tile_size)
@@ -1568,7 +1640,14 @@ class BioioEngine(_Hdf5EngineMixin):
         box = (y0, min(y0 + int(tile_size), height), x0, min(x0 + int(tile_size), width))
         try:
             return self._render(
-                source, path, t=0, z=0, level=lvl, channels=channels, colors=colors, box=box
+                source,
+                path,
+                t=time_index,
+                z=depth_index,
+                level=lvl,
+                channels=channels,
+                colors=colors,
+                box=box,
             )
         except Exception as exc:  # noqa: BLE001
             raise _as_decode_error(path, exc) from exc
@@ -1918,9 +1997,7 @@ class BioioEngine(_Hdf5EngineMixin):
             if generation is None:
                 generation = _source_generation(path)
             generation = atlas_mod.validate_scalar_source_generation(generation)
-            admitted_work, read_count = _complete_exact_mask_decode_admission(
-                source, plan
-            )
+            admitted_work, read_count = _complete_exact_mask_decode_admission(source, plan)
             plan.update(
                 {
                     "decode_admission": atlas_mod.SCALAR_DECODE_ADMISSION,
@@ -2108,12 +2185,8 @@ class BioioEngine(_Hdf5EngineMixin):
                 getattr(source, "source_generation", None)
             )
             if source_generation != generation:
-                raise ValueError(
-                    "exact Mask selected source generation does not match its plan"
-                )
-            source_dtype, source_bytes_per_voxel, _canonical_dtype = _scalar_dtype(
-                source.dtype
-            )
+                raise ValueError("exact Mask selected source generation does not match its plan")
+            source_dtype, source_bytes_per_voxel, _canonical_dtype = _scalar_dtype(source.dtype)
             plan_channel = _exact_index(plan.get("channel"), "channel")
             plan_time = _exact_index(plan.get("t"), "time")
             plan_pages = _exact_index(plan.get("pages"), "pages")
@@ -2132,27 +2205,18 @@ class BioioEngine(_Hdf5EngineMixin):
                 or plan_channel != worker_channel
                 or plan_time != worker_time
                 or plan_pages != worker_pages
-                or str(plan["sampling"]).strip().lower()
-                != str(sampling).strip().lower()
+                or str(plan["sampling"]).strip().lower() != str(sampling).strip().lower()
                 or str(plan["dtype"]).strip().lower() != source_dtype
                 or int(plan["bytes_per_voxel"]) != source_bytes_per_voxel
-                or str(plan["admitted_source_dtype"]).strip().lower()
-                != source_dtype
-                or int(plan["admitted_source_bytes_per_voxel"])
-                != source_bytes_per_voxel
+                or str(plan["admitted_source_dtype"]).strip().lower() != source_dtype
+                or int(plan["admitted_source_bytes_per_voxel"]) != source_bytes_per_voxel
             ):
-                raise ValueError(
-                    "exact Mask worker plan does not match the selected source"
-                )
-            complete_work, complete_read_count = _complete_exact_mask_decode_admission(
-                source, plan
-            )
+                raise ValueError("exact Mask worker plan does not match the selected source")
+            complete_work, complete_read_count = _complete_exact_mask_decode_admission(source, plan)
             if complete_work != int(plan["admitted_decode_work_bytes"]):
                 raise ValueError("exact Mask decode work does not match its admission plan")
             if complete_read_count != int(plan["admitted_decode_read_count"]):
-                raise ValueError(
-                    "exact Mask read count does not match its admission plan"
-                )
+                raise ValueError("exact Mask read count does not match its admission plan")
         _dtype_name, _bytes_per_voxel, canonical_dtype = _scalar_dtype(source.dtype)
         output_indices = _bounded_output_indices(zs, int(plan["depth"]))
         if plan["sampling"] == "nearest":
@@ -2226,9 +2290,7 @@ class BioioEngine(_Hdf5EngineMixin):
                 pages=plan["pages"],
                 sampling=plan["sampling"],
                 plan=(
-                    plan
-                    if plan["preview_policy"] == atlas_mod.SCALAR_MASK_NATIVE_POLICY
-                    else None
+                    plan if plan["preview_policy"] == atlas_mod.SCALAR_MASK_NATIVE_POLICY else None
                 ),
             )
             return atlas_mod.build_scalar_volume_dict(planes, plan["channel"], plan)

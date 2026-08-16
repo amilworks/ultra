@@ -12,6 +12,10 @@ type JSONMap map[string]any
 const (
 	DataAgentQueryResourceHardLimit = 100000
 	PublicResourceGranteeUserID     = "__public__"
+	ResourceStatusActive            = "active"
+	ResourceStatusDeleted           = "deleted"
+	ResourceStatusPurging           = "purging"
+	ResourceStatusRetentionBlocked  = "retention_blocked"
 )
 
 type ThreadStatus string
@@ -253,6 +257,26 @@ type BulkTagResourcesResult struct {
 	Events       []ResourceEventRecord
 }
 
+// ResourceLifecycleMutationInput binds one reversible resource lifecycle
+// transition to its audit evidence. Stores commit the status change and event
+// in one transaction so a retry can never observe a transitioned resource
+// whose required audit event was lost.
+type ResourceLifecycleMutationInput struct {
+	ResourceID  string
+	OwnerUserID string
+	OwnerOrgID  string
+	ActorUserID string
+	ActorOrgID  string
+	EventID     string
+	TS          time.Time
+	Metadata    JSONMap
+}
+
+type ResourceLifecycleMutationResult struct {
+	Resource ResourceRecord
+	Event    ResourceEventRecord
+}
+
 type MergeResourceMetadataInput struct {
 	ResourceID                 string
 	UserID                     string
@@ -260,6 +284,7 @@ type MergeResourceMetadataInput struct {
 	Patch                      JSONMap
 	ExpectedSourceSHA256       string
 	SelectionExpectedRevisions map[string]int
+	Scene3dExpectedRevision    *int
 	UpdatedAt                  time.Time
 }
 
@@ -402,11 +427,17 @@ type ResourceStorageStats struct {
 	TotalBytes     int64
 }
 
-// ResourceRetentionBacklog summarizes soft-deleted resources whose undelete window has
-// elapsed (retention_expires_at < now) — the storage a retention GC can reclaim.
+// ResourceRetentionBacklog separates reclaimable soft-deleted resources from
+// terminal retention rows that require operator action (for example externally
+// managed sources). This keeps blocked storage visible without letting poison
+// rows starve ordinary reclamation.
 type ResourceRetentionBacklog struct {
-	Count int64
-	Bytes int64
+	Count        int64
+	Bytes        int64
+	BlockedCount int64
+	BlockedBytes int64
+	PurgingCount int64
+	PurgingBytes int64
 }
 
 type ResourceCollectionRecord struct {
@@ -1300,12 +1331,17 @@ const (
 )
 
 type RunSteerMessageRecord struct {
-	SteerID   string     `json:"steer_id"`
-	RunID     string     `json:"run_id"`
-	ThreadID  string     `json:"thread_id"`
-	UserID    string     `json:"user_id,omitempty"`
-	MessageID string     `json:"message_id"`
-	Content   string     `json:"content"`
+	SteerID   string `json:"steer_id"`
+	RunID     string `json:"run_id"`
+	ThreadID  string `json:"thread_id"`
+	UserID    string `json:"user_id,omitempty"`
+	MessageID string `json:"message_id"`
+	Content   string `json:"content"`
+	// FileIDs are uploads attached to the steer. They ride the trusted
+	// control-plane channel because workers treat run-stamped file ids as the
+	// only filesystem authority — ids appearing merely in message text are
+	// rejected by the staging tools.
+	FileIDs   []string   `json:"file_ids,omitempty"`
 	Status    string     `json:"status"`
 	CreatedAt time.Time  `json:"created_at"`
 	AppliedAt *time.Time `json:"applied_at,omitempty"`
@@ -1319,7 +1355,63 @@ type CreateRunSteerMessageInput struct {
 	UserID    string
 	MessageID string
 	Content   string
+	FileIDs   []string
 	CreatedAt time.Time
+}
+
+// The two note editing surfaces. Values are stored verbatim in
+// control_notes.editor_mode.
+const (
+	NoteEditorModeMarkdown  = "markdown"
+	NoteEditorModePlaintext = "plaintext"
+)
+
+// NoteRecord is a user's personal note: markdown as the source of truth,
+// owner-scoped everywhere it is read. Deletion is HARD deletion — a note the
+// user deletes is erased, not concealed.
+type NoteRecord struct {
+	NoteID       string `json:"note_id"`
+	UserID       string `json:"user_id,omitempty"`
+	OrgID        string `json:"org_id,omitempty"`
+	Title        string `json:"title"`
+	BodyMarkdown string `json:"body_markdown"`
+	Pinned       bool   `json:"pinned"`
+	// EditorMode is the owner's editing surface for this note — "markdown"
+	// (rich, doc-style) or "plaintext" (raw mono). Sticky per note; purely a
+	// presentation preference. The body is plain markdown in either mode.
+	EditorMode string    `json:"editor_mode"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// NoteListItem is the list-pane projection: no full body, just enough to
+// render a row (the snippet is computed server-side from the body head).
+type NoteListItem struct {
+	NoteID    string    `json:"note_id"`
+	Title     string    `json:"title"`
+	Snippet   string    `json:"snippet"`
+	Pinned    bool      `json:"pinned"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type NoteListInput struct {
+	UserID string
+	Query  string
+	Limit  int
+	Offset int
+}
+
+type NoteListPage struct {
+	Notes      []NoteListItem
+	TotalCount int
+}
+
+// NoteUpdateInput carries a partial update; nil fields are left untouched.
+type NoteUpdateInput struct {
+	Title        *string
+	BodyMarkdown *string
+	Pinned       *bool
+	EditorMode   *string
 }
 
 type WorkerHeartbeatRecord struct {
@@ -1526,6 +1618,27 @@ func NewID(prefix string) string {
 		return strings.TrimSuffix(prefix, "_") + "_" + time.Now().UTC().Format("20060102150405.000000000")
 	}
 	return strings.TrimSuffix(prefix, "_") + "_" + hex.EncodeToString(bytes[:])
+}
+
+// IsCanonicalResourceID reports whether value is safe to use as both a catalog
+// identity and a single filesystem path component. Resource IDs are immutable
+// lifecycle identities, so accepting filepath aliases such as "." or ".." would
+// create rows that cannot be reclaimed safely.
+func IsCanonicalResourceID(value string) bool {
+	if value == "" || value == "." || value == ".." || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, char := range value {
+		switch {
+		case char >= 'a' && char <= 'z':
+		case char >= 'A' && char <= 'Z':
+		case char >= '0' && char <= '9':
+		case char == '_' || char == '-' || char == '.' || char == ':':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func Now() time.Time {

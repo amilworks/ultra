@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
@@ -79,6 +80,11 @@ type ServerDeps struct {
 	// LRU so pan/zoom + 3D re-loads skip the engine. Set by NewRouter from
 	// ULTRA_CONTROL_IMAGE_CACHE_BYTES; nil disables (plain streaming proxy).
 	imageCache *imageResponseCache
+	// pyramidInfoCache keeps source/derived viewer axes in a separate bounded
+	// cache. Compatibility checks must not pollute the tile cache's budget or
+	// observability counters, and the shared stat-stamped cache keys invalidate
+	// metadata automatically when either artifact changes.
+	pyramidInfoCache *imageResponseCache
 	// sliceCache is a separate, smaller LRU for /slice responses so a z-scrub burst
 	// of one-shot slices can't evict the viewer's tile/atlas working set.
 	sliceCache *imageResponseCache
@@ -431,6 +437,11 @@ type resourceEventStore interface {
 	CreateResourceEvent(context.Context, domain.AppendResourceEventInput) (domain.ResourceEventRecord, error)
 }
 
+type resourceLifecycleMutationStore interface {
+	SoftDeleteResourceForUserWithEvent(context.Context, domain.ResourceLifecycleMutationInput) (domain.ResourceLifecycleMutationResult, error)
+	RestoreResourceForUserWithEvent(context.Context, domain.ResourceLifecycleMutationInput) (domain.ResourceLifecycleMutationResult, error)
+}
+
 type resourceEventLogStore interface {
 	ListResourceEvents(context.Context, string, int) ([]domain.ResourceEventRecord, error)
 	ListResourceEventsForUser(context.Context, domain.ResourceEventListInput) (domain.ResourceEventListPage, error)
@@ -515,8 +526,16 @@ type uploadSessionOperationalMetricsStore interface {
 }
 
 type uploadCatalogMigrationState struct {
-	mu   sync.Mutex
-	done bool
+	mu                   sync.Mutex
+	done                 bool
+	migration            *uploadCatalogMigrationAttempt
+	reconciliationNeeded bool
+	reconciliationActive bool
+}
+
+type uploadCatalogMigrationAttempt struct {
+	done chan struct{}
+	err  error
 }
 
 var uploadCatalogMigrations sync.Map
@@ -553,6 +572,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 	}
 	if deps.imageCache == nil {
 		deps.imageCache = newImageResponseCacheFromEnv()
+	}
+	if deps.pyramidInfoCache == nil {
+		deps.pyramidInfoCache = newImageResponseCache(8 << 20)
 	}
 	if deps.ModelPrices == nil {
 		deps.ModelPrices = loadModelPricesFromEnv()
@@ -620,6 +642,10 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/scalar-volume", deps.handleGetUploadScalarVolumeService)
 			r.Get("/uploads/{file_id}/cifti/carpet", deps.handleGetUploadCiftiCarpet)
 			r.Get("/uploads/{file_id}/cifti/connectivity", deps.handleGetUploadCiftiConnectivity)
+			r.Get("/uploads/{file_id}/scene3d/manifest", deps.handleGetUploadScene3dManifest)
+			r.Get("/uploads/{file_id}/scene3d/chunk/{index}", deps.handleGetUploadScene3dChunk)
+			r.Get("/uploads/{file_id}/scene3d/image/{index}", deps.handleGetUploadScene3dCameraImage)
+			r.Get("/uploads/{file_id}/scene3d/lod/{artifact}", deps.handleGetUploadScene3dLodArtifact)
 			r.Get("/uploads/{file_id}/tiles/{axis}/{level}/{tile_x}/{tile_y}", deps.handleServeUploadTiles)
 			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
 			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
@@ -644,6 +670,11 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/bisque/push", deps.handleBisquePush)
 			r.Post("/bisque/unlink", deps.handleBisqueUnlink)
 			r.Get("/resource-events", deps.handleListResourceEventLog)
+			r.Get("/notes", deps.handleListNotes)
+			r.Post("/notes", deps.handleCreateNote)
+			r.Get("/notes/{note_id}", deps.handleGetNote)
+			r.Patch("/notes/{note_id}", deps.handleUpdateNote)
+			r.Delete("/notes/{note_id}", deps.handleDeleteNote)
 			r.Get("/resources", deps.handleListResources)
 			r.Post("/resources/delete/bulk", deps.handleBulkDeleteResources)
 			r.Post("/resources/restore/bulk", deps.handleBulkRestoreResources)
@@ -2113,27 +2144,28 @@ type uploadHistogramPayload struct {
 }
 
 type resourceRecord struct {
-	FileID             string                      `json:"file_id"`
-	OriginalName       string                      `json:"original_name"`
-	ContentType        string                      `json:"content_type,omitempty"`
-	SizeBytes          int64                       `json:"size_bytes"`
-	SHA256             string                      `json:"sha256"`
-	CreatedAt          string                      `json:"created_at"`
-	Status             string                      `json:"status"`
-	SourceType         string                      `json:"source_type"`
-	ResourceKind       string                      `json:"resource_kind"`
-	SourceURI          string                      `json:"source_uri,omitempty"`
-	ProjectID          string                      `json:"project_id,omitempty"`
-	HasThumbnail       bool                        `json:"has_thumbnail"`
-	ThumbnailURL       string                      `json:"thumbnail_url,omitempty"`
-	PreviewURL         string                      `json:"preview_url,omitempty"`
-	CacheReady         bool                        `json:"cache_ready"`
-	StagedLocally      bool                        `json:"staged_locally"`
-	Principal          principalRecord             `json:"principal,omitempty"`
-	Tags               []string                    `json:"tags,omitempty"`
-	Metadata           domain.JSONMap              `json:"metadata,omitempty"`
-	ShareSummary       domain.ResourceShareSummary `json:"share_summary,omitempty"`
-	TrustedSourceRunID string                      `json:"-"`
+	FileID               string                      `json:"file_id"`
+	OriginalName         string                      `json:"original_name"`
+	ContentType          string                      `json:"content_type,omitempty"`
+	SizeBytes            int64                       `json:"size_bytes"`
+	SHA256               string                      `json:"sha256"`
+	CreatedAt            string                      `json:"created_at"`
+	Status               string                      `json:"status"`
+	SourceType           string                      `json:"source_type"`
+	ResourceKind         string                      `json:"resource_kind"`
+	SourceURI            string                      `json:"source_uri,omitempty"`
+	ProjectID            string                      `json:"project_id,omitempty"`
+	HasThumbnail         bool                        `json:"has_thumbnail"`
+	ThumbnailURL         string                      `json:"thumbnail_url,omitempty"`
+	ThumbnailInteraction string                      `json:"thumbnail_interaction,omitempty"`
+	PreviewURL           string                      `json:"preview_url,omitempty"`
+	CacheReady           bool                        `json:"cache_ready"`
+	StagedLocally        bool                        `json:"staged_locally"`
+	Principal            principalRecord             `json:"principal,omitempty"`
+	Tags                 []string                    `json:"tags,omitempty"`
+	Metadata             domain.JSONMap              `json:"metadata,omitempty"`
+	ShareSummary         domain.ResourceShareSummary `json:"share_summary,omitempty"`
+	TrustedSourceRunID   string                      `json:"-"`
 }
 
 type principalRecord struct {
@@ -2156,6 +2188,7 @@ type patchResourceRequest struct {
 	Metadata                              domain.JSONMap `json:"metadata"`
 	CalibrationExpectedSourceSHA256       string         `json:"-"`
 	CalibrationSelectionExpectedRevisions map[string]int `json:"-"`
+	Scene3dCalibrationExpectedRevision    *int           `json:"-"`
 }
 
 type bulkLifecycleResourcesRequest struct {
@@ -2614,6 +2647,10 @@ type adminImageCacheStats struct {
 type adminRetentionBacklog struct {
 	ExpiredResources int64 `json:"expired_resources"`
 	ReclaimableBytes int64 `json:"reclaimable_bytes"`
+	BlockedResources int64 `json:"blocked_resources"`
+	BlockedBytes     int64 `json:"blocked_bytes"`
+	PurgingResources int64 `json:"purging_resources"`
+	PurgingBytes     int64 `json:"purging_bytes"`
 }
 
 type retentionBacklogStore interface {
@@ -3529,11 +3566,28 @@ func (deps ServerDeps) handleUploadFiles(w http.ResponseWriter, r *http.Request)
 			record.TrustedSourceRunID = authority.Run.RunID
 		}
 		if err := deps.enforceResourceQuota(r.Context(), principal, record.ProjectID, record.SizeBytes); err != nil {
-			_ = removeUploadedFile(root, record.FileID)
+			if cleanupErr := rollbackUncatalogedUpload(r.Context(), root, record); cleanupErr != nil {
+				slog.ErrorContext(r.Context(), "quota rollback left a retryable upload deletion intent",
+					"resource_id", record.FileID, "error", cleanupErr)
+				writeError(w, http.StatusInternalServerError, fmt.Errorf("quota rollback cleanup failed: %w", cleanupErr))
+				return
+			}
 			writeResourceQuotaError(w, err)
 			return
 		}
 		if err := deps.catalogUploadedFile(r.Context(), root, record, "resource.uploaded"); err != nil {
+			var unknownOutcome *catalogWriteOutcomeUnknownError
+			if errors.As(err, &unknownOutcome) {
+				if intentErr := writeUploadCatalogReconciliationIntent(root, record); intentErr != nil {
+					err = errors.Join(err, fmt.Errorf("persist catalog reconciliation intent: %w", intentErr))
+				} else {
+					deps.requestUploadCatalogReconciliation(root)
+				}
+				slog.ErrorContext(r.Context(), "upload catalog outcome is ambiguous; retaining owned bytes for reconciliation",
+					"resource_id", record.FileID, "error", err)
+			} else if cleanupErr := rollbackUncatalogedUpload(r.Context(), root, record); cleanupErr != nil {
+				err = errors.Join(err, fmt.Errorf("uncataloged upload cleanup failed: %w", cleanupErr))
+			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -5002,7 +5056,7 @@ func (deps ServerDeps) handleListResources(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusOK, resourcesResponse{Count: 0, Resources: []resourceRecord{}})
 		return
 	}
-	resources, err := listUploadResources(root)
+	resources, err := listUploadResourcesWithDeps(deps, root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -7283,6 +7337,31 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 		req.CalibrationExpectedSourceSHA256 = resource.SHA256
 		req.CalibrationSelectionExpectedRevisions = expectedRevisions
 	}
+	rawSceneCalibration, sceneCalibrationPatch := req.Metadata["ultra_scene3d_calibration_v1"]
+	if sceneCalibrationPatch {
+		sourcePath, pathErr := resolveCatalogResourcePath(root, resource)
+		if pathErr != nil {
+			writeStoreError(w, pathErr)
+			return
+		}
+		record := deps.resourceRecordFromCatalog(root, resource)
+		info, isScene := scene3dPeek(record, sourcePath)
+		if !isScene || !scene3dCanDerive(record, info) {
+			writeError(w, http.StatusUnprocessableEntity, errors.New("3D scene calibration is unsupported for this source"))
+			return
+		}
+		sanitized, expectedRevision, validationErr := validateScene3dCalibrationMetadata(
+			rawSceneCalibration,
+			resource.SHA256,
+		)
+		if validationErr != nil {
+			writeError(w, http.StatusBadRequest, validationErr)
+			return
+		}
+		req.Metadata["ultra_scene3d_calibration_v1"] = sanitized
+		req.CalibrationExpectedSourceSHA256 = resource.SHA256
+		req.Scene3dCalibrationExpectedRevision = &expectedRevision
+	}
 	now := domain.Now()
 	updated := resource
 	if len(req.Metadata) > 0 {
@@ -7299,6 +7378,7 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 			Patch:                      req.Metadata,
 			ExpectedSourceSHA256:       req.CalibrationExpectedSourceSHA256,
 			SelectionExpectedRevisions: req.CalibrationSelectionExpectedRevisions,
+			Scene3dExpectedRevision:    req.Scene3dCalibrationExpectedRevision,
 			UpdatedAt:                  now,
 		})
 		if err != nil {
@@ -7322,6 +7402,22 @@ func (deps ServerDeps) handlePatchResource(w http.ResponseWriter, r *http.Reques
 					http.StatusInternalServerError,
 					errors.New("viewer calibration persisted but its audit event could not be recorded"),
 				)
+				return
+			}
+		}
+		if sceneCalibrationPatch {
+			if _, recorded := deps.appendResourceEvent(
+				r.Context(),
+				updated.ResourceID,
+				principal,
+				"resource.scene3d_calibration_updated",
+				domain.JSONMap{
+					"source_sha256": resource.SHA256,
+					"calibration":   req.Metadata["ultra_scene3d_calibration_v1"],
+					"updated_at":    now.UTC().Format(time.RFC3339Nano),
+				},
+			); !recorded {
+				writeError(w, http.StatusInternalServerError, errors.New("3D scene calibration persisted but its audit event could not be recorded"))
 				return
 			}
 		}
@@ -7368,30 +7464,68 @@ func (deps ServerDeps) handleDeleteResource(w http.ResponseWriter, r *http.Reque
 	}
 	fileID := chi.URLParam(r, "file_id")
 	principal := deps.principalFromRequest(r, "")
-	if catalog, ok := deps.resourceCatalogStore(); ok {
+	if _, ok := deps.resourceCatalogStore(); ok {
+		mutations, mutationsOK := deps.resourceLifecycleMutationStore()
+		if !mutationsOK {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource lifecycle mutation is not configured"})
+			return
+		}
+		ownerLookup, ownerLookupOK := deps.resourceOwnerLookupStore()
+		if !ownerLookupOK {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource owner lookup is not configured"})
+			return
+		}
 		if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		record, err := catalog.SoftDeleteResourceForUser(r.Context(), fileID, principal.UserID, principal.OrgID, domain.Now())
+		uploadRoot, err := os.OpenRoot(root)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		defer uploadRoot.Close()
+		transitionedAt := domain.Now()
+		_, _, _, err = softDeleteCatalogResourceWithFence(
+			r.Context(),
+			uploadRoot,
+			mutations,
+			ownerLookup,
+			domain.ResourceLifecycleMutationInput{
+				ResourceID:  fileID,
+				OwnerUserID: principal.UserID,
+				OwnerOrgID:  principal.OrgID,
+				ActorUserID: principal.UserID,
+				ActorOrgID:  principal.OrgID,
+				TS:          transitionedAt,
+			},
+		)
 		if err != nil {
 			writeStoreError(w, err)
 			return
 		}
-		deps.recordResourceEvent(r.Context(), record.ResourceID, principal, "resource.deleted", nil)
 		writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "soft_deleted": true, "file_id": fileID})
 		return
 	}
-	_, path, err := deps.findUploadResourceForRequest(r.Context(), root, principal, fileID)
+	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, principal, fileID)
 	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if err := os.Remove(path); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			writeStoreError(w, err)
+			return
+		}
+		path, err = pendingUploadDeletionSourceForRequest(root, fileID, principal)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	} else if err := writeUploadDeletionIntent(root, fileID, path, record.Principal); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	_ = os.Remove(uploadMetadataPath(root, fileID))
+	if err := removeUploadedFile(r.Context(), root, fileID, path); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "file_id": fileID})
 }
 
@@ -7401,94 +7535,62 @@ func (deps ServerDeps) handleRestoreResource(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	catalog, ok := deps.resourceCatalogStore()
+	_, ok := deps.resourceCatalogStore()
 	if !ok {
 		writeStoreError(w, store.ErrNotFound)
 		return
 	}
+	mutations, ok := deps.resourceLifecycleMutationStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource lifecycle mutation is not configured"})
+		return
+	}
 	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	ownerLookup, ok := deps.resourceOwnerLookupStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource owner lookup is not configured"})
+		return
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer uploadRoot.Close()
 	principal := deps.principalFromRequest(r, "")
-	resource, err := catalog.RestoreResourceForUser(r.Context(), chi.URLParam(r, "file_id"), principal.UserID, principal.OrgID, domain.Now())
+	resource, _, _, err := restoreCatalogResourceWithFence(
+		r.Context(),
+		uploadRoot,
+		mutations,
+		ownerLookup,
+		domain.ResourceLifecycleMutationInput{
+			ResourceID:  chi.URLParam(r, "file_id"),
+			OwnerUserID: principal.UserID,
+			OwnerOrgID:  principal.OrgID,
+			ActorUserID: principal.UserID,
+			ActorOrgID:  principal.OrgID,
+			TS:          domain.Now(),
+		},
+	)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	deps.recordResourceEvent(r.Context(), resource.ResourceID, principal, "resource.restored", nil)
 	writeJSON(w, http.StatusOK, resourceResponse{Resource: deps.resourceRecordFromCatalog(root, resource)})
 }
 
 func (deps ServerDeps) handleBulkDeleteResources(w http.ResponseWriter, r *http.Request) {
-	catalog, ok := deps.resourceCatalogStore()
+	_, ok := deps.resourceCatalogStore()
 	if !ok {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog is not configured"})
 		return
 	}
-	root, err := deps.resolvedUploadRoot()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	var request bulkLifecycleResourcesRequest
-	if !decodeJSON(w, r, &request) {
-		return
-	}
-	resourceIDs := uniqueTrimmedStringValues(request.ResourceIDs)
-	if len(resourceIDs) == 0 {
-		writeError(w, http.StatusBadRequest, errors.New("resource_ids must include at least one resource"))
-		return
-	}
-	if len(resourceIDs) > uploadSessionMaxFilesPerBatch {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("resource_ids cannot include more than %d resources", uploadSessionMaxFilesPerBatch))
-		return
-	}
-	principal := deps.principalFromRequest(r, "")
-	for _, resourceID := range resourceIDs {
-		resource, err := catalog.GetResourceForUser(r.Context(), resourceID, principal.UserID, principal.OrgID)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		if !resourceOwnedByPrincipal(resource, principal) {
-			writeStoreError(w, store.ErrNotFound)
-			return
-		}
-	}
-	deletedAt := domain.Now()
-	records := make([]resourceRecord, 0, len(resourceIDs))
-	events := make([]domain.ResourceEventRecord, 0, len(resourceIDs))
-	for _, resourceID := range resourceIDs {
-		record, err := catalog.SoftDeleteResourceForUser(r.Context(), resourceID, principal.UserID, principal.OrgID, deletedAt)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		records = append(records, deps.resourceRecordFromCatalog(root, record))
-		if event, ok := deps.appendResourceEvent(r.Context(), record.ResourceID, principal, "resource.deleted", domain.JSONMap{
-			"source":      "resources_bulk_delete",
-			"deleted_at":  deletedAt.UTC().Format(time.RFC3339Nano),
-			"batch_count": len(resourceIDs),
-		}); ok {
-			events = append(events, event)
-		}
-	}
-	writeJSON(w, http.StatusOK, bulkLifecycleResourcesResponse{
-		Count:     len(records),
-		Resources: records,
-		Events:    events,
-	})
-}
-
-func (deps ServerDeps) handleBulkRestoreResources(w http.ResponseWriter, r *http.Request) {
-	catalog, ok := deps.resourceCatalogStore()
+	mutations, ok := deps.resourceLifecycleMutationStore()
 	if !ok {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog is not configured"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource lifecycle mutation is not configured"})
 		return
 	}
 	ownerLookup, ok := deps.resourceOwnerLookupStore()
@@ -7501,10 +7603,18 @@ func (deps ServerDeps) handleBulkRestoreResources(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if err := deps.ensureUploadCatalogMigrated(r.Context(), root); err != nil {
+	operationCtx, cancelOperation := context.WithTimeout(r.Context(), resourceLifecycleBulkMutationTimeout)
+	defer cancelOperation()
+	if err := deps.ensureUploadCatalogMigrated(operationCtx, root); err != nil {
+		writeBulkLifecycleStoreError(w, err)
+		return
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	defer uploadRoot.Close()
 	var request bulkLifecycleResourcesRequest
 	if !decodeJSON(w, r, &request) {
 		return
@@ -7520,9 +7630,109 @@ func (deps ServerDeps) handleBulkRestoreResources(w http.ResponseWriter, r *http
 	}
 	principal := deps.principalFromRequest(r, "")
 	for _, resourceID := range resourceIDs {
-		resource, err := ownerLookup.GetResourceForOwner(r.Context(), resourceID, principal.UserID, principal.OrgID)
+		resource, err := ownerLookup.GetResourceForOwner(operationCtx, resourceID, principal.UserID, principal.OrgID)
 		if err != nil {
-			writeStoreError(w, err)
+			writeBulkLifecycleStoreError(w, err)
+			return
+		}
+		if !resourceOwnedByPrincipal(resource, principal) {
+			writeStoreError(w, store.ErrNotFound)
+			return
+		}
+	}
+	deletedAt := domain.Now()
+	records := make([]resourceRecord, 0, len(resourceIDs))
+	events := make([]domain.ResourceEventRecord, 0, len(resourceIDs))
+	for _, resourceID := range resourceIDs {
+		record, event, transitioned, err := softDeleteCatalogResourceWithFence(
+			operationCtx,
+			uploadRoot,
+			mutations,
+			ownerLookup,
+			domain.ResourceLifecycleMutationInput{
+				ResourceID:  resourceID,
+				OwnerUserID: principal.UserID,
+				OwnerOrgID:  principal.OrgID,
+				ActorUserID: principal.UserID,
+				ActorOrgID:  principal.OrgID,
+				TS:          deletedAt,
+				Metadata: domain.JSONMap{
+					"source":      "resources_bulk_delete",
+					"deleted_at":  deletedAt.UTC().Format(time.RFC3339Nano),
+					"batch_count": len(resourceIDs),
+				},
+			},
+		)
+		if err != nil {
+			writeBulkLifecycleStoreError(w, err)
+			return
+		}
+		records = append(records, deps.resourceRecordFromCatalog(root, record))
+		if !transitioned {
+			continue
+		}
+		if strings.TrimSpace(event.EventID) != "" {
+			events = append(events, event)
+		}
+	}
+	writeJSON(w, http.StatusOK, bulkLifecycleResourcesResponse{
+		Count:     len(records),
+		Resources: records,
+		Events:    events,
+	})
+}
+
+func (deps ServerDeps) handleBulkRestoreResources(w http.ResponseWriter, r *http.Request) {
+	_, ok := deps.resourceCatalogStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource catalog is not configured"})
+		return
+	}
+	mutations, ok := deps.resourceLifecycleMutationStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource lifecycle mutation is not configured"})
+		return
+	}
+	ownerLookup, ok := deps.resourceOwnerLookupStore()
+	if !ok {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "resource owner lookup is not configured"})
+		return
+	}
+	root, err := deps.resolvedUploadRoot()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	operationCtx, cancelOperation := context.WithTimeout(r.Context(), resourceLifecycleBulkMutationTimeout)
+	defer cancelOperation()
+	if err := deps.ensureUploadCatalogMigrated(operationCtx, root); err != nil {
+		writeBulkLifecycleStoreError(w, err)
+		return
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	defer uploadRoot.Close()
+	var request bulkLifecycleResourcesRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	resourceIDs := uniqueTrimmedStringValues(request.ResourceIDs)
+	if len(resourceIDs) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("resource_ids must include at least one resource"))
+		return
+	}
+	if len(resourceIDs) > uploadSessionMaxFilesPerBatch {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("resource_ids cannot include more than %d resources", uploadSessionMaxFilesPerBatch))
+		return
+	}
+	principal := deps.principalFromRequest(r, "")
+	for _, resourceID := range resourceIDs {
+		resource, err := ownerLookup.GetResourceForOwner(operationCtx, resourceID, principal.UserID, principal.OrgID)
+		if err != nil {
+			writeBulkLifecycleStoreError(w, err)
 			return
 		}
 		if !resourceOwnedByPrincipal(resource, principal) {
@@ -7534,17 +7744,35 @@ func (deps ServerDeps) handleBulkRestoreResources(w http.ResponseWriter, r *http
 	records := make([]resourceRecord, 0, len(resourceIDs))
 	events := make([]domain.ResourceEventRecord, 0, len(resourceIDs))
 	for _, resourceID := range resourceIDs {
-		record, err := catalog.RestoreResourceForUser(r.Context(), resourceID, principal.UserID, principal.OrgID, restoredAt)
+		record, event, transitioned, err := restoreCatalogResourceWithFenceMode(
+			operationCtx,
+			uploadRoot,
+			mutations,
+			ownerLookup,
+			domain.ResourceLifecycleMutationInput{
+				ResourceID:  resourceID,
+				OwnerUserID: principal.UserID,
+				OwnerOrgID:  principal.OrgID,
+				ActorUserID: principal.UserID,
+				ActorOrgID:  principal.OrgID,
+				TS:          restoredAt,
+				Metadata: domain.JSONMap{
+					"source":      "resources_bulk_restore",
+					"restored_at": restoredAt.UTC().Format(time.RFC3339Nano),
+					"batch_count": len(resourceIDs),
+				},
+			},
+			true,
+		)
 		if err != nil {
-			writeStoreError(w, err)
+			writeBulkLifecycleStoreError(w, err)
 			return
 		}
 		records = append(records, deps.resourceRecordFromCatalog(root, record))
-		if event, ok := deps.appendResourceEvent(r.Context(), record.ResourceID, principal, "resource.restored", domain.JSONMap{
-			"source":      "resources_bulk_restore",
-			"restored_at": restoredAt.UTC().Format(time.RFC3339Nano),
-			"batch_count": len(resourceIDs),
-		}); ok {
+		if !transitioned {
+			continue
+		}
+		if strings.TrimSpace(event.EventID) != "" {
 			events = append(events, event)
 		}
 	}
@@ -7899,7 +8127,9 @@ func (deps ServerDeps) handleServeUpload(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		if err := serveNiftiSliceAsPNG(w, path, r); err != nil {
+		if err := serveNiftiSliceAsPNG(w, path, r, niftiDecompressedSidecarIdentity{
+			root: root, resourceID: record.FileID, sourceSHA256: record.SHA256,
+		}); err != nil {
 			writeError(w, http.StatusUnsupportedMediaType, err)
 		}
 		return
@@ -7923,21 +8153,64 @@ func (deps ServerDeps) handleServeUploadSlice(w http.ResponseWriter, r *http.Req
 }
 
 func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *http.Request) {
-	root, err := deps.resolvedUploadRoot()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	authorization, ok := deps.authorizeUploadServingRequest(w, r)
+	if !ok {
 		return
 	}
-	record, path, err := deps.findUploadResourceForRequest(r.Context(), root, deps.principalFromRequest(r, ""), chi.URLParam(r, "file_id"))
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
+	record := authorization.record
 	if !isNiftiUpload(record.OriginalName, record.ContentType) {
+		if _, ok := resolveAuthorizedUploadStorage(w, authorization); !ok {
+			return
+		}
 		writeError(w, http.StatusUnsupportedMediaType, errors.New("upload scalar volume is only available for NIfTI resources"))
 		return
 	}
-	volume, err := loadNiftiScalarVolumeAt(path, parseUploadScalarTimeIndex(r), parseUploadScalarChannelIndex(r))
+	deps.serveAuthorizedNiftiScalarVolume(w, r, authorization)
+}
+
+func (deps ServerDeps) serveAuthorizedNiftiScalarVolume(
+	w http.ResponseWriter,
+	r *http.Request,
+	authorization uploadServingAuthorization,
+) {
+	selection, err := parseNiftiScalarVolumeSelection(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	catalogBounds, boundsErr := validateCatalogNiftiScalarVolumeBounds(
+		authorization.record,
+		selection,
+	)
+	if boundsErr != nil {
+		writeError(w, http.StatusBadRequest, boundsErr)
+		return
+	}
+	path, ok := resolveAuthorizedUploadStorage(w, authorization)
+	if !ok {
+		return
+	}
+	geometry, err := readNiftiHeaderGeometry(path)
+	if err != nil {
+		writeError(w, http.StatusUnsupportedMediaType, err)
+		return
+	}
+	if !catalogBounds {
+		if selection.time >= geometry.timeCount {
+			writeError(w, http.StatusBadRequest, errors.New("NIfTI scalar volume time selector is out of range"))
+			return
+		}
+		if selection.channel >= geometry.channelCount {
+			writeError(w, http.StatusBadRequest, errors.New("NIfTI scalar volume channel selector is out of range"))
+			return
+		}
+	}
+	sidecarIdentity := niftiDecompressedSidecarIdentity{
+		root:         authorization.root,
+		resourceID:   authorization.record.FileID,
+		sourceSHA256: authorization.record.SHA256,
+	}
+	volume, err := loadNiftiScalarVolumeAt(path, selection.time, selection.channel, sidecarIdentity)
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
@@ -7953,7 +8226,13 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 		return
 	}
 	defer scalarVolumeInFlightBudget.release(volumeBytes)
-	maybeDecompressNiftiSidecar(path, volume.TimeCount)
+	maybeDecompressNiftiSidecar(
+		authorization.root,
+		authorization.record.FileID,
+		authorization.record.SHA256,
+		path,
+		volume.TimeCount,
+	)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	w.Header().Set("x-volume-time", strconv.Itoa(volume.TimeIndex))
@@ -7973,7 +8252,7 @@ func (deps ServerDeps) handleGetUploadScalarVolume(w http.ResponseWriter, r *htt
 	w.Header().Set("x-volume-downsample-y", "1")
 	w.Header().Set("x-volume-downsample-z", "1")
 	w.Header().Set("x-volume-preview-policy", "native-exact-v1")
-	w.Header().Set("x-volume-sampling", "box")
+	w.Header().Set("x-volume-sampling", selection.sampling)
 	// Rescale to physical units (HU/SUV) so the client can window in true
 	// intensities: physical = slope*code + inter.
 	w.Header().Set("x-volume-scl-slope", formatScalarHeaderFloat(volume.SclSlope))
@@ -7995,7 +8274,9 @@ func (deps ServerDeps) handleGetUploadHistogram(w http.ResponseWriter, r *http.R
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
 		binCount := parseUploadHistogramBins(r)
 		channelIndex := parseUploadScalarChannelIndex(r)
-		volume, err := loadNiftiScalarVolume(path, channelIndex)
+		volume, err := loadNiftiScalarVolumeAt(path, 0, channelIndex, niftiDecompressedSidecarIdentity{
+			root: root, resourceID: record.FileID, sourceSHA256: record.SHA256,
+		})
 		if err != nil {
 			writeError(w, http.StatusUnsupportedMediaType, err)
 			return
@@ -8077,7 +8358,17 @@ func (deps ServerDeps) handleGetUploadViewer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if isNiftiUpload(record.OriginalName, record.ContentType) {
-		deps.writeNiftiUploadViewer(w, record, path)
+		deps.writeNiftiUploadViewer(w, root, record, path)
+		return
+	}
+	// The same 3D-scene arm as handleGetUploadViewerService. This path runs when
+	// the image service is unconfigured, so omitting it here would make the
+	// modality work locally and break in production. See scene3d.go.
+	if info, isScene := scene3dPeek(record, path); isScene {
+		if scene3dCanDerive(record, info) {
+			deps.enqueueScene3dDerivation(r.Context(), root, record, path, "view")
+		}
+		deps.writeScene3dViewer(w, record, info, path)
 		return
 	}
 	imageInfo := uploadImageDescriptorForPath(path, record.ContentType)
@@ -8196,7 +8487,12 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 		measurementPolicy = "spacing-aware"
 	}
 	if meta.SizeC > 1 {
-		displayCapabilities = append(displayCapabilities, "channel_visibility")
+		displayCapabilities = append(
+			displayCapabilities,
+			"channel_visibility",
+			"channel_color",
+			"channel_lut_transport",
+		)
 		viewerCapabilities = append(viewerCapabilities, "channel_selection")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -8299,7 +8595,7 @@ func (deps ServerDeps) writeOMETiffUploadViewer(w http.ResponseWriter, record re
 	})
 }
 
-func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record resourceRecord, path string) {
+func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, root string, record resourceRecord, path string) {
 	// CIFTI (.dtseries.nii et al.) is a NIfTI-2 container whose data is a
 	// grayordinate/parcel matrix, not a spatial volume. Route it to the CIFTI
 	// viewer (carpet + connectivity) instead of the slice loader. See cifti.go.
@@ -8307,18 +8603,21 @@ func (deps ServerDeps) writeNiftiUploadViewer(w http.ResponseWriter, record reso
 		deps.writeCiftiViewer(w, record, info, path)
 		return
 	}
-	volume, err := loadNiftiScalarVolume(path)
+	sidecarIdentity := niftiDecompressedSidecarIdentity{
+		root: root, resourceID: record.FileID, sourceSHA256: record.SHA256,
+	}
+	volume, err := loadNiftiScalarVolumeAt(path, 0, 0, sidecarIdentity)
 	if err != nil {
 		writeError(w, http.StatusUnsupportedMediaType, err)
 		return
 	}
 	// Warm the random-access sidecar for 4D series so the first time-scrub is
 	// already fast; no-op for single-timepoint or uncompressed volumes.
-	maybeDecompressNiftiSidecar(path, volume.TimeCount)
+	maybeDecompressNiftiSidecar(root, record.FileID, record.SHA256, path, volume.TimeCount)
 	dimsOrder := niftiScalarDimsOrder(volume)
 	arrayShape := niftiScalarArrayShape(volume)
 	channelColors := niftiDefaultChannelColors(volume.ChannelCount)
-	displayCapabilities := []string{"slice_navigation", "histogram", "volume_context", "physical_scale", "window_level", "scalar_probe", "diagnostic_mpr"}
+	displayCapabilities := []string{"slice_navigation", "histogram", "volume_context", "physical_scale", "window_level", "scalar_probe", "diagnostic_mpr", "strict_scalar_slice"}
 	viewerCapabilities := []string{"webgl_first_paint", "scalar_volume_delivery", "linear_sampling", "mpr_truth_surface", "slice_navigation", "volume_context", "physical_scale", "window_level"}
 	if volume.ChannelCount > 1 {
 		displayCapabilities = append(displayCapabilities, "channel_visibility")
@@ -8520,7 +8819,7 @@ func (deps ServerDeps) handleAdminReconcileResources(w http.ResponseWriter, r *h
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	uploads, err := listUploadResourceEntries(root)
+	uploads, err := listUploadResourceEntriesWithDeps(deps, root)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -8737,7 +9036,14 @@ func (deps ServerDeps) adminRetentionBacklog(ctx context.Context) adminRetention
 	if err != nil {
 		return adminRetentionBacklog{}
 	}
-	return adminRetentionBacklog{ExpiredResources: backlog.Count, ReclaimableBytes: backlog.Bytes}
+	return adminRetentionBacklog{
+		ExpiredResources: backlog.Count,
+		ReclaimableBytes: backlog.Bytes,
+		BlockedResources: backlog.BlockedCount,
+		BlockedBytes:     backlog.BlockedBytes,
+		PurgingResources: backlog.PurgingCount,
+		PurgingBytes:     backlog.PurgingBytes,
+	}
 }
 
 func (deps ServerDeps) adminQueueDiagnostics(ctx context.Context) adminQueueDiagnostics {
@@ -10303,7 +10609,7 @@ func (deps ServerDeps) uploadStats() (int, int64) {
 	if err != nil {
 		return 0, 0
 	}
-	resources, err := listUploadResources(root)
+	resources, err := listUploadResourcesWithDeps(deps, root)
 	if err != nil {
 		return 0, 0
 	}
@@ -10703,8 +11009,9 @@ func (deps ServerDeps) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 }
 
 type steerRunRequest struct {
-	SteerID string `json:"steer_id"`
-	Text    string `json:"text"`
+	SteerID string   `json:"steer_id"`
+	Text    string   `json:"text"`
+	FileIDs []string `json:"file_ids"`
 }
 
 type ackRunSteerRequest struct {
@@ -10733,6 +11040,7 @@ func (deps ServerDeps) handleSteerRun(w http.ResponseWriter, r *http.Request) {
 		UserID:  principal.UserID,
 		SteerID: req.SteerID,
 		Text:    req.Text,
+		FileIDs: req.FileIDs,
 	})
 	if err != nil {
 		if errors.Is(err, runcontrol.ErrInvalidSteer) {
@@ -11255,7 +11563,12 @@ func (deps ServerDeps) handlePromoteArtifactResource(w http.ResponseWriter, r *h
 		return
 	}
 	if err := deps.enforceResourceQuota(r.Context(), principal, record.ProjectID, record.SizeBytes); err != nil {
-		_ = removeUploadedFile(uploadRoot, record.FileID)
+		if cleanupErr := rollbackUncatalogedUpload(r.Context(), uploadRoot, record); cleanupErr != nil {
+			slog.ErrorContext(r.Context(), "promotion quota rollback left a retryable upload deletion intent",
+				"resource_id", record.FileID, "error", cleanupErr)
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("promotion quota rollback cleanup failed: %w", cleanupErr))
+			return
+		}
 		writeResourceQuotaError(w, err)
 		return
 	}
@@ -11276,6 +11589,18 @@ func (deps ServerDeps) handlePromoteArtifactResource(w http.ResponseWriter, r *h
 		CacheReady:    true,
 	}
 	if err := deps.catalogResourceRecord(r.Context(), uploadRoot, resourceRecord, "resource.promoted"); err != nil {
+		var unknownOutcome *catalogWriteOutcomeUnknownError
+		if errors.As(err, &unknownOutcome) {
+			if intentErr := writeUploadCatalogReconciliationIntent(uploadRoot, record); intentErr != nil {
+				err = errors.Join(err, fmt.Errorf("persist catalog reconciliation intent: %w", intentErr))
+			} else {
+				deps.requestUploadCatalogReconciliation(uploadRoot)
+			}
+			slog.ErrorContext(r.Context(), "promotion catalog outcome is ambiguous; retaining owned bytes for reconciliation",
+				"resource_id", record.FileID, "error", err)
+		} else if cleanupErr := rollbackUncatalogedUpload(r.Context(), uploadRoot, record); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("uncataloged promotion cleanup failed: %w", cleanupErr))
+		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -11594,6 +11919,14 @@ func (deps ServerDeps) resourceOwnerLookupStore() (resourceOwnerLookupStore, boo
 	return lookup, ok
 }
 
+func (deps ServerDeps) resourceLifecycleMutationStore() (resourceLifecycleMutationStore, bool) {
+	if deps.Store == nil {
+		return nil, false
+	}
+	mutations, ok := deps.Store.(resourceLifecycleMutationStore)
+	return mutations, ok
+}
+
 func (deps ServerDeps) resourceCollectionStore() (resourceCollectionStore, bool) {
 	if deps.Store == nil {
 		return nil, false
@@ -11633,24 +11966,185 @@ func (deps ServerDeps) ensureUploadCatalogMigrated(ctx context.Context, root str
 	stateValue, _ := uploadCatalogMigrations.LoadOrStore(root, &uploadCatalogMigrationState{})
 	state := stateValue.(*uploadCatalogMigrationState)
 	state.mu.Lock()
-	defer state.mu.Unlock()
 	if state.done {
+		startReconciliation := state.reconciliationNeeded && !state.reconciliationActive
+		if startReconciliation {
+			state.reconciliationActive = true
+		}
+		state.mu.Unlock()
+		if startReconciliation {
+			go deps.runUploadCatalogReconciliation(root, state)
+		}
 		return nil
 	}
-	// This one-time, process-wide catalog backfill must not be tied to the
-	// triggering request's lifecycle. If that request is canceled (client abort,
-	// navigation, a superseded fetch) while the migration runs, a request-scoped
-	// context returns context.Canceled — and the previous sync.Once cached it, so
-	// EVERY later resource request returned "context canceled" until a restart.
-	// Detach cancellation (keep a bounded deadline) and only mark the migration
-	// done on success, so a genuine failure simply retries on the next request.
-	migrateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
-	defer cancel()
-	if err := deps.migrateUploadCatalog(migrateCtx, root); err != nil {
+	attempt := state.migration
+	if attempt == nil {
+		attempt = &uploadCatalogMigrationAttempt{done: make(chan struct{})}
+		state.migration = attempt
+		go deps.runUploadCatalogMigration(root, state, attempt)
+	}
+	state.mu.Unlock()
+
+	// The process-wide migration itself is detached and bounded, but every
+	// caller—including the request that starts it—waits with its own context.
+	// A canceled HTTP request therefore cannot pin a handler for the migration's
+	// five-minute safety window, while the shared work continues for later calls.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-attempt.done:
+		return attempt.err
+	}
+}
+
+func (deps ServerDeps) runUploadCatalogMigration(
+	root string,
+	state *uploadCatalogMigrationState,
+	attempt *uploadCatalogMigrationAttempt,
+) {
+	migrateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	err := deps.migrateUploadCatalog(migrateCtx, root)
+	cancel()
+	startReconciliation := false
+	state.mu.Lock()
+	attempt.err = err
+	if state.migration == attempt {
+		state.migration = nil
+		if err == nil {
+			state.done = true
+			// A restart may inherit durable reconciliation intents. Process them in
+			// a bounded background worker without scanning on the request path.
+			state.reconciliationNeeded = true
+			if !state.reconciliationActive {
+				state.reconciliationActive = true
+				startReconciliation = true
+			}
+		}
+	}
+	close(attempt.done)
+	state.mu.Unlock()
+	if startReconciliation {
+		go deps.runUploadCatalogReconciliation(root, state)
+	}
+}
+
+func (deps ServerDeps) requestUploadCatalogReconciliation(root string) {
+	stateValue, _ := uploadCatalogMigrations.LoadOrStore(root, &uploadCatalogMigrationState{})
+	state := stateValue.(*uploadCatalogMigrationState)
+	state.mu.Lock()
+	state.reconciliationNeeded = true
+	start := state.done && !state.reconciliationActive
+	if start {
+		state.reconciliationActive = true
+	}
+	state.mu.Unlock()
+	if start {
+		go deps.runUploadCatalogReconciliation(root, state)
+	}
+}
+
+func (deps ServerDeps) runUploadCatalogReconciliation(root string, state *uploadCatalogMigrationState) {
+	retryDelay := 100 * time.Millisecond
+	for {
+		state.mu.Lock()
+		if !state.reconciliationNeeded {
+			state.reconciliationActive = false
+			state.mu.Unlock()
+			return
+		}
+		state.reconciliationNeeded = false
+		state.mu.Unlock()
+
+		reconcileCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		err := deps.reconcileUploadCatalogIntents(reconcileCtx, root)
+		cancel()
+		if err != nil {
+			state.mu.Lock()
+			state.reconciliationNeeded = true
+			state.mu.Unlock()
+			slog.Warn("upload catalog reconciliation retrying", "root", root, "retry_in", retryDelay, "error", err)
+			time.Sleep(retryDelay)
+			if retryDelay < time.Minute {
+				retryDelay *= 2
+				if retryDelay > time.Minute {
+					retryDelay = time.Minute
+				}
+			}
+			continue
+		}
+		retryDelay = 100 * time.Millisecond
+	}
+}
+
+func (deps ServerDeps) reconcileUploadCatalogIntents(ctx context.Context, root string) error {
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
 	}
-	state.done = true
-	return nil
+	defer uploadRoot.Close()
+	intentRoot, err := uploadRoot.OpenRoot(resourceCatalogReconciliationDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer intentRoot.Close()
+	directory, err := intentRoot.Open(".")
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	const suffix = ".catalog-reconcile.json"
+	var reconciliationErrors []error
+	for {
+		entries, readErr := directory.ReadDir(128)
+		for _, entry := range entries {
+			entryErr := func() error {
+				name := entry.Name()
+				if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(name, suffix) {
+					return fmt.Errorf("invalid catalog reconciliation entry %q", name)
+				}
+				resourceID := strings.TrimSuffix(name, suffix)
+				if !safeResourceLifecycleID(resourceID) || resourceCatalogReconciliationIntentName(resourceID) != name {
+					return fmt.Errorf("invalid catalog reconciliation resource %q", resourceID)
+				}
+				intent, err := readUploadCatalogReconciliationIntent(root, resourceID)
+				if err != nil {
+					return err
+				}
+				if err := validateManagedSourcePath(uploadRoot, intent.SourceRelative, false); err != nil {
+					return fmt.Errorf("catalog reconciliation source %q: %w", resourceID, err)
+				}
+				path := filepath.Join(root, intent.SourceRelative)
+				record, err := uploadResourceFromPathWithDeps(deps, root, path)
+				if err != nil {
+					return fmt.Errorf("catalog reconciliation source %q: %w", resourceID, err)
+				}
+				if record.FileID != resourceID || normalizedResourcePrincipal(record.Principal) != intent.Principal {
+					return fmt.Errorf("catalog reconciliation identity mismatch for %q", resourceID)
+				}
+				if err := deps.catalogResourceRecordAtPathWithEventMetadata(
+					ctx, root, path, record, "resource.reconciled", nil,
+				); err != nil {
+					return err
+				}
+				return nil
+			}()
+			if entryErr != nil {
+				reconciliationErrors = append(reconciliationErrors, entryErr)
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return errors.Join(reconciliationErrors...)
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) error {
@@ -11676,7 +12170,7 @@ func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) er
 	candidates := make([]uploadCatalogCandidate, 0, len(entries))
 	batchLookupIDs := map[uploadCatalogOwnerKey][]string{}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			continue
 		}
 		path := filepath.Clean(filepath.Join(root, entry.Name()))
@@ -11735,7 +12229,7 @@ func (deps ServerDeps) migrateUploadCatalog(ctx context.Context, root string) er
 				}
 			}
 		}
-		record, err := uploadResourceFromPath(root, candidate.path)
+		record, err := uploadResourceFromPathWithDeps(deps, root, candidate.path)
 		if err != nil {
 			continue
 		}
@@ -11751,7 +12245,7 @@ func (deps ServerDeps) catalogUploadedFile(ctx context.Context, root string, rec
 }
 
 func (deps ServerDeps) catalogUploadedFileWithEventMetadata(ctx context.Context, root string, record uploadedFileRecord, eventType string, eventMetadata domain.JSONMap) error {
-	resource, _, err := findUploadResource(root, record.FileID)
+	resource, _, err := findUploadResourceWithDeps(deps, root, record.FileID)
 	if err != nil {
 		return err
 	}
@@ -11799,11 +12293,66 @@ func (deps ServerDeps) catalogResourceRecordWithEventMetadata(ctx context.Contex
 		return nil
 	}
 	record.Principal = normalizedResourcePrincipal(record.Principal)
-	_, path, err := findUploadResource(root, record.FileID)
+	_, path, err := findUploadResourceWithDeps(deps, root, record.FileID)
 	if err != nil {
 		return err
 	}
 	return deps.catalogResourceRecordAtPathWithEventMetadata(ctx, root, path, record, eventType, eventMetadata)
+}
+
+type catalogWriteOutcomeUnknownError struct {
+	err error
+}
+
+func (err *catalogWriteOutcomeUnknownError) Error() string {
+	return "resource catalog write outcome is unknown: " + err.err.Error()
+}
+
+func (err *catalogWriteOutcomeUnknownError) Unwrap() error {
+	return err.err
+}
+
+func resourceMatchesCatalogInput(resource domain.ResourceRecord, input domain.UpsertResourceInput) bool {
+	return resource.ResourceID == strings.TrimSpace(input.ResourceID) &&
+		resource.OwnerUserID == strings.TrimSpace(input.OwnerUserID) &&
+		resource.OwnerOrgID == strings.TrimSpace(input.OwnerOrgID) &&
+		resource.OriginalName == strings.TrimSpace(input.OriginalName) &&
+		resource.ContentType == strings.TrimSpace(input.ContentType) &&
+		resource.SizeBytes == input.SizeBytes &&
+		resource.SHA256 == strings.TrimSpace(input.SHA256) &&
+		resource.StorageURI == strings.TrimSpace(input.StorageURI) &&
+		resource.StoragePath == strings.TrimSpace(input.StoragePath) &&
+		resource.SourceType == strings.TrimSpace(input.SourceType) &&
+		resource.ResourceKind == strings.TrimSpace(input.ResourceKind) &&
+		resource.SourceURI == strings.TrimSpace(input.SourceURI) &&
+		resource.ProjectID == strings.TrimSpace(input.ProjectID) &&
+		strings.TrimSpace(resource.Status) == domain.ResourceStatusActive
+}
+
+func reconcileCatalogWrite(
+	ctx context.Context,
+	catalog resourceCatalogStore,
+	input domain.UpsertResourceInput,
+	writeErr error,
+) (domain.ResourceRecord, error) {
+	resource, lookupErr := catalog.GetResourceForUser(
+		ctx,
+		strings.TrimSpace(input.ResourceID),
+		strings.TrimSpace(input.OwnerUserID),
+		strings.TrimSpace(input.OwnerOrgID),
+	)
+	if lookupErr == nil {
+		if resourceMatchesCatalogInput(resource, input) {
+			return resource, nil
+		}
+		return domain.ResourceRecord{}, &catalogWriteOutcomeUnknownError{
+			err: errors.Join(writeErr, errors.New("catalog contains a different resource identity")),
+		}
+	}
+	if errors.Is(lookupErr, store.ErrNotFound) {
+		return domain.ResourceRecord{}, writeErr
+	}
+	return domain.ResourceRecord{}, &catalogWriteOutcomeUnknownError{err: errors.Join(writeErr, lookupErr)}
 }
 
 func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.Context, root string, path string, record resourceRecord, eventType string, eventMetadata domain.JSONMap) error {
@@ -11843,7 +12392,14 @@ func (deps ServerDeps) catalogResourceRecordAtPathWithEventMetadata(ctx context.
 	}
 	resource, err := catalog.UpsertResource(ctx, input)
 	if err != nil {
-		return err
+		resource, err = reconcileCatalogWrite(ctx, catalog, input, err)
+		if err != nil {
+			return err
+		}
+	}
+	if err := removeUploadCatalogReconciliationIntent(root, resource.ResourceID); err != nil {
+		slog.WarnContext(ctx, "cataloged resource retains a stale reconciliation intent",
+			"resource_id", resource.ResourceID, "error", err)
 	}
 	deps.recordResourceEvent(ctx, resource.ResourceID, requestPrincipal{
 		UserID: record.Principal.UserID,
@@ -12192,55 +12748,54 @@ func copyFileIntoUploadRoot(root string, sourcePath string, originalName string,
 	}, nil
 }
 
-func removeUploadedFile(root string, fileID string) error {
-	if !safeUploadID(fileID) {
+func removeUploadedFile(ctx context.Context, root string, fileID string, sourcePath string) error {
+	if !safeResourceLifecycleID(fileID) {
 		return errors.New("unsafe upload id")
 	}
-	var firstErr error
-	patterns := []string{
-		filepath.Join(root, fileID+"__*"),
-		filepath.Join(root, fileID),
-		filepath.Join(root, fileID+".*"),
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancel()
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
 	}
-	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		for _, match := range matches {
-			resolved := filepath.Clean(match)
-			if !pathIsUnderRoot(root, resolved) {
-				continue
-			}
-			if err := os.Remove(resolved); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-				firstErr = err
-			}
+	defer uploadRoot.Close()
+	sourceRelative := ""
+	if strings.TrimSpace(sourcePath) != "" {
+		var ok bool
+		sourceRelative, ok = relativePathUnderRoot(root, sourcePath)
+		if !ok {
+			return errUnsafeArtifactPath
 		}
 	}
-	if err := os.Remove(uploadMetadataPath(root, fileID)); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-		firstErr = err
+	if err := validateManagedSourcePath(uploadRoot, sourceRelative, true); err != nil {
+		return err
 	}
-	// Directory-format bundle (OME-Zarr): the whole bundles/{fileID} tree.
-	if bundleDir := filepath.Join(root, bundlesDirName, fileID); pathIsUnderRoot(root, bundleDir) {
-		if err := os.RemoveAll(bundleDir); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-			firstErr = err
-		}
+	lock, err := acquireResourceLifecycleCleanupLock(cleanupCtx, uploadRoot, fileID, "")
+	if err != nil {
+		return err
 	}
-	// Derived pyramid + its permanent-failure marker (for transcoded/derived formats).
-	for _, p := range []string{
-		filepath.Join(root, "derived", derivedPyramidName(fileID)),
-		filepath.Join(root, "derived", derivedPyramidFailedName(fileID)),
-	} {
-		if pathIsUnderRoot(root, p) {
-			if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
-				firstErr = err
-			}
-		}
+	defer lock.release()
+	if err := validateManagedSourcePath(uploadRoot, sourceRelative, true); err != nil {
+		return err
 	}
-	return firstErr
+	if err := ensureResourceFilesystemTombstone(uploadRoot, fileID); err != nil {
+		return err
+	}
+	if err := removeResourceFilesystemDeleteFence(uploadRoot, fileID); err != nil {
+		return err
+	}
+	if _, err := removeOwnedResourceNamespace(uploadRoot, fileID, sourceRelative); err != nil {
+		return err
+	}
+	return lock.removePath()
+}
+
+func rollbackUncatalogedUpload(ctx context.Context, root string, record uploadedFileRecord) error {
+	sourcePath := filepath.Join(root, record.FileID+"__"+record.OriginalName)
+	if err := writeUploadDeletionIntent(root, record.FileID, sourcePath, record.Principal); err != nil {
+		return err
+	}
+	return removeUploadedFile(ctx, root, record.FileID, sourcePath)
 }
 
 func uploadMetadataPath(root string, fileID string) string {
@@ -12258,26 +12813,352 @@ type uploadMetadataRecord struct {
 	ProjectID  string          `json:"project_id,omitempty"`
 }
 
+type uploadDeletionIntent struct {
+	ResourceID     string          `json:"resource_id"`
+	SourceRelative string          `json:"source_relative"`
+	Principal      principalRecord `json:"principal"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+type uploadCatalogReconciliationIntent struct {
+	ResourceID     string          `json:"resource_id"`
+	SourceRelative string          `json:"source_relative"`
+	Principal      principalRecord `json:"principal"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+func readUploadCatalogReconciliationIntent(root string, resourceID string) (uploadCatalogReconciliationIntent, error) {
+	if !safeResourceLifecycleID(resourceID) {
+		return uploadCatalogReconciliationIntent{}, store.ErrNotFound
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return uploadCatalogReconciliationIntent{}, err
+	}
+	defer uploadRoot.Close()
+	intentRoot, err := uploadRoot.OpenRoot(resourceCatalogReconciliationDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return uploadCatalogReconciliationIntent{}, store.ErrNotFound
+		}
+		return uploadCatalogReconciliationIntent{}, err
+	}
+	defer intentRoot.Close()
+	name := resourceCatalogReconciliationIntentName(resourceID)
+	file, err := intentRoot.Open(name)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return uploadCatalogReconciliationIntent{}, store.ErrNotFound
+		}
+		return uploadCatalogReconciliationIntent{}, err
+	}
+	info, statErr := file.Stat()
+	pathInfo, pathErr := intentRoot.Lstat(name)
+	if statErr != nil || pathErr != nil || !info.Mode().IsRegular() ||
+		!pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+		_ = file.Close()
+		return uploadCatalogReconciliationIntent{}, errors.New("invalid catalog reconciliation intent")
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(file, 1<<20))
+	closeErr := file.Close()
+	if readErr != nil {
+		return uploadCatalogReconciliationIntent{}, readErr
+	}
+	if closeErr != nil {
+		return uploadCatalogReconciliationIntent{}, closeErr
+	}
+	var intent uploadCatalogReconciliationIntent
+	if err := json.Unmarshal(payload, &intent); err != nil {
+		return uploadCatalogReconciliationIntent{}, fmt.Errorf("decode catalog reconciliation intent: %w", err)
+	}
+	intent.ResourceID = strings.TrimSpace(intent.ResourceID)
+	if intent.ResourceID != resourceID {
+		return uploadCatalogReconciliationIntent{}, errors.New("catalog reconciliation intent resource mismatch")
+	}
+	intent.SourceRelative, err = cleanRootRelativePath(intent.SourceRelative)
+	if err != nil {
+		return uploadCatalogReconciliationIntent{}, errors.New("invalid catalog reconciliation source")
+	}
+	intent.Principal = normalizedResourcePrincipal(intent.Principal)
+	return intent, nil
+}
+
+func readUploadDeletionIntent(root string, resourceID string) (uploadDeletionIntent, error) {
+	if !safeResourceLifecycleID(resourceID) {
+		return uploadDeletionIntent{}, store.ErrNotFound
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return uploadDeletionIntent{}, err
+	}
+	defer uploadRoot.Close()
+	metaRoot, err := uploadRoot.OpenRoot(resourceMetaDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return uploadDeletionIntent{}, store.ErrNotFound
+		}
+		return uploadDeletionIntent{}, err
+	}
+	defer metaRoot.Close()
+	file, err := metaRoot.Open(resourceDeletionIntentName(resourceID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return uploadDeletionIntent{}, store.ErrNotFound
+		}
+		return uploadDeletionIntent{}, err
+	}
+	defer file.Close()
+	info, statErr := file.Stat()
+	pathInfo, pathErr := metaRoot.Lstat(resourceDeletionIntentName(resourceID))
+	if statErr != nil || pathErr != nil || !info.Mode().IsRegular() ||
+		!pathInfo.Mode().IsRegular() || !os.SameFile(info, pathInfo) {
+		return uploadDeletionIntent{}, errors.New("invalid upload deletion intent")
+	}
+	payload, err := io.ReadAll(io.LimitReader(file, 1<<20))
+	if err != nil {
+		return uploadDeletionIntent{}, err
+	}
+	var intent uploadDeletionIntent
+	if err := json.Unmarshal(payload, &intent); err != nil {
+		return uploadDeletionIntent{}, fmt.Errorf("decode upload deletion intent: %w", err)
+	}
+	intent.ResourceID = strings.TrimSpace(intent.ResourceID)
+	if intent.ResourceID != resourceID {
+		return uploadDeletionIntent{}, errors.New("upload deletion intent resource mismatch")
+	}
+	intent.SourceRelative, err = cleanRootRelativePath(intent.SourceRelative)
+	if err != nil {
+		return uploadDeletionIntent{}, errors.New("invalid upload deletion intent source")
+	}
+	intent.Principal = normalizedResourcePrincipal(intent.Principal)
+	return intent, nil
+}
+
+func writeUploadDeletionIntent(root string, resourceID string, sourcePath string, principal principalRecord) error {
+	if !safeResourceLifecycleID(resourceID) {
+		return errors.New("unsafe upload deletion id")
+	}
+	sourceRelative, ok := relativePathUnderRoot(root, sourcePath)
+	if !ok {
+		return errUnsafeArtifactPath
+	}
+	principal = normalizedResourcePrincipal(principal)
+	intent := uploadDeletionIntent{
+		ResourceID: resourceID, SourceRelative: sourceRelative, Principal: principal, CreatedAt: domain.Now(),
+	}
+	payload, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer uploadRoot.Close()
+	if err := uploadRoot.MkdirAll(resourceMetaDir, 0o700); err != nil {
+		return err
+	}
+	metaRoot, err := uploadRoot.OpenRoot(resourceMetaDir)
+	if err != nil {
+		return err
+	}
+	defer metaRoot.Close()
+	name := resourceDeletionIntentName(resourceID)
+	file, err := metaRoot.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		existing, readErr := readUploadDeletionIntent(root, resourceID)
+		if readErr != nil {
+			return readErr
+		}
+		if existing.SourceRelative != intent.SourceRelative || existing.Principal != intent.Principal {
+			return errors.New("upload deletion intent conflicts with existing ownership")
+		}
+		return nil
+	}
+	created := true
+	defer func() {
+		if created {
+			_ = metaRoot.Remove(name)
+		}
+	}()
+	if _, err := file.Write(append(payload, '\n')); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := syncRootDirectory(metaRoot); err != nil {
+		return err
+	}
+	created = false
+	return nil
+}
+
+func writeUploadCatalogReconciliationIntent(root string, record uploadedFileRecord) error {
+	resourceID := strings.TrimSpace(record.FileID)
+	if !safeResourceLifecycleID(resourceID) {
+		return errors.New("unsafe catalog reconciliation id")
+	}
+	sourcePath := filepath.Join(root, resourceID+"__"+record.OriginalName)
+	sourceRelative, ok := relativePathUnderRoot(root, sourcePath)
+	if !ok {
+		return errUnsafeArtifactPath
+	}
+	intent := uploadCatalogReconciliationIntent{
+		ResourceID: resourceID, SourceRelative: sourceRelative,
+		Principal: normalizedResourcePrincipal(record.Principal), CreatedAt: domain.Now(),
+	}
+	payload, err := json.Marshal(intent)
+	if err != nil {
+		return err
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer uploadRoot.Close()
+	if err := uploadRoot.MkdirAll(resourceCatalogReconciliationDir, 0o700); err != nil {
+		return err
+	}
+	intentRoot, err := uploadRoot.OpenRoot(resourceCatalogReconciliationDir)
+	if err != nil {
+		return err
+	}
+	defer intentRoot.Close()
+	name := resourceCatalogReconciliationIntentName(resourceID)
+	file, err := intentRoot.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		existing, readErr := readUploadCatalogReconciliationIntent(root, resourceID)
+		if readErr != nil {
+			return readErr
+		}
+		if existing.ResourceID != intent.ResourceID || existing.SourceRelative != intent.SourceRelative ||
+			existing.Principal != intent.Principal {
+			return errors.New("catalog reconciliation intent conflicts with existing ownership")
+		}
+		return nil
+	}
+	created := true
+	defer func() {
+		if created {
+			_ = intentRoot.Remove(name)
+		}
+	}()
+	if _, err := file.Write(append(payload, '\n')); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := syncRootDirectory(intentRoot); err != nil {
+		return err
+	}
+	created = false
+	return nil
+}
+
+func removeUploadCatalogReconciliationIntent(root string, resourceID string) error {
+	if !safeResourceLifecycleID(resourceID) {
+		return errors.New("unsafe catalog reconciliation id")
+	}
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer uploadRoot.Close()
+	intentRoot, err := uploadRoot.OpenRoot(resourceCatalogReconciliationDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer intentRoot.Close()
+	if err := intentRoot.Remove(resourceCatalogReconciliationIntentName(resourceID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncRootDirectory(intentRoot)
+}
+
+func pendingUploadDeletionSourceForRequest(
+	root string,
+	resourceID string,
+	principal requestPrincipal,
+) (string, error) {
+	intent, err := readUploadDeletionIntent(root, resourceID)
+	if err != nil {
+		return "", err
+	}
+	if !resourceVisibleToPrincipal(resourceRecord{FileID: resourceID, Principal: intent.Principal}, principal) {
+		return "", store.ErrNotFound
+	}
+	return filepath.Join(root, intent.SourceRelative), nil
+}
+
 func writeUploadMetadataRecord(root string, fileID string, payload uploadMetadataRecord) error {
 	if !safeUploadID(fileID) {
 		return errors.New("unsafe upload metadata id")
-	}
-	metaDir := filepath.Join(root, ".meta")
-	if !pathIsUnderRoot(root, metaDir) {
-		return errUnsafeArtifactPath
-	}
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return err
-	}
-	path := uploadMetadataPath(root, fileID)
-	if !pathIsUnderRoot(root, path) {
-		return errUnsafeArtifactPath
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
+	uploadRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer uploadRoot.Close()
+	if err := uploadRoot.MkdirAll(resourceMetaDir, 0o700); err != nil {
+		return err
+	}
+	metaRoot, err := uploadRoot.OpenRoot(resourceMetaDir)
+	if err != nil {
+		return err
+	}
+	defer metaRoot.Close()
+	name := fileID + ".json"
+	temporary := "." + name + ".tmp-" + safePathToken(domain.NewID("meta"))
+	file, err := metaRoot.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	published := false
+	defer func() {
+		_ = file.Close()
+		if !published {
+			_ = metaRoot.Remove(temporary)
+		}
+	}()
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := metaRoot.Rename(temporary, name); err != nil {
+		return err
+	}
+	published = true
+	return syncRootDirectory(metaRoot)
 }
 
 func readUploadPrincipal(root string, fileID string) principalRecord {
@@ -12309,7 +13190,11 @@ type uploadResourceEntry struct {
 }
 
 func listUploadResources(root string) ([]resourceRecord, error) {
-	entries, err := listUploadResourceEntries(root)
+	return listUploadResourcesWithDeps(ServerDeps{}, root)
+}
+
+func listUploadResourcesWithDeps(deps ServerDeps, root string) ([]resourceRecord, error) {
+	entries, err := listUploadResourceEntriesWithDeps(deps, root)
 	if err != nil {
 		return nil, err
 	}
@@ -12321,6 +13206,10 @@ func listUploadResources(root string) ([]resourceRecord, error) {
 }
 
 func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
+	return listUploadResourceEntriesWithDeps(ServerDeps{}, root)
+}
+
+func listUploadResourceEntriesWithDeps(deps ServerDeps, root string) ([]uploadResourceEntry, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -12334,7 +13223,7 @@ func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
-		record, err := uploadResourceFromPath(root, path)
+		record, err := uploadResourceFromPathWithDeps(deps, root, path)
 		if err != nil {
 			continue
 		}
@@ -12353,6 +13242,10 @@ func listUploadResourceEntries(root string) ([]uploadResourceEntry, error) {
 }
 
 func findUploadResource(root string, fileID string) (resourceRecord, string, error) {
+	return findUploadResourceWithDeps(ServerDeps{}, root, fileID)
+}
+
+func findUploadResourceWithDeps(deps ServerDeps, root string, fileID string) (resourceRecord, string, error) {
 	fileID = strings.TrimSpace(fileID)
 	if !safeUploadID(fileID) {
 		return resourceRecord{}, "", store.ErrNotFound
@@ -12373,7 +13266,7 @@ func findUploadResource(root string, fileID string) (resourceRecord, string, err
 			if !pathIsUnderRoot(root, resolved) {
 				continue
 			}
-			record, err := uploadResourceFromPath(root, resolved)
+			record, err := uploadResourceFromPathWithDeps(deps, root, resolved)
 			if err != nil {
 				continue
 			}
@@ -12404,7 +13297,7 @@ func (deps ServerDeps) findUploadResourceForRequest(ctx context.Context, root st
 		}
 		return record, path, nil
 	}
-	record, path, err := findUploadResource(root, fileID)
+	record, path, err := findUploadResourceWithDeps(deps, root, fileID)
 	if err != nil {
 		return resourceRecord{}, "", err
 	}
@@ -12418,10 +13311,24 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 	path, pathErr := resolveCatalogResourcePath(root, resource)
 	stagedLocally := false
 	if pathErr == nil {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			stagedLocally = true
+		if info, err := os.Stat(path); err == nil {
+			stagedLocally = !info.IsDir() || detectSpecialFormatByDir(path) != nil
 		}
 	}
+	record := resourceRecordFromCatalogState(resource, stagedLocally)
+	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, path, stagedLocally)
+	if record.HasThumbnail {
+		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(resource.ResourceID) + "/thumbnail"
+	}
+	return record
+}
+
+// resourceRecordFromCatalogState shapes catalog-owned metadata without resolving
+// or probing its storage location. Viewer handlers use this form immediately
+// after the owner-scoped catalog lookup so request selectors can be rejected
+// before any source localization or stat. List/detail responses use the wrapper
+// above when they need the staged/cache flags.
+func resourceRecordFromCatalogState(resource domain.ResourceRecord, stagedLocally bool) resourceRecord {
 	previewURL := "/v2/uploads/" + url.PathEscape(resource.ResourceID) + "/preview"
 	// Read-time classification repair: chunked/bundle uploads persist an
 	// "application/octet-stream" content type (handlers.go:3819,3944), so a large
@@ -12444,7 +13351,7 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 	if status == "" {
 		status = "active"
 	}
-	return resourceRecord{
+	record := resourceRecord{
 		FileID:        resource.ResourceID,
 		OriginalName:  resource.OriginalName,
 		ContentType:   contentType,
@@ -12456,8 +13363,6 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		ResourceKind:  resourceKind,
 		SourceURI:     resource.SourceURI,
 		ProjectID:     resource.ProjectID,
-		HasThumbnail:  stagedLocally && strings.HasPrefix(contentType, "image/"),
-		ThumbnailURL:  previewURL,
 		PreviewURL:    previewURL,
 		CacheReady:    stagedLocally,
 		StagedLocally: stagedLocally,
@@ -12470,6 +13375,52 @@ func (deps ServerDeps) resourceRecordFromCatalog(root string, resource domain.Re
 		Metadata:     resource.Metadata,
 		ShareSummary: resource.ShareSummary,
 	}
+	return record
+}
+
+func (deps ServerDeps) resourceThumbnailCapability(root string, record resourceRecord, path string, stagedLocally bool) (bool, string) {
+	if !stagedLocally || strings.TrimSpace(path) == "" {
+		return false, ""
+	}
+	if resourceIsCifti(record, path) {
+		if _, err := ciftiThumbnailPreflight(path); err != nil {
+			return false, ""
+		}
+		return true, "static"
+	}
+	if isNiftiUpload(record.OriginalName, record.ContentType) {
+		if _, err := niftiThumbnailPreflight(path); err != nil {
+			return false, ""
+		}
+		return true, "static"
+	}
+	if goNativeThumbnailable(record) {
+		if err := boundedRasterThumbnailPreflight(path); err == nil {
+			return true, "static"
+		}
+		if _, committed := committedThumbnailDerivative(root, record, path); deps.imageServiceConfigured() && committed {
+			return true, "static"
+		}
+		return false, ""
+	}
+	if format := specialFormatForResource(record, path); format != nil && format.Serve == "ngff" {
+		if strings.TrimSpace(deps.NgffServiceURL) != "" {
+			return true, "z_scrub"
+		}
+		return false, ""
+	}
+	if isVideoUpload(record.OriginalName, record.ContentType) {
+		if deps.imageServiceConfigured() {
+			return true, "video_hover"
+		}
+		return false, ""
+	}
+	if isScientificThumbnailCandidate(record) && deps.imageServiceConfigured() {
+		if _, committed := committedThumbnailDerivative(root, record, path); committed {
+			return true, "z_scrub"
+		}
+	}
+	return false, ""
 }
 
 func (deps ServerDeps) uploadedFileRecordFromCatalog(root string, resource domain.ResourceRecord) uploadedFileRecord {
@@ -12546,13 +13497,20 @@ func validatePreviewSource(path string) error {
 }
 
 func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
+	return uploadResourceFromPathWithDeps(ServerDeps{}, root, path)
+}
+
+func uploadResourceFromPathWithDeps(deps ServerDeps, root string, path string) (resourceRecord, error) {
 	resolved := filepath.Clean(path)
 	if !pathIsUnderRoot(root, resolved) {
 		return resourceRecord{}, errUnsafeArtifactPath
 	}
-	info, err := os.Stat(resolved)
+	info, err := os.Lstat(resolved)
 	if err != nil {
 		return resourceRecord{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return resourceRecord{}, errors.New("upload resource must not be a symlink")
 	}
 	if info.IsDir() {
 		return resourceRecord{}, errors.New("upload resource is a directory")
@@ -12572,7 +13530,7 @@ func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
 	if sourceType == "" {
 		sourceType = "upload"
 	}
-	return resourceRecord{
+	record := resourceRecord{
 		FileID:        fileID,
 		OriginalName:  originalName,
 		ContentType:   contentType,
@@ -12583,13 +13541,16 @@ func uploadResourceFromPath(root string, path string) (resourceRecord, error) {
 		ResourceKind:  resourceKindForContent(originalName, contentType),
 		SourceURI:     strings.TrimSpace(metadata.SourceURI),
 		ProjectID:     strings.TrimSpace(metadata.ProjectID),
-		HasThumbnail:  strings.HasPrefix(contentType, "image/"),
-		ThumbnailURL:  previewURL,
 		PreviewURL:    previewURL,
 		CacheReady:    true,
 		StagedLocally: true,
 		Principal:     metadata.Principal,
-	}, nil
+	}
+	record.HasThumbnail, record.ThumbnailInteraction = deps.resourceThumbnailCapability(root, record, resolved, true)
+	if record.HasThumbnail {
+		record.ThumbnailURL = "/v2/resources/" + url.PathEscape(fileID) + "/thumbnail"
+	}
+	return record, nil
 }
 
 type uploadImageDescriptor struct {
@@ -13840,6 +14801,9 @@ func niftiScalarDisplayDefaults(volume niftiScalarVolume, channelColors []string
 func niftiScalarRangeLooksCTLike(volume niftiScalarVolume) bool {
 	physMin := volume.physical(volume.RawMin)
 	physMax := volume.physical(volume.RawMax)
+	if physMax < physMin {
+		physMin, physMax = physMax, physMin
+	}
 	return physMin <= -300 && physMin >= -1100 && physMax >= 300
 }
 
@@ -14238,13 +15202,18 @@ func loadNiftiScalarVolume(path string, requestedChannel ...int) (niftiScalarVol
 // rest of the 4D payload. For a 4D fMRI this bounds memory at a single ~MB
 // timepoint instead of the whole multi-GB series, which is what previously OOM'd
 // the control plane on every viewer request.
-func loadNiftiScalarVolumeAt(path string, timeIndex, channelIndex int) (niftiScalarVolume, error) {
+func loadNiftiScalarVolumeAt(
+	path string,
+	timeIndex int,
+	channelIndex int,
+	sidecarIdentity ...niftiDecompressedSidecarIdentity,
+) (niftiScalarVolume, error) {
 	gzipped := strings.HasSuffix(strings.ToLower(path), ".gz")
-	if gzipped {
+	if gzipped && len(sidecarIdentity) > 0 {
 		// A one-time decompressed sidecar (when ready) turns every timepoint
 		// into an O(1) random read; until then, stream the gzip and stop at the
 		// requested slab.
-		if sidecar := readyDecompressedNiftiSidecar(path); sidecar != "" {
+		if sidecar := readyDecompressedNiftiSidecar(sidecarIdentity[0]); sidecar != "" {
 			path = sidecar
 			gzipped = false
 		}
@@ -14422,19 +15391,46 @@ func niftiDecompressCacheEnabled() bool {
 	return true
 }
 
-// niftiDecompressedSidecarPath maps <root>/file_x.nii.gz to the decompressed
-// <root>/derived/file_x.nii served via random access.
-func niftiDecompressedSidecarPath(srcPath string) string {
-	base := strings.TrimSuffix(filepath.Base(srcPath), ".gz")
-	return filepath.Join(filepath.Dir(srcPath), "derived", base)
+type niftiDecompressedSidecarIdentity struct {
+	root         string
+	resourceID   string
+	sourceSHA256 string
 }
 
-func readyDecompressedNiftiSidecar(srcPath string) string {
+// niftiDecompressedSidecarPath binds the cache to both the immutable resource
+// identity and the catalog-verified source digest. The global derived namespace
+// cannot alias a nested analysis output or another resource's authoritative
+// source.
+func niftiDecompressedSidecarPath(identity niftiDecompressedSidecarIdentity) (string, bool) {
+	root := filepath.Clean(strings.TrimSpace(identity.root))
+	resourceID := strings.TrimSpace(identity.resourceID)
+	digest := strings.ToLower(strings.TrimSpace(identity.sourceSHA256))
+	if !filepath.IsAbs(root) || !domain.IsCanonicalResourceID(resourceID) || !isSHA256Hex(digest) {
+		return "", false
+	}
+	name := resourceID + "__nifti.sha256-" + digest + ".nii"
+	return filepath.Join(root, resourceDerivedDir, name), true
+}
+
+func readyDecompressedNiftiSidecar(identity niftiDecompressedSidecarIdentity) string {
 	if !niftiDecompressCacheEnabled() {
 		return ""
 	}
-	dst := niftiDecompressedSidecarPath(srcPath)
-	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+	dst, ok := niftiDecompressedSidecarPath(identity)
+	if !ok {
+		return ""
+	}
+	uploadRoot, err := os.OpenRoot(filepath.Clean(identity.root))
+	if err != nil {
+		return ""
+	}
+	defer uploadRoot.Close()
+	derived, err := uploadRoot.OpenRoot(resourceDerivedDir)
+	if err != nil {
+		return ""
+	}
+	defer derived.Close()
+	if info, err := derived.Lstat(filepath.Base(dst)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 		return dst
 	}
 	return ""
@@ -14445,15 +15441,33 @@ func readyDecompressedNiftiSidecar(srcPath string) string {
 // best-effort: bounded-memory streaming requests already work without it, so a
 // failure (disk full, etc.) never affects correctness. Concurrent callers
 // dedupe on the destination path.
-func maybeDecompressNiftiSidecar(srcPath string, timeCount int) {
+func maybeDecompressNiftiSidecar(
+	root string,
+	resourceID string,
+	sourceSHA256 string,
+	srcPath string,
+	timeCount int,
+) {
 	if timeCount <= 1 || !niftiDecompressCacheEnabled() {
 		return
 	}
-	if !strings.HasSuffix(strings.ToLower(srcPath), ".gz") {
+	if !safeUploadID(resourceID) || !strings.HasSuffix(strings.ToLower(srcPath), ".nii.gz") {
 		return
 	}
-	dst := niftiDecompressedSidecarPath(srcPath)
-	if info, err := os.Stat(dst); err == nil && info.Size() > 0 {
+	if _, ok := relativePathUnderRoot(root, srcPath); !ok {
+		return
+	}
+	dst, ok := niftiDecompressedSidecarPath(niftiDecompressedSidecarIdentity{
+		root:         root,
+		resourceID:   resourceID,
+		sourceSHA256: sourceSHA256,
+	})
+	if !ok {
+		return
+	}
+	if readyDecompressedNiftiSidecar(niftiDecompressedSidecarIdentity{
+		root: root, resourceID: resourceID, sourceSHA256: sourceSHA256,
+	}) != "" {
 		return
 	}
 	if _, inFlight := niftiDecompressInFlight.LoadOrStore(dst, struct{}{}); inFlight {
@@ -14475,18 +15489,54 @@ func maybeDecompressNiftiSidecar(srcPath string, timeCount int) {
 		// only forgoes the random-access speedup and must not surface or leak.
 		ctx, cancel := context.WithTimeout(context.Background(), niftiDecompressTimeout())
 		defer cancel()
-		_ = buildDecompressedNiftiSidecar(ctx, srcPath, dst)
+		_ = buildAndPublishDecompressedNiftiSidecar(
+			ctx, root, resourceID, sourceSHA256, srcPath, dst,
+		)
 	}()
 }
 
 func buildDecompressedNiftiSidecar(ctx context.Context, srcPath, dst string) (err error) {
-	if info, statErr := os.Stat(dst); statErr == nil && info.Size() > 0 {
-		return nil
+	directoryPath := filepath.Clean(filepath.Dir(dst))
+	rootPath := filepath.Dir(directoryPath)
+	if filepath.Base(directoryPath) != resourceDerivedDir || !filepath.IsAbs(rootPath) {
+		return errors.New("NIfTI sidecar destination is outside the managed derived namespace")
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	uploadRoot, err := os.OpenRoot(rootPath)
+	if err != nil {
 		return err
 	}
-	in, err := os.Open(srcPath)
+	defer uploadRoot.Close()
+	if err := uploadRoot.MkdirAll(resourceDerivedDir, 0o755); err != nil {
+		return err
+	}
+	directory, err := uploadRoot.OpenRoot(resourceDerivedDir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	destinationName := filepath.Base(dst)
+	temporaryName := destinationName + ".tmp"
+	if info, statErr := directory.Lstat(destinationName); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("NIfTI sidecar destination is not a regular file")
+		}
+		if info.Size() > 0 {
+			return nil
+		}
+		if err := directory.Remove(destinationName); err != nil {
+			return err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	sourceRelative, ok := relativePathUnderRoot(rootPath, srcPath)
+	if !ok {
+		return errors.New("NIfTI source is outside the managed upload root")
+	}
+	if err := validateManagedSourcePath(uploadRoot, sourceRelative, false); err != nil {
+		return err
+	}
+	in, err := uploadRoot.Open(sourceRelative)
 	if err != nil {
 		return err
 	}
@@ -14507,8 +15557,21 @@ func buildDecompressedNiftiSidecar(ctx context.Context, srcPath, dst string) (er
 		return err
 	}
 	defer func() { _ = zr.Close() }()
-	tmp := dst + ".tmp"
-	out, err := os.Create(tmp)
+	if info, statErr := directory.Lstat(temporaryName); statErr == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("NIfTI sidecar temporary path is not a regular file")
+		}
+		if err := directory.Remove(temporaryName); err != nil {
+			return err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return statErr
+	}
+	out, err := directory.OpenFile(
+		temporaryName,
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW,
+		0o600,
+	)
 	if err != nil {
 		return err
 	}
@@ -14516,7 +15579,7 @@ func buildDecompressedNiftiSidecar(ctx context.Context, srcPath, dst string) (er
 	defer func() {
 		_ = out.Close()
 		if !committed {
-			_ = os.Remove(tmp)
+			_ = directory.Remove(temporaryName)
 		}
 	}()
 	if _, err := io.Copy(out, zr); err != nil { // streaming copy, O(1) memory
@@ -14525,7 +15588,13 @@ func buildDecompressedNiftiSidecar(ctx context.Context, srcPath, dst string) (er
 	if err := out.Sync(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil { // atomic publish
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := directory.Rename(temporaryName, destinationName); err != nil { // atomic publish
+		return err
+	}
+	if err := syncRootDirectory(directory); err != nil {
 		return err
 	}
 	committed = true
@@ -14854,8 +15923,18 @@ func channelFilteredPreviewImage(img image.Image, transform uploadPreviewTransfo
 	return output
 }
 
-func serveNiftiSliceAsPNG(w http.ResponseWriter, path string, r *http.Request) error {
-	volume, err := loadNiftiScalarVolumeAt(path, parseUploadScalarTimeIndex(r), parseUploadScalarChannelIndex(r))
+func serveNiftiSliceAsPNG(
+	w http.ResponseWriter,
+	path string,
+	r *http.Request,
+	sidecarIdentity ...niftiDecompressedSidecarIdentity,
+) error {
+	volume, err := loadNiftiScalarVolumeAt(
+		path,
+		parseUploadScalarTimeIndex(r),
+		parseUploadScalarChannelIndex(r),
+		sidecarIdentity...,
+	)
 	if err != nil {
 		return err
 	}
@@ -15388,20 +16467,7 @@ func safeOriginalFilename(value string) string {
 }
 
 func safeUploadID(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, char := range value {
-		switch {
-		case char >= 'a' && char <= 'z':
-		case char >= 'A' && char <= 'Z':
-		case char >= '0' && char <= '9':
-		case char == '_' || char == '-' || char == '.' || char == ':':
-		default:
-			return false
-		}
-	}
-	return true
+	return domain.IsCanonicalResourceID(value)
 }
 
 func contentTypeForUpload(originalName string, hint string) string {
@@ -15440,11 +16506,30 @@ func resourceKindForContent(originalName string, contentType string) string {
 		return "video"
 	case isTabularUpload(originalName, contentType):
 		return "table"
+	case isBinaryDocumentUpload(originalName, contentType):
+		return "document"
 	case isTextDocumentUpload(originalName, contentType):
 		return "document"
 	default:
 		return "file"
 	}
+}
+
+func isBinaryDocumentUpload(originalName string, contentType string) bool {
+	normalizedType := strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+	switch normalizedType {
+	case "application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		"application/vnd.ms-powerpoint",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(strings.TrimSpace(originalName))) {
+	case ".pdf", ".ppt", ".pptx", ".doc", ".docx":
+		return true
+	}
+	return false
 }
 
 // isTabularUpload reports whether the file is a delimited table (CSV/TSV) that
@@ -15703,6 +16788,11 @@ func toString(value any) string {
 }
 
 func writeStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errResourceLifecycleBusy) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -15712,6 +16802,14 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusInternalServerError, err)
+}
+
+func writeBulkLifecycleStoreError(w http.ResponseWriter, err error) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		writeStoreError(w, errResourceLifecycleBusy)
+		return
+	}
+	writeStoreError(w, err)
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

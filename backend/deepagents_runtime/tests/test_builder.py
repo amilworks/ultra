@@ -7,6 +7,8 @@ fallback.
 
 from __future__ import annotations
 
+from deepagents.middleware.filesystem import FilesystemMiddleware
+from langchain.agents.middleware import TodoListMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from ultra_deepagents.builder import (
     BUILDER_SYSTEM_PROMPT,
@@ -190,6 +192,7 @@ def test_builder_registered_when_enabled(monkeypatch):
     monkeypatch.setattr("ultra_deepagents.builder.create_deep_agent", fake_create_deep_agent)
     monkeypatch.setattr("ultra_deepagents.builder.build_builder_model", lambda s: "builder-model")
     monkeypatch.setattr("ultra_deepagents.builder.build_builder_worker_model", lambda s: "worker-model")
+    backend = object()
     sub = build_builder_subagent(
         _settings(
             builder_enabled=True,
@@ -197,7 +200,7 @@ def test_builder_registered_when_enabled(monkeypatch):
             builder_recursion_limit=123,
         ),
         tools=["execute"],
-        backend=object(),
+        backend=backend,
         permissions=["DENY-/policies"],
     )
     assert sub is not None and sub["name"] == "builder"
@@ -224,6 +227,20 @@ def test_builder_registered_when_enabled(monkeypatch):
     # the worker carries image-stripping (text-only by construction) but NOT the GoalLoop (lead-only)
     assert any(isinstance(m, StripImagesForTextModelMiddleware) for m in worker["middleware"])
     assert not any(isinstance(m, GoalLoopMiddleware) for m in worker["middleware"])
+    lead_todos = [m for m in captured["middleware"] if isinstance(m, TodoListMiddleware)]
+    lead_filesystems = [m for m in captured["middleware"] if isinstance(m, FilesystemMiddleware)]
+    worker_todos = [m for m in worker["middleware"] if isinstance(m, TodoListMiddleware)]
+    worker_filesystems = [m for m in worker["middleware"] if isinstance(m, FilesystemMiddleware)]
+    assert len(lead_todos) == len(lead_filesystems) == 1
+    assert len(worker_todos) == len(worker_filesystems) == 1
+    assert lead_todos[0] is not worker_todos[0]
+    assert lead_filesystems[0] is not worker_filesystems[0]
+    assert lead_filesystems[0].backend is worker_filesystems[0].backend is backend
+    assert (
+        lead_filesystems[0]._permissions == worker_filesystems[0]._permissions == ["DENY-/policies"]
+    )
+    assert "delete" not in {tool.name for tool in lead_filesystems[0].tools}
+    assert "delete" not in {tool.name for tool in worker_filesystems[0].tools}
 
 
 def test_strip_image_content_drops_images_keeps_text():

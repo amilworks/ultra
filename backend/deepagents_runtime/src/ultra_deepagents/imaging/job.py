@@ -11,17 +11,44 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from ultra_deepagents.imaging.convert import ConvertResult, PyramidSpec, derive_pyramid
-from ultra_deepagents.imaging.transcode import TranscodeResult, transcode_to_ome_tiff
+from ultra_deepagents.imaging.convert import (
+    ConversionDependencyError,
+    ConversionInputError,
+    ConversionProcessError,
+    ConversionResourceError,
+    ConvertResult,
+    PyramidSpec,
+    derive_pyramid,
+)
+from ultra_deepagents.imaging.derivative_manifest import (
+    DerivativeJobError,
+    DeterministicDerivativeError,
+    StaleDerivativeJobError,
+    TransientDerivativeError,
+    ViewerInfoFn,
+    run_strict_publication,
+)
+from ultra_deepagents.imaging.transcode import (
+    TranscodeDependencyError,
+    TranscodeError,
+    TranscodeInputError,
+    TranscodeOperationalError,
+    TranscodeResourceError,
+    TranscodeResult,
+    transcode_to_ome_tiff,
+)
 
-__all__ = ["DerivePyramidJob", "run_derive_pyramid_job", "ConvertFn", "MetaFn", "TranscodeFn"]
+__all__ = ["ConvertFn", "DerivePyramidJob", "MetaFn", "TranscodeFn", "run_derive_pyramid_job"]
 
 ConvertFn = Callable[..., ConvertResult]
 MetaFn = Callable[[str], dict[str, Any]]
 TranscodeFn = Callable[..., TranscodeResult]
+NATIVE_PYRAMID_TERMINAL_STATUS = "skipped_native_pyramid_no_manifest"
 
 
 @dataclass
@@ -33,9 +60,13 @@ class DerivePyramidJob:
     compression: str = "lzw"
     layout: str = "topdirs"
     fmt: str = "bigtiff"
+    source_sha256: str | None = None
+    source_size_bytes: int | None = None
+    force: bool = False
+    force_id: str | None = None
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "DerivePyramidJob":
+    def from_dict(cls, payload: dict[str, Any]) -> DerivePyramidJob:
         return cls(
             resource_id=str(payload["resource_id"]),
             src_path=str(payload["src_path"]),
@@ -44,6 +75,16 @@ class DerivePyramidJob:
             compression=str(payload.get("compression", "lzw")),
             layout=str(payload.get("layout", "topdirs")),
             fmt=str(payload.get("fmt", "bigtiff")),
+            source_sha256=(
+                str(payload["source_sha256"]) if payload.get("source_sha256") is not None else None
+            ),
+            source_size_bytes=(
+                int(payload["source_size_bytes"])
+                if payload.get("source_size_bytes") is not None
+                else None
+            ),
+            force=payload.get("force", False) is True,
+            force_id=(str(payload["force_id"]) if payload.get("force_id") is not None else None),
         )
 
     def spec(self) -> PyramidSpec:
@@ -83,16 +124,16 @@ def _has_pixel_geometry(meta: dict[str, Any] | None) -> bool:
     """Whether the engine actually decoded the source (reported a real canvas). Empty
     meta / a 0-wide canvas means libbioimage recognized the container but cannot decode
     it (a Leica .lif, etc.) -> the bioio transcode fallback handles it."""
-    return bool(meta) and _meta_int(meta, "image_num_x", 0) >= 1
+    if not meta:
+        return False
+    return _meta_int(meta, "image_num_x", 0) >= 1
 
 
 def _safe_remove(path: str | None) -> None:
     if not path:
         return
-    try:
+    with suppress(OSError):
         os.remove(path)
-    except OSError:
-        pass
 
 
 def _extension_of(path: str) -> str:
@@ -133,15 +174,19 @@ def _source_is_native_tiled_pyramid(meta: dict[str, Any] | None) -> bool:
     Borrowed from BisQue's native-pyramid fast path."""
     if not meta:
         return False
-    return _meta_int(meta, "image_num_resolution_levels", 1) > 1 and _meta_int(meta, "tile_num_x", 0) > 0
+    return (
+        _meta_int(meta, "image_num_resolution_levels", 1) > 1
+        and _meta_int(meta, "tile_num_x", 0) > 0
+    )
 
 
-def run_derive_pyramid_job(
+def _run_derive_pyramid_job_legacy(
     job: dict[str, Any] | DerivePyramidJob,
     *,
     convert_fn: ConvertFn = derive_pyramid,
     meta_fn: MetaFn | None = None,
     transcode_fn: TranscodeFn = transcode_to_ome_tiff,
+    strict_publication: bool = False,
 ) -> dict[str, Any]:
     """Run a derive-pyramid job and return a completion-event payload.
 
@@ -166,7 +211,7 @@ def run_derive_pyramid_job(
         try:
             src_meta = dict(meta_fn(spec_job.src_path))
             meta_ran = True
-        except Exception:  # noqa: BLE001 - metadata is best-effort; fall through and convert
+        except Exception:  # Metadata is best-effort; fall through and convert.
             src_meta = None
     # Native-pyramid fast path: a source that is already a tiled multi-resolution
     # pyramid is served tile-by-tile directly, so skip the (potentially huge) convert.
@@ -174,7 +219,7 @@ def run_derive_pyramid_job(
         return {
             "resource_id": spec_job.resource_id,
             "derived_path": None,
-            "status": "skipped_native_pyramid",
+            "status": NATIVE_PYRAMID_TERMINAL_STATUS,
         }
     # bioio transcode: convert the source to an intermediate OME-TIFF via bioio (pure-
     # Python plugins, off the serving path), then pyramid THAT — the pyramid, not bioio,
@@ -187,27 +232,43 @@ def run_derive_pyramid_job(
     if prefer_bioio or (meta_ran and not _has_pixel_geometry(src_meta)):
         intermediate_path = spec_job.dst_path + ".transcode.ome.tif"
         try:
-            transcode = transcode_fn(spec_job.src_path, intermediate_path)
-        except Exception:  # noqa: BLE001
+            transcode = transcode_fn(
+                spec_job.src_path,
+                intermediate_path,
+                prefer="first" if strict_publication else "largest",
+            )
+        except DerivativeJobError:
+            raise
+        except (TranscodeDependencyError, TranscodeOperationalError, TranscodeResourceError) as exc:
+            _safe_remove(intermediate_path)
+            intermediate_path = None
+            raise TransientDerivativeError("transcode_unavailable") from exc
+        except TranscodeInputError as exc:
             # PREFER is soft: if bioio can't read it, fall back to a normal libbioimage
             # convert of the source (don't discard a working native render). The
             # undecodable case has NO native render, so re-raise -> failure marker.
             _safe_remove(intermediate_path)
             intermediate_path = None
-            if not prefer_bioio:
-                raise
+            if not prefer_bioio or strict_publication:
+                raise DeterministicDerivativeError("unsupported_source") from exc
             if meta_fn is not None:
                 try:
                     src_meta = dict(meta_fn(spec_job.src_path))
-                except Exception:  # noqa: BLE001
+                except Exception:
                     src_meta = None
+        except TranscodeError as exc:
+            _safe_remove(intermediate_path)
+            intermediate_path = None
+            raise TransientDerivativeError("transcode_unavailable") from exc
         if transcode is not None:
+            if intermediate_path is None:
+                raise RuntimeError("transcode completed without an intermediate artifact path")
             convert_src = intermediate_path
             # Re-read the readable intermediate so fmt="auto" + meta reflect real geometry.
             if meta_fn is not None:
                 try:
                     src_meta = dict(meta_fn(convert_src))
-                except Exception:  # noqa: BLE001 - best-effort; multichannel/volume hint below still guides fmt
+                except Exception:  # Best-effort; transcode geometry still guides format.
                     src_meta = None
             # A transcoded multichannel or z-stack series must stay OME-BigTIFF so its
             # channels/planes survive (plain BigTIFF flattens them to one plane).
@@ -222,7 +283,25 @@ def run_derive_pyramid_job(
     if spec_job.fmt == "auto":
         spec_job.fmt = _resolve_auto_fmt(src_meta)
     try:
-        convert_fn(convert_src, spec_job.dst_path, spec=spec_job.spec())
+        if not strict_publication:
+            convert_fn(convert_src, spec_job.dst_path, spec=spec_job.spec())
+        else:
+            try:
+                convert_fn(convert_src, spec_job.dst_path, spec=spec_job.spec())
+            except DerivativeJobError:
+                raise
+            except ConversionInputError as exc:
+                raise DeterministicDerivativeError("conversion_rejected") from exc
+            except (
+                ConversionDependencyError,
+                ConversionProcessError,
+                ConversionResourceError,
+            ) as exc:
+                raise TransientDerivativeError("conversion_unavailable") from exc
+            except ValueError as exc:
+                raise DeterministicDerivativeError("invalid_conversion_spec") from exc
+            except Exception as exc:
+                raise TransientDerivativeError("conversion_unavailable") from exc
     finally:
         # The intermediate OME-TIFF is redundant once the pyramid exists — reclaim disk.
         _safe_remove(intermediate_path)
@@ -251,6 +330,80 @@ def run_derive_pyramid_job(
             result["scales"] = meta.get("image_res_l_scales")
             result["num_x"] = meta.get("image_num_x")
             result["num_y"] = meta.get("image_num_y")
-        except Exception as exc:  # noqa: BLE001 - metadata is best-effort
+        except Exception as exc:  # Metadata is best-effort.
             result["meta_warning"] = repr(exc)
     return result
+
+
+def run_derive_pyramid_job(
+    job: dict[str, Any] | DerivePyramidJob,
+    *,
+    convert_fn: ConvertFn = derive_pyramid,
+    meta_fn: MetaFn | None = None,
+    transcode_fn: TranscodeFn = transcode_to_ome_tiff,
+    viewer_info_fn: ViewerInfoFn | None = None,
+    source_viewer_info_fn: ViewerInfoFn | None = None,
+    require_manifest: bool = False,
+) -> dict[str, Any]:
+    """Run a derive job, using strict source-bound publication when identity is present.
+
+    ``require_manifest`` is used by the production worker to reject old queue payloads
+    that cannot prove which catalog generation they were derived from. The legacy path
+    remains solely for the existing direct runner API and its isolated unit tests.
+    """
+    spec_job = job if isinstance(job, DerivePyramidJob) else DerivePyramidJob.from_dict(job)
+    source_sha256 = spec_job.source_sha256
+    source_size_bytes = spec_job.source_size_bytes
+    if source_sha256 is None or source_size_bytes is None:
+        if require_manifest:
+            raise ValueError("derive job is missing source_sha256 or source_size_bytes")
+        return _run_derive_pyramid_job_legacy(
+            spec_job, convert_fn=convert_fn, meta_fn=meta_fn, transcode_fn=transcode_fn
+        )
+    if require_manifest and spec_job.force and spec_job.force_id is None:
+        raise StaleDerivativeJobError("invalid_force_request")
+    if viewer_info_fn is None:
+        raise TransientDerivativeError("viewer_info_unavailable")
+    prefer_bioio = _extension_of(spec_job.src_path) in _prefer_bioio_extensions()
+
+    def produce(temp_path: str) -> dict[str, Any]:
+        temp_job = DerivePyramidJob(
+            resource_id=spec_job.resource_id,
+            src_path=spec_job.src_path,
+            dst_path=temp_path,
+            tile_size=spec_job.tile_size,
+            compression=spec_job.compression,
+            layout=spec_job.layout,
+            fmt=spec_job.fmt,
+            source_sha256=spec_job.source_sha256,
+            source_size_bytes=spec_job.source_size_bytes,
+            force=spec_job.force,
+            force_id=spec_job.force_id,
+        )
+        return _run_derive_pyramid_job_legacy(
+            temp_job,
+            convert_fn=convert_fn,
+            meta_fn=meta_fn,
+            transcode_fn=transcode_fn,
+            strict_publication=True,
+        )
+
+    return run_strict_publication(
+        resource_id=spec_job.resource_id,
+        src_path=spec_job.src_path,
+        dst_path=spec_job.dst_path,
+        source_sha256=source_sha256,
+        source_size_bytes=source_size_bytes,
+        viewer_info_fn=viewer_info_fn,
+        source_viewer_info_fn=(source_viewer_info_fn if prefer_bioio else viewer_info_fn),
+        source_reader=("bioio" if prefer_bioio else "libbioimage"),
+        conversion_spec={
+            "tile_size": spec_job.tile_size,
+            "compression": spec_job.compression,
+            "layout": spec_job.layout,
+            "fmt": spec_job.fmt,
+        },
+        produce_fn=produce,
+        force=spec_job.force,
+        force_id=spec_job.force_id,
+    )

@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS, MAX_TILE_EDGE
 from ultra_deepagents.ngff.reader import NgffImage
 
 __all__ = ["build_ngff_viewer_info", "build_ngff_tile_scheme"]
@@ -19,7 +20,11 @@ __all__ = ["build_ngff_viewer_info", "build_ngff_tile_scheme"]
 # DeepZoom /tile path instead of reading a whole (gigapixel) plane via /slice. Smaller images
 # (e.g. a 1848 px time-lapse) stay on the simpler, proven direct/slice path.
 _TILE_THRESHOLD = int(os.environ.get("ULTRA_NGFF_TILE_THRESHOLD", "2048"))
-_TILE_SIZE = int(os.environ.get("ULTRA_NGFF_TILE_SIZE", "256"))
+try:
+    _CONFIGURED_TILE_SIZE = int(os.environ.get("ULTRA_NGFF_TILE_SIZE", "256"))
+except ValueError:
+    _CONFIGURED_TILE_SIZE = 256
+_TILE_SIZE = max(1, min(MAX_TILE_EDGE, _CONFIGURED_TILE_SIZE))
 
 
 def _format_quantity(value: float, unit: str) -> str:
@@ -34,7 +39,7 @@ def _format_quantity(value: float, unit: str) -> str:
 
 def _visible_channels(img: NgffImage) -> list[int]:
     active = [i for i, ch in enumerate(img.channels[: img.num_c]) if ch.active]
-    return active or list(range(max(1, img.num_c)))
+    return (active or list(range(max(1, img.num_c))))[:MAX_COMPOSITE_CHANNELS]
 
 
 def build_ngff_tile_scheme(img: NgffImage) -> dict[str, Any] | None:
@@ -70,7 +75,15 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
         raise ValueError(f"OME-Zarr reports no pixel geometry ({x}x{y}); cannot decode")
 
     names = [ch.label for ch in img.channels[:c]] or ["Channel"]
-    colors = ["#" + ch.color for ch in img.channels[:c]] or ["#FFFFFF"]
+    color_hexes = ["#" + ch.color.upper() for ch in img.channels[:c]] or ["#FFFFFF"]
+    colors = [
+        {
+            "index": index,
+            "hex": color,
+            "rgb": [int(color[offset : offset + 2], 16) for offset in (1, 3, 5)],
+        }
+        for index, color in enumerate(color_hexes)
+    ]
     visible = _visible_channels(img)
     tile_scheme = build_ngff_tile_scheme(img)
     has_tiles = tile_scheme is not None
@@ -115,6 +128,7 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
         "fusion_method": "m",
         "channel_mode": channel_mode,
         "channels": visible,
+        "channel_colors": color_hexes,
         "time_index": 0,
         "z_index": z // 2,
         "volume_channel": visible[0],
@@ -160,9 +174,7 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
     # prevents an exact result.
     intensity = img.intensity_range()
     intensity_scope = (
-        "complete_array"
-        if len(img.levels) == 1
-        else "complete_smallest_multiscale_level"
+        "complete_array" if len(img.levels) == 1 else "complete_smallest_multiscale_level"
     )
     intensity_record: dict[str, Any] = {
         "status": img.intensity_range_status,
@@ -182,9 +194,7 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
                 "complete smallest multiscale level"
             )
     else:
-        metadata["warnings"].append(
-            f"intensity range omitted: {img.intensity_range_status}"
-        )
+        metadata["warnings"].append(f"intensity range omitted: {img.intensity_range_status}")
     # Acquisition / provenance the NGFF store carries: the multiscale pyramid depth and the
     # source image name (multiscales.name / omero.name, e.g. a well/sample id).
     acquisition: dict[str, Any] = {"pyramid_levels": len(img.levels)}
@@ -216,6 +226,11 @@ def build_ngff_viewer_info(img: NgffImage) -> dict[str, Any]:
         "delivery_mode": delivery_mode,
         "first_paint_mode": "webgl",
         "texture_policy": "linear",
+        "display_capabilities": [
+            "slice_navigation",
+            "intensity_window",
+            *(["channel_visibility", "channel_color", "channel_lut_transport"] if c > 1 else []),
+        ],
         "asset_preparation": {
             "status": "ready",
             "native_supported": True,

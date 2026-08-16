@@ -99,6 +99,14 @@ jobs:
           python-version: "3.11"
 
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.30"
+
+      - name: Verify Deep Agents worker lock
+        run: make deepagents-worker-lock-check
+
+      - name: Verify Deep Agents worker environment
+        run: make deepagents-worker-env-check
 
       - name: Run Deep Agents unit tests
         run: make deepagents-test

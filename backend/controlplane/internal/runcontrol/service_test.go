@@ -1331,6 +1331,269 @@ func TestServiceIngestRunEventWaitsForSourceSequencePredecessor(t *testing.T) {
 	}
 }
 
+func TestServiceIngestRunCompletedFailsClosedForEmptyVisibleResponse(t *testing.T) {
+	t.Parallel()
+	const wantFailure = "Deep Agents worker completed without a user-visible response."
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-empty-response",
+		Title:  "empty response defense",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-empty-response",
+		Goal:     "Can you provide some real computations on delta attention?",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Can you provide some real computations on delta attention?"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+	drainRunEvents(bus)
+
+	completed := domain.AppendRunEventInput{
+		EventID:        "evt-empty-visible-completed",
+		SourceSequence: 2,
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "run.completed",
+		EventType:      "run",
+		Message:        "  ",
+		Payload:        domain.JSONMap{"response_text": "  "},
+	}
+	first, err := service.IngestRunEvent(ctx, completed)
+	if err != nil {
+		t.Fatalf("IngestRunEvent empty completed: %v", err)
+	}
+	duplicate, err := service.IngestRunEvent(ctx, completed)
+	if err != nil {
+		t.Fatalf("IngestRunEvent duplicate empty completed: %v", err)
+	}
+	for _, event := range []domain.RunEventRecord{first, duplicate} {
+		if event.EventID != completed.EventID || event.SourceSequence != completed.SourceSequence || event.EventKind != "run.failed" {
+			t.Fatalf("normalized terminal event = %+v, want same event id stored as run.failed", event)
+		}
+		if got := stringFromPayload(event.Payload, "error"); got != wantFailure {
+			t.Fatalf("normalized terminal error = %q, want %q", got, wantFailure)
+		}
+	}
+	for delivery := 0; delivery < 2; delivery++ {
+		select {
+		case event := <-bus.Events():
+			if event.EventID != completed.EventID || event.SourceSequence != completed.SourceSequence || event.EventKind != "run.failed" {
+				t.Fatalf("fanout delivery %d = %+v, want normalized run.failed", delivery, event)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for normalized failure fanout delivery %d", delivery)
+		}
+	}
+
+	stored, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != domain.RunStatusFailed || stored.Error != wantFailure {
+		t.Fatalf("stored run = %+v, want failed with empty-response error", stored)
+	}
+	if stored.ResponseText != "" {
+		t.Fatalf("stored response = %q, want empty", stored.ResponseText)
+	}
+	events, err := mem.ListRunEventsAfter(ctx, run.RunID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListRunEventsAfter: %v", err)
+	}
+	if len(events) != 2 || events[1].EventKind != "run.failed" {
+		t.Fatalf("stored events = %+v, want accepted then normalized run.failed", events)
+	}
+	messages, err := mem.ListThreadMessages(ctx, thread.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages: %v", err)
+	}
+	if len(messages) != 1 || messages[0].Role != "user" {
+		t.Fatalf("thread messages = %+v, want only the original user message", messages)
+	}
+}
+
+func TestServiceIngestRunCompletedPreservesEmptyInternalCompletion(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-internal-empty",
+		Title:  "internal empty response",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-internal-empty",
+		Goal:     "Internal tool handoff.",
+		Messages: []domain.ThreadMessage{{Role: "tool", Content: "Internal tool handoff."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if !isInternalRunRecord(run) {
+		t.Fatalf("run metadata = %+v, want explicit internal run", run.Metadata)
+	}
+	drainJobs(bus)
+
+	event, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-empty-internal-completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		EventType: "run",
+		Payload:   domain.JSONMap{"response_text": ""},
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent internal completed: %v", err)
+	}
+	if event.EventKind != "run.completed" {
+		t.Fatalf("internal terminal event kind = %q, want run.completed", event.EventKind)
+	}
+	stored, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != domain.RunStatusSucceeded || stored.ResponseText != "" {
+		t.Fatalf("stored internal run = %+v, want succeeded with empty response", stored)
+	}
+}
+
+func TestServiceIngestRunCompletedPreservesLegacyMessageResponse(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	bus := eventbus.NewMemoryBus()
+	service := NewService(mem, bus)
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: "user-legacy-message",
+		Title:  "legacy completion message",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   "user-legacy-message",
+		Goal:     "Return an answer.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Return an answer."}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	drainJobs(bus)
+
+	event, err := service.IngestRunEvent(ctx, domain.AppendRunEventInput{
+		EventID:   "evt-legacy-message-completed",
+		RunID:     run.RunID,
+		ThreadID:  thread.ThreadID,
+		EventKind: "run.completed",
+		EventType: "run",
+		Message:   "Legacy worker answer.",
+		Payload:   domain.JSONMap{},
+	})
+	if err != nil {
+		t.Fatalf("IngestRunEvent legacy completed: %v", err)
+	}
+	if event.EventKind != "run.completed" {
+		t.Fatalf("legacy terminal event kind = %q, want run.completed", event.EventKind)
+	}
+	stored, err := mem.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != domain.RunStatusSucceeded || stored.ResponseText != "Legacy worker answer." {
+		t.Fatalf("stored legacy run = %+v, want succeeded with message response", stored)
+	}
+}
+
+func TestServiceIngestRunCompletedFailsClosedForEmptyVisibleResponseInPostgres(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := store.ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	pg := store.NewPostgresStore(pool)
+	service := NewService(pg, eventbus.NewMemoryBus())
+	userID := "user-empty-response-" + domain.NewID("test")
+
+	thread, err := service.CreateThread(ctx, CreateThreadRequest{
+		UserID: userID,
+		Title:  "postgres empty response defense",
+	})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: thread.ThreadID,
+		UserID:   userID,
+		Goal:     "Can you provide some real computations on delta attention?",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Can you provide some real computations on delta attention?"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	completed := domain.AppendRunEventInput{
+		EventID:        "evt-" + run.RunID + "-empty-completed",
+		SourceSequence: 2,
+		RunID:          run.RunID,
+		ThreadID:       thread.ThreadID,
+		EventKind:      "run.completed",
+		EventType:      "run",
+		Payload:        domain.JSONMap{"response_text": ""},
+	}
+	first, err := service.IngestRunEvent(ctx, completed)
+	if err != nil {
+		t.Fatalf("IngestRunEvent empty completed: %v", err)
+	}
+	duplicate, err := service.IngestRunEvent(ctx, completed)
+	if err != nil {
+		t.Fatalf("IngestRunEvent duplicate empty completed: %v", err)
+	}
+	if first.EventKind != "run.failed" || duplicate.EventKind != "run.failed" {
+		t.Fatalf("terminal events = %s/%s, want idempotent run.failed", first.EventKind, duplicate.EventKind)
+	}
+	if first.EventID != completed.EventID || duplicate.EventID != completed.EventID || first.SourceSequence != completed.SourceSequence || duplicate.SourceSequence != completed.SourceSequence {
+		t.Fatalf("terminal replay identities = %+v/%+v, want original event id and source sequence", first, duplicate)
+	}
+	stored, err := pg.GetRun(ctx, run.RunID)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	if stored.Status != domain.RunStatusFailed || stored.Error != emptyFinalResponseFailureMessage {
+		t.Fatalf("stored Postgres run = %+v, want failed with empty-response error", stored)
+	}
+	events, err := pg.ListRunEventsAfter(ctx, run.RunID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListRunEventsAfter: %v", err)
+	}
+	if len(events) != 2 || events[1].EventKind != "run.failed" {
+		t.Fatalf("stored Postgres events = %+v, want accepted then run.failed", events)
+	}
+}
+
 func TestServiceIngestRunCompletedPersistsAssistantMessageOnce(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

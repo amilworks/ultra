@@ -98,7 +98,23 @@ func Evaluate(clauses []Clause, candidate Run, baseline Run, classNames []string
 
 	anyFailed := false
 	for _, clause := range enabled {
-		for _, expansion := range expandClause(clause, classNames) {
+		expansions := expandClause(clause, classNames)
+		if len(expansions) == 0 {
+			reason := fmt.Sprintf("clause %s (%s) cannot be evaluated: no authoritative manifest class names", clause.ClauseKey, clause.MetricPath)
+			result.Clauses = append(result.Clauses, ClauseOutcome{
+				ClauseKey:  clause.ClauseKey,
+				MetricPath: clause.MetricPath,
+				Slice:      clause.Slice,
+				Comparator: clause.Comparator,
+				Value:      clause.Value,
+				Outcome:    "failed",
+				Reason:     reason,
+			})
+			anyFailed = true
+			result.Reasons = append(result.Reasons, reason)
+			continue
+		}
+		for _, expansion := range expansions {
 			outcome := evaluateExpansion(expansion, candidate.Metrics, baseline.Metrics)
 			result.Clauses = append(result.Clauses, outcome)
 			switch outcome.Outcome {

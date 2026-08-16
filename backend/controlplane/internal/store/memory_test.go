@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -16,6 +17,661 @@ func resourceIDs(resources []domain.ResourceRecord) []string {
 		ids = append(ids, resource.ResourceID)
 	}
 	return ids
+}
+
+func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	type namedStringSlice []string
+	type namedStringMap map[string]string
+	type cyclicPayloadMap map[string]any
+	type definedPointerTarget struct {
+		Value  string
+		Values []string
+	}
+	type definedPointer *definedPointerTarget
+	type definedPointerHolder struct {
+		Pointer definedPointer
+	}
+	type pointerCycle struct {
+		Next *pointerCycle
+	}
+	type payloadStruct struct {
+		Values   []string
+		Metadata map[string]string
+	}
+	type payloadWithHiddenReference struct {
+		hidden []string
+	}
+
+	newStoreAndRun := func(t *testing.T) (*MemoryStore, domain.RunRecord) {
+		t.Helper()
+		store := NewMemoryStore()
+		thread, err := store.CreateThread(ctx, domain.CreateThreadInput{
+			UserID: "payload-owner",
+			Title:  "Run-event payload isolation",
+		})
+		if err != nil {
+			t.Fatalf("CreateThread: %v", err)
+		}
+		run, err := store.CreateRun(ctx, domain.CreateRunInput{
+			ThreadID: thread.ThreadID,
+			UserID:   "payload-owner",
+			Goal:     "Verify run-event payload isolation",
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		return store, run
+	}
+	payloadFor := func(value string) domain.JSONMap {
+		var nilSlice []string
+		var nilMap map[string]string
+		var nilNamedMap namedStringMap
+		var nilRawMessage json.RawMessage
+		var nilPointer *payloadStruct
+		return domain.JSONMap{
+			"domain_map": domain.JSONMap{
+				"plain_map": map[string]any{
+					"slice": []any{domain.JSONMap{"value": value}},
+				},
+			},
+			"slice":            []any{map[string]any{"value": value}},
+			"number":           float64(42.5),
+			"boolean":          true,
+			"null":             nil,
+			"typed_slice":      []string{value},
+			"named_slice":      namedStringSlice{value},
+			"typed_map":        map[string]string{"value": value},
+			"named_map":        namedStringMap{"value": value},
+			"domain_map_slice": []domain.JSONMap{{"value": value}},
+			"raw_message":      json.RawMessage(`{"stable":true}`),
+			"pointer": &payloadStruct{
+				Values:   []string{value},
+				Metadata: map[string]string{"value": value},
+			},
+			"array":           [1][]string{{value}},
+			"nil_slice":       nilSlice,
+			"nil_map":         nilMap,
+			"nil_named_map":   nilNamedMap,
+			"nil_raw_message": nilRawMessage,
+			"nil_pointer":     nilPointer,
+		}
+	}
+	mutatePayload := func(t *testing.T, payload domain.JSONMap) {
+		t.Helper()
+		payload["domain_map"].(domain.JSONMap)["plain_map"].(map[string]any)["slice"].([]any)[0].(domain.JSONMap)["value"] = "mutated"
+		payload["slice"].([]any)[0].(map[string]any)["value"] = "mutated"
+		payload["number"] = float64(-1)
+		payload["typed_slice"].([]string)[0] = "mutated"
+		payload["named_slice"].(namedStringSlice)[0] = "mutated"
+		payload["typed_map"].(map[string]string)["value"] = "mutated"
+		payload["named_map"].(namedStringMap)["value"] = "mutated"
+		payload["domain_map_slice"].([]domain.JSONMap)[0]["value"] = "mutated"
+		payload["raw_message"].(json.RawMessage)[0] = '['
+		payload["pointer"].(*payloadStruct).Values[0] = "mutated"
+		payload["pointer"].(*payloadStruct).Metadata["value"] = "mutated"
+		payload["array"].([1][]string)[0][0] = "mutated"
+	}
+	appendEvent := func(t *testing.T, store *MemoryStore, run domain.RunRecord, eventID string, sourceSequence int64, value string) domain.RunEventRecord {
+		t.Helper()
+		event, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:        eventID,
+			SourceSequence: sourceSequence,
+			RunID:          run.RunID,
+			ThreadID:       run.ThreadID,
+			EventKind:      "payload.test",
+			Payload:        payloadFor(value),
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEvent: %v", err)
+		}
+		return event
+	}
+	assertStoredPayload := func(t *testing.T, store *MemoryStore, eventID string, value string) {
+		t.Helper()
+		event, ok, err := store.GetRunEvent(ctx, eventID)
+		if err != nil {
+			t.Fatalf("GetRunEvent: %v", err)
+		}
+		if !ok {
+			t.Fatalf("GetRunEvent(%q) not found", eventID)
+		}
+		if want := payloadFor(value); !reflect.DeepEqual(event.Payload, want) {
+			t.Fatalf("stored payload = %#v, want %#v", event.Payload, want)
+		}
+		if event.Payload["nil_slice"].([]string) != nil {
+			t.Fatalf("nested typed nil slice = %#v, want nil", event.Payload["nil_slice"])
+		}
+		if event.Payload["nil_map"].(map[string]string) != nil {
+			t.Fatalf("nested typed nil map = %#v, want nil", event.Payload["nil_map"])
+		}
+		if event.Payload["nil_named_map"].(namedStringMap) != nil {
+			t.Fatalf("nested named nil map = %#v, want nil", event.Payload["nil_named_map"])
+		}
+		if event.Payload["nil_raw_message"].(json.RawMessage) != nil {
+			t.Fatalf("nested nil raw message = %#v, want nil", event.Payload["nil_raw_message"])
+		}
+		if event.Payload["nil_pointer"].(*payloadStruct) != nil {
+			t.Fatalf("nested typed nil pointer = %#v, want nil", event.Payload["nil_pointer"])
+		}
+		encoded, err := json.Marshal(event.Payload)
+		if err != nil {
+			t.Fatalf("json.Marshal payload: %v", err)
+		}
+		var encodedFields map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &encodedFields); err != nil {
+			t.Fatalf("json.Unmarshal encoded payload: %v", err)
+		}
+		for _, key := range []string{"nil_slice", "nil_map", "nil_named_map", "nil_raw_message", "nil_pointer"} {
+			if got := string(encodedFields[key]); got != "null" {
+				t.Fatalf("encoded %s = %s, want null", key, got)
+			}
+		}
+	}
+	findEvent := func(t *testing.T, events []domain.RunEventRecord, eventID string) domain.RunEventRecord {
+		t.Helper()
+		for _, event := range events {
+			if event.EventID == eventID {
+				return event
+			}
+		}
+		t.Fatalf("event %q not found in page", eventID)
+		return domain.RunEventRecord{}
+	}
+
+	t.Run("original input after append", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		payload := payloadFor("input")
+		event, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "event-input",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payload,
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEvent: %v", err)
+		}
+		mutatePayload(t, payload)
+		assertStoredPayload(t, store, event.EventID, "input")
+	})
+
+	t.Run("AppendRunEvent return", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		event := appendEvent(t, store, run, "event-append", 0, "append")
+		mutatePayload(t, event.Payload)
+		assertStoredPayload(t, store, event.EventID, "append")
+	})
+
+	t.Run("AppendRunEventIfRunActive appended return", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		event, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-active",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payloadFor("active"),
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEventIfRunActive: %v", err)
+		}
+		if outcome != RunEventAppendOutcomeAppended {
+			t.Fatalf("outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+		}
+		mutatePayload(t, event.Payload)
+		assertStoredPayload(t, store, event.EventID, "active")
+	})
+
+	t.Run("original input after AppendRunEventIfRunActive", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		payload := payloadFor("active input")
+		event, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-active-input",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payload,
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEventIfRunActive: %v", err)
+		}
+		if outcome != RunEventAppendOutcomeAppended {
+			t.Fatalf("outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+		}
+		mutatePayload(t, payload)
+		assertStoredPayload(t, store, event.EventID, "active input")
+	})
+
+	t.Run("AppendRunEventIfRunActive duplicate return", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		original, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-duplicate",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payloadFor("duplicate"),
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEventIfRunActive append: %v", err)
+		}
+		if outcome != RunEventAppendOutcomeAppended {
+			t.Fatalf("append outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+		}
+		duplicate, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   original.EventID,
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payloadFor("ignored duplicate input"),
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEventIfRunActive duplicate: %v", err)
+		}
+		if outcome != RunEventAppendOutcomeDuplicate {
+			t.Fatalf("duplicate outcome = %q, want %q", outcome, RunEventAppendOutcomeDuplicate)
+		}
+		mutatePayload(t, duplicate.Payload)
+		assertStoredPayload(t, store, original.EventID, "duplicate")
+	})
+
+	t.Run("GetRunEvent", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		event := appendEvent(t, store, run, "event-get", 0, "get")
+		got, ok, err := store.GetRunEvent(ctx, event.EventID)
+		if err != nil {
+			t.Fatalf("GetRunEvent: %v", err)
+		}
+		if !ok {
+			t.Fatal("GetRunEvent not found")
+		}
+		mutatePayload(t, got.Payload)
+		assertStoredPayload(t, store, event.EventID, "get")
+	})
+
+	t.Run("GetRunEventBySourceSequence", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		event := appendEvent(t, store, run, "event-source-sequence", 41, "source sequence")
+		got, ok, err := store.GetRunEventBySourceSequence(ctx, run.RunID, 41)
+		if err != nil {
+			t.Fatalf("GetRunEventBySourceSequence: %v", err)
+		}
+		if !ok {
+			t.Fatal("GetRunEventBySourceSequence not found")
+		}
+		mutatePayload(t, got.Payload)
+		assertStoredPayload(t, store, event.EventID, "source sequence")
+	})
+
+	listCases := []struct {
+		name string
+		list func(*testing.T, *MemoryStore, domain.RunRecord) []domain.RunEventRecord
+	}{
+		{
+			name: "ListRunEvents",
+			list: func(t *testing.T, store *MemoryStore, run domain.RunRecord) []domain.RunEventRecord {
+				t.Helper()
+				events, err := store.ListRunEvents(ctx, run.RunID, 10)
+				if err != nil {
+					t.Fatalf("ListRunEvents: %v", err)
+				}
+				return events
+			},
+		},
+		{
+			name: "ListRunEventsForUser",
+			list: func(t *testing.T, store *MemoryStore, run domain.RunRecord) []domain.RunEventRecord {
+				t.Helper()
+				events, err := store.ListRunEventsForUser(ctx, run.RunID, run.UserID, 10)
+				if err != nil {
+					t.Fatalf("ListRunEventsForUser: %v", err)
+				}
+				return events
+			},
+		},
+		{
+			name: "ListRunEventsAfter",
+			list: func(t *testing.T, store *MemoryStore, run domain.RunRecord) []domain.RunEventRecord {
+				t.Helper()
+				events, err := store.ListRunEventsAfter(ctx, run.RunID, 0, 10)
+				if err != nil {
+					t.Fatalf("ListRunEventsAfter: %v", err)
+				}
+				return events
+			},
+		},
+		{
+			name: "ListRunEventsAfterForUser",
+			list: func(t *testing.T, store *MemoryStore, run domain.RunRecord) []domain.RunEventRecord {
+				t.Helper()
+				events, err := store.ListRunEventsAfterForUser(ctx, run.RunID, run.UserID, 0, 10)
+				if err != nil {
+					t.Fatalf("ListRunEventsAfterForUser: %v", err)
+				}
+				return events
+			},
+		},
+	}
+	for _, tc := range listCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, run := newStoreAndRun(t)
+			event := appendEvent(t, store, run, "event-"+tc.name, 0, tc.name)
+			listed := findEvent(t, tc.list(t, store, run), event.EventID)
+			mutatePayload(t, listed.Payload)
+			assertStoredPayload(t, store, event.EventID, tc.name)
+		})
+	}
+
+	t.Run("nil payload remains non-nil empty map", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		event, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "event-empty-payload",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEvent: %v", err)
+		}
+		if event.Payload == nil || len(event.Payload) != 0 {
+			t.Fatalf("appended payload = %#v, want non-nil empty map", event.Payload)
+		}
+		stored, ok, err := store.GetRunEvent(ctx, event.EventID)
+		if err != nil {
+			t.Fatalf("GetRunEvent: %v", err)
+		}
+		if !ok {
+			t.Fatal("GetRunEvent not found")
+		}
+		if stored.Payload == nil || len(stored.Payload) != 0 {
+			t.Fatalf("stored payload = %#v, want non-nil empty map", stored.Payload)
+		}
+	})
+
+	newDefinedPointer := func(value string) definedPointer {
+		return definedPointer(&definedPointerTarget{Value: value, Values: []string{value}})
+	}
+	definedPointerPayload := func(value string) domain.JSONMap {
+		return domain.JSONMap{
+			"interface_pointer": any(newDefinedPointer(value)),
+			"pointer_slice":     []definedPointer{newDefinedPointer(value)},
+			"pointer_map":       map[string]definedPointer{"value": newDefinedPointer(value)},
+			"pointer_struct":    definedPointerHolder{Pointer: newDefinedPointer(value)},
+			"pointer_key_map":   map[definedPointer]string{newDefinedPointer(value): "value"},
+		}
+	}
+	assertDefinedPointers := func(t *testing.T, payload domain.JSONMap, value string) {
+		t.Helper()
+		assertPointer := func(name string, pointer definedPointer) {
+			t.Helper()
+			if pointer == nil || pointer.Value != value || !reflect.DeepEqual(pointer.Values, []string{value}) {
+				t.Fatalf("%s = %#v, want defined pointer containing %q", name, pointer, value)
+			}
+		}
+		pointer, ok := payload["interface_pointer"].(definedPointer)
+		if !ok {
+			t.Fatalf("interface pointer dynamic type = %T, want definedPointer", payload["interface_pointer"])
+		}
+		assertPointer("interface pointer", pointer)
+		assertPointer("typed slice pointer", payload["pointer_slice"].([]definedPointer)[0])
+		assertPointer("typed map pointer", payload["pointer_map"].(map[string]definedPointer)["value"])
+		assertPointer("struct pointer", payload["pointer_struct"].(definedPointerHolder).Pointer)
+		keyMap := payload["pointer_key_map"].(map[definedPointer]string)
+		if len(keyMap) != 1 {
+			t.Fatalf("pointer key map = %#v, want one entry", keyMap)
+		}
+		for key, mapValue := range keyMap {
+			if mapValue != "value" {
+				t.Fatalf("pointer key map value = %q, want value", mapValue)
+			}
+			assertPointer("map key pointer", key)
+		}
+	}
+	mutateDefinedPointers := func(payload domain.JSONMap) {
+		mutate := func(pointer definedPointer) {
+			pointer.Value = "mutated"
+			pointer.Values[0] = "mutated"
+		}
+		mutate(payload["interface_pointer"].(definedPointer))
+		mutate(payload["pointer_slice"].([]definedPointer)[0])
+		mutate(payload["pointer_map"].(map[string]definedPointer)["value"])
+		mutate(payload["pointer_struct"].(definedPointerHolder).Pointer)
+		for key := range payload["pointer_key_map"].(map[definedPointer]string) {
+			mutate(key)
+		}
+	}
+
+	t.Run("defined pointers preserve dynamic type and isolation", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		payload := definedPointerPayload("defined")
+		var event domain.RunEventRecord
+		var appendErr error
+		var panicValue any
+		func() {
+			defer func() {
+				panicValue = recover()
+			}()
+			event, appendErr = store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   "event-defined-pointers",
+				RunID:     run.RunID,
+				ThreadID:  run.ThreadID,
+				EventKind: "payload.test",
+				Payload:   payload,
+			})
+		}()
+		if panicValue != nil {
+			t.Fatalf("AppendRunEvent panicked cloning defined pointer: %v", panicValue)
+		}
+		if appendErr != nil {
+			t.Fatalf("AppendRunEvent: %v", appendErr)
+		}
+		assertDefinedPointers(t, event.Payload, "defined")
+		mutateDefinedPointers(payload)
+		assertDefinedPointers(t, event.Payload, "defined")
+		mutateDefinedPointers(event.Payload)
+		stored, ok, err := store.GetRunEvent(ctx, event.EventID)
+		if err != nil || !ok {
+			t.Fatalf("GetRunEvent = (_, %v, %v), want record", ok, err)
+		}
+		assertDefinedPointers(t, stored.Payload, "defined")
+	})
+
+	t.Run("finite overlapping slice views clone without a false cycle", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		outer := make([]any, 2)
+		outer[0] = "x"
+		outer[1] = outer[:1]
+		event, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "event-overlapping-slice",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   domain.JSONMap{"overlap": outer},
+		})
+		if err != nil {
+			t.Fatalf("AppendRunEvent: %v", err)
+		}
+		assertOverlap := func(t *testing.T, payload domain.JSONMap) {
+			t.Helper()
+			encoded, err := json.Marshal(payload["overlap"])
+			if err != nil {
+				t.Fatalf("json.Marshal overlap: %v", err)
+			}
+			if got := string(encoded); got != `["x",["x"]]` {
+				t.Fatalf("overlap JSON = %s, want [\"x\",[\"x\"]]", got)
+			}
+		}
+		assertOverlap(t, event.Payload)
+		outer[0] = "mutated input"
+		assertOverlap(t, event.Payload)
+		returned := event.Payload["overlap"].([]any)
+		returned[0] = "mutated return"
+		returned[1].([]any)[0] = "mutated nested return"
+		stored, ok, err := store.GetRunEvent(ctx, event.EventID)
+		if err != nil || !ok {
+			t.Fatalf("GetRunEvent = (_, %v, %v), want record", ok, err)
+		}
+		assertOverlap(t, stored.Payload)
+	})
+
+	invalidPayloadCases := []struct {
+		name    string
+		payload func() domain.JSONMap
+		want    error
+	}{
+		{
+			name: "cycle",
+			payload: func() domain.JSONMap {
+				cycle := cyclicPayloadMap{}
+				cycle["self"] = cycle
+				return domain.JSONMap{"cycle": cycle}
+			},
+			want: errRunEventPayloadCycle,
+		},
+		{
+			name: "self-referential slice",
+			payload: func() domain.JSONMap {
+				cycle := make([]any, 1)
+				cycle[0] = cycle
+				return domain.JSONMap{"cycle": cycle}
+			},
+			want: errRunEventPayloadCycle,
+		},
+		{
+			name: "self-referential pointer",
+			payload: func() domain.JSONMap {
+				cycle := &pointerCycle{}
+				cycle.Next = cycle
+				return domain.JSONMap{"cycle": cycle}
+			},
+			want: errRunEventPayloadCycle,
+		},
+		{
+			name: "channel",
+			payload: func() domain.JSONMap {
+				return domain.JSONMap{"channel": make(chan int)}
+			},
+			want: errRunEventPayloadUnsupported,
+		},
+		{
+			name: "struct with hidden reference",
+			payload: func() domain.JSONMap {
+				return domain.JSONMap{"struct": payloadWithHiddenReference{hidden: []string{"secret"}}}
+			},
+			want: errRunEventPayloadUnsupported,
+		},
+	}
+	for _, tc := range invalidPayloadCases {
+		t.Run("AppendRunEvent rejects "+tc.name, func(t *testing.T) {
+			store, run := newStoreAndRun(t)
+			eventID := "event-invalid-append-" + tc.name
+			if _, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+				EventID:   eventID,
+				RunID:     run.RunID,
+				ThreadID:  run.ThreadID,
+				EventKind: "payload.test",
+				Payload:   tc.payload(),
+			}); !errors.Is(err, tc.want) {
+				t.Fatalf("AppendRunEvent error = %v, want %v", err, tc.want)
+			}
+			if _, ok, err := store.GetRunEvent(ctx, eventID); err != nil || ok {
+				t.Fatalf("GetRunEvent after rejected append = (_, %v, %v), want (_, false, nil)", ok, err)
+			}
+		})
+
+		t.Run("AppendRunEventIfRunActive rejects "+tc.name, func(t *testing.T) {
+			store, run := newStoreAndRun(t)
+			eventID := "event-invalid-active-" + tc.name
+			_, _, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+				EventID:   eventID,
+				RunID:     run.RunID,
+				ThreadID:  run.ThreadID,
+				EventKind: "payload.test",
+				Payload:   tc.payload(),
+			})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("AppendRunEventIfRunActive error = %v, want %v", err, tc.want)
+			}
+			if _, ok, err := store.GetRunEvent(ctx, eventID); err != nil || ok {
+				t.Fatalf("GetRunEvent after rejected active append = (_, %v, %v), want (_, false, nil)", ok, err)
+			}
+		})
+	}
+
+	t.Run("AppendRunEvent validates run existence before payload", func(t *testing.T) {
+		store := NewMemoryStore()
+		cycle := cyclicPayloadMap{}
+		cycle["self"] = cycle
+		if _, err := store.AppendRunEvent(ctx, domain.AppendRunEventInput{
+			EventID:   "event-missing-run",
+			RunID:     "missing-run",
+			EventKind: "payload.test",
+			Payload:   domain.JSONMap{"cycle": cycle},
+		}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("AppendRunEvent error = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("AppendRunEventIfRunActive terminal duplicate ignores replacement payload", func(t *testing.T) {
+		store, run := newStoreAndRun(t)
+		original, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-duplicate-cycle",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   payloadFor("duplicate cycle"),
+		})
+		if err != nil || outcome != RunEventAppendOutcomeAppended {
+			t.Fatalf("initial append = (_, %q, %v), want appended", outcome, err)
+		}
+		if _, err := store.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID}); err != nil {
+			t.Fatalf("CompleteRun: %v", err)
+		}
+		cycle := cyclicPayloadMap{}
+		cycle["self"] = cycle
+		duplicate, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   original.EventID,
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   domain.JSONMap{"cycle": cycle},
+		})
+		if err != nil || outcome != RunEventAppendOutcomeDuplicate {
+			t.Fatalf("duplicate replay = (_, %q, %v), want duplicate", outcome, err)
+		}
+		if !reflect.DeepEqual(duplicate.Payload, original.Payload) {
+			t.Fatalf("duplicate payload = %#v, want %#v", duplicate.Payload, original.Payload)
+		}
+	})
+
+	t.Run("AppendRunEventIfRunActive missing and terminal runs ignore payload", func(t *testing.T) {
+		cyclePayload := func() domain.JSONMap {
+			cycle := cyclicPayloadMap{}
+			cycle["self"] = cycle
+			return domain.JSONMap{"cycle": cycle}
+		}
+		store, run := newStoreAndRun(t)
+		if _, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-missing-active-run",
+			RunID:     "missing-run",
+			EventKind: "payload.test",
+			Payload:   cyclePayload(),
+		}); err != nil || outcome != RunEventAppendOutcomeDropped {
+			t.Fatalf("missing run append = (_, %q, %v), want dropped", outcome, err)
+		}
+		if _, err := store.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID}); err != nil {
+			t.Fatalf("CompleteRun: %v", err)
+		}
+		if _, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
+			EventID:   "event-terminal-active-run",
+			RunID:     run.RunID,
+			ThreadID:  run.ThreadID,
+			EventKind: "payload.test",
+			Payload:   cyclePayload(),
+		}); err != nil || outcome != RunEventAppendOutcomeDropped {
+			t.Fatalf("terminal run append = (_, %q, %v), want dropped", outcome, err)
+		}
+	})
 }
 
 func TestMemoryStoreThreadRunEventArtifactFlow(t *testing.T) {

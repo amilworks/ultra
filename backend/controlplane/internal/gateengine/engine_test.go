@@ -115,6 +115,38 @@ func TestEmptyClauseSetFailsClosed(t *testing.T) {
 	}
 }
 
+func TestWildcardClauseWithoutManifestClassesFailsClosed(t *testing.T) {
+	t.Parallel()
+	clauses := []Clause{
+		{ClauseKey: "class_recall_abs", MetricPath: "per_class.*.recall_at_op", Comparator: "abs_floor", Value: 0.50, Enabled: true},
+		{ClauseKey: "agg_map50", MetricPath: "aggregate.map50", Comparator: "abs_floor", Value: 0.80, Enabled: true},
+	}
+	blob := healthyBlob(0.83, 0.62)
+	result := Evaluate(clauses, run(blob), run(blob), []string{})
+
+	if result.Passed {
+		t.Fatal("wildcard clause without authoritative manifest class names must fail closed")
+	}
+	if len(result.Clauses) != 2 {
+		t.Fatalf("clause outcomes = %d, want aggregate plus failed wildcard", len(result.Clauses))
+	}
+	if aggregate := result.Clauses[1]; aggregate.ClauseKey != "agg_map50" || aggregate.Outcome != "passed" {
+		t.Fatalf("aggregate outcome = %+v, want retained passed outcome", aggregate)
+	}
+
+	wildcard := result.Clauses[0]
+	wantReason := "clause class_recall_abs (per_class.*.recall_at_op) cannot be evaluated: no authoritative manifest class names"
+	if wildcard.ClauseKey != "class_recall_abs" || wildcard.MetricPath != "per_class.*.recall_at_op" || wildcard.Outcome != "failed" {
+		t.Fatalf("wildcard outcome = %+v, want failed outcome retaining source clause key and path", wildcard)
+	}
+	if wildcard.Reason != wantReason {
+		t.Fatalf("wildcard reason = %q, want %q", wildcard.Reason, wantReason)
+	}
+	if len(result.Reasons) != 1 || result.Reasons[0] != wantReason {
+		t.Fatalf("top-level reasons = %v, want [%q]", result.Reasons, wantReason)
+	}
+}
+
 // Proof 5: a synthetic SEGMENTATION clause set evaluates with zero engine
 // changes - Gate B is config, not code.
 func TestSyntheticSegmentationClauseSet(t *testing.T) {

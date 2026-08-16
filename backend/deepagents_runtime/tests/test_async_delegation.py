@@ -948,6 +948,7 @@ def test_list_async_tasks_reports_persisted_failed_launch_error_without_remote_c
     result = middleware.wrap_tool_call(request, unreachable_handler)
 
     assert isinstance(result, ToolMessage)
+    assert result.status == "error"
     assert result.tool_call_id == "call-list-async-tasks-failed-launch"
     assert "1 tracked task(s):" in str(result.content)
     assert "task_id: async-thread-1" in str(result.content)
@@ -969,6 +970,7 @@ def test_alist_async_tasks_reports_persisted_failed_launch_error_without_remote_
     result = asyncio.run(middleware.awrap_tool_call(request, unreachable_handler))
 
     assert isinstance(result, ToolMessage)
+    assert result.status == "error"
     assert result.tool_call_id == "call-list-async-tasks-failed-launch"
     assert "1 tracked task(s):" in str(result.content)
     assert "task_id: async-thread-1" in str(result.content)
@@ -994,6 +996,24 @@ def test_list_async_tasks_reports_mixed_terminal_cached_tasks_without_remote_cal
     assert "503 Service Unavailable" in str(result.content)
     assert "task_id: cancelled-thread-1" in str(result.content)
     assert "status: cancelled" in str(result.content)
+
+
+def test_list_async_tasks_cached_nonfailed_terminal_list_remains_success():
+    middleware = _middleware()
+    request = _terminal_task_request(
+        "list_async_tasks",
+        task_id="cancelled-thread-1",
+        run_id="cancelled-run-1",
+        status="cancelled",
+    )
+
+    def unreachable_handler(request):
+        raise AssertionError("terminal cached list should not call fallback handler")
+
+    result = middleware.wrap_tool_call(request, unreachable_handler)
+
+    assert isinstance(result, ToolMessage)
+    assert result.status == "success"
 
 
 def test_alist_async_tasks_reports_mixed_terminal_cached_tasks_without_remote_call():
@@ -1109,6 +1129,7 @@ def test_update_async_task_persists_update_failure_without_marking_task_failed(m
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
+    assert message.status == "error"
     assert "Failed to update async subagent" in str(message.content)
     assert "task_id: async-thread-1" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
@@ -1151,6 +1172,7 @@ def test_aupdate_async_task_persists_update_failure_without_marking_task_failed(
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
+    assert message.status == "error"
     assert "Failed to update async subagent" in str(message.content)
     assert "task_id: async-thread-1" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
@@ -1340,6 +1362,7 @@ def test_check_async_task_persists_status_failure_without_marking_task_failed():
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
+    assert message.status == "error"
     assert "Failed to get run status" in str(message.content)
     assert "task_id: async-thread-1" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]
@@ -1368,6 +1391,7 @@ def test_acheck_async_task_persists_status_failure_without_marking_task_failed()
     assert isinstance(result, Command)
     message = result.update["messages"][0]
     assert isinstance(message, ToolMessage)
+    assert message.status == "error"
     assert "Failed to get run status" in str(message.content)
     assert "task_id: async-thread-1" in str(message.content)
     task = result.update["async_tasks"]["async-thread-1"]

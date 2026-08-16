@@ -55,6 +55,15 @@ class RuntimeSettings:
     # only max_input_tokens does NOT enable native structured output, so the
     # subagent ToolStrategy auto-retry handoff is preserved.
     model_max_input_tokens: int = 0
+    # Opt-in typed multi-tool programs. The program surface is an explicit
+    # allowlist; the operation/concurrency caps are host authority, not prompt
+    # suggestions. Byte and timeout limits remain conservative code constants.
+    tool_program_enabled: bool = False
+    tool_program_max_operations: int = 16
+    tool_program_max_concurrency: int = 4
+    # Experimental local Trace Lens enrichment.  Off by default; when enabled,
+    # existing token-usage events may carry content-free structural input counts.
+    trace_lens_inputs_enabled: bool = False
     request_timeout_seconds: float = 0.0
     # Idle/stall watchdog: if the agent's event stream produces NOTHING for this long
     # the run is recovered instead of hanging forever. Generous (1h) so it only trips on
@@ -62,7 +71,27 @@ class RuntimeSettings:
     # subagent/reasoning/tool events that reset the deadline). 0 disables (was the default
     # that let a stalled vision call wedge a worker for 1h43m).
     model_stream_idle_timeout_seconds: float = 3600.0
+    # Once coordinator reasoning/answer output has begun, a dead-open provider
+    # stream must not wait for the one-hour all-stream ceiling. This shorter
+    # gap applies only while no tool call is active; long scientific compute
+    # therefore keeps the hard stream ceiling above. 0 disables.
+    model_output_idle_timeout_seconds: float = 120.0
     model_stream_idle_max_recoveries: int = 2
+    # A malformed model turn can expose raw provider control tokens as ordinary
+    # assistant text when the upstream tool parser fails closed (observed with
+    # DeepSeek DSML after a long tool-heavy run). This budget is intentionally
+    # independent of idle recovery: a run may consume its dead-stream retries
+    # before the parser defect appears, but protocol text must still never be
+    # accepted as a successful user response. 0 disables recovery and fails the
+    # run immediately; detection itself remains armed.
+    model_protocol_max_recoveries: int = 1
+    # After the first reasoning-degeneration or protocol-leak recovery, retry
+    # attempts run the coordinator with chat_template_kwargs.enable_thinking
+    # =false (deepseek_v4 only). Both pathologies live in the served template's
+    # thinking path — thinking-off on the same weights answers cleanly — so
+    # re-rolling the retry in thinking mode mostly re-fails and burns the
+    # recovery budget for nothing. Run-scoped; reset at every run start.
+    degeneration_thinking_fallback: bool = True
     # Within-turn progress-stall guard (the anti-livelock complement to the idle
     # watchdog above, which is a dead-transport detector and by design never trips
     # on a BUSY loop). Counts consecutive sandbox executes that repeat an
@@ -91,8 +120,11 @@ class RuntimeSettings:
     # subagent. Enabled per-env; when disabled, or when endpoint/key are missing,
     # the subagent is never registered. max_input_tokens is the endpoint's context
     # window (prompt+images+thinking+answer must all fit). client_max_edge bounds
-    # image longest-side before send so large scientific images do not overload the
-    # configured server.
+    # image longest-side before send — an upload-cost bound only: the served
+    # processor normalizes every image into its own fixed vision-token budget
+    # (probed: identical prompt_tokens from 1280px to 3300px), so raising this
+    # beyond the server's effective resolution adds bytes, not model-visible
+    # detail. Raise it only together with the serve command's mm max_pixels.
     qwen_vlm_enabled: bool = False
     qwen_vlm_base_url: str = ""
     qwen_vlm_model: str = "Qwen3.6-27B"
@@ -296,11 +328,37 @@ class RuntimeSettings:
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS", "0")),
             ),
+            tool_program_enabled=_env_bool(
+                "ULTRA_DEEPAGENTS_TOOL_PROGRAM_ENABLED",
+                False,
+            ),
+            tool_program_max_operations=max(
+                1,
+                min(
+                    64,
+                    int(os.getenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_OPERATIONS", "16")),
+                ),
+            ),
+            tool_program_max_concurrency=max(
+                1,
+                min(
+                    16,
+                    int(os.getenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_CONCURRENCY", "4")),
+                ),
+            ),
+            trace_lens_inputs_enabled=_env_bool(
+                "ULTRA_DEEPAGENTS_TRACE_LENS_INPUTS",
+                False,
+            ),
             request_timeout_seconds=float(os.getenv("ULTRA_DEEPAGENTS_TIMEOUT_SECONDS", "0")),
             model_stream_idle_timeout_seconds=max(
                 0.0,
                 # Default armed (3600 = the field default); only an explicit env 0 disables it.
                 float(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS", "3600")),
+            ),
+            model_output_idle_timeout_seconds=max(
+                0.0,
+                float(os.getenv("ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS", "120")),
             ),
             subagent_task_timeout_seconds=max(
                 0.0, float(os.getenv("ULTRA_DEEPAGENTS_SUBAGENT_TASK_TIMEOUT_SECONDS", "1800"))
@@ -308,6 +366,13 @@ class RuntimeSettings:
             model_stream_idle_max_recoveries=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", "2")),
+            ),
+            model_protocol_max_recoveries=max(
+                0,
+                int(os.getenv("ULTRA_DEEPAGENTS_MODEL_PROTOCOL_MAX_RECOVERIES", "1")),
+            ),
+            degeneration_thinking_fallback=_env_bool(
+                "ULTRA_DEEPAGENTS_DEGENERATION_THINKING_FALLBACK", True
             ),
             progress_stall_threshold=max(
                 0,

@@ -6,7 +6,8 @@ import logging
 import re
 import time
 import unicodedata
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -35,7 +36,6 @@ from ultra_deepagents.code_execution.docker import (
 )
 from ultra_deepagents.code_execution.git_staging import GitStagingConfig
 from ultra_deepagents.config import RuntimeSettings
-from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.context import AgentRunContext
 from ultra_deepagents.context_tools import (
     build_context_tools,
@@ -49,6 +49,14 @@ from ultra_deepagents.evaluation_profiles import (
     evaluation_policy_dir,
     is_cleanroom_evaluation_profile,
 )
+from ultra_deepagents.harness_plugins import (
+    HarnessPlugin,
+    HarnessPluginRegistry,
+    ProgramToolPolicy,
+    ToolConcurrency,
+    program_policy_from_tool_metadata,
+)
+from ultra_deepagents.map_task import GENERAL_PURPOSE_SUBAGENT_SPEC, build_map_task_tool
 from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import TextOnlyMultimodalMiddleware
 from ultra_deepagents.papers.tools import build_paper_tools
@@ -58,6 +66,12 @@ from ultra_deepagents.resources.tools import build_resource_tools
 from ultra_deepagents.steering import SteeringInboxMiddleware
 from ultra_deepagents.subagent_resilience import SubagentFailureIsolationMiddleware
 from ultra_deepagents.todo_reminders import UltraTodoReminderMiddleware
+from ultra_deepagents.tool_program import (
+    ToolProgramLimits,
+    build_tool_program_prompt,
+    build_tool_program_tool,
+)
+from ultra_deepagents.trace_lens_inputs import build_agent_configuration
 from ultra_deepagents.vision import build_vision_tools
 
 _FENCED_CODE_BLOCK_RE = re.compile(r"```.*?```|~~~.*?~~~", re.DOTALL)
@@ -1114,7 +1128,10 @@ OCR_SUBAGENT = {
         "(blocks with kind heading|body|table|axis_label|legend|tick|caption, text, "
         "confidence, and engine/vlm agreement; tables additionally as TSV). Return the "
         "file paths in artifacts and only the distilled result in summary — never "
-        "paste a long transcription into your response fields.\n"
+        "paste a long transcription into your response fields. Working images — region "
+        "crops, upscaled/preprocessed variants, extracted frames — are scratch: keep "
+        "them under /workspace (e.g. /workspace/crops/), never under /outputs; every "
+        "file in /outputs is delivered to the user as a run artifact.\n"
         "ROUTING LIMITS: born-digital PDFs and ingested papers are NOT OCR jobs — "
         "report that the paper tools own them (extract_paper_table_evidence for "
         "tables). Counting objects, measuring pixels, and bounding-box production stay "
@@ -1285,6 +1302,70 @@ def ensure_ultra_harness_profile() -> None:
         ),
     )
     _ULTRA_HARNESS_PROFILE_REGISTERED = True
+
+
+_PROGRAM_CONTEXT_TOOLS = {
+    "artifact_manifest": ToolConcurrency.PARALLEL,
+    "stage_artifact_for_analysis": ToolConcurrency.EXCLUSIVE,
+    "stage_uploaded_files_for_analysis": ToolConcurrency.EXCLUSIVE,
+}
+_PROGRAM_PAPER_TOOLS = {
+    "ingest_arxiv_paper": ToolConcurrency.EXCLUSIVE,
+    "ingest_pdf_resource": ToolConcurrency.EXCLUSIVE,
+    "paper_manifest": ToolConcurrency.PARALLEL,
+    "search_paper": ToolConcurrency.PARALLEL,
+    "read_paper_pages": ToolConcurrency.PARALLEL,
+    "read_paper_section": ToolConcurrency.PARALLEL,
+    "bind_paper_text_literal": ToolConcurrency.PARALLEL,
+    "render_paper_page": ToolConcurrency.EXCLUSIVE,
+}
+_PROGRAM_BISQUE_TOOLS = {
+    "bisque_search_resources": ToolConcurrency.PARALLEL,
+    "bisque_dataset_members": ToolConcurrency.PARALLEL,
+    "bisque_image_annotations": ToolConcurrency.PARALLEL,
+    "bisque_dataset_annotation_summary": ToolConcurrency.PARALLEL,
+    "bisque_download_resource": ToolConcurrency.EXCLUSIVE,
+    "bisque_module_runs": ToolConcurrency.PARALLEL,
+}
+_PROGRAM_EPISODIC_TOOLS = {
+    "search_past_research": ToolConcurrency.PARALLEL,
+}
+_PROGRAM_RESOURCE_TOOLS = {
+    "search_resources": ToolConcurrency.PARALLEL,
+    "stage_resource_for_analysis": ToolConcurrency.EXCLUSIVE,
+}
+_PROGRAM_GIT_TOOLS = {
+    "stage_git_repo_for_analysis": ToolConcurrency.EXCLUSIVE,
+}
+_PROGRAM_JSON_OBJECT_SCHEMA = {"type": "object"}
+
+
+def _program_policies(
+    tools: Sequence[Any],
+    modes: Mapping[str, ToolConcurrency],
+) -> tuple[ProgramToolPolicy, ...]:
+    policies: list[ProgramToolPolicy] = []
+    for tool_object in tools:
+        name = str(getattr(tool_object, "name", "") or "").strip()
+        concurrency = modes.get(name)
+        if concurrency is None:
+            continue
+        policies.append(
+            ProgramToolPolicy(
+                tool_name=name,
+                concurrency=concurrency,
+                result_schema=_PROGRAM_JSON_OBJECT_SCHEMA,
+            )
+        )
+    return tuple(policies)
+
+
+def _custom_program_policies(tools: Sequence[Any]) -> tuple[ProgramToolPolicy, ...]:
+    return tuple(
+        policy
+        for tool_object in tools
+        if (policy := program_policy_from_tool_metadata(tool_object)) is not None
+    )
 
 
 def build_subagents(
@@ -1628,7 +1709,12 @@ def _should_register_async_delegation_subagents(context: AgentRunContext | None)
     )
 
 
-def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | None = None) -> str:
+def build_system_prompt(
+    settings: RuntimeSettings,
+    context: AgentRunContext | None = None,
+    *,
+    extension_sections: Sequence[str] = (),
+) -> str:
     cleanroom = bool(
         context is not None and is_cleanroom_evaluation_profile(context.evaluation_profile)
     )
@@ -1687,10 +1773,10 @@ def build_system_prompt(settings: RuntimeSettings, context: AgentRunContext | No
     # coordinator drove 155 inline code-runner calls instead of delegating the loop.
     if settings.builder_enabled:
         sections.append(BUILDER_DELEGATION_GUIDANCE)
-    if context is not None:
-        brief = build_run_context_brief(context)
-        if brief:
-            sections.append(brief)
+    # Extension SDKs are deterministic for a frozen plugin surface. Per-run
+    # identity, resources, and time are appended by middleware instead, so the
+    # expensive static prefix remains cacheable and appears exactly once.
+    sections.extend(section.strip() for section in extension_sections if section.strip())
     return "\n\n".join(sections) + "\n"
 
 
@@ -1819,7 +1905,7 @@ def build_runtime_prompt_suffix(
     *,
     elapsed_seconds: float | None = None,
 ) -> str:
-    """Request-dependent system-prompt suffix: run brief, wall-clock, contract.
+    """Request-dependent system-prompt suffix: run brief, contract, wall-clock.
 
     Pure helper so the middleware stays trivially testable. The wall-clock line
     exists because the model cannot see session time and otherwise mislabels
@@ -1831,6 +1917,10 @@ def build_runtime_prompt_suffix(
     brief = build_run_context_brief(context)
     if brief:
         sections.append(brief)
+    if is_rigor_intelligence(context) and looks_dynamical_system_rigor_goal(context.goal):
+        sections.append(DYNAMICAL_SYSTEMS_RESULTS_CONTRACT_GUIDANCE.strip())
+    # Keep the only value that changes on every model call at the very end. This
+    # maximizes the reusable request prefix for provider KV/prompt caches.
     if elapsed_seconds is not None and elapsed_seconds >= 0:
         minutes, seconds = divmod(int(elapsed_seconds), 60)
         sections.append(
@@ -1838,8 +1928,6 @@ def build_runtime_prompt_suffix(
             "When reporting runtimes, report this wall-clock time and any inner "
             "compute time as separate labeled numbers."
         )
-    if is_rigor_intelligence(context) and looks_dynamical_system_rigor_goal(context.goal):
-        sections.append(DYNAMICAL_SYSTEMS_RESULTS_CONTRACT_GUIDANCE.strip())
     return "\n\n".join(sections)
 
 
@@ -2213,6 +2301,7 @@ def build_research_agent(
     context: AgentRunContext | None = None,
     checkpointer: Any | None = None,
     surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
+    trace_surface_sink: Callable[[dict[str, Any]], None] | None = None,
     steering_inbox: Any | None = None,
 ) -> Any:
     ensure_ultra_harness_profile()
@@ -2266,7 +2355,7 @@ def build_research_agent(
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 
-    resolved_tools = list(tools or [])
+    caller_tools = list(tools or [])
     context_tools = (
         [] if cleanroom else build_context_tools(upload_roots=settings.rarespot_upload_roots)
     )
@@ -2278,18 +2367,97 @@ def build_research_agent(
         if _should_register_paper_tools(context)
         else []
     )
-    resolved_tools.extend(context_tools)
-    resolved_tools.extend(paper_tools)
-    if _should_register_bisque_tools(context):
-        resolved_tools.extend(build_bisque_tools(settings, context=context))
-    if _should_register_episodic_tools(context):
-        resolved_tools.extend(build_episodic_tools(settings))
-    if _should_register_resource_tools(context):
-        resolved_tools.extend(
-            build_resource_tools(settings, upload_roots=settings.rarespot_upload_roots)
+    bisque_tools = (
+        build_bisque_tools(settings, context=context)
+        if _should_register_bisque_tools(context)
+        else []
+    )
+    episodic_tools = (
+        build_episodic_tools(settings) if _should_register_episodic_tools(context) else []
+    )
+    resource_tools = (
+        build_resource_tools(settings, upload_roots=settings.rarespot_upload_roots)
+        if _should_register_resource_tools(context)
+        else []
+    )
+    git_tools = (
+        build_git_tools(git_staging_config(settings))
+        if _should_register_git_tools(context, settings)
+        else []
+    )
+    plugin_registry = HarnessPluginRegistry(
+        (
+            HarnessPlugin(
+                name="caller",
+                order=0,
+                tools=tuple(caller_tools),
+                program_tools=(
+                    _custom_program_policies(caller_tools) if settings.tool_program_enabled else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="context",
+                order=10,
+                tools=tuple(context_tools),
+                program_tools=(
+                    _program_policies(context_tools, _PROGRAM_CONTEXT_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="papers",
+                order=20,
+                tools=tuple(paper_tools),
+                program_tools=(
+                    _program_policies(paper_tools, _PROGRAM_PAPER_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="bisque",
+                order=30,
+                tools=tuple(bisque_tools),
+                program_tools=(
+                    _program_policies(bisque_tools, _PROGRAM_BISQUE_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="episodic",
+                order=40,
+                tools=tuple(episodic_tools),
+                program_tools=(
+                    _program_policies(episodic_tools, _PROGRAM_EPISODIC_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="resources",
+                order=50,
+                tools=tuple(resource_tools),
+                program_tools=(
+                    _program_policies(resource_tools, _PROGRAM_RESOURCE_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
+            HarnessPlugin(
+                name="git",
+                order=60,
+                tools=tuple(git_tools),
+                program_tools=(
+                    _program_policies(git_tools, _PROGRAM_GIT_TOOLS)
+                    if settings.tool_program_enabled
+                    else ()
+                ),
+            ),
         )
-    if _should_register_git_tools(context, settings):
-        resolved_tools.extend(build_git_tools(git_staging_config(settings)))
+    )
+    resolved_tools = list(plugin_registry.freeze().tools)
     vision_tools = (
         build_vision_tools(
             settings,
@@ -2379,9 +2547,36 @@ def build_research_agent(
     # available_subagents:[] alongside a registered map_task is a lie the
     # model wastes reasoning on.
     manifest_subagents = [*subagents, dict(GENERAL_PURPOSE_SUBAGENT_SPEC)]
-    resolved_tools.append(
-        build_map_task_tool(mappable_specs, workspace_dir=workspace_dir)
+    map_task_tool = build_map_task_tool(mappable_specs, workspace_dir=workspace_dir)
+    plugin_registry.register(
+        HarnessPlugin(
+            name="map-task",
+            order=70,
+            tools=(map_task_tool,),
+        )
     )
+    program_surface = plugin_registry.freeze()
+    if settings.tool_program_enabled and program_surface.program_tools:
+        tool_program_tool = build_tool_program_tool(
+            program_surface.program_tools,
+            limits=ToolProgramLimits(
+                max_operations=settings.tool_program_max_operations,
+                max_concurrency=min(
+                    settings.tool_program_max_concurrency,
+                    settings.tool_program_max_operations,
+                ),
+            ),
+        )
+        plugin_registry.register(
+            HarnessPlugin(
+                name="tool-program",
+                order=80,
+                tools=(tool_program_tool,),
+                prompt_sections=(build_tool_program_prompt(program_surface.program_sdk),),
+            )
+        )
+    resolved_surface = plugin_registry.freeze()
+    resolved_tools = list(resolved_surface.tools)
     compute_resources = sandbox_compute_resources(settings)
     capability_manifest_tool = build_tool_capability_manifest_tool(
         resolved_tools,
@@ -2389,7 +2584,15 @@ def build_research_agent(
         available_async_subagents=async_subagents,
         compute_resources=compute_resources,
     )
-    registered_tools = [*resolved_tools, capability_manifest_tool]
+    plugin_registry.register(
+        HarnessPlugin(
+            name="capability-manifest",
+            order=90,
+            tools=(capability_manifest_tool,),
+        )
+    )
+    registered_surface = plugin_registry.freeze()
+    registered_tools = list(registered_surface.tools)
     domain_manifest = build_tool_capability_manifest(
         registered_tools,
         available_subagents=manifest_subagents,
@@ -2402,7 +2605,11 @@ def build_research_agent(
         available_async_subagents=async_subagents,
         compute_resources=compute_resources,
     )
-    system_prompt = build_system_prompt(settings, context)
+    system_prompt = build_system_prompt(
+        settings,
+        context,
+        extension_sections=registered_surface.prompt_sections,
+    )
     if surface_attestation_sink is not None:
         surface_attestation_sink(
             {
@@ -2415,6 +2622,36 @@ def build_research_agent(
     resolved_tools = registered_tools
     all_subagents = [*subagents, *async_subagents]
 
+    if trace_surface_sink is not None:
+        # Local diagnostics must not affect agent construction. Do not log
+        # values from this path: custom tool objects may expose content in
+        # attribute access or exception representations.
+        with suppress(Exception):
+            trace_surface_sink(
+                build_agent_configuration(
+                    model_id=settings.openai_model,
+                    provider_id=settings.model_provider_id,
+                    registered_tools=resolved_tools,
+                    subagents=subagents,
+                    async_subagent_count=len(async_subagents),
+                    builder_enabled=settings.builder_enabled,
+                    declared_memory_count=(
+                        0
+                        if cleanroom
+                        else sum(path.startswith("/memories/") for path in MEMORY_PATHS)
+                    ),
+                    declared_policy_count=(
+                        0
+                        if cleanroom
+                        else sum(path.startswith("/policies/") for path in MEMORY_PATHS)
+                    ),
+                    declared_skill_count=len(skills_sources or ()),
+                )
+            )
+
+    # Upstream hoisted `model or build_chat_model(settings)` into map_model for
+    # the map_task dispatch; the sink block above only OBSERVES construction, so
+    # it slots in before the assignment without touching model resolution.
     resolved_model = map_model
 
     return create_deep_agent(

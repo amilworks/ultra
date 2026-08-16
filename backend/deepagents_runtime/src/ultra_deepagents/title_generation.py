@@ -260,12 +260,12 @@ async def generate_conversation_title(
                 artifact_events=artifact_events,
             ),
         )
-    except Exception as exc:  # Title generation must never block run completion.
+    except Exception:  # Title generation must never block run completion.
         return ConversationTitleResult(
             title=fallback,
             strategy="fallback",
             model=settings.openai_model,
-            reason=str(exc),
+            reason="title_model_error",
         )
     sanitized = sanitize_generated_title(title)
     if not sanitized:

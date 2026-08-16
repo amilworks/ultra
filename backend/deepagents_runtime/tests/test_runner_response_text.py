@@ -11,11 +11,18 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.runner import (
     _choose_response_text,
     _response_text_from_final_state,
+    _stream_text_delta,
     run_job,
 )
 from ultra_deepagents.schemas import RunJobEnvelope
@@ -88,6 +95,23 @@ def test_final_state_trailing_bookkeeping_without_coda_keeps_report():
 def test_final_state_empty_returns_empty():
     assert _response_text_from_final_state(None) == ""
     assert _response_text_from_final_state({"messages": []}) == ""
+
+
+def test_v3_raw_role_messages_never_publish_user_or_system_as_assistant_deltas():
+    for message in (
+        HumanMessage(content="private user request"),
+        SystemMessage(content="private system rules"),
+        ToolMessage(content="tool output", tool_call_id="tool-1"),
+    ):
+        event = {"method": "messages", "params": {"data": [message]}}
+        assert _stream_text_delta(event) == ""
+
+    assert _stream_text_delta(
+        {"method": "messages", "params": {"data": [AIMessage(content="answer")]}}
+    ) == "answer"
+    assert _stream_text_delta(
+        {"method": "messages", "params": {"data": [AIMessageChunk(content="delta")]}}
+    ) == "delta"
 
 
 def test_choose_response_prefers_fuller_post_tool_when_final_is_short_suffix():

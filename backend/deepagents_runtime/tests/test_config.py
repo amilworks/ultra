@@ -101,6 +101,22 @@ def test_runtime_settings_load_model_stream_liveness_guard(monkeypatch):
     assert settings.model_stream_idle_timeout_seconds == 12.5
 
 
+def test_runtime_settings_bound_dead_open_model_output_by_default(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS", raising=False)
+    assert RuntimeSettings.from_env().model_output_idle_timeout_seconds == 120.0
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS", "0")
+    assert RuntimeSettings.from_env().model_output_idle_timeout_seconds == 0.0
+
+
+def test_runtime_settings_load_model_output_idle_guard(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS", "12.5")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.model_output_idle_timeout_seconds == 12.5
+
+
 def test_runtime_settings_default_to_model_stream_idle_recoveries(monkeypatch):
     monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_MAX_RECOVERIES", raising=False)
 
@@ -115,6 +131,22 @@ def test_runtime_settings_load_model_stream_idle_recoveries(monkeypatch):
     settings = RuntimeSettings.from_env()
 
     assert settings.model_stream_idle_max_recoveries == 4
+
+
+def test_runtime_settings_default_to_one_model_protocol_recovery(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_MODEL_PROTOCOL_MAX_RECOVERIES", raising=False)
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.model_protocol_max_recoveries == 1
+
+
+def test_runtime_settings_load_model_protocol_recoveries(monkeypatch):
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_MODEL_PROTOCOL_MAX_RECOVERIES", "3")
+
+    settings = RuntimeSettings.from_env()
+
+    assert settings.model_protocol_max_recoveries == 3
 
 
 def test_runtime_settings_default_progress_stall_guard_armed(monkeypatch):
@@ -144,6 +176,26 @@ def test_runtime_settings_builder_disabled_by_default_opt_in(monkeypatch):
 
     monkeypatch.setenv("ULTRA_DEEPAGENTS_BUILDER_ENABLED", "1")
     assert RuntimeSettings.from_env().builder_enabled is True
+
+
+def test_runtime_settings_tool_program_is_bounded_and_opt_in(monkeypatch):
+    monkeypatch.delenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_ENABLED", raising=False)
+    assert RuntimeSettings.from_env().tool_program_enabled is False
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_ENABLED", "1")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_OPERATIONS", "9")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_CONCURRENCY", "3")
+    settings = RuntimeSettings.from_env()
+
+    assert settings.tool_program_enabled is True
+    assert settings.tool_program_max_operations == 9
+    assert settings.tool_program_max_concurrency == 3
+
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_OPERATIONS", "999")
+    monkeypatch.setenv("ULTRA_DEEPAGENTS_TOOL_PROGRAM_MAX_CONCURRENCY", "999")
+    clamped = RuntimeSettings.from_env()
+    assert clamped.tool_program_max_operations == 64
+    assert clamped.tool_program_max_concurrency == 16
 
 
 def test_runtime_settings_default_to_higher_autonomous_continuation_guard(monkeypatch):

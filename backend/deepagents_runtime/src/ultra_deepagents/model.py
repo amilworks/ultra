@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Any
 
@@ -9,6 +10,39 @@ from langchain_openai import ChatOpenAI
 from ultra_deepagents.config import RuntimeSettings
 
 logger = logging.getLogger(__name__)
+
+# Degeneration escalation switch. The repetition-collapse and DSML-leak
+# pathologies live in the served template's thinking path (thinking-off is
+# clean on the same weights), so after the runner's first
+# reasoning-degeneration / protocol-leak recovery it arms this run-scoped
+# switch and every subsequent deepseek_v4 request carries
+# chat_template_kwargs.enable_thinking=false — the retry stops re-rolling the
+# same collapsed distribution. A contextvar (not a bind) because the model is
+# already woven into the compiled agent graph mid-run; asyncio propagates the
+# armed state to the retry attempt's child tasks and to_thread hops.
+_thinking_fallback_armed: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ultra_deepagents_thinking_fallback_armed", default=False
+)
+
+
+def arm_thinking_fallback() -> None:
+    _thinking_fallback_armed.set(True)
+
+
+def reset_thinking_fallback() -> None:
+    _thinking_fallback_armed.set(False)
+
+
+def thinking_fallback_armed() -> bool:
+    return _thinking_fallback_armed.get()
+
+# DeepSeek-V4-Flash-0731's published agentic evaluation/serving profile uses
+# temperature=1.0 and top_p=0.95.  Leaving these unset delegates to the model's
+# generic generation_config.json (top_p=1.0), which is explicitly the
+# non-agentic preset and produced rare high-entropy reasoning loops in live
+# Ultra runs.  Keep this model-specific: other OpenAI-compatible endpoints own
+# their own sampling defaults.
+_DEEPSEEK_V4_AGENTIC_SAMPLING = {"temperature": 1.0, "top_p": 0.95}
 
 
 class UltraChatOpenAI(ChatOpenAI):
@@ -33,6 +67,8 @@ class UltraChatOpenAI(ChatOpenAI):
         payload = super()._get_request_payload(messages, stop=stop, **kwargs)
         if _is_deepseek_v4_model(getattr(self, "model_name", None)):
             _preserve_deepseek_reasoning_content(payload, messages)
+            if _thinking_fallback_armed.get():
+                _apply_thinking_fallback(payload)
         return payload
 
     def _convert_chunk_to_generation_chunk(
@@ -49,15 +85,36 @@ class UltraChatOpenAI(ChatOpenAI):
         reasoning = _chunk_reasoning_text(chunk)
         if reasoning:
             kwargs = generation_chunk.message.additional_kwargs
-            kwargs["reasoning_content"] = (
-                str(kwargs.get("reasoning_content") or "") + reasoning
-            )
+            kwargs["reasoning_content"] = str(kwargs.get("reasoning_content") or "") + reasoning
         return generation_chunk
 
 
 def _is_deepseek_v4_model(model_name: str | None) -> bool:
     normalized = str(model_name or "").lower().replace("-", "_").replace("/", "_")
     return "deepseek_v4" in normalized
+
+
+def _agentic_sampling_kwargs(model_name: str | None) -> dict[str, float]:
+    if _is_deepseek_v4_model(model_name):
+        return dict(_DEEPSEEK_V4_AGENTIC_SAMPLING)
+    return {}
+
+
+def _apply_thinking_fallback(payload: dict) -> None:
+    """Force chat_template_kwargs.enable_thinking=false on this request.
+
+    Merged under ``extra_body`` (the OpenAI SDK's pass-through for
+    non-standard body keys — the same wire path title_generation uses at
+    bind time), preserving any caller-supplied extra_body/chat_template_kwargs
+    rather than clobbering them.
+    """
+    extra = payload.get("extra_body")
+    merged = dict(extra) if isinstance(extra, dict) else {}
+    template_kwargs = merged.get("chat_template_kwargs")
+    template_kwargs = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
+    template_kwargs["enable_thinking"] = False
+    merged["chat_template_kwargs"] = template_kwargs
+    payload["extra_body"] = merged
 
 
 def _preserve_deepseek_reasoning_content(payload: dict, messages: list[Any]) -> None:
@@ -103,9 +160,7 @@ def _client_timeout(read_timeout: float | None):
     byte. Returns an ``httpx.Timeout``; the OpenAI client accepts it directly."""
     import httpx  # transitive dep of openai/langchain_openai; worker-only module
 
-    return httpx.Timeout(
-        connect=_CONNECT_TIMEOUT_SECONDS, read=read_timeout, write=30.0, pool=30.0
-    )
+    return httpx.Timeout(connect=_CONNECT_TIMEOUT_SECONDS, read=read_timeout, write=30.0, pool=30.0)
 
 
 def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
@@ -120,6 +175,7 @@ def build_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         timeout=_client_timeout(request_timeout),
         stream_chunk_timeout=stream_chunk_timeout,
         max_retries=settings.max_retries,
+        **_agentic_sampling_kwargs(settings.openai_model),
         # Ask the OpenAI-compatible endpoint to report token usage on the
         # streamed response so the runner can account per-run token spend.
         stream_usage=True,
@@ -160,6 +216,7 @@ def build_vision_chat_model(settings: RuntimeSettings) -> ChatOpenAI:
         timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
+        **_agentic_sampling_kwargs(settings.qwen_vlm_model),
         stream_usage=True,
     )
     if settings.qwen_vlm_max_input_tokens > 0:
@@ -196,6 +253,7 @@ def build_builder_model(settings: RuntimeSettings) -> ChatOpenAI:
         timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
+        **_agentic_sampling_kwargs(settings.builder_model),
         stream_usage=True,
     )
     if settings.builder_max_input_tokens > 0:
@@ -231,6 +289,7 @@ def build_builder_worker_model(settings: RuntimeSettings) -> ChatOpenAI:
         timeout=_client_timeout(timeout),
         stream_chunk_timeout=timeout,
         max_retries=settings.max_retries,
+        **_agentic_sampling_kwargs(settings.builder_worker_model),
         stream_usage=True,
     )
     if settings.builder_worker_max_input_tokens > 0:

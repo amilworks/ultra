@@ -81,6 +81,7 @@ def test_transcription_contract_pins_the_key_clauses():
         "Agreement between engine and VLM",
         "never silently pick one",
         "/outputs/ocr/",
+        "/workspace/crops/",
         "ffmpeg",
         "timeout",
         "paper tools",

@@ -106,6 +106,12 @@ const reasoningDeltaText = (event: RunEventLike): string => {
   return typeof text === "string" ? text : "";
 };
 
+const reasoningRunID = (event: RunEventLike): string =>
+  String(toRecord(event.payload)?.run_id ?? "").trim();
+
+const reasoningStatus = (event: RunEventLike): string =>
+  String(toRecord(event.payload)?.status ?? "").trim().toLowerCase();
+
 // Merge a new reasoning delta into the coalesced one by ACCUMULATING its text. The worker flushes
 // reasoning as INCREMENTAL fragments (reasoning_stream.py joins the buffered parts then clears them),
 // so each delta carries only the text since the last flush — NOT a cumulative snapshot. We therefore
@@ -113,14 +119,23 @@ const reasoningDeltaText = (event: RunEventLike): string => {
 // status="completed" flush usually carries no text, so this preserves the full chain-of-thought
 // while flipping the step to done).
 const mergeReasoningDelta = <T extends RunEventLike>(prev: T, next: T): T =>
-  ({
-    ...next,
-    payload: {
-      ...(toRecord(prev.payload) ?? {}),
-      ...(toRecord(next.payload) ?? {}),
-      text: reasoningDeltaText(prev) + reasoningDeltaText(next),
-    },
-  }) as T;
+  (() => {
+    const previousText = reasoningDeltaText(prev);
+    const nextText = reasoningDeltaText(next);
+    // A completed flush is the boundary between model calls. Without a
+    // separator, the last sentence of one tool/reasoning round is glued to the
+    // first sentence of the next and the trace reads as scrambled prose.
+    const roundSeparator =
+      previousText && nextText && reasoningStatus(prev) === "completed" ? "\n\n" : "";
+    return {
+      ...next,
+      payload: {
+        ...(toRecord(prev.payload) ?? {}),
+        ...(toRecord(next.payload) ?? {}),
+        text: previousText + roundSeparator + nextText,
+      },
+    } as T;
+  })();
 
 // Coalesce reasoning deltas into a SINGLE run event (bounded array — a long think is ~2.5 events/s),
 // accumulating their text IN PLACE so the full reasoning trace is preserved for the "Thinking"
@@ -132,14 +147,41 @@ export const appendRunEventCoalescing = <T extends RunEventLike>(
   nextEvent: T
 ): T[] => {
   if (eventKindOf(nextEvent) === REASONING_DELTA_KIND) {
+    const nextRunID = reasoningRunID(nextEvent);
+    const nextSequence = finiteSequence(
+      toRecord(nextEvent.payload)?.sequence ?? nextEvent.sequence
+    );
+    const nextIdentity = runEventIdentity(nextEvent);
     for (let i = events.length - 1; i >= 0; i--) {
-      if (eventKindOf(events[i]) === REASONING_DELTA_KIND) {
+      const previous = events[i];
+      if (eventKindOf(previous) === REASONING_DELTA_KIND) {
+        const previousRunID = reasoningRunID(previous);
+        if (previousRunID && nextRunID && previousRunID !== nextRunID) {
+          continue;
+        }
+        const previousSequence = finiteSequence(
+          toRecord(previous.payload)?.sequence ?? previous.sequence
+        );
+        // Coalescing replaces the stored identity/sequence with the newest
+        // fragment. SSE reconnect or poll overlap can replay any older
+        // fragment; strict per-run ordering means a <= sequence here is a
+        // replay, never a new delta. Do this check BEFORE concatenation.
+        if (
+          (nextSequence > 0 && previousSequence >= nextSequence) ||
+          runEventIdentity(previous) === nextIdentity ||
+          (nextSequence === 0 &&
+            previousSequence === 0 &&
+            reasoningDeltaText(nextEvent).length > 0 &&
+            reasoningDeltaText(previous).endsWith(reasoningDeltaText(nextEvent)))
+        ) {
+          return events;
+        }
         const next = events.slice();
-        next[i] = mergeReasoningDelta(events[i], nextEvent);
+        next[i] = mergeReasoningDelta(previous, nextEvent);
         return next;
       }
     }
-    return [...events, nextEvent];
+    return appendUniqueRunEvent(events, nextEvent);
   }
   return appendUniqueRunEvent(events, nextEvent);
 };
@@ -152,9 +194,15 @@ export const reasoningTextFromRunEvents = (
   events: Array<{ event_type?: unknown; event_kind?: unknown; payload?: unknown }>
 ): string => {
   let text = "";
+  let previousStatus = "";
   for (const event of events) {
     if (eventKindOf(event) === REASONING_DELTA_KIND) {
-      text += reasoningDeltaText(event);
+      const fragment = reasoningDeltaText(event);
+      if (text && fragment && previousStatus === "completed") {
+        text += "\n\n";
+      }
+      text += fragment;
+      previousStatus = reasoningStatus(event);
     }
   }
   return text.trim();

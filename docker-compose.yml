@@ -274,6 +274,12 @@ services:
       # at a forced 96K window: 3 compaction cycles, bounded context, zero guard
       # firings, todos/ledger state intact across every cycle). Override per model.
       ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS: ${ULTRA_DEEPAGENTS_MODEL_MAX_INPUT_TOKENS:-720896}
+      ULTRA_DEEPAGENTS_TRACE_LENS_INPUTS: ${ULTRA_TRACE_LENS_INPUTS:-false}
+      # A one-hour hard ceiling protects silent tools. Once coordinator output
+      # has begun and no tool is active, fail over much sooner if the provider
+      # leaves its stream dead-open after reasoning.
+      ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS: ${ULTRA_DEEPAGENTS_MODEL_STREAM_IDLE_TIMEOUT_SECONDS:-3600}
+      ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS: ${ULTRA_DEEPAGENTS_MODEL_OUTPUT_IDLE_TIMEOUT_SECONDS:-120}
       ULTRA_CONTROL_BASE_URL: http://control-plane:8000
       ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
       ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
@@ -310,6 +316,14 @@ services:
       QWEN_VLM_DEPLOYMENT_ATTESTATION_PATH: ${ULTRA_QWEN_VLM_DEPLOYMENT_ATTESTATION_PATH:-}
       QWEN_VLM_DEPLOYMENT_ATTESTATION_SHA256: ${ULTRA_QWEN_VLM_DEPLOYMENT_ATTESTATION_SHA256:-}
       QWEN_VLM_API_KEY: ${ULTRA_QWEN_VLM_API_KEY:-}
+      # MAX_INPUT_TOKENS must match the endpoint's served max_model_len
+      # (GET /v1/models). CLIENT_MAX_EDGE is an upload-side bound only: the
+      # served processor normalizes every image into its own fixed vision-token
+      # budget, so raising it beyond the server's effective resolution adds
+      # upload bytes, not model-visible detail — raise it only together with
+      # the serve command's mm-processor max_pixels.
+      QWEN_VLM_MAX_INPUT_TOKENS: ${ULTRA_QWEN_VLM_MAX_INPUT_TOKENS:-131072}
+      QWEN_VLM_CLIENT_MAX_EDGE: ${ULTRA_QWEN_VLM_CLIENT_MAX_EDGE:-1280}
       # Optional external GPU MegaSeg inference service — off unless a URL is set.
       MEGASEG_SERVICE_URL: ${ULTRA_MEGASEG_SERVICE_URL:-}
       MEGASEG_SERVICE_API_KEY: ${ULTRA_MEGASEG_SERVICE_API_KEY:-}

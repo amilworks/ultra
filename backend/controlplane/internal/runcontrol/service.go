@@ -103,6 +103,8 @@ type workerHeartbeatReader interface {
 // writes loses nothing except sub-15s freshness of runs.updated_at.
 const heartbeatStatusWriteInterval = 15 * time.Second
 
+const emptyFinalResponseFailureMessage = "Deep Agents worker completed without a user-visible response."
+
 type Service struct {
 	store            Store
 	bus              eventbus.Bus
@@ -1284,6 +1286,11 @@ func (s *Service) ReleaseRunLease(ctx context.Context, req ReleaseRunLeaseReques
 }
 
 func (s *Service) IngestRunEvent(ctx context.Context, input domain.AppendRunEventInput) (domain.RunEventRecord, error) {
+	normalized, err := s.normalizeEmptyVisibleRunCompletion(ctx, input)
+	if err != nil {
+		return domain.RunEventRecord{}, err
+	}
+	input = normalized
 	if err := s.ensureRunEventSourcePredecessor(ctx, input); err != nil {
 		return domain.RunEventRecord{}, err
 	}
@@ -1291,6 +1298,36 @@ func (s *Service) IngestRunEvent(ctx context.Context, input domain.AppendRunEven
 		return s.ingestRunEventFast(ctx, appender, input)
 	}
 	return s.ingestRunEventLegacy(ctx, input)
+}
+
+// normalizeEmptyVisibleRunCompletion turns an invalid worker success into a
+// durable failure before append. The same event ID and source sequence are
+// retained, so duplicate delivery replays the stored failure and cannot mutate
+// terminal state. Explicit internal/hidden runs retain their existing contract.
+func (s *Service) normalizeEmptyVisibleRunCompletion(ctx context.Context, input domain.AppendRunEventInput) (domain.AppendRunEventInput, error) {
+	if input.EventKind != "run.completed" || completedRunResponseText(input) != "" {
+		return input, nil
+	}
+	run, err := s.store.GetRun(ctx, input.RunID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return input, nil
+		}
+		return domain.AppendRunEventInput{}, err
+	}
+	if run.WorkflowKind != "deep_agents" || isInternalRunRecord(run) {
+		return input, nil
+	}
+	payload := cloneMap(input.Payload)
+	delete(payload, "response_text")
+	payload["error"] = emptyFinalResponseFailureMessage
+	payload["error_type"] = "AgentEmptyResponseError"
+	input.EventKind = "run.failed"
+	input.EventType = "run"
+	input.Level = "error"
+	input.Message = emptyFinalResponseFailureMessage
+	input.Payload = payload
+	return input, nil
 }
 
 func (s *Service) ensureRunEventSourcePredecessor(ctx context.Context, input domain.AppendRunEventInput) error {
@@ -1506,10 +1543,7 @@ func (s *Service) applyRunEventSideEffects(ctx context.Context, input domain.App
 			return err
 		}
 	case "run.completed":
-		responseText := stringFromPayload(input.Payload, "response_text")
-		if responseText == "" {
-			responseText = input.Message
-		}
+		responseText := completedRunResponseText(input)
 		completedRun, err := s.store.CompleteRun(ctx, domain.CompleteRunInput{
 			RunID:        input.RunID,
 			ResponseText: responseText,
@@ -2269,6 +2303,13 @@ func isTerminalRunEventKind(eventKind string) bool {
 
 func stringFromPayload(payload domain.JSONMap, key string) string {
 	return strings.TrimSpace(anyString(payload[key]))
+}
+
+func completedRunResponseText(input domain.AppendRunEventInput) string {
+	if responseText := stringFromPayload(input.Payload, "response_text"); responseText != "" {
+		return responseText
+	}
+	return strings.TrimSpace(input.Message)
 }
 
 func jsonMapFromPayload(payload domain.JSONMap, key string) domain.JSONMap {

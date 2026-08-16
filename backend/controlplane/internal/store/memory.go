@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,8 +16,10 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("already exists")
+	ErrNotFound                   = errors.New("not found")
+	ErrConflict                   = errors.New("already exists")
+	errRunEventPayloadCycle       = errors.New("run event payload contains a cycle")
+	errRunEventPayloadUnsupported = errors.New("run event payload contains an unsupported mutable reference")
 )
 
 const defaultResourceRetention = 30 * 24 * time.Hour
@@ -1524,6 +1527,10 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 		// source_sequence space (zero = none in the record shape).
 		sourceSequence = 0
 	}
+	storedPayload, err := cloneRunEventPayload(input.Payload)
+	if err != nil {
+		return domain.RunEventRecord{}, err
+	}
 	event := domain.RunEventRecord{
 		EventID:        eventID,
 		Sequence:       seq,
@@ -1540,10 +1547,14 @@ func (s *MemoryStore) AppendRunEvent(ctx context.Context, input domain.AppendRun
 		Level:          input.Level,
 		TS:             ts,
 		Message:        input.Message,
-		Payload:        mapOrEmpty(input.Payload),
+		Payload:        storedPayload,
+	}
+	returnedEvent, err := cloneRunEventRecord(event)
+	if err != nil {
+		return domain.RunEventRecord{}, err
 	}
 	s.events[input.RunID] = append(s.events[input.RunID], event)
-	return event, nil
+	return returnedEvent, nil
 }
 
 // AppendRunEventIfRunActive mirrors the Postgres fast path: a duplicate
@@ -1557,7 +1568,11 @@ func (s *MemoryStore) AppendRunEventIfRunActive(ctx context.Context, input domai
 	if input.EventID != "" {
 		for _, existing := range s.events[input.RunID] {
 			if existing.EventID == input.EventID {
-				return existing, RunEventAppendOutcomeDuplicate, nil
+				cloned, err := cloneRunEventRecord(existing)
+				if err != nil {
+					return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, err
+				}
+				return cloned, RunEventAppendOutcomeDuplicate, nil
 			}
 		}
 	}
@@ -1572,6 +1587,10 @@ func (s *MemoryStore) AppendRunEventIfRunActive(ctx context.Context, input domai
 	ts := input.TS
 	if ts.IsZero() {
 		ts = domain.Now()
+	}
+	storedPayload, err := cloneRunEventPayload(input.Payload)
+	if err != nil {
+		return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, err
 	}
 	event := domain.RunEventRecord{
 		EventID:        eventID,
@@ -1589,10 +1608,14 @@ func (s *MemoryStore) AppendRunEventIfRunActive(ctx context.Context, input domai
 		Level:          input.Level,
 		TS:             ts,
 		Message:        input.Message,
-		Payload:        mapOrEmpty(input.Payload),
+		Payload:        storedPayload,
+	}
+	returnedEvent, err := cloneRunEventRecord(event)
+	if err != nil {
+		return domain.RunEventRecord{}, RunEventAppendOutcomeDropped, err
 	}
 	s.events[input.RunID] = append(s.events[input.RunID], event)
-	return event, RunEventAppendOutcomeAppended, nil
+	return returnedEvent, RunEventAppendOutcomeAppended, nil
 }
 
 func sourceSequenceOrDefault(sourceSequence int64, defaultSequence int64) int64 {
@@ -1612,7 +1635,11 @@ func (s *MemoryStore) GetRunEvent(ctx context.Context, eventID string) (domain.R
 	for _, events := range s.events {
 		for _, event := range events {
 			if event.EventID == eventID {
-				return event, true, nil
+				cloned, err := cloneRunEventRecord(event)
+				if err != nil {
+					return domain.RunEventRecord{}, false, err
+				}
+				return cloned, true, nil
 			}
 		}
 	}
@@ -1628,7 +1655,11 @@ func (s *MemoryStore) GetRunEventBySourceSequence(ctx context.Context, runID str
 	defer s.mu.RUnlock()
 	for _, event := range s.events[strings.TrimSpace(runID)] {
 		if event.SourceSequence == sourceSequence {
-			return event, true, nil
+			cloned, err := cloneRunEventRecord(event)
+			if err != nil {
+				return domain.RunEventRecord{}, false, err
+			}
+			return cloned, true, nil
 		}
 	}
 	return domain.RunEventRecord{}, false, nil
@@ -1638,7 +1669,7 @@ func (s *MemoryStore) ListRunEvents(ctx context.Context, runID string, limit int
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneLatestRunEventsPage(s.events[runID], limit), nil
+	return cloneLatestRunEventsPage(s.events[runID], limit)
 }
 
 // PruneRunEventDeltas mirrors PostgresStore.PruneRunEventDeltas for the in-memory store: it removes
@@ -1692,14 +1723,14 @@ func (s *MemoryStore) ListRunEventsForUser(ctx context.Context, runID string, us
 	if !ok || run.UserID != userID {
 		return nil, ErrNotFound
 	}
-	return cloneLatestRunEventsPage(s.events[runID], limit), nil
+	return cloneLatestRunEventsPage(s.events[runID], limit)
 }
 
 func (s *MemoryStore) ListRunEventsAfter(ctx context.Context, runID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit), nil
+	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit)
 }
 
 func (s *MemoryStore) ListRunEventsAfterForUser(ctx context.Context, runID string, userID string, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
@@ -1710,28 +1741,257 @@ func (s *MemoryStore) ListRunEventsAfterForUser(ctx context.Context, runID strin
 	if !ok || run.UserID != userID {
 		return nil, ErrNotFound
 	}
-	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit), nil
+	return cloneRunEventsPageAfter(s.events[runID], afterSequence, limit)
 }
 
-func cloneLatestRunEventsPage(source []domain.RunEventRecord, limit int) []domain.RunEventRecord {
+func cloneLatestRunEventsPage(source []domain.RunEventRecord, limit int) ([]domain.RunEventRecord, error) {
 	if limit > 0 && len(source) > limit {
 		source = source[len(source)-limit:]
 	}
-	return append([]domain.RunEventRecord(nil), source...)
+	events := append([]domain.RunEventRecord(nil), source...)
+	for index := range events {
+		cloned, err := cloneRunEventRecord(events[index])
+		if err != nil {
+			return nil, err
+		}
+		events[index] = cloned
+	}
+	return events, nil
 }
 
-func cloneRunEventsPageAfter(source []domain.RunEventRecord, afterSequence int64, limit int) []domain.RunEventRecord {
+func cloneRunEventsPageAfter(source []domain.RunEventRecord, afterSequence int64, limit int) ([]domain.RunEventRecord, error) {
 	start := sort.Search(len(source), func(index int) bool {
 		return source[index].Sequence > afterSequence
 	})
 	if start >= len(source) {
-		return []domain.RunEventRecord{}
+		return []domain.RunEventRecord{}, nil
 	}
 	end := len(source)
 	if limit > 0 && start+limit < end {
 		end = start + limit
 	}
-	return append([]domain.RunEventRecord(nil), source[start:end]...)
+	events := append([]domain.RunEventRecord(nil), source[start:end]...)
+	for index := range events {
+		cloned, err := cloneRunEventRecord(events[index])
+		if err != nil {
+			return nil, err
+		}
+		events[index] = cloned
+	}
+	return events, nil
+}
+
+func cloneRunEventRecord(event domain.RunEventRecord) (domain.RunEventRecord, error) {
+	payload, err := cloneRunEventPayload(event.Payload)
+	if err != nil {
+		return domain.RunEventRecord{}, err
+	}
+	event.Payload = payload
+	return event, nil
+}
+
+type runEventPayloadVisit struct {
+	typeOf      reflect.Type
+	pointer     uintptr
+	sliceLength int
+}
+
+func cloneRunEventPayload(payload domain.JSONMap) (domain.JSONMap, error) {
+	if payload == nil {
+		return domain.JSONMap{}, nil
+	}
+	cloned, err := cloneRunEventPayloadValue(reflect.ValueOf(payload), make(map[runEventPayloadVisit]struct{}))
+	if err != nil {
+		return nil, err
+	}
+	return cloned.Interface().(domain.JSONMap), nil
+}
+
+func cloneRunEventPayloadValue(value reflect.Value, visiting map[runEventPayloadVisit]struct{}) (reflect.Value, error) {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		cloned, err := cloneRunEventPayloadValue(value.Elem(), visiting)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		result := reflect.New(value.Type()).Elem()
+		if err := setRunEventPayloadValue(result, cloned); err != nil {
+			return reflect.Value{}, err
+		}
+		return result, nil
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		visit := runEventPayloadVisit{typeOf: value.Type(), pointer: uintptr(value.UnsafePointer())}
+		if _, ok := visiting[visit]; ok {
+			return reflect.Value{}, errRunEventPayloadCycle
+		}
+		visiting[visit] = struct{}{}
+		defer delete(visiting, visit)
+		result := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			key, err := cloneRunEventPayloadValue(iterator.Key(), visiting)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			item, err := cloneRunEventPayloadValue(iterator.Value(), visiting)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			key, err = coerceRunEventPayloadValue(key, value.Type().Key())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			item, err = coerceRunEventPayloadValue(item, value.Type().Elem())
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			result.SetMapIndex(key, item)
+		}
+		return result, nil
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		visit := runEventPayloadVisit{
+			typeOf:      value.Type(),
+			pointer:     uintptr(value.UnsafePointer()),
+			sliceLength: value.Len(),
+		}
+		if _, ok := visiting[visit]; ok {
+			return reflect.Value{}, errRunEventPayloadCycle
+		}
+		visiting[visit] = struct{}{}
+		defer delete(visiting, visit)
+		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := 0; index < value.Len(); index++ {
+			item, err := cloneRunEventPayloadValue(value.Index(index), visiting)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			if err := setRunEventPayloadValue(result.Index(index), item); err != nil {
+				return reflect.Value{}, err
+			}
+		}
+		return result, nil
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type()), nil
+		}
+		visit := runEventPayloadVisit{typeOf: value.Type(), pointer: uintptr(value.UnsafePointer())}
+		if _, ok := visiting[visit]; ok {
+			return reflect.Value{}, errRunEventPayloadCycle
+		}
+		visiting[visit] = struct{}{}
+		defer delete(visiting, visit)
+		item, err := cloneRunEventPayloadValue(value.Elem(), visiting)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		result := reflect.New(value.Type().Elem())
+		if err := setRunEventPayloadValue(result.Elem(), item); err != nil {
+			return reflect.Value{}, err
+		}
+		return coerceRunEventPayloadValue(result, value.Type())
+	case reflect.Array:
+		result := reflect.New(value.Type()).Elem()
+		for index := 0; index < value.Len(); index++ {
+			item, err := cloneRunEventPayloadValue(value.Index(index), visiting)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			if err := setRunEventPayloadValue(result.Index(index), item); err != nil {
+				return reflect.Value{}, err
+			}
+		}
+		return result, nil
+	case reflect.Struct:
+		valueType := value.Type()
+		for index := 0; index < value.NumField(); index++ {
+			field := valueType.Field(index)
+			if field.PkgPath != "" && runEventPayloadTypeHasReferences(field.Type, make(map[reflect.Type]struct{})) {
+				return reflect.Value{}, errRunEventPayloadUnsupported
+			}
+		}
+		result := reflect.New(valueType).Elem()
+		if err := setRunEventPayloadValue(result, value); err != nil {
+			return reflect.Value{}, err
+		}
+		for index := 0; index < value.NumField(); index++ {
+			if valueType.Field(index).PkgPath != "" {
+				continue
+			}
+			field, err := cloneRunEventPayloadValue(value.Field(index), visiting)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			if err := setRunEventPayloadValue(result.Field(index), field); err != nil {
+				return reflect.Value{}, err
+			}
+		}
+		return result, nil
+	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return reflect.Value{}, errRunEventPayloadUnsupported
+	case reflect.Invalid:
+		return reflect.Value{}, errRunEventPayloadUnsupported
+	default:
+		return value, nil
+	}
+}
+
+func setRunEventPayloadValue(destination reflect.Value, value reflect.Value) error {
+	coerced, err := coerceRunEventPayloadValue(value, destination.Type())
+	if err != nil {
+		return err
+	}
+	destination.Set(coerced)
+	return nil
+}
+
+func coerceRunEventPayloadValue(value reflect.Value, targetType reflect.Type) (reflect.Value, error) {
+	if !value.IsValid() {
+		return reflect.Value{}, errRunEventPayloadUnsupported
+	}
+	if value.Type() == targetType {
+		return value, nil
+	}
+	if value.Type().AssignableTo(targetType) {
+		result := reflect.New(targetType).Elem()
+		result.Set(value)
+		return result, nil
+	}
+	if value.Type().ConvertibleTo(targetType) {
+		return value.Convert(targetType), nil
+	}
+	return reflect.Value{}, errRunEventPayloadUnsupported
+}
+
+func runEventPayloadTypeHasReferences(valueType reflect.Type, visiting map[reflect.Type]struct{}) bool {
+	switch valueType.Kind() {
+	case reflect.Map, reflect.Slice, reflect.Pointer, reflect.Interface, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return true
+	case reflect.Array:
+		return runEventPayloadTypeHasReferences(valueType.Elem(), visiting)
+	case reflect.Struct:
+		if _, ok := visiting[valueType]; ok {
+			return false
+		}
+		visiting[valueType] = struct{}{}
+		defer delete(visiting, valueType)
+		for index := 0; index < valueType.NumField(); index++ {
+			if runEventPayloadTypeHasReferences(valueType.Field(index).Type, visiting) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func (s *MemoryStore) CreateArtifact(ctx context.Context, input domain.CreateArtifactInput) (domain.ArtifactRecord, error) {

@@ -31,7 +31,7 @@ class FailingTitleModel:
     model_name = "deepseek_v4"
 
     async def ainvoke(self, _messages):
-        raise RuntimeError("title model unavailable")
+        raise RuntimeError("TITLE_SECRET_CANARY at /private/TITLE_PATH_CANARY")
 
 
 def _settings(tmp_path):
@@ -95,7 +95,15 @@ def test_generate_conversation_title_falls_back_without_blocking_run_completion(
 
     assert result.title == "UNet Segmentation Training"
     assert result.strategy == "fallback"
-    assert "title model unavailable" in result.reason
+    assert result.reason == "title_model_error"
+    payload = result.to_payload()
+    assert payload == {
+        "strategy": "fallback",
+        "model": "deepseek_v4",
+        "reason": "title_model_error",
+    }
+    assert "TITLE_SECRET_CANARY" not in str(payload)
+    assert "/private/TITLE_PATH_CANARY" not in str(payload)
 
 
 class SlowTitleModel:
@@ -338,7 +346,7 @@ def test_resolve_conversation_title_task_enriches_fallback_with_run_outcome(tmp_
     result = asyncio.run(scenario())
 
     assert result.strategy == "fallback"
-    assert "title model unavailable" in result.reason
+    assert result.reason == "title_model_error"
     # The deterministic title is rebuilt from the full run outcome, matching
     # what the old inline call would have produced.
     assert result.title == "UNet Segmentation Training"

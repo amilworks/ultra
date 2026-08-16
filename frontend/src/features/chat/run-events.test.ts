@@ -199,6 +199,59 @@ describe("appendRunEventCoalescing", () => {
     expect((coalesced[0] as { payload: Record<string, unknown> }).payload.text).toBe("ab");
   });
 
+  it("dedupes an older reasoning fragment replayed after later fragments were coalesced", () => {
+    const first = {
+      event_kind: "trace.reasoning.delta",
+      payload: { event_id: "evt-r1", sequence: 2, run_id: "run_1", text: "first " },
+    };
+    const second = {
+      event_kind: "trace.reasoning.delta",
+      payload: { event_id: "evt-r2", sequence: 4, run_id: "run_1", text: "second" },
+    };
+    const coalesced = appendRunEventCoalescing(
+      appendRunEventCoalescing([], first),
+      second
+    );
+    const replay = { ...first, payload: { ...first.payload, replayed: true } };
+
+    const afterReplay = appendRunEventCoalescing(coalesced, replay);
+
+    expect(afterReplay).toBe(coalesced);
+    expect((afterReplay[0] as { payload: Record<string, unknown> }).payload.text).toBe(
+      "first second"
+    );
+  });
+
+  it("separates completed model reasoning rounds instead of gluing their prose", () => {
+    const firstRound = {
+      event_kind: "trace.reasoning.delta",
+      payload: { sequence: 2, run_id: "run_1", text: "Check the inputs.", status: "completed" },
+    };
+    const secondRound = {
+      event_kind: "trace.reasoning.delta",
+      payload: { sequence: 5, run_id: "run_1", text: "Now use the result.", status: "running" },
+    };
+
+    const coalesced = appendRunEventCoalescing([firstRound], secondRound);
+
+    expect((coalesced[0] as { payload: Record<string, unknown> }).payload.text).toBe(
+      "Check the inputs.\n\nNow use the result."
+    );
+  });
+
+  it("does not merge reasoning events from different runs", () => {
+    const first = {
+      event_kind: "trace.reasoning.delta",
+      payload: { sequence: 2, run_id: "run_1", text: "first" },
+    };
+    const otherRun = {
+      event_kind: "trace.reasoning.delta",
+      payload: { sequence: 2, run_id: "run_2", text: "second" },
+    };
+
+    expect(appendRunEventCoalescing([first], otherRun)).toHaveLength(2);
+  });
+
   it("delegates non-reasoning events to appendUniqueRunEvent (dedup preserved)", () => {
     const first = { event_kind: "tool_call.started", payload: { sequence: 5, run_id: "run_1" } };
     const events = [first];
@@ -228,6 +281,22 @@ describe("reasoningTextFromRunEvents", () => {
       { event_type: "trace.reasoning.delta", payload: { text: "part two" } },
     ];
     expect(reasoningTextFromRunEvents(events)).toBe("part one part two");
+  });
+
+  it("separates un-coalesced model rounds at completed boundaries", () => {
+    const events = [
+      {
+        event_type: "trace.reasoning.delta",
+        payload: { text: "round one", status: "running" },
+      },
+      { event_type: "trace.reasoning.delta", payload: { text: "", status: "completed" } },
+      {
+        event_type: "trace.reasoning.delta",
+        payload: { text: "round two", status: "completed" },
+      },
+    ];
+
+    expect(reasoningTextFromRunEvents(events)).toBe("round one\n\nround two");
   });
 
   it("is empty when there is no reasoning", () => {

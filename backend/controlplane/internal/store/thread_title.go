@@ -48,15 +48,14 @@ func generatedThreadTitleMetadata(
 	now time.Time,
 ) domain.JSONMap {
 	metadata := copyJSONMap(existing)
-	state := domain.JSONMap{
-		"source":         "generated",
-		"run_id":         strings.TrimSpace(input.RunID),
-		"previous_title": strings.TrimSpace(previousTitle),
-		"updated_at":     now.UTC().Format(time.RFC3339Nano),
-	}
+	state := domain.JSONMap{}
 	for key, value := range input.Generation {
 		state[key] = value
 	}
+	state["source"] = "generated"
+	state["run_id"] = strings.TrimSpace(input.RunID)
+	state["previous_title"] = strings.TrimSpace(previousTitle)
+	state["updated_at"] = now.UTC().Format(time.RFC3339Nano)
 	metadata[threadTitleStateKey] = state
 	return metadata
 }

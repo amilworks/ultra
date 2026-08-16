@@ -15,6 +15,7 @@ from ultra_deepagents.agent import (
     build_agent_backend,
     build_research_agent,
     build_run_context_brief,
+    build_runtime_prompt_suffix,
     build_sandbox_backend,
     build_sandbox_resources_guidance,
     build_system_prompt,
@@ -1494,7 +1495,7 @@ def test_system_prompt_does_not_carry_retired_rarespot_dispatch():
     assert "512 px tiles with 25% overlap" not in prompt
 
 
-def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
+def test_runtime_prompt_projects_prior_artifacts_once_after_cache_stable_system_prompt():
     settings = RuntimeSettings(
         openai_base_url="http://127.0.0.1:8003/v1",
         openai_model="deepseek_v4",
@@ -1522,6 +1523,7 @@ def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
 
     brief = build_run_context_brief(context)
     prompt = build_system_prompt(settings, context)
+    suffix = build_runtime_prompt_suffix(context, elapsed_seconds=0)
 
     assert "Add a dashed reference line." in brief
     assert "file-prairie" in brief
@@ -1532,7 +1534,9 @@ def test_system_prompt_surfaces_prior_artifacts_from_runtime_context():
     assert "artifact_manifest" in prompt
     assert "stage_artifact_for_analysis" in prompt
     assert "stage_uploaded_files_for_analysis" in prompt
-    assert "artifact-plot" in prompt
+    assert "artifact-plot" in suffix
+    assert "artifact-plot" not in prompt
+    assert (prompt + suffix).count("Active run context:") == 1
 
 
 def test_run_context_brief_surfaces_runtime_facts():
@@ -1564,6 +1568,7 @@ def test_run_context_brief_surfaces_runtime_facts():
 
     brief = build_run_context_brief(context)
     prompt = build_system_prompt(settings, context)
+    suffix = build_runtime_prompt_suffix(context, elapsed_seconds=0)
 
     assert "Runtime facts:" in brief
     assert "current_datetime_utc: 2026-06-25T00:42:05.123456789Z" in brief
@@ -1573,7 +1578,8 @@ def test_run_context_brief_surfaces_runtime_facts():
     assert "product_name: Ultra" in brief
     assert "deployment_environment: production" in brief
     assert "public_url: https://ultra.example.edu" in brief
-    assert "Use these runtime facts for today, tomorrow, yesterday" in prompt
+    assert "Use these runtime facts for today, tomorrow, yesterday" in suffix
+    assert "current_datetime_utc: 2026-06-25T00:42:05.123456789Z" not in prompt
 
 
 def test_run_context_brief_surfaces_runtime_budget_without_dumping_secrets():
@@ -2536,6 +2542,7 @@ def test_runtime_prompt_suffix_appends_contract_only_for_pro_intelligence():
     assert "Active run context:" in suffix
     assert "1m35s" in suffix
     assert "wall-clock" in suffix
+    assert suffix.index("Dynamical-systems results contract") < suffix.index("Elapsed wall-clock")
 
     high = AgentRunContext(**{**base, "goal": dynamics_goal})
     high_suffix = build_runtime_prompt_suffix(high, elapsed_seconds=5)

@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from openai import APIConnectionError
 from PIL import Image, UnidentifiedImageError
 
 from ultra_deepagents.agent import (
@@ -59,7 +61,12 @@ from ultra_deepagents.events import (
     normalize_tool_call,
     normalize_tool_call_progress,
 )
-from ultra_deepagents.model import build_chat_model
+from ultra_deepagents.model import (
+    arm_thinking_fallback,
+    build_chat_model,
+    reset_thinking_fallback,
+    thinking_fallback_armed,
+)
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
     ingest_pdf_file,
@@ -71,7 +78,11 @@ from ultra_deepagents.progress_guard import (
     ProgressStallDetector,
     ProgressStallVerdict,
 )
-from ultra_deepagents.reasoning_stream import ReasoningEventStreamer
+from ultra_deepagents.reasoning_stream import (
+    ReasoningDegenerationError,
+    ReasoningEventStreamer,
+    ReasoningQualityGuard,
+)
 from ultra_deepagents.schemas import RunJobEnvelope
 from ultra_deepagents.steering import (
     STEER_CONTENT_PREFIX,
@@ -85,6 +96,10 @@ from ultra_deepagents.steering import (
 from ultra_deepagents.title_generation import (
     resolve_conversation_title_task,
     start_conversation_title_task,
+)
+from ultra_deepagents.trace_lens_inputs import (
+    TraceLensInputCallback,
+    attach_trace_lens_metadata,
 )
 
 PublishEvent = Callable[[dict[str, Any]], Awaitable[None]]
@@ -251,12 +266,145 @@ class AgentAttemptResult:
 
 
 class AgentStreamIdleTimeoutError(TimeoutError):
-    def __init__(self, timeout_seconds: float) -> None:
+    def __init__(self, timeout_seconds: float, *, idle_scope: str = "stream") -> None:
         super().__init__(
             f"Deep Agents stream produced no events for {timeout_seconds:g}s "
             "while waiting for the model."
         )
         self.timeout_seconds = timeout_seconds
+        self.idle_scope = idle_scope
+        self.partial_result: AgentAttemptResult | None = None
+        self.reasoning_chars = 0
+        self.active_tool_call = False
+
+
+class ModelStreamDisconnectedError(AgentStreamIdleTimeoutError):
+    """The provider connection dropped mid-stream (httpx ReadError et al.).
+
+    Subclasses the idle-timeout error so the identical bounded recovery lane
+    applies (budget ``model_stream_idle_max_recoveries``): a disconnect is the
+    loud variant of a dead-open stream, and failing the whole run for one
+    transient TCP reset wastes every completed tool result. Observed live
+    2026-08-16: one mid-generation ``httpx.ReadError`` -> ``APIConnectionError``
+    failed an otherwise healthy run while a concurrent run on the same
+    endpoint finished normally.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(0.0, idle_scope="model_disconnect")
+
+
+class ModelProtocolLeakError(RuntimeError):
+    """Provider control syntax escaped its parser as assistant-visible text."""
+
+    def __init__(self, *, protocol: str, signal: str) -> None:
+        super().__init__(
+            "Deep Agents model output contained malformed internal tool protocol text."
+        )
+        self.protocol = protocol
+        self.signal = signal
+        self.partial_result: AgentAttemptResult | None = None
+        self.reasoning_chars = 0
+        self.active_tool_call = False
+
+
+_DEEPSEEK_DSML_MARKERS = ("<｜DSML｜", "</｜DSML｜", "<|DSML|", "</|DSML|")
+
+# Under collapse the model also emits the SAME tool markup with the DSML
+# prefix dropped — observed in production as floods of bare
+# "<invoke name=…>" / "</invoke>" / "</tool_calls>" lines in the visible
+# answer. A single quoted tag is legitimate prose (a user may ask about tool
+# syntax), so bare markup only trips on sustained density inside a sliding
+# window, mirroring the reasoning-quality guard's philosophy: require a local
+# pathology, never an isolated stylistic occurrence.
+_BARE_TOOL_MARKUP_RE = re.compile(
+    r"</?(?:invoke|tool_calls|tool)(?:\s+[a-z_]+=\"[^\"]*\")*\s*>",
+    flags=re.IGNORECASE,
+)
+_BARE_MARKUP_WINDOW_CHARS = 2048
+_BARE_MARKUP_MIN_TAGS = 6
+_BARE_MARKUP_MIN_DENSITY = 0.25
+
+
+class _VisibleModelProtocolGuard:
+    """Quarantine split control-token prefixes before message publication.
+
+    vLLM's DeepSeek tool parser normally converts DSML into structured tool
+    calls. If the model emits an invalid opening/closing sequence, vLLM passes
+    the protocol through as ordinary content. Chunks can split inside a marker,
+    so keep only the longest possible marker prefix and release all other text.
+    Bare (prefix-dropped) tool markup is detected by window density instead.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._window = ""
+
+    def _check_bare_markup(self, released: str) -> None:
+        if not released:
+            return
+        self._window = (self._window + released)[-_BARE_MARKUP_WINDOW_CHARS:]
+        matches = _BARE_TOOL_MARKUP_RE.findall(self._window)
+        if len(matches) < _BARE_MARKUP_MIN_TAGS:
+            return
+        markup_chars = sum(len(m) for m in matches)
+        if markup_chars / max(1, len(self._window)) >= _BARE_MARKUP_MIN_DENSITY:
+            raise ModelProtocolLeakError(
+                protocol="bare_tool_markup",
+                signal="tool_markup_flood",
+            )
+
+    def feed(self, text: str) -> str:
+        candidate = self._pending + text
+        if any(marker in candidate for marker in _DEEPSEEK_DSML_MARKERS):
+            raise ModelProtocolLeakError(
+                protocol="deepseek_dsml",
+                signal="deepseek_dsml_control_token",
+            )
+        keep = 0
+        for marker in _DEEPSEEK_DSML_MARKERS:
+            max_prefix = min(len(candidate), len(marker) - 1)
+            for prefix_length in range(max_prefix, 0, -1):
+                if candidate.endswith(marker[:prefix_length]):
+                    keep = max(keep, prefix_length)
+                    break
+        if keep:
+            safe = candidate[:-keep]
+            self._pending = candidate[-keep:]
+            self._check_bare_markup(safe)
+            return safe
+        self._pending = ""
+        self._check_bare_markup(candidate)
+        return candidate
+
+    def finish(self) -> str:
+        pending = self._pending
+        self._pending = ""
+        return pending
+
+    @staticmethod
+    def validate(text: str) -> None:
+        if any(marker in text for marker in _DEEPSEEK_DSML_MARKERS):
+            raise ModelProtocolLeakError(
+                protocol="deepseek_dsml",
+                signal="deepseek_dsml_control_token",
+            )
+        # Whole-text density check for the prefix-dropped variant: applied to
+        # complete (non-streamed) visible text with the same thresholds, using
+        # the worst window rather than the full-document average so a long
+        # valid answer cannot dilute a trailing markup flood.
+        text_tail_start = 0
+        while text_tail_start < len(text):
+            window = text[text_tail_start : text_tail_start + _BARE_MARKUP_WINDOW_CHARS]
+            matches = _BARE_TOOL_MARKUP_RE.findall(window)
+            if len(matches) >= _BARE_MARKUP_MIN_TAGS:
+                markup_chars = sum(len(m) for m in matches)
+                if markup_chars / max(1, len(window)) >= _BARE_MARKUP_MIN_DENSITY:
+                    raise ModelProtocolLeakError(
+                        protocol="bare_tool_markup",
+                        signal="tool_markup_flood",
+                    )
+            text_tail_start += _BARE_MARKUP_WINDOW_CHARS // 2
 
 
 class AgentProgressStalledError(RuntimeError):
@@ -276,6 +424,15 @@ class AgentProgressStalledError(RuntimeError):
         )
         self.verdict = verdict
         self.partial_result = partial_result
+
+
+class AgentEmptyResponseError(RuntimeError):
+    """A visible run exhausted bounded recovery without producing an answer."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Deep Agents completed without a user-visible response after bounded recovery."
+        )
 
 
 def _extract_arxiv_references(*, goal: str, messages: list[dict[str, Any]]) -> list[str]:
@@ -476,7 +633,9 @@ async def run_job(
 ) -> str:
     workspace_root = Path(settings.workspace_root).expanduser()
     evaluation_policy = evaluation_profile_policy(job.evaluation_profile)
-    effective_messages = _effective_job_messages(job)
+    effective_messages, quarantined_history_message_count = (
+        _effective_job_messages_with_diagnostics(job)
+    )
     workspace_dir = (
         evaluation_workspace_dir(
             workspace_root,
@@ -563,6 +722,26 @@ async def run_job(
             )
         )
 
+    if quarantined_history_message_count > 0:
+        await publish_event(
+            sequencer.stamp(
+                RunEvent(
+                    run_id=context.run_id,
+                    thread_id=context.thread_id,
+                    event_kind="trace.history.quarantined",
+                    event_type="trace",
+                    node_name="model_input",
+                    agent_role="coordinator",
+                    level="warning",
+                    message="",
+                    payload={
+                        "reason": "model_protocol",
+                        "message_count": quarantined_history_message_count,
+                    },
+                ).to_dict()
+            )
+        )
+
     await publish_event(
         sequencer.stamp(
             RunEvent(
@@ -616,6 +795,7 @@ async def run_job(
                 cache_root=Path(settings.memory_root).expanduser() / "papers",
             )
         evaluation_surface: dict[str, str] = {}
+        trace_surface: dict[str, Any] = {}
         # Mid-run steering: cleanroom evaluation profiles run with a sealed
         # surface, so they never grow a steering channel.
         steering_inbox = (
@@ -636,6 +816,9 @@ async def run_job(
             context=context,
             checkpointer=checkpointer,
             surface_attestation_sink=evaluation_surface.update,
+            trace_surface_sink=(
+                trace_surface.update if settings.trace_lens_inputs_enabled else None
+            ),
             steering_inbox=steering_inbox,
         )
         if evaluation_policy is not None and not evaluation_surface:
@@ -712,7 +895,11 @@ async def run_job(
         )
         completion_continuations_used = 0
         model_stream_recoveries_used = 0
+        model_protocol_recoveries_used = 0
         progress_stall_recoveries_used = 0
+        # Escalation state is strictly run-scoped: a prior run's collapse must
+        # never bleed thinking-off into a fresh run on a reused worker task.
+        reset_thinking_fallback()
         steer_barrier_rounds_used = 0
         # Answers produced BEFORE a continuation attempt (steer barrier or
         # completion guard). The continuation's model reply is typically just
@@ -744,6 +931,7 @@ async def run_job(
                     sequencer=sequencer,
                     publish_event=publish_event,
                     model_stream_idle_timeout_seconds=settings.model_stream_idle_timeout_seconds,
+                    model_output_idle_timeout_seconds=settings.model_output_idle_timeout_seconds,
                     langgraph_recursion_limit=settings.langgraph_recursion_limit,
                     run_config=run_config,
                     resume_from_checkpoint=resume_from_checkpoint,
@@ -752,14 +940,119 @@ async def run_job(
                     execute_runtime_image_digest=sandbox_image_digest,
                     primary_model_id=settings.openai_model,
                     primary_provider_id=settings.model_provider_id,
+                    trace_lens_inputs_enabled=settings.trace_lens_inputs_enabled,
+                    trace_surface=trace_surface,
                 )
                 # Only the first attempt of a redelivered run resumes from the
                 # checkpoint; continuation passes feed fresh messages.
                 resume_from_checkpoint = False
-            except AgentStreamIdleTimeoutError as exc:
-                if model_stream_recoveries_used >= settings.model_stream_idle_max_recoveries:
+            except (
+                AgentStreamIdleTimeoutError,
+                ReasoningDegenerationError,
+                ModelProtocolLeakError,
+            ) as exc:
+                attempt_result = exc.partial_result or AgentAttemptResult(
+                    final_response_text="",
+                    streamed_response_text="",
+                    post_tool_streamed_response_text="",
+                )
+                # A canceled model turn has already consumed its checkpoint
+                # resume opportunity.  The recovery prompt below must be sent
+                # as fresh input; leaving this true would pass payload=None and
+                # silently discard the corrective message on redelivered runs.
+                resume_from_checkpoint = False
+                run_usage["input_tokens"] += int(attempt_result.usage.get("input_tokens", 0))
+                run_usage["output_tokens"] += int(attempt_result.usage.get("output_tokens", 0))
+                run_usage["total_tokens"] += int(attempt_result.usage.get("total_tokens", 0))
+                if attempt_result.model and not run_usage_model:
+                    run_usage_model = attempt_result.model
+                visible_response_observed = bool(
+                    attempt_result.final_response_text.strip()
+                    or attempt_result.streamed_response_text.strip()
+                    or attempt_result.post_tool_streamed_response_text.strip()
+                )
+                reasoning_degenerated = isinstance(exc, ReasoningDegenerationError)
+                protocol_leaked = isinstance(exc, ModelProtocolLeakError)
+                if protocol_leaked:
+                    output_classification = "invalid_protocol"
+                elif visible_response_observed:
+                    output_classification = "partial_response"
+                elif exc.active_tool_call:
+                    output_classification = "tool_wait"
+                elif exc.reasoning_chars > 0:
+                    output_classification = "reasoning_only"
+                else:
+                    output_classification = "empty"
+                recovery_index = (
+                    model_protocol_recoveries_used + 1
+                    if protocol_leaked
+                    else model_stream_recoveries_used + 1
+                )
+                recoveries_exhausted = (
+                    model_protocol_recoveries_used >= settings.model_protocol_max_recoveries
+                    if protocol_leaked
+                    else model_stream_recoveries_used >= settings.model_stream_idle_max_recoveries
+                )
+                idle_scope = (
+                    "model_protocol"
+                    if protocol_leaked
+                    else "reasoning_quality"
+                    if reasoning_degenerated
+                    else exc.idle_scope
+                )
+                stall_payload: dict[str, Any] = {
+                    "idle_scope": idle_scope,
+                    "output_classification": output_classification,
+                    "reasoning_observed": exc.reasoning_chars > 0,
+                    "reasoning_char_count": exc.reasoning_chars,
+                    "visible_response_observed": visible_response_observed,
+                    "active_tool_call": exc.active_tool_call,
+                    "recovery_index": recovery_index,
+                    "recoveries_exhausted": recoveries_exhausted,
+                }
+                if protocol_leaked:
+                    stall_payload.update(
+                        {
+                            "quality_signal": exc.signal,
+                            "protocol": exc.protocol,
+                        }
+                    )
+                elif reasoning_degenerated:
+                    verdict = exc.verdict
+                    stall_payload.update(
+                        {
+                            "quality_signal": verdict.signal,
+                            "quality_window_char_count": verdict.window_chars,
+                            "quality_dashlike_count": verdict.dashlike_count,
+                            "quality_dashlike_ratio": round(verdict.dashlike_ratio, 6),
+                            "quality_replacement_char_count": verdict.replacement_char_count,
+                            "quality_max_repeated_trigram": verdict.max_repeated_trigram,
+                            "quality_token_diversity": round(verdict.token_diversity, 6),
+                        }
+                    )
+                else:
+                    stall_payload["timeout_seconds"] = exc.timeout_seconds
+                await publish_event(
+                    sequencer.stamp(
+                        RunEvent(
+                            run_id=context.run_id,
+                            thread_id=context.thread_id,
+                            event_kind="trace.model.stalled",
+                            event_type="trace",
+                            node_name="model",
+                            agent_role="coordinator",
+                            level="warning",
+                            message="",
+                            payload=stall_payload,
+                        ).to_dict()
+                    )
+                )
+                if recoveries_exhausted:
                     raise
-                model_stream_recoveries_used += 1
+                if protocol_leaked:
+                    model_protocol_recoveries_used += 1
+                else:
+                    model_stream_recoveries_used += 1
                 artifact_events = await asyncio.to_thread(
                     _collect_output_artifacts,
                     context,
@@ -773,10 +1066,52 @@ async def run_job(
                     post_tool_streamed_response_text=attempt_result.post_tool_streamed_response_text,
                     artifact_events=artifact_events,
                 )
-                recovery_prompt = _model_stream_idle_recovery_prompt(
-                    timeout_seconds=exc.timeout_seconds,
-                    artifact_events=artifact_events,
-                )
+                if protocol_leaked:
+                    recovery_prompt = _model_protocol_recovery_prompt(
+                        artifact_events=artifact_events,
+                    )
+                    recovery_reason = "model_protocol_leak"
+                    recovery_node_name = "model_protocol_recovery"
+                    recovery_index = model_protocol_recoveries_used
+                elif reasoning_degenerated:
+                    recovery_prompt = _reasoning_degeneration_recovery_prompt(
+                        artifact_events=artifact_events,
+                    )
+                    recovery_reason = "reasoning_degeneration"
+                    recovery_node_name = "reasoning_degeneration"
+                    recovery_index = model_stream_recoveries_used
+                elif exc.idle_scope == "model_disconnect":
+                    recovery_prompt = _model_stream_disconnect_recovery_prompt(
+                        artifact_events=artifact_events,
+                    )
+                    recovery_reason = "model_stream_disconnect"
+                    recovery_node_name = "model_stream_recovery"
+                    recovery_index = model_stream_recoveries_used
+                else:
+                    recovery_prompt = _model_stream_idle_recovery_prompt(
+                        timeout_seconds=exc.timeout_seconds,
+                        artifact_events=artifact_events,
+                    )
+                    recovery_reason = "model_stream_idle"
+                    recovery_node_name = "model_stream_recovery"
+                    recovery_index = model_stream_recoveries_used
+                if (
+                    (protocol_leaked or reasoning_degenerated)
+                    and settings.degeneration_thinking_fallback
+                    and not thinking_fallback_armed()
+                ):
+                    # Both signals are thinking-path collapses; retrying in
+                    # thinking mode mostly re-rolls the same failure. Escalate
+                    # the retry (and the rest of this run) to thinking-off.
+                    arm_thinking_fallback()
+                recovery_payload: dict[str, Any] = {
+                    "text": recovery_prompt,
+                    "reason": recovery_reason,
+                    "recovery_index": recovery_index,
+                    "thinking_fallback_armed": thinking_fallback_armed(),
+                }
+                if isinstance(exc, AgentStreamIdleTimeoutError):
+                    recovery_payload["timeout_seconds"] = exc.timeout_seconds
                 await publish_event(
                     sequencer.stamp(
                         RunEvent(
@@ -784,21 +1119,21 @@ async def run_job(
                             thread_id=context.thread_id,
                             event_kind="trace.message.delta",
                             event_type="trace",
-                            node_name="model_stream_recovery",
-                            agent_role="model_stream_recovery",
+                            node_name=recovery_node_name,
+                            agent_role=recovery_node_name,
                             level="warning",
                             message=recovery_prompt,
-                            payload={
-                                "text": recovery_prompt,
-                                "reason": "model_stream_idle",
-                                "recovery_index": model_stream_recoveries_used,
-                                "timeout_seconds": exc.timeout_seconds,
-                            },
+                            payload=recovery_payload,
                         ).to_dict()
                     )
                 )
-                if current_response_text.strip():
+                if current_response_text.strip() and not protocol_leaked:
                     messages.append({"role": "assistant", "content": current_response_text})
+                    if (
+                        attempt_result.final_response_text.strip()
+                        or attempt_result.post_tool_streamed_response_text.strip()
+                    ):
+                        continuation_answer_parts.append(current_response_text)
                 messages.append({"role": "user", "content": recovery_prompt})
                 continue
             except AgentProgressStalledError as exc:
@@ -1019,6 +1354,8 @@ async def run_job(
         response_text = _link_response_artifact_paths(response_text, artifact_events)
         for artifact_event in artifact_events:
             await publish_event(sequencer.stamp(artifact_event))
+        if _requires_user_visible_response(job) and not response_text.strip():
+            raise AgentEmptyResponseError()
     except asyncio.CancelledError:
         _cancel_title_task(title_task)
         _write_workspace_lease(context, status="canceled", error="canceled")
@@ -1187,6 +1524,7 @@ def _build_agent_with_optional_checkpointer(
     context: AgentRunContext,
     checkpointer: Any | None,
     surface_attestation_sink: Callable[[dict[str, str]], None] | None = None,
+    trace_surface_sink: Callable[[dict[str, Any]], None] | None = None,
     steering_inbox: Any | None = None,
 ) -> Any:
     """Build the agent, passing the checkpointer only when the factory accepts
@@ -1210,6 +1548,10 @@ def _build_agent_with_optional_checkpointer(
         "surface_attestation_sink" in parameters or accepts_var_kwargs
     ):
         kwargs["surface_attestation_sink"] = surface_attestation_sink
+    if trace_surface_sink is not None and (
+        "trace_surface_sink" in parameters or accepts_var_kwargs
+    ):
+        kwargs["trace_surface_sink"] = trace_surface_sink
     if steering_inbox is not None and ("steering_inbox" in parameters or accepts_var_kwargs):
         kwargs["steering_inbox"] = steering_inbox
     return agent_factory(settings, **kwargs)
@@ -1223,6 +1565,7 @@ async def _stream_agent_attempt(
     sequencer: RunEventSequencer,
     publish_event: PublishEvent,
     model_stream_idle_timeout_seconds: float = 0.0,
+    model_output_idle_timeout_seconds: float = 0.0,
     langgraph_recursion_limit: int = 1000,
     run_config: dict[str, Any] | None = None,
     resume_from_checkpoint: bool = False,
@@ -1231,6 +1574,8 @@ async def _stream_agent_attempt(
     execute_runtime_image_digest: str = "",
     primary_model_id: str = "",
     primary_provider_id: str = "",
+    trace_lens_inputs_enabled: bool = False,
+    trace_surface: dict[str, Any] | None = None,
 ) -> AgentAttemptResult:
     response_parts: list[str] = []
     post_tool_response_parts: list[str] = []
@@ -1245,9 +1590,28 @@ async def _stream_agent_attempt(
         sequencer=sequencer,
         publish_event=publish_event,
     )
+    # Run before the best-effort trace streamer so the chunk that crosses a
+    # conservative malformed-generation threshold is never published as
+    # trustworthy reasoning.  ``raise_error=True`` on this callback aborts the
+    # provider turn and enters the bounded recovery path below.
+    reasoning_quality_guard = ReasoningQualityGuard()
+    visible_protocol_guard = _VisibleModelProtocolGuard()
+    trace_input_callback: TraceLensInputCallback | None = None
+    if trace_lens_inputs_enabled:
+        try:
+            trace_input_callback = TraceLensInputCallback()
+        except Exception:
+            # Best-effort local diagnostics must never affect the model stream.
+            trace_input_callback = None
+    trace_callbacks = [trace_input_callback] if trace_input_callback is not None else []
     config = {
         **config,
-        "callbacks": [*(config.get("callbacks") or []), reasoning_streamer],
+        "callbacks": [
+            *(config.get("callbacks") or []),
+            reasoning_quality_guard,
+            reasoning_streamer,
+            *trace_callbacks,
+        ],
     }
     # Resuming a redelivered run: pass None so LangGraph continues from the last
     # checkpoint instead of appending the original messages again.
@@ -1270,8 +1634,10 @@ async def _stream_agent_attempt(
     dynamic_namespace_subagent_names: dict[str, str] = {}
     attempt_usage = _empty_token_usage()
     attempt_model = ""
+    attempt_finish_reason = ""
     delegation_evidence: dict[str, int] = {}
     usage_index = 0
+    trace_surface_attached = False
     stream_iter = stream.__aiter__()
     execute_progress_streamer = ExecuteProgressEventStreamer(
         context=context,
@@ -1279,39 +1645,78 @@ async def _stream_agent_attempt(
         publish_event=publish_event,
     )
     execute_progress_token = set_execute_progress_sink(execute_progress_streamer.emit_sync)
+    loop = asyncio.get_running_loop()
+    last_stream_activity_at = loop.time()
+    model_output_boundary_at = last_stream_activity_at
+    explicit_model_output_activity_at = 0.0
+    active_tool_calls: dict[str, int] = {}
     while True:
         try:
-            # The idle watchdog must fire even while tools are executing. A previous
-            # gate disarmed it during tool execution — the exact window in which a
-            # stalled vision call (an uncancellable to_thread blocked in httpx)
-            # wedged a worker for 1h43m. Wrapping every __anext__ in wait_for resets
-            # the deadline on each received event (heartbeat semantics), so slow-but-alive
-            # work — which keeps emitting subagent/reasoning/tool/usage events — never trips
-            # it; only a true dead-transport stall (zero events for the generous window) does.
-            if model_stream_idle_timeout_seconds > 0:
-                try:
-                    event = await asyncio.wait_for(
-                        stream_iter.__anext__(),
-                        timeout=model_stream_idle_timeout_seconds,
-                    )
-                except TimeoutError as exc:
-                    # Flush pending coalesced reasoning deltas so nothing streamed
-                    # before the stall is lost to the recovery arm.
-                    await reasoning_streamer.aclose()
-                    await _close_execute_progress_context(
-                        execute_progress_streamer,
-                        execute_progress_token,
-                    )
-                    raise AgentStreamIdleTimeoutError(model_stream_idle_timeout_seconds) from exc
-            else:
-                event = await stream_iter.__anext__()
+            # Raw reasoning chunks reach only the callback above, not LangGraph's
+            # v3 event iterator. Await the next graph event and callback activity
+            # together so live reasoning resets liveness, while a provider socket
+            # that stays open after reasoning stops receives the shorter model-
+            # output gap bound. Active tools retain the hard all-stream ceiling.
+            event = await _next_agent_stream_event(
+                stream_iter,
+                reasoning_streamer=reasoning_streamer,
+                last_stream_activity_at=last_stream_activity_at,
+                model_output_boundary_at=model_output_boundary_at,
+                explicit_model_output_activity_at=explicit_model_output_activity_at,
+                active_tool_calls=active_tool_calls,
+                stream_idle_timeout_seconds=model_stream_idle_timeout_seconds,
+                model_output_idle_timeout_seconds=model_output_idle_timeout_seconds,
+            )
         except StopAsyncIteration:
             break
+        except (
+            AgentStreamIdleTimeoutError,
+            ReasoningDegenerationError,
+            APIConnectionError,
+        ) as caught:
+            if isinstance(caught, APIConnectionError):
+                # Normalize a mid-stream transport drop into the idle-recovery
+                # shape so the bounded recovery lane below applies unchanged.
+                exc: AgentStreamIdleTimeoutError | ReasoningDegenerationError = (
+                    ModelStreamDisconnectedError()
+                )
+                exc.__cause__ = caught
+            else:
+                exc = caught
+            exc.partial_result = AgentAttemptResult(
+                final_response_text=_response_text_from_final_state(final_state),
+                streamed_response_text="".join(response_parts),
+                post_tool_streamed_response_text=(
+                    "".join(post_tool_response_parts) if saw_tool_event else "".join(response_parts)
+                ),
+                usage=dict(attempt_usage),
+                model=attempt_model,
+                delegation=dict(delegation_evidence),
+            )
+            exc.reasoning_chars = max(
+                int(getattr(exc, "reasoning_chars", 0)),
+                reasoning_streamer.observed_chars,
+            )
+            exc.active_tool_call = _has_active_tool_calls(active_tool_calls)
+            # Flush pending coalesced reasoning deltas so nothing streamed
+            # before the stall is lost to the recovery arm.
+            await reasoning_streamer.aclose()
+            await _close_execute_progress_context(
+                execute_progress_streamer,
+                execute_progress_token,
+            )
+            if trace_input_callback is not None:
+                trace_input_callback.clear()
+            raise exc
+        last_stream_activity_at = loop.time()
         _bind_dynamic_task_namespace(
             event,
             pending_task_subagent_names,
             dynamic_namespace_subagent_names,
         )
+        finish_reason = _finish_reason_from_stream_event(event)
+        if finish_reason:
+            attempt_finish_reason = finish_reason
         usage = _usage_from_stream_event(event)
         if usage is not None:
             # Every model call (coordinator + subagents) reports usage on its
@@ -1324,30 +1729,53 @@ async def _stream_agent_attempt(
                 # the release evidence for the instantiated primary endpoint.
                 provider_name = primary_provider_id
             usage_index += 1
-            usage_event = sequencer.stamp(
-                _annotate_usage_event_scope(
-                    normalize_token_usage(
-                        context,
-                        usage,
-                        model=model_name,
-                        provider=provider_name,
-                        usage_event_id=_usage_event_id_from_stream_event(
-                            context,
-                            event,
-                            usage,
-                            usage_index,
-                        ),
-                    ),
-                    event,
-                    dynamic_namespace_subagent_names,
-                )
+            usage_event_id = _usage_event_id_from_stream_event(
+                context,
+                event,
+                usage,
+                usage_index,
             )
+            usage_event = _annotate_usage_event_scope(
+                normalize_token_usage(
+                    context,
+                    usage,
+                    model=model_name,
+                    provider=provider_name,
+                    usage_event_id=usage_event_id,
+                ),
+                event,
+                dynamic_namespace_subagent_names,
+            )
+            if trace_input_callback is not None:
+                logical_input = trace_input_callback.take_exact_match(
+                    event,
+                    logical_call_id=usage_event_id,
+                )
+                if logical_input is not None:
+                    try:
+                        attached = attach_trace_lens_metadata(
+                            usage_event,
+                            logical_model_input=logical_input,
+                            agent_configuration=(
+                                trace_surface
+                                if trace_surface and not trace_surface_attached
+                                else None
+                            ),
+                        )
+                    except Exception:
+                        attached = False
+                    trace_surface_attached = trace_surface_attached or (
+                        attached and bool(trace_surface)
+                    )
+            usage_event = sequencer.stamp(usage_event)
             await publish_event(usage_event)
             attempt_usage["input_tokens"] += usage["input_tokens"]
             attempt_usage["output_tokens"] += usage["output_tokens"]
             attempt_usage["total_tokens"] += usage["total_tokens"]
             if not attempt_model:
                 attempt_model = model_name
+            if _is_coordinator_stream(event):
+                explicit_model_output_activity_at = last_stream_activity_at
             continue
         tool_event = _tool_event_from_stream_event(context, event, tool_names_by_call_id)
         if tool_event is not None:
@@ -1363,6 +1791,25 @@ async def _stream_agent_attempt(
             )
             tool_event = _annotate_task_delegation_failure(tool_event)
             _track_delegation_evidence(delegation_evidence, tool_event)
+            _track_active_tool_call(active_tool_calls, tool_event)
+            model_output_boundary_at = last_stream_activity_at
+            tool_payload = tool_event.get("payload")
+            tool_status = (
+                str(tool_payload.get("status") or "").strip().lower()
+                if isinstance(tool_payload, dict)
+                else ""
+            )
+            # A tool may legitimately run longer than the short model-output
+            # deadline. Once the final active tool terminates, however, the
+            # coordinator owes another model event; arm the short deadline at
+            # that boundary so a provider that goes dead-open immediately
+            # after tool completion cannot fall back to the one-hour ceiling.
+            explicit_model_output_activity_at = (
+                last_stream_activity_at
+                if tool_status in {"completed", "failed", "error", "canceled"}
+                and not _has_active_tool_calls(active_tool_calls)
+                else 0.0
+            )
             await publish_event(sequencer.stamp(tool_event))
             execute_progress_streamer.bind_tool_event(tool_event)
             saw_tool_event = True
@@ -1391,6 +1838,8 @@ async def _stream_agent_attempt(
                             execute_progress_streamer,
                             execute_progress_token,
                         )
+                        if trace_input_callback is not None:
+                            trace_input_callback.clear()
                         raise AgentProgressStalledError(
                             observation.verdict,
                             AgentAttemptResult(
@@ -1409,6 +1858,11 @@ async def _stream_agent_attempt(
             dynamic_namespace_subagent_names,
         )
         if subagent_event is not None:
+            model_output_boundary_at = last_stream_activity_at
+            # A completed subagent message is also a coordinator handoff
+            # boundary. Active task tools still suppress the short deadline;
+            # otherwise the coordinator must resume within the bounded gap.
+            explicit_model_output_activity_at = last_stream_activity_at
             await publish_event(sequencer.stamp(subagent_event))
             continue
         if not _is_coordinator_stream(event):
@@ -1416,8 +1870,39 @@ async def _stream_agent_attempt(
         values_state = _deepagents_values_state(event)
         if values_state is not None:
             final_state = values_state
+            explicit_model_output_activity_at = last_stream_activity_at
+            finish_reason = _finish_reason_from_final_state(values_state)
+            if finish_reason:
+                attempt_finish_reason = finish_reason
             continue
         text = _stream_text_delta(event)
+        if not text:
+            continue
+        explicit_model_output_activity_at = last_stream_activity_at
+        try:
+            text = visible_protocol_guard.feed(text)
+        except ModelProtocolLeakError as exc:
+            exc.partial_result = AgentAttemptResult(
+                final_response_text="",
+                streamed_response_text="".join(response_parts),
+                post_tool_streamed_response_text=(
+                    "".join(post_tool_response_parts) if saw_tool_event else "".join(response_parts)
+                ),
+                usage=dict(attempt_usage),
+                model=attempt_model,
+                delegation=dict(delegation_evidence),
+            )
+            exc.reasoning_chars = reasoning_streamer.observed_chars
+            exc.active_tool_call = _has_active_tool_calls(active_tool_calls)
+            await _close_agent_event_stream(stream)
+            await reasoning_streamer.aclose()
+            await _close_execute_progress_context(
+                execute_progress_streamer,
+                execute_progress_token,
+            )
+            if trace_input_callback is not None:
+                trace_input_callback.clear()
+            raise
         if not text:
             continue
         if not has_streamed_text and not text.strip():
@@ -1428,14 +1913,50 @@ async def _stream_agent_attempt(
         post_tool_response_parts.append(text)
         await publish_event(sequencer.stamp(normalize_message_delta(context, text)))
 
+    trailing_text = visible_protocol_guard.finish()
+    if trailing_text and (has_streamed_text or trailing_text.strip()):
+        response_parts.append(trailing_text)
+        post_tool_response_parts.append(trailing_text)
+        await publish_event(sequencer.stamp(normalize_message_delta(context, trailing_text)))
     await _close_execute_progress_context(
         execute_progress_streamer,
         execute_progress_token,
     )
     await reasoning_streamer.aclose()
+    if trace_input_callback is not None:
+        trace_input_callback.clear()
+    final_response_text = _response_text_from_final_state(final_state)
+    streamed_response_text = "".join(response_parts)
+    try:
+        visible_protocol_guard.validate(final_response_text)
+    except ModelProtocolLeakError as exc:
+        exc.partial_result = AgentAttemptResult(
+            final_response_text="",
+            streamed_response_text=streamed_response_text,
+            post_tool_streamed_response_text=(
+                "".join(post_tool_response_parts) if saw_tool_event else streamed_response_text
+            ),
+            usage=dict(attempt_usage),
+            model=attempt_model,
+            delegation=dict(delegation_evidence),
+        )
+        exc.reasoning_chars = reasoning_streamer.observed_chars
+        exc.active_tool_call = _has_active_tool_calls(active_tool_calls)
+        raise
+    if not final_response_text.strip() and not streamed_response_text.strip():
+        await publish_event(
+            sequencer.stamp(
+                _empty_model_terminal_trace(
+                    context,
+                    finish_reason=attempt_finish_reason,
+                    reasoning_chars=reasoning_streamer.observed_chars,
+                    saw_tool_event=saw_tool_event,
+                )
+            )
+        )
     return AgentAttemptResult(
-        final_response_text=_response_text_from_final_state(final_state),
-        streamed_response_text="".join(response_parts),
+        final_response_text=final_response_text,
+        streamed_response_text=streamed_response_text,
         post_tool_streamed_response_text=(
             "".join(post_tool_response_parts) if saw_tool_event else "".join(response_parts)
         ),
@@ -1443,6 +1964,211 @@ async def _stream_agent_attempt(
         model=attempt_model,
         delegation=delegation_evidence,
     )
+
+
+def _empty_model_terminal_trace(
+    context: AgentRunContext,
+    *,
+    finish_reason: str,
+    reasoning_chars: int,
+    saw_tool_event: bool,
+) -> dict[str, Any]:
+    if saw_tool_event:
+        output_classification = "tool_only"
+    elif reasoning_chars > 0:
+        output_classification = "reasoning_only"
+    else:
+        output_classification = "empty"
+    payload: dict[str, Any] = {
+        "output_classification": output_classification,
+        "reasoning_observed": reasoning_chars > 0,
+        "reasoning_char_count": max(0, int(reasoning_chars)),
+        "visible_response_observed": False,
+        "tool_event_observed": saw_tool_event,
+    }
+    if finish_reason:
+        payload["finish_reason"] = finish_reason
+    return RunEvent(
+        run_id=context.run_id,
+        thread_id=context.thread_id,
+        event_kind="trace.model.terminal",
+        event_type="trace",
+        node_name="model",
+        agent_role="coordinator",
+        level="warning",
+        message="",
+        payload=payload,
+    ).to_dict()
+
+
+def _model_output_idle_anchor(
+    reasoning_streamer: ReasoningEventStreamer,
+    *,
+    model_output_boundary_at: float,
+    explicit_model_output_activity_at: float,
+) -> float:
+    candidates = [explicit_model_output_activity_at]
+    reasoning_activity_at = reasoning_streamer.last_observed_monotonic
+    if reasoning_activity_at > model_output_boundary_at:
+        candidates.append(reasoning_activity_at)
+    return max(candidates)
+
+
+def _has_active_tool_calls(active_tool_calls: dict[str, int]) -> bool:
+    return any(count > 0 for count in active_tool_calls.values())
+
+
+async def _next_agent_stream_event(
+    stream_iter: Any,
+    *,
+    reasoning_streamer: ReasoningEventStreamer,
+    last_stream_activity_at: float,
+    model_output_boundary_at: float,
+    explicit_model_output_activity_at: float,
+    active_tool_calls: dict[str, int],
+    stream_idle_timeout_seconds: float,
+    model_output_idle_timeout_seconds: float,
+) -> Any:
+    """Await one v3 event while treating raw reasoning as liveness.
+
+    LangGraph does not yield reasoning deltas, so a plain ``wait_for`` around
+    ``__anext__`` cannot distinguish an actively thinking model from a dead-
+    open provider socket. The callback stream supplies a rate-limited activity
+    signal and exact last-token timestamp. A short post-output deadline applies
+    only outside active tools; the hard all-stream deadline remains the backstop
+    for silent tools and providers that never emit any output.
+    """
+
+    loop = asyncio.get_running_loop()
+    next_event_task = asyncio.create_task(stream_iter.__anext__())
+    reasoning_version = reasoning_streamer.activity_version
+    reasoning_activity_task: asyncio.Task[int] | None = None
+    try:
+        while True:
+            now = loop.time()
+            hard_activity_at = max(
+                last_stream_activity_at,
+                reasoning_streamer.last_observed_monotonic,
+            )
+            output_activity_at = _model_output_idle_anchor(
+                reasoning_streamer,
+                model_output_boundary_at=model_output_boundary_at,
+                explicit_model_output_activity_at=explicit_model_output_activity_at,
+            )
+            deadlines: list[float] = []
+            if stream_idle_timeout_seconds > 0:
+                deadlines.append(hard_activity_at + stream_idle_timeout_seconds)
+            output_guard_active = (
+                model_output_idle_timeout_seconds > 0
+                # A terminal tool/subagent boundary deliberately arms the
+                # deadline at that exact timestamp; ordinary pre-output state
+                # keeps the activity anchor at zero.
+                and output_activity_at >= model_output_boundary_at
+                and not _has_active_tool_calls(active_tool_calls)
+            )
+            if output_guard_active:
+                deadlines.append(output_activity_at + model_output_idle_timeout_seconds)
+
+            if not deadlines and model_output_idle_timeout_seconds <= 0:
+                return await next_event_task
+
+            timeout = max(0.0, min(deadlines) - now) if deadlines else None
+            reasoning_activity_task = asyncio.create_task(
+                reasoning_streamer.wait_for_activity_after(reasoning_version)
+            )
+            done, _ = await asyncio.wait(
+                {next_event_task, reasoning_activity_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if next_event_task in done:
+                await _cancel_agent_stream_wait_task(reasoning_activity_task)
+                reasoning_activity_task = None
+                return next_event_task.result()
+            if reasoning_activity_task in done:
+                reasoning_version = reasoning_activity_task.result()
+                reasoning_activity_task = None
+                continue
+
+            await _cancel_agent_stream_wait_task(reasoning_activity_task)
+            reasoning_activity_task = None
+            now = loop.time()
+            output_activity_at = _model_output_idle_anchor(
+                reasoning_streamer,
+                model_output_boundary_at=model_output_boundary_at,
+                explicit_model_output_activity_at=explicit_model_output_activity_at,
+            )
+            if (
+                model_output_idle_timeout_seconds > 0
+                and output_activity_at >= model_output_boundary_at
+                and not _has_active_tool_calls(active_tool_calls)
+                and now - output_activity_at >= model_output_idle_timeout_seconds
+            ):
+                raise AgentStreamIdleTimeoutError(
+                    model_output_idle_timeout_seconds,
+                    idle_scope="model_output",
+                )
+            hard_activity_at = max(
+                last_stream_activity_at,
+                reasoning_streamer.last_observed_monotonic,
+            )
+            if (
+                stream_idle_timeout_seconds > 0
+                and now - hard_activity_at >= stream_idle_timeout_seconds
+            ):
+                raise AgentStreamIdleTimeoutError(stream_idle_timeout_seconds)
+    finally:
+        await _cancel_agent_stream_wait_task(reasoning_activity_task)
+        await _cancel_agent_stream_wait_task(next_event_task)
+
+
+async def _cancel_agent_stream_wait_task(task: asyncio.Task[Any] | None) -> None:
+    if task is None or task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+
+
+async def _close_agent_event_stream(stream: Any) -> None:
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    try:
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except RuntimeError:
+        # The provider/graph may already be closing the iterator as the guard
+        # aborts its current turn. The run-level recovery path owns the outcome.
+        pass
+
+
+def _track_active_tool_call(
+    active_tool_calls: dict[str, int],
+    tool_event: dict[str, Any],
+) -> None:
+    payload = tool_event.get("payload")
+    if not isinstance(payload, dict):
+        return
+    tool_name = str(payload.get("tool_name") or "").strip()
+    call_id = str(payload.get("tool_call_id") or "").strip()
+    key = call_id or (f"anonymous:{tool_name}" if tool_name else "")
+    if not key:
+        return
+    status = str(payload.get("status") or "").strip().lower()
+    if status == "started":
+        active_tool_calls[key] = active_tool_calls.get(key, 0) + 1
+        return
+    if status not in {"completed", "failed", "error", "canceled"}:
+        return
+    remaining = active_tool_calls.get(key, 0) - 1
+    if remaining > 0:
+        active_tool_calls[key] = remaining
+    else:
+        active_tool_calls.pop(key, None)
 
 
 def _start_agent_event_stream(
@@ -1579,6 +2305,14 @@ _ANIMATION_FRAME_RE = re.compile(
     r"(^|[_-])frames?[_-]?\d+\.(?:png|jpe?g|webp)$|^frame[_-]?\d+\.(?:png|jpe?g|webp)$",
     re.IGNORECASE,
 )
+# OCR/vision runs write working region crops (crop_350_450.png, crop_x5.png,
+# crops/quote.png) while deciphering fine print — sandbox scratch, not
+# deliverables. Promoting them buries the real figures under card noise in chat
+# (same failure class as the RareSpot tiles below). "crop" must sit at a word
+# boundary followed by a separator/digit/end so agriculture names (cropland_yield)
+# stay collectable; a matched image is still collected when the answer or a
+# report references it by name — a referenced crop is a deliberate figure.
+_SCRATCH_CROP_RE = re.compile(r"(^|[_-])crop(?:s|ped)?(?=$|[_.\-\d])", re.IGNORECASE)
 _SKIP_OUTPUT_DIRS = {
     ".cache",
     ".deepagents",
@@ -1685,6 +2419,8 @@ def _collect_output_artifacts(
                 and source.name not in reference_text
             ):
                 continue
+            if _looks_like_scratch_crop(source, root) and source.name not in reference_text:
+                continue
             relative = (prefix / source.relative_to(root)).as_posix()
             if relative.startswith("./"):
                 relative = relative[2:]
@@ -1735,6 +2471,18 @@ def _should_collect_output_file(path: Path, root: Path) -> bool:
     if _ANIMATION_FRAME_RE.search(path.name):
         return False
     return True
+
+
+def _looks_like_scratch_crop(path: Path, root: Path) -> bool:
+    if not _artifact_mime_type(path).startswith("image/"):
+        return False
+    if _SCRATCH_CROP_RE.search(path.stem):
+        return True
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    return any(_SCRATCH_CROP_RE.search(part) for part in relative.parts[:-1])
 
 
 def _artifact_event_for_path(
@@ -2044,6 +2792,12 @@ _DIRECT_MODEL_OUTPUT_REQUEST_RE = re.compile(
     r"(?:saved|returned|provided|downloadable|exported|included|delivered|attached)\b",
     re.IGNORECASE,
 )
+_DURABLE_OUTPUT_REQUEST_RE = re.compile(
+    r"\b(save|saved|return|provide|download|durable|outputs?|artifacts?|deliverables?)\b",
+    re.IGNORECASE,
+)
+
+
 _RESPONSE_REQUEST_RE = re.compile(
     r"\b("
     r"briefly|explain|explanation|summari[sz]e|summary|interpret|interpretation|"
@@ -2068,7 +2822,7 @@ def _missing_requested_response_kinds(
     job: RunJobEnvelope,
     attempt_result: AgentAttemptResult,
 ) -> list[str]:
-    if not _RESPONSE_REQUEST_RE.search(_run_request_text(job)):
+    if not _requires_user_visible_response(job):
         return []
     if (
         attempt_result.final_response_text.strip()
@@ -2076,6 +2830,11 @@ def _missing_requested_response_kinds(
     ):
         return []
     return ["response"]
+
+
+def _requires_user_visible_response(job: RunJobEnvelope) -> bool:
+    metadata = job.metadata if isinstance(job.metadata, dict) else {}
+    return metadata.get("internal") is not True and metadata.get("visible_in_thread") is not False
 
 
 _HTML_ARTIFACT_SUFFIXES = frozenset({".html", ".htm"})
@@ -2631,16 +3390,34 @@ def _run_request_text(job: RunJobEnvelope) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
+def _effective_job_messages_with_diagnostics(
+    job: RunJobEnvelope,
+) -> tuple[list[dict[str, Any]], int]:
     policy = evaluation_profile_policy(job.evaluation_profile)
     if policy is not None:
-        return list(goal_only_messages(policy.name, job.goal))
+        return list(goal_only_messages(policy.name, job.goal)), 0
     messages = list(job.messages or [{"role": "user", "content": job.goal}])
     # Requeue-seeded steering rows carry their thread message_id as the graph
     # message id, unifying the add_messages id-dedup invariant with the
     # steering middleware's injections (see steering.py).
     normalized: list[dict[str, Any]] = []
+    quarantined = 0
     for message in messages:
+        if (
+            isinstance(message, dict)
+            and _is_assistant_message(message)
+            and any(
+                marker in _chunk_text(message.get("content")) for marker in _DEEPSEEK_DSML_MARKERS
+            )
+        ):
+            # Old workers could persist malformed DeepSeek control syntax as a
+            # successful assistant response. Never feed that syntax back into
+            # the next chat template: it can bias the model toward another
+            # malformed tool turn or a lexical generation loop. The durable
+            # transcript remains untouched for audit; only model input is
+            # quarantined, with a structural trace emitted by run_job.
+            quarantined += 1
+            continue
         if isinstance(message, dict) and _is_steering_seed_message(message):
             row_id = str(message.get("message_id") or "").strip()
             if row_id and not message.get("id"):
@@ -2666,7 +3443,14 @@ def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
             elif attached:
                 message = {**message, "content": content}
         normalized.append(message)
-    return normalized
+    if not normalized:
+        normalized.append({"role": "user", "content": job.goal})
+    return normalized, quarantined
+
+
+def _effective_job_messages(job: RunJobEnvelope) -> list[dict[str, Any]]:
+    messages, _ = _effective_job_messages_with_diagnostics(job)
+    return messages
 
 
 def _requested_artifact_kinds(text: str) -> list[str]:
@@ -2830,6 +3614,64 @@ def _model_stream_idle_recovery_prompt(
         "re-running steps inline. Then either continue the next genuinely-new step "
         "or, if no further distinct approach remains, finalize the requested answer "
         "honestly with the current results and state clearly what did not converge.\n"
+        "Current durable outputs detected:\n"
+        f"{current_outputs_text}"
+    )
+
+
+def _model_stream_disconnect_recovery_prompt(
+    *,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    current_outputs = _current_output_summary(artifact_events)
+    current_outputs_text = "\n".join(current_outputs) if current_outputs else "- none yet"
+    return (
+        "The previous Deep Agents model stream was cut off by a transient provider "
+        "connection drop; the turn's partial output was discarded. Continue "
+        "autonomously in the same workspace. Read the existing files and logs first — "
+        "do NOT re-run a step whose output already exists. Resume from the last "
+        "confirmed tool result and durable workspace state, complete the remaining "
+        "genuinely-new steps, and return one complete final answer.\n"
+        "Current durable outputs detected:\n"
+        f"{current_outputs_text}"
+    )
+
+
+def _reasoning_degeneration_recovery_prompt(
+    *,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    current_outputs = _current_output_summary(artifact_events)
+    current_outputs_text = "\n".join(current_outputs) if current_outputs else "- none yet"
+    return (
+        "The previous provider turn was stopped because its generated reasoning entered "
+        "a malformed repetitive token loop. Discard that turn's reasoning and restart "
+        "from the last confirmed user request, tool result, and durable workspace state. "
+        "Do not quote, summarize, or continue the malformed text. Read existing outputs "
+        "before running anything again; do not repeat completed work. Then finish the "
+        "remaining analysis and return one complete, coherent final answer. If a valid "
+        "answer cannot be produced from verified results, say exactly what remains "
+        "unresolved instead of emitting partial reasoning.\n"
+        "Current durable outputs detected:\n"
+        f"{current_outputs_text}"
+    )
+
+
+def _model_protocol_recovery_prompt(
+    *,
+    artifact_events: list[dict[str, Any]],
+) -> str:
+    current_outputs = _current_output_summary(artifact_events)
+    current_outputs_text = "\n".join(current_outputs) if current_outputs else "- none yet"
+    return (
+        "The previous provider turn was stopped because malformed internal tool protocol "
+        "escaped into its visible response. Discard that entire response: do not quote, "
+        "summarize, or continue it. Do not call another tool in this recovery. Use only the "
+        "original user request, already-confirmed tool results, and durable workspace outputs "
+        "to return one complete, self-contained final answer now. Include the substantive "
+        "calculations, conclusions, and links to relevant durable outputs; do not mention this "
+        "recovery or emit provider control syntax. If the verified state is insufficient, state "
+        "the exact limitation in a normal user-facing answer instead of returning protocol text.\n"
         "Current durable outputs detected:\n"
         f"{current_outputs_text}"
     )
@@ -3472,19 +4314,91 @@ def _first_nonempty_string(*values: Any) -> str:
     return ""
 
 
-def _compact_payload_mapping(value: dict[str, Any]) -> dict[str, Any]:
-    return {str(key): _compact_payload_value(item) for key, item in value.items()}
+_COMPACT_PAYLOAD_MAX_DEPTH = 8
+_COMPACT_PAYLOAD_MAX_NODES = 256
+_COMPACT_PAYLOAD_MAX_ITEMS = 20
+
+
+def _compact_payload_mapping(
+    value: dict[str, Any],
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+    _budget: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    seen = _seen if _seen is not None else set()
+    budget = _budget if _budget is not None else {"nodes": _COMPACT_PAYLOAD_MAX_NODES}
+    if _depth >= _COMPACT_PAYLOAD_MAX_DEPTH:
+        return {"_truncated": "depth_limit"}
+    identity = id(value)
+    if identity in seen:
+        return {"_truncated": "cycle"}
+    seen.add(identity)
+    compact: dict[str, Any] = {}
+    try:
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _COMPACT_PAYLOAD_MAX_ITEMS or budget["nodes"] <= 0:
+                compact["_truncated"] = "item_or_node_limit"
+                break
+            compact[str(key)[:128]] = _compact_payload_value(
+                item,
+                _depth=_depth + 1,
+                _seen=seen,
+                _budget=budget,
+            )
+    finally:
+        seen.discard(identity)
+    return compact
 
 
 def _drop_empty_payload_values(payload: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in payload.items() if value is not None and value != ""}
 
 
-def _compact_payload_value(value: Any, *, max_chars: int = 2000) -> Any:
+def _compact_payload_value(
+    value: Any,
+    *,
+    max_chars: int = 2000,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+    _budget: dict[str, int] | None = None,
+) -> Any:
+    seen = _seen if _seen is not None else set()
+    budget = _budget if _budget is not None else {"nodes": _COMPACT_PAYLOAD_MAX_NODES}
+    if budget["nodes"] <= 0:
+        return "[truncated: node limit]"
+    budget["nodes"] -= 1
+    if _depth >= _COMPACT_PAYLOAD_MAX_DEPTH:
+        return "[truncated: depth limit]"
     if isinstance(value, dict):
-        return _compact_payload_mapping(value)
+        return _compact_payload_mapping(
+            value,
+            _depth=_depth,
+            _seen=seen,
+            _budget=budget,
+        )
     if isinstance(value, list | tuple):
-        return [_compact_payload_value(item) for item in value[:20]]
+        identity = id(value)
+        if identity in seen:
+            return "[truncated: cycle]"
+        seen.add(identity)
+        try:
+            compact = [
+                _compact_payload_value(
+                    item,
+                    max_chars=max_chars,
+                    _depth=_depth + 1,
+                    _seen=seen,
+                    _budget=budget,
+                )
+                for item in value[:_COMPACT_PAYLOAD_MAX_ITEMS]
+                if budget["nodes"] > 0
+            ]
+        finally:
+            seen.discard(identity)
+        if len(value) > _COMPACT_PAYLOAD_MAX_ITEMS:
+            compact.append("[truncated: item limit]")
+        return compact
     if isinstance(value, str):
         return value if len(value) <= max_chars else f"{value[:max_chars]}... [truncated]"
     if isinstance(value, int | float | bool) or value is None:
@@ -3562,6 +4476,62 @@ def _v3_message_finish_data(event: dict[str, Any]) -> tuple[dict[str, Any], dict
         return None
     metadata = data[1] if len(data) > 1 and isinstance(data[1], dict) else {}
     return chunk, metadata
+
+
+def _finish_reason_from_stream_event(event: dict[str, Any]) -> str:
+    finish = _v3_message_finish_data(event)
+    if finish is not None:
+        chunk, metadata = finish
+        reason = _finish_reason_from_mapping(chunk)
+        if reason:
+            return reason
+        chunk_metadata = chunk.get("metadata")
+        if isinstance(chunk_metadata, dict):
+            reason = _finish_reason_from_mapping(chunk_metadata)
+            if reason:
+                return reason
+        return _finish_reason_from_mapping(metadata)
+    if str(event.get("event") or "").strip() != "on_chat_model_end":
+        return ""
+    data = event.get("data")
+    if not isinstance(data, dict):
+        return ""
+    output = data.get("output")
+    response_metadata = (
+        output.get("response_metadata")
+        if isinstance(output, dict)
+        else getattr(output, "response_metadata", None)
+    )
+    return (
+        _finish_reason_from_mapping(response_metadata)
+        if isinstance(response_metadata, dict)
+        else ""
+    )
+
+
+def _finish_reason_from_final_state(state: dict[str, Any]) -> str:
+    messages = state.get("messages")
+    if not isinstance(messages, list | tuple):
+        return ""
+    for message in reversed(messages):
+        if not _is_assistant_message(message):
+            continue
+        response_metadata = (
+            message.get("response_metadata")
+            if isinstance(message, dict)
+            else getattr(message, "response_metadata", None)
+        )
+        if isinstance(response_metadata, dict):
+            return _finish_reason_from_mapping(response_metadata)
+        return ""
+    return ""
+
+
+def _finish_reason_from_mapping(metadata: dict[str, Any]) -> str:
+    return _first_nonempty_string(
+        metadata.get("finish_reason"),
+        metadata.get("stop_reason"),
+    )
 
 
 def _usage_from_stream_event(event: dict[str, Any]) -> dict[str, int] | None:
@@ -3792,7 +4762,11 @@ def _stream_text_delta(event: dict[str, Any]) -> str:
         return ""
     chunk = data[0]
     if not isinstance(chunk, dict):
-        return _chunk_text(chunk)
+        if isinstance(chunk, AIMessage | AIMessageChunk):
+            return _chunk_text(chunk)
+        if isinstance(chunk, HumanMessage | SystemMessage):
+            return ""
+        return ""
     if chunk.get("event") != "content-block-delta":
         return ""
     return _chunk_text(chunk.get("delta"))

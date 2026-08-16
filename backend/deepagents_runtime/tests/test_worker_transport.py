@@ -31,7 +31,7 @@ from ultra_deepagents.nats_worker import (
     post_control_plane_worker_heartbeat,
     try_acquire_run_lock,
 )
-from ultra_deepagents.runner import _tool_end_payload, run_job
+from ultra_deepagents.runner import run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
 _REAL_RUN_EVENTS_SNAPSHOT = NATSDeepAgentsWorker._run_events_snapshot
@@ -60,7 +60,6 @@ def _make_worker_transport_tests_independent_of_control_plane(monkeypatch, reque
             "_acquire_run_lease_for_delivery",
             no_control_plane_lease,
         )
-
 
 def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
     job = RunJobEnvelope.from_dict(
@@ -1002,6 +1001,64 @@ class FakeProcessTextThenToolNoFinalAgent:
         }
 
 
+class FakeEmptyThenFinalResponseAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.continuation_prompt = ""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "event",
+                "method": "messages",
+                "params": {
+                    "namespace": [],
+                    "data": [
+                        {
+                            "event": "message-finish",
+                            "metadata": {"finish_reason": "stop"},
+                        },
+                        {},
+                    ],
+                },
+            }
+            return
+
+        self.continuation_prompt = payload["messages"][-1]["content"]
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][-1]["content"]},
+                        {
+                            "role": "assistant",
+                            "content": (
+                                "Delta attention updates its fast-weight matrix with the "
+                                "prediction error before reading the next output."
+                            ),
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class FakeAlwaysEmptyAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if False:
+            yield payload
+
+
 class FakeDeepAgentsToolsProtocolAgent:
     async def astream_events(self, payload, *, context=None, version=None):
         assert version == "v3"
@@ -1142,6 +1199,288 @@ class FakeIdleOnceThenRecoversAgent:
                         {
                             "role": "assistant",
                             "content": "Recovered from the idle stream and summarized the saved plot.",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+class FakeReasoningIdleOnceThenRecoversAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.recovery_prompt = ""
+
+    def astream_events(
+        self,
+        payload,
+        *,
+        config=None,
+        context=None,
+        version=None,
+    ):
+        assert version == "v3"
+        self.calls += 1
+        callbacks = list((config or {}).get("callbacks") or [])
+
+        async def generate():
+            if self.calls == 1:
+                run_id = "reasoning-dead-open-call"
+                for handler in callbacks:
+                    if hasattr(handler, "on_chat_model_start"):
+                        await handler.on_chat_model_start(
+                            {},
+                            [],
+                            run_id=run_id,
+                            metadata={},
+                        )
+                for handler in callbacks:
+                    if hasattr(handler, "on_llm_new_token"):
+                        await handler.on_llm_new_token(
+                            "",
+                            chunk=SimpleNamespace(
+                                message=SimpleNamespace(
+                                    additional_kwargs={
+                                        "reasoning_content": "Reasoning without answering. " * 8
+                                    }
+                                )
+                            ),
+                            run_id=run_id,
+                        )
+                await asyncio.Event().wait()
+                return
+
+            self.recovery_prompt = payload["messages"][-1]["content"]
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": self.recovery_prompt},
+                            {
+                                "role": "assistant",
+                                "content": "Recovered and returned the complete delta-attention answer.",
+                            },
+                        ]
+                    },
+                },
+            }
+
+        return generate()
+
+
+class FakeDegenerateReasoningOnceThenRecoversAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.recovery_prompt = ""
+
+    def astream_events(
+        self,
+        payload,
+        *,
+        config=None,
+        context=None,
+        version=None,
+    ):
+        assert version == "v3"
+        self.calls += 1
+        callbacks = list((config or {}).get("callbacks") or [])
+
+        async def generate():
+            if self.calls == 1:
+                run_id = "degenerate-reasoning-call"
+                for handler in callbacks:
+                    if hasattr(handler, "on_chat_model_start"):
+                        await handler.on_chat_model_start(
+                            {},
+                            [],
+                            run_id=run_id,
+                            metadata={},
+                        )
+                bad_fragment = "the — wait — the — — continue — " * 24
+                for _ in range(8):
+                    for handler in callbacks:
+                        if hasattr(handler, "on_llm_new_token"):
+                            await handler.on_llm_new_token(
+                                "",
+                                chunk=SimpleNamespace(
+                                    message=SimpleNamespace(
+                                        additional_kwargs={
+                                            "reasoning_content": bad_fragment,
+                                        }
+                                    )
+                                ),
+                                run_id=run_id,
+                            )
+                return
+
+            self.recovery_prompt = payload["messages"][-1]["content"]
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": self.recovery_prompt},
+                            {
+                                "role": "assistant",
+                                "content": "Recovered with one complete, coherent answer.",
+                            },
+                        ]
+                    },
+                },
+            }
+
+        return generate()
+
+
+class FakeRepeatedReasoningOnceThenRecoversAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def astream_events(
+        self,
+        payload,
+        *,
+        config=None,
+        context=None,
+        version=None,
+    ):
+        assert version == "v3"
+        self.calls += 1
+        callbacks = list((config or {}).get("callbacks") or [])
+
+        async def generate():
+            if self.calls == 1:
+                run_id = "repeated-reasoning-call"
+                for handler in callbacks:
+                    if hasattr(handler, "on_chat_model_start"):
+                        await handler.on_chat_model_start({}, [], run_id=run_id, metadata={})
+                repeated = ("Retrieval Retrieval Retrieval Retrieval | Delta " * 180).strip()
+                for handler in callbacks:
+                    if hasattr(handler, "on_llm_new_token"):
+                        await handler.on_llm_new_token(
+                            "",
+                            chunk=SimpleNamespace(
+                                message=SimpleNamespace(
+                                    additional_kwargs={"reasoning_content": repeated}
+                                )
+                            ),
+                            run_id=run_id,
+                        )
+                return
+
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": payload["messages"][-1]["content"]},
+                            {
+                                "role": "assistant",
+                                "content": "Recovered with a coherent explanation of the plot.",
+                            },
+                        ]
+                    },
+                },
+            }
+
+        return generate()
+
+
+class FakeIdleTwiceThenMalformedProtocolThenRecoversAgent:
+    """Exact live failure shape: two dead-open turns, then raw DSML text."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.protocol_recovery_prompt = ""
+
+    def astream_events(
+        self,
+        payload,
+        *,
+        config=None,
+        context=None,
+        version=None,
+    ):
+        assert version == "v3"
+        self.calls += 1
+
+        async def generate():
+            if self.calls <= 2:
+                await asyncio.Event().wait()
+                return
+            if self.calls == 3:
+                for text in (
+                    "Computation verified. Now the figures.\n\n</｜DS",
+                    'ML｜tool_calls>\n<｜DSML｜invoke name="execute">',
+                ):
+                    yield {
+                        "event": "on_chat_model_stream",
+                        "data": {"chunk": SimpleNamespace(content=text)},
+                        "metadata": {},
+                    }
+                return
+
+            self.protocol_recovery_prompt = payload["messages"][-1]["content"]
+            assert "malformed internal tool protocol" in self.protocol_recovery_prompt
+            assert "DSML" not in json.dumps(payload["messages"][:-1])
+            yield {
+                "type": "event",
+                "method": "values",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "messages": [
+                            {"role": "user", "content": self.protocol_recovery_prompt},
+                            {
+                                "role": "assistant",
+                                "content": (
+                                    "For q=(1,0), k=(1,0), and v=(2,3), the retrieval "
+                                    "is (2,3); the delta update subtracts the current "
+                                    "prediction before adding the residual outer product."
+                                ),
+                            },
+                        ]
+                    },
+                },
+            }
+
+        return generate()
+
+
+class FakePartialResponseIdleOnceThenRecoversAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": SimpleNamespace(content="First complete numerical section.")},
+                "metadata": {},
+            }
+            await asyncio.Event().wait()
+            return
+
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][-1]["content"]},
+                        {
+                            "role": "assistant",
+                            "content": "Second recovered numerical section.",
                         },
                     ]
                 },
@@ -2754,8 +3093,11 @@ def test_run_job_fails_terminal_when_deepagents_stream_goes_idle(tmp_path: Path)
         "run.started",
         "tool_call.started",
         "tool_call.completed",
+        "trace.model.stalled",
         "run.failed",
     ]
+    assert events[-2]["payload"]["idle_scope"] == "stream"
+    assert events[-2]["payload"]["recoveries_exhausted"] is True
     assert "Deep Agents stream produced no events" in events[-1]["message"]
     lease = json.loads((tmp_path / "workspaces" / "run-1" / "lease.json").read_text())
     assert lease["status"] == "failed"
@@ -2843,14 +3185,426 @@ def test_run_job_recovers_from_one_idle_model_stream_before_failing(tmp_path: Pa
         "run.started",
         "tool_call.started",
         "tool_call.completed",
+        "trace.model.stalled",
         "trace.message.delta",
         "run.completed",
     ]
-    assert events[3]["payload"]["recovery_index"] == 1
-    assert events[3]["payload"]["reason"] == "model_stream_idle"
+    assert events[3]["payload"]["idle_scope"] == "stream"
+    assert events[4]["payload"]["recovery_index"] == 1
+    assert events[4]["payload"]["reason"] == "model_stream_idle"
     assert events[-1]["payload"]["response_text"] == result
     lease = json.loads((tmp_path / "workspaces" / "run-1" / "lease.json").read_text())
     assert lease["status"] == "succeeded"
+
+
+def test_run_job_recovers_reasoning_only_dead_open_model_stream(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeReasoningIdleOnceThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_timeout_seconds=1.0,
+            model_output_idle_timeout_seconds=0.02,
+            model_stream_idle_max_recoveries=1,
+        )
+        prompt = "Can you provide real computations for delta attention?"
+        job = RunJobEnvelope(
+            run_id="run-reasoning-dead-open",
+            thread_id="thread-reasoning-dead-open",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await asyncio.wait_for(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            ),
+            timeout=1.0,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert result == "Recovered and returned the complete delta-attention answer."
+    assert "model stream went idle" in fake_agent.recovery_prompt
+    recovery = next(
+        event for event in events if event.get("payload", {}).get("reason") == "model_stream_idle"
+    )
+    assert recovery["payload"]["timeout_seconds"] == 0.02
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "model_output"
+    assert stalled["payload"]["output_classification"] == "reasoning_only"
+    assert [
+        event["payload"]["status"]
+        for event in events
+        if event["event_kind"] == "trace.reasoning.delta"
+    ] == ["running", "completed"]
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == result
+
+
+def test_run_job_aborts_degenerate_reasoning_and_returns_full_recovery(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeDegenerateReasoningOnceThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+        )
+        prompt = "Can you provide real computations for delta attention?"
+        job = RunJobEnvelope(
+            run_id="run-degenerate-reasoning",
+            thread_id="thread-degenerate-reasoning",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert "malformed repetitive token loop" in fake_agent.recovery_prompt
+    assert result == "Recovered with one complete, coherent answer."
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "reasoning_quality"
+    assert stalled["payload"]["quality_signal"] == "dashlike_density"
+    assert stalled["payload"]["recoveries_exhausted"] is False
+    recovery = next(
+        event
+        for event in events
+        if event.get("payload", {}).get("reason") == "reasoning_degeneration"
+    )
+    assert recovery["payload"]["recovery_index"] == 1
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == result
+    assert not any(event["event_kind"] == "run.failed" for event in events)
+
+
+def test_run_job_aborts_repeated_word_reasoning_and_returns_full_recovery(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeRepeatedReasoningOnceThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+        )
+        prompt = "Explain the delta-attention retrieval calculation."
+        job = RunJobEnvelope(
+            run_id="run-repeated-reasoning",
+            thread_id="thread-repeated-reasoning",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert result == "Recovered with a coherent explanation of the plot."
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "reasoning_quality"
+    assert stalled["payload"]["quality_signal"] == "lexical_repetition"
+    assert stalled["payload"]["quality_max_repeated_trigram"] >= 48
+    assert stalled["payload"]["quality_token_diversity"] <= 0.08
+    assert "Retrieval Retrieval Retrieval" not in json.dumps(events)
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == result
+
+
+def test_run_job_recovers_malformed_protocol_after_idle_budget_is_exhausted(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeIdleTwiceThenMalformedProtocolThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_timeout_seconds=0.01,
+            model_stream_idle_max_recoveries=2,
+            model_protocol_max_recoveries=1,
+        )
+        prompt = "Can you provide real computations for delta attention?"
+        job = RunJobEnvelope(
+            run_id="run-malformed-protocol",
+            thread_id="thread-malformed-protocol",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await asyncio.wait_for(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            ),
+            timeout=1.0,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 4
+    assert fake_agent.protocol_recovery_prompt
+    assert result.startswith("For q=(1,0), k=(1,0), and v=(2,3)")
+    stalled = [event for event in events if event["event_kind"] == "trace.model.stalled"]
+    assert [event["payload"]["idle_scope"] for event in stalled] == [
+        "stream",
+        "stream",
+        "model_protocol",
+    ]
+    protocol_stall = stalled[-1]
+    assert protocol_stall["payload"]["quality_signal"] == "deepseek_dsml_control_token"
+    assert protocol_stall["payload"]["recoveries_exhausted"] is False
+    protocol_recovery = next(
+        event for event in events if event.get("payload", {}).get("reason") == "model_protocol_leak"
+    )
+    assert protocol_recovery["payload"]["recovery_index"] == 1
+    terminal = events[-1]
+    assert terminal["event_kind"] == "run.completed"
+    assert terminal["payload"]["response_text"] == result
+    assert "DSML" not in result
+    assert "tool_calls" not in result
+    assert "DSML" not in json.dumps(events)
+    assert not any(event["event_kind"] == "run.failed" for event in events)
+
+
+def test_run_job_fails_closed_instead_of_completing_with_protocol_text(tmp_path: Path):
+    class _MalformedProtocolAgent:
+        def astream_events(self, _payload, *, version=None, **_kwargs):
+            assert version == "v3"
+
+            async def generate():
+                for text in ("Results follow.\n\n</｜DS", "ML｜tool_calls>"):
+                    yield {
+                        "event": "on_chat_model_stream",
+                        "data": {"chunk": SimpleNamespace(content=text)},
+                        "metadata": {},
+                    }
+
+            return generate()
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_protocol_max_recoveries=0,
+        )
+        job = RunJobEnvelope(
+            run_id="run-malformed-protocol-exhausted",
+            thread_id="thread-malformed-protocol-exhausted",
+            user_id="researcher-1",
+            goal="Return the calculation.",
+            messages=[{"role": "user", "content": "Return the calculation."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        with pytest.raises(
+            RuntimeError,
+            match="malformed internal tool protocol text",
+        ):
+            await run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: _MalformedProtocolAgent(),
+            )
+        return published
+
+    events = asyncio.run(scenario())
+
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "model_protocol"
+    assert stalled["payload"]["recoveries_exhausted"] is True
+    assert events[-1]["event_kind"] == "run.failed"
+    assert not any(event["event_kind"] == "run.completed" for event in events)
+    visible = "".join(
+        str(event.get("payload", {}).get("text") or "")
+        for event in events
+        if event["event_kind"] == "message.delta"
+    )
+    assert visible == "Results follow.\n\n"
+    assert "DSML" not in visible
+    assert "DSML" not in json.dumps(events)
+
+
+def test_run_job_quarantines_legacy_protocol_response_from_model_history(tmp_path: Path):
+    class _HistoryCapturingAgent:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def astream_events(self, payload, *, version=None, **_kwargs):
+            assert version == "v3"
+            self.messages = list(payload["messages"])
+
+            async def generate():
+                yield {
+                    "type": "event",
+                    "method": "values",
+                    "params": {
+                        "namespace": [],
+                        "data": {
+                            "messages": [
+                                {"role": "user", "content": self.messages[-1]["content"]},
+                                {
+                                    "role": "assistant",
+                                    "content": "The first plot shows the retrieval residual.",
+                                },
+                            ]
+                        },
+                    },
+                }
+
+            return generate()
+
+    async def scenario():
+        agent = _HistoryCapturingAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            completion_max_continuations=0,
+        )
+        job = RunJobEnvelope(
+            run_id="run-legacy-protocol-history",
+            thread_id="thread-legacy-protocol-history",
+            user_id="researcher-1",
+            goal="Explain the first plot.",
+            messages=[
+                {"role": "user", "content": "Compute delta attention."},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Computation verified.\n\n</｜DSML｜tool_calls>"
+                        '<｜DSML｜invoke name="execute">'
+                    ),
+                },
+                {"role": "user", "content": "Explain the first plot."},
+            ],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, published, agent
+
+    result, events, agent = asyncio.run(scenario())
+
+    assert result == "The first plot shows the retrieval residual."
+    assert [message["role"] for message in agent.messages] == ["user", "user"]
+    assert "DSML" not in json.dumps(agent.messages)
+    quarantine = next(
+        event for event in events if event["event_kind"] == "trace.history.quarantined"
+    )
+    assert quarantine["payload"] == {
+        "reason": "model_protocol",
+        "message_count": 1,
+    }
+    assert events[-1]["event_kind"] == "run.completed"
+
+
+def test_run_job_preserves_partial_response_across_idle_recovery(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakePartialResponseIdleOnceThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_timeout_seconds=1.0,
+            model_output_idle_timeout_seconds=0.02,
+            model_stream_idle_max_recoveries=1,
+        )
+        job = RunJobEnvelope(
+            run_id="run-partial-response-idle",
+            thread_id="thread-partial-response-idle",
+            user_id="researcher-1",
+            goal="Return both numerical sections.",
+            messages=[{"role": "user", "content": "Return both numerical sections."}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await asyncio.wait_for(
+            run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            ),
+            timeout=1.0,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert result == ("First complete numerical section.\n\nSecond recovered numerical section.")
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "model_output"
+    assert stalled["payload"]["output_classification"] == "partial_response"
+    assert stalled["payload"]["visible_response_observed"] is True
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == result
 
 
 def test_run_job_recovers_from_within_turn_progress_stall(tmp_path: Path):
@@ -2913,9 +3667,10 @@ def test_run_job_recovers_from_within_turn_progress_stall(tmp_path: Path):
     assert lease["status"] == "succeeded"
 
 
-def test_run_job_progress_stall_recoveries_exhausted_still_completes(tmp_path: Path):
-    """A model that ignores the corrective prompt is BOUNDED: recoveries exhaust,
-    the run finalizes with what exists — it must never fail or hang for stalling."""
+def test_run_job_progress_stall_recoveries_exhausted_fail_without_empty_success(
+    tmp_path: Path,
+):
+    """A model that ignores recovery is bounded and never reports empty success."""
 
     async def scenario():
         fake_agent = FakeAlwaysLivelockedAgent()
@@ -2939,18 +3694,19 @@ def test_run_job_progress_stall_recoveries_exhausted_still_completes(tmp_path: P
         async def publish(event):
             published.append(event)
 
-        result = await asyncio.wait_for(
-            run_job(
-                job,
-                settings,
-                publish_event=publish,
-                agent_factory=lambda *_args, **_kwargs: fake_agent,
-            ),
-            timeout=2.0,
-        )
-        return result, published, fake_agent
+        with pytest.raises(RuntimeError, match="without a user-visible response"):
+            await asyncio.wait_for(
+                run_job(
+                    job,
+                    settings,
+                    publish_event=publish,
+                    agent_factory=lambda *_args, **_kwargs: fake_agent,
+                ),
+                timeout=2.0,
+            )
+        return published, fake_agent
 
-    result, events, fake_agent = asyncio.run(scenario())
+    events, fake_agent = asyncio.run(scenario())
 
     stall_events = [
         event for event in events if event.get("payload", {}).get("reason") == "progress_stall"
@@ -2959,8 +3715,8 @@ def test_run_job_progress_stall_recoveries_exhausted_still_completes(tmp_path: P
     assert stall_events[-1]["payload"]["recoveries_exhausted"] is True
     assert "finalizing the run honestly" in stall_events[-1]["message"]
     kinds = [event["event_kind"] for event in events]
-    assert "run.completed" in kinds
-    assert "run.failed" not in kinds
+    assert "run.completed" not in kinds
+    assert kinds[-1] == "run.failed"
     # Bounded: initial attempt + 1 recovery (+ possibly bounded completion-guard
     # continuations that re-trip the guard and exhaust immediately).
     assert fake_agent.calls <= 4
@@ -3117,6 +3873,7 @@ def test_run_job_ignores_leading_whitespace_and_falls_back_to_saved_outputs(tmp_
     )
     assert [event["event_kind"] for event in events] == [
         "run.started",
+        "trace.model.terminal",
         "artifact.created",
         "run.completed",
     ]
@@ -3608,6 +4365,140 @@ def test_run_job_continues_when_only_process_text_precedes_final_tool(tmp_path: 
     assert events[-1]["payload"]["response_text"] == result
     trace_events = [event for event in events if event["event_kind"] == "trace.message.delta"]
     assert [event["payload"]["missing_artifact_kinds"] for event in trace_events] == [["response"]]
+
+
+def test_run_job_recovers_empty_response_for_generic_visible_prompt(tmp_path: Path):
+    prompt = "Can you provide some real computations on how delta attention is computed"
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            completion_max_continuations=2,
+        )
+        job = RunJobEnvelope(
+            run_id="run-empty-recovery",
+            thread_id="thread-empty-recovery",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        agent = FakeEmptyThenFinalResponseAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, published, agent
+
+    result, events, agent = asyncio.run(scenario())
+
+    assert agent.calls == 2
+    assert "Delta attention updates" in result
+    assert "missing requested final response" in agent.continuation_prompt
+    assert [
+        event["payload"]["missing_artifact_kinds"]
+        for event in events
+        if event["event_kind"] == "trace.message.delta"
+    ] == [["response"]]
+    terminal_traces = [event for event in events if event["event_kind"] == "trace.model.terminal"]
+    assert [event["payload"]["output_classification"] for event in terminal_traces] == ["empty"]
+    assert terminal_traces[0]["payload"]["finish_reason"] == "stop"
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == result
+
+
+def test_run_job_fails_closed_when_visible_response_recovery_is_exhausted(tmp_path: Path):
+    prompt = "Can you provide some real computations on how delta attention is computed"
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            completion_max_continuations=8,
+        )
+        job = RunJobEnvelope(
+            run_id="run-empty-exhausted",
+            thread_id="thread-empty-exhausted",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        agent = FakeAlwaysEmptyAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        with pytest.raises(RuntimeError, match="without a user-visible response"):
+            await run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: agent,
+            )
+        return published, agent
+
+    events, agent = asyncio.run(scenario())
+
+    assert agent.calls == 2
+    assert not [event for event in events if event["event_kind"] == "run.completed"]
+    assert events[-1]["event_kind"] == "run.failed"
+    assert events[-1]["payload"]["error_type"] == "AgentEmptyResponseError"
+    assert [
+        event["payload"]["output_classification"]
+        for event in events
+        if event["event_kind"] == "trace.model.terminal"
+    ] == ["empty", "empty"]
+
+
+def test_run_job_preserves_empty_completion_for_explicit_internal_run(tmp_path: Path):
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+        )
+        job = RunJobEnvelope(
+            run_id="run-internal-empty",
+            thread_id="thread-internal-empty",
+            user_id="researcher-1",
+            goal="Perform the internal tool handoff.",
+            messages=[{"role": "tool", "content": "Internal tool handoff."}],
+            metadata={"internal": True, "visible_in_thread": False},
+        )
+        agent = FakeAlwaysEmptyAgent()
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: agent,
+        )
+        return result, published, agent
+
+    result, events, agent = asyncio.run(scenario())
+
+    assert result == ""
+    assert agent.calls == 1
+    assert not [event for event in events if event["event_kind"] == "run.failed"]
+    assert events[-1]["event_kind"] == "run.completed"
+    assert events[-1]["payload"]["response_text"] == ""
 
 
 def test_run_job_writes_workspace_lease_lifecycle(tmp_path: Path):
@@ -7191,6 +8082,50 @@ def test_collect_output_artifacts_skips_unreferenced_top_level_scripts(tmp_path:
     assert "outputs/report.md" in paths
 
 
+def test_collect_output_artifacts_skips_unreferenced_scratch_crops(tmp_path: Path):
+    from ultra_deepagents.runner import (
+        _artifact_reference_text,
+        _collect_output_artifacts,
+    )
+
+    job = _study_job({"id": "pro_mode"})
+    context = _context_for_job(job, tmp_path)
+    workspace = Path(context.workspace_root)
+    artifact_dir = Path(context.artifact_root)
+    ocr_dir = workspace / "outputs" / "ocr"
+    (ocr_dir / "crops").mkdir(parents=True)
+    artifact_dir.mkdir(parents=True)
+
+    def _write_png(path: Path, color: str) -> None:
+        Image.new("RGB", (8, 8), color).save(path)
+
+    _write_png(ocr_dir / "crop_350_450.png", "red")
+    _write_png(ocr_dir / "crop_x5.png", "green")
+    _write_png(ocr_dir / "crops" / "quote.png", "blue")
+    _write_png(ocr_dir / "crop_referenced.png", "yellow")
+    _write_png(workspace / "outputs" / "cropland_yield.png", "white")
+    (ocr_dir / "crop_notes.txt").write_text("engine vs VLM disagreements\n")
+
+    reference_text = _artifact_reference_text(
+        _attempt(
+            "Transcription in outputs/ocr/page.txt; the disputed glyph is shown "
+            "in crop_referenced.png."
+        ),
+        workspace,
+    )
+    events = _collect_output_artifacts(
+        context, workspace, artifact_dir, reference_text=reference_text
+    )
+    paths = [event["payload"]["path"] for event in events]
+
+    assert "outputs/ocr/crop_350_450.png" not in paths
+    assert "outputs/ocr/crop_x5.png" not in paths
+    assert "outputs/ocr/crops/quote.png" not in paths
+    assert "outputs/ocr/crop_referenced.png" in paths
+    assert "outputs/cropland_yield.png" in paths
+    assert "outputs/ocr/crop_notes.txt" in paths
+
+
 def test_run_job_enforces_rigor_contract_with_one_continuation(tmp_path: Path):
     class FakeStudyThenContractAgent:
         def __init__(self) -> None:
@@ -7738,3 +8673,259 @@ def test_run_job_treats_invalid_subagent_task_output_as_failed_delegation(tmp_pa
     response_text = completed["payload"]["response_text"]
     assert "Task delegation failed" in response_text
     assert "local fallback verification" in response_text
+
+
+class FakeDegenerateThenObservesFallbackAgent(FakeDegenerateReasoningOnceThenRecoversAgent):
+    """Records whether the thinking fallback was armed when each attempt ran."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fallback_state_per_call: list[bool] = []
+
+    def astream_events(self, payload, *, config=None, context=None, version=None):
+        from ultra_deepagents.model import thinking_fallback_armed
+
+        self.fallback_state_per_call.append(thinking_fallback_armed())
+        return super().astream_events(payload, config=config, context=context, version=version)
+
+
+def test_degeneration_recovery_arms_thinking_fallback_run_scoped(tmp_path: Path):
+    """Attempt 1 runs unarmed; the retry after a degeneration recovery runs with
+    the thinking fallback armed; a FRESH run starts unarmed again (run-scoped
+    reset), and the recovery event advertises the escalation."""
+
+    async def scenario():
+        fake_agent = FakeDegenerateThenObservesFallbackAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+        )
+        prompt = "Can you provide real computations for delta attention?"
+        job = RunJobEnvelope(
+            run_id="run-fallback-escalation",
+            thread_id="thread-fallback-escalation",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job, settings, publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+
+        # A brand-new run on the same task context must start unarmed.
+        fresh_agent = FakeDegenerateThenObservesFallbackAgent()
+        fresh_job = RunJobEnvelope(
+            run_id="run-fallback-reset",
+            thread_id="thread-fallback-reset",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        await run_job(
+            fresh_job, settings, publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fresh_agent,
+        )
+        return result, published, fake_agent, fresh_agent
+
+    result, events, fake_agent, fresh_agent = asyncio.run(scenario())
+
+    assert result == "Recovered with one complete, coherent answer."
+    assert fake_agent.fallback_state_per_call == [False, True]
+    assert fresh_agent.fallback_state_per_call[0] is False
+    recovery = next(
+        event for event in events
+        if event.get("payload", {}).get("reason") == "reasoning_degeneration"
+    )
+    assert recovery["payload"]["thinking_fallback_armed"] is True
+
+
+def test_degeneration_recovery_respects_disabled_fallback(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeDegenerateThenObservesFallbackAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+            degeneration_thinking_fallback=False,
+        )
+        prompt = "Can you provide real computations for delta attention?"
+        job = RunJobEnvelope(
+            run_id="run-fallback-disabled",
+            thread_id="thread-fallback-disabled",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        await run_job(
+            job, settings, publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+        return published, fake_agent
+
+    events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.fallback_state_per_call == [False, False]
+    recovery = next(
+        event for event in events
+        if event.get("payload", {}).get("reason") == "reasoning_degeneration"
+    )
+    assert recovery["payload"]["thinking_fallback_armed"] is False
+
+
+class FakeDisconnectOnceThenRecoversAgent:
+    """First attempt raises a mid-stream APIConnectionError (the live
+    2026-08-16 httpx.ReadError failure shape); second attempt completes."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.recovery_prompt = ""
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        import httpx
+        from openai import APIConnectionError
+
+        assert version == "v3"
+        self.calls += 1
+        if self.calls == 1:
+            yield {
+                "type": "event",
+                "method": "tools",
+                "params": {
+                    "namespace": [],
+                    "data": {
+                        "event": "tool-finished",
+                        "tool_call_id": "call-eig-1",
+                        "output": "eigenvalues: [-2.14, -0.87, 0.13, 1.02, 2.55, 3.31]",
+                    },
+                },
+            }
+            raise APIConnectionError(request=httpx.Request("POST", "http://example.test/v1"))
+
+        self.recovery_prompt = payload["messages"][-1]["content"]
+        yield {
+            "type": "event",
+            "method": "values",
+            "params": {
+                "namespace": [],
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": payload["messages"][-1]["content"]},
+                        {
+                            "role": "assistant",
+                            "content": "Resumed after the connection drop: the eigenvalues are [-2.14, -0.87, 0.13, 1.02, 2.55, 3.31].",
+                        },
+                    ]
+                },
+            },
+        }
+
+
+def test_run_job_recovers_from_mid_stream_connection_drop(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeDisconnectOnceThenRecoversAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+        )
+        prompt = "Compute the eigenvalues of the matrix and report them."
+        job = RunJobEnvelope(
+            run_id="run-disconnect-recovery",
+            thread_id="thread-disconnect-recovery",
+            user_id="researcher-1",
+            goal=prompt,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        result = await run_job(
+            job, settings, publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: fake_agent,
+        )
+        return result, published, fake_agent
+
+    result, events, fake_agent = asyncio.run(scenario())
+
+    assert fake_agent.calls == 2
+    assert result == "Resumed after the connection drop: the eigenvalues are [-2.14, -0.87, 0.13, 1.02, 2.55, 3.31]."
+    assert "transient provider connection drop" in fake_agent.recovery_prompt
+    assert "do NOT re-run a step whose output already exists" in fake_agent.recovery_prompt
+    stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
+    assert stalled["payload"]["idle_scope"] == "model_disconnect"
+    recovery = next(
+        event for event in events
+        if event.get("payload", {}).get("reason") == "model_stream_disconnect"
+    )
+    assert recovery["payload"]["recovery_index"] == 1
+    # A pure transport drop is NOT a thinking-path collapse: no escalation.
+    assert recovery["payload"]["thinking_fallback_armed"] is False
+    assert events[-1]["event_kind"] == "run.completed"
+
+
+class FakeAlwaysDisconnectsAgent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def astream_events(self, payload, *, context=None, version=None):
+        import httpx
+        from openai import APIConnectionError
+
+        self.calls += 1
+        if False:
+            yield {}
+        raise APIConnectionError(request=httpx.Request("POST", "http://example.test/v1"))
+
+
+def test_run_job_fails_after_exhausting_disconnect_recoveries(tmp_path: Path):
+    async def scenario():
+        fake_agent = FakeAlwaysDisconnectsAgent()
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            model_stream_idle_max_recoveries=1,
+        )
+        job = RunJobEnvelope(
+            run_id="run-disconnect-exhausted",
+            thread_id="thread-disconnect-exhausted",
+            user_id="researcher-1",
+            goal="anything",
+            messages=[{"role": "user", "content": "anything"}],
+        )
+        published = []
+
+        async def publish(event):
+            published.append(event)
+
+        with pytest.raises(Exception):
+            await run_job(
+                job, settings, publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: fake_agent,
+            )
+        return fake_agent
+
+    fake_agent = asyncio.run(scenario())
+    # initial attempt + exactly one bounded recovery, never an infinite loop
+    assert fake_agent.calls == 2

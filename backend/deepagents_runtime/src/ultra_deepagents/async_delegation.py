@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from langchain.agents.middleware.types import AgentMiddleware
@@ -182,25 +182,38 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         if tool_name in _ASYNC_TASK_TOOLS_REQUIRING_TRACKED_SUBAGENT:
             failed_launch = _failed_launch_task_message(request)
             if failed_launch:
-                return _tool_message(failed_launch, request)
+                return _tool_message(failed_launch, request, status="error")
             tracked = self._resolve_configured_tracked_task(request)
             if isinstance(tracked, str):
-                return _tool_message(tracked, request)
+                return _tool_message(tracked, request, status="error")
             if tool_name in {"cancel_async_task", "check_async_task", "update_async_task"}:
                 cached_terminal = _cached_terminal_task_check_message(tracked)
                 if cached_terminal:
-                    return _tool_message(cached_terminal, request)
+                    return _tool_message(
+                        cached_terminal,
+                        request,
+                        status=(
+                            "error"
+                            if tracked["status"].lower()
+                            in _FAILED_TERMINAL_ASYNC_TASK_STATUSES
+                            else "success"
+                        ),
+                    )
             if tool_name in _ASYNC_TASK_TOOLS_REQUIRING_SYNC_URL:
                 error = self._validate_sync_url(tracked["agent_name"])
                 if error:
-                    return _tool_message(error, request)
+                    return _tool_message(error, request, status="error")
         if tool_name == _ASYNC_TASK_LIST_TOOL:
             cached_terminal_list = _cached_terminal_task_list_message(request)
             if cached_terminal_list:
-                return _tool_message(cached_terminal_list, request)
+                return _tool_message(
+                    cached_terminal_list,
+                    request,
+                    status=_cached_terminal_task_list_status(request),
+                )
             error = self._validate_listable_tracked_tasks(request, require_sync_url=True)
             if error:
-                return _tool_message(error, request)
+                return _tool_message(error, request, status="error")
             return self._list_async_tasks(request)
         if tool_name not in _ASYNC_TASK_TOOLS_WITH_REMOTE_RUNS:
             result = handler(request)
@@ -215,7 +228,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             return result
         context = _runtime_context(request)
         if context is None:
-            return _tool_message(_missing_context_error(tool_name), request)
+            return _tool_message(_missing_context_error(tool_name), request, status="error")
         if tool_name == "start_async_task":
             return self._start_async_task(request, context)
         return self._update_async_task(request, context)
@@ -229,21 +242,34 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         if tool_name in _ASYNC_TASK_TOOLS_REQUIRING_TRACKED_SUBAGENT:
             failed_launch = _failed_launch_task_message(request)
             if failed_launch:
-                return _tool_message(failed_launch, request)
+                return _tool_message(failed_launch, request, status="error")
             tracked = self._resolve_configured_tracked_task(request)
             if isinstance(tracked, str):
-                return _tool_message(tracked, request)
+                return _tool_message(tracked, request, status="error")
             if tool_name in {"cancel_async_task", "check_async_task", "update_async_task"}:
                 cached_terminal = _cached_terminal_task_check_message(tracked)
                 if cached_terminal:
-                    return _tool_message(cached_terminal, request)
+                    return _tool_message(
+                        cached_terminal,
+                        request,
+                        status=(
+                            "error"
+                            if tracked["status"].lower()
+                            in _FAILED_TERMINAL_ASYNC_TASK_STATUSES
+                            else "success"
+                        ),
+                    )
         if tool_name == _ASYNC_TASK_LIST_TOOL:
             cached_terminal_list = _cached_terminal_task_list_message(request)
             if cached_terminal_list:
-                return _tool_message(cached_terminal_list, request)
+                return _tool_message(
+                    cached_terminal_list,
+                    request,
+                    status=_cached_terminal_task_list_status(request),
+                )
             error = self._validate_listable_tracked_tasks(request, require_sync_url=False)
             if error:
-                return _tool_message(error, request)
+                return _tool_message(error, request, status="error")
             return await self._alist_async_tasks(request)
         if tool_name not in _ASYNC_TASK_TOOLS_WITH_REMOTE_RUNS:
             result = await handler(request)
@@ -258,7 +284,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             return result
         context = _runtime_context(request)
         if context is None:
-            return _tool_message(_missing_context_error(tool_name), request)
+            return _tool_message(_missing_context_error(tool_name), request, status="error")
         if tool_name == "start_async_task":
             return await self._astart_async_task(request, context)
         return await self._aupdate_async_task(request, context)
@@ -277,9 +303,9 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         )
         error = self._validate_subagent_type(subagent_type)
         if error:
-            return _tool_message(error, request)
+            return _tool_message(error, request, status="error")
         if description_error:
-            return _tool_message(description_error, request)
+            return _tool_message(description_error, request, status="error")
         spec = self._agent_map[subagent_type]
         task_id = ""
         try:
@@ -319,6 +345,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             return _tool_message(
                 f"Failed to launch async subagent '{subagent_type}': {exc}",
                 request,
+                status="error",
             )
         return _async_task_command(
             request,
@@ -342,9 +369,9 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
         )
         error = self._validate_subagent_type(subagent_type)
         if error:
-            return _tool_message(error, request)
+            return _tool_message(error, request, status="error")
         if description_error:
-            return _tool_message(description_error, request)
+            return _tool_message(description_error, request, status="error")
         spec = self._agent_map[subagent_type]
         task_id = ""
         try:
@@ -384,6 +411,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             return _tool_message(
                 f"Failed to launch async subagent '{subagent_type}': {exc}",
                 request,
+                status="error",
             )
         return _async_task_command(
             request,
@@ -400,7 +428,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
     ) -> ToolMessage | Command[Any]:
         tracked = self._resolve_configured_tracked_task(request)
         if isinstance(tracked, str):
-            return _tool_message(tracked, request)
+            return _tool_message(tracked, request, status="error")
         spec = self._agent_map[tracked["agent_name"]]
         message, message_error = _required_tool_arg_text(
             _tool_call_args(request),
@@ -408,7 +436,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             tool_name="update_async_task",
         )
         if message_error:
-            return _tool_message(message_error, request)
+            return _tool_message(message_error, request, status="error")
         try:
             client = self._clients.get_sync(tracked["agent_name"])
             run = client.runs.create(
@@ -453,7 +481,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
     ) -> ToolMessage | Command[Any]:
         tracked = self._resolve_configured_tracked_task(request)
         if isinstance(tracked, str):
-            return _tool_message(tracked, request)
+            return _tool_message(tracked, request, status="error")
         spec = self._agent_map[tracked["agent_name"]]
         message, message_error = _required_tool_arg_text(
             _tool_call_args(request),
@@ -461,7 +489,7 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             tool_name="update_async_task",
         )
         if message_error:
-            return _tool_message(message_error, request)
+            return _tool_message(message_error, request, status="error")
         try:
             client = self._clients.get_async(tracked["agent_name"])
             run = await client.runs.create(
@@ -540,7 +568,13 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             update={
                 "messages": [
                     _tool_message(
-                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request
+                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries),
+                        request,
+                        status=(
+                            "error"
+                            if any(_async_task_list_entry_is_error(task) for task in updates.values())
+                            else "success"
+                        ),
                     )
                 ],
                 "async_tasks": updates,
@@ -588,7 +622,13 @@ class UltraAsyncSubagentContextMiddleware(AgentMiddleware[Any, AgentRunContext, 
             update={
                 "messages": [
                     _tool_message(
-                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries), request
+                        f"{len(entries)} tracked task(s):\n" + "\n".join(entries),
+                        request,
+                        status=(
+                            "error"
+                            if any(_async_task_list_entry_is_error(task) for task in updates.values())
+                            else "success"
+                        ),
                     )
                 ],
                 "async_tasks": updates,
@@ -886,6 +926,24 @@ def _cached_terminal_task_list_message(request: ToolCallRequest) -> str:
     return f"{len(entries)} tracked task(s):\n" + "\n".join(entries)
 
 
+def _cached_terminal_task_list_status(
+    request: ToolCallRequest,
+) -> Literal["success", "error"]:
+    tasks = request.state.get("async_tasks") or {}
+    if not isinstance(tasks, dict):
+        return "success"
+    status_filter = str(_tool_call_args(request).get("status_filter") or "all").strip()
+    for task in tasks.values():
+        if not isinstance(task, dict):
+            continue
+        status = str(task.get("status") or "").strip()
+        if status_filter and status_filter != "all" and status != status_filter:
+            continue
+        if _async_task_list_entry_is_error(task):
+            return "error"
+    return "success"
+
+
 def _cached_terminal_task_check_message(tracked: dict[str, str]) -> str:
     if tracked["status"].lower() not in _TERMINAL_ASYNC_TASK_STATUSES:
         return ""
@@ -960,6 +1018,12 @@ def _format_async_task_list_entry(task: dict[str, str]) -> str:
     return entry
 
 
+def _async_task_list_entry_is_error(task: dict[str, str]) -> bool:
+    return bool(task.get("last_error")) or task.get("status", "").lower() in (
+        _FAILED_TERMINAL_ASYNC_TASK_STATUSES
+    )
+
+
 def _cancel_failure_command_from_result(
     request: ToolCallRequest,
     result: ToolMessage | Command[Any],
@@ -1020,6 +1084,12 @@ def _check_error_detail_command_from_result(
         return None
     enriched_update = dict(update)
     enriched_update["async_tasks"] = enriched_tasks
+    enriched_update["messages"] = [
+        message.model_copy(update={"status": "error"})
+        if isinstance(message, ToolMessage)
+        else message
+        for message in messages
+    ]
     return Command(update=enriched_update)
 
 
@@ -1329,7 +1399,7 @@ def _async_task_error_command(
     visible_message = f"{message} task_id: {task_id} status: error error: {error_text}"
     return Command(
         update={
-            "messages": [_tool_message(visible_message, request)],
+            "messages": [_tool_message(visible_message, request, status="error")],
             "async_tasks": {task_id: task},
         }
     )
@@ -1361,7 +1431,7 @@ def _async_task_update_error_command(
     )
     return Command(
         update={
-            "messages": [_tool_message(visible_message, request)],
+            "messages": [_tool_message(visible_message, request, status="error")],
             "async_tasks": {task_id: task},
         }
     )
@@ -1393,7 +1463,7 @@ def _async_task_cancel_error_command(
     )
     return Command(
         update={
-            "messages": [_tool_message(visible_message, request)],
+            "messages": [_tool_message(visible_message, request, status="error")],
             "async_tasks": {task_id: task},
         }
     )
@@ -1425,7 +1495,7 @@ def _async_task_check_error_command(
     )
     return Command(
         update={
-            "messages": [_tool_message(visible_message, request)],
+            "messages": [_tool_message(visible_message, request, status="error")],
             "async_tasks": {task_id: task},
         }
     )
@@ -1465,5 +1535,14 @@ def _missing_context_error(tool_name: str) -> str:
     )
 
 
-def _tool_message(content: str, request: ToolCallRequest) -> ToolMessage:
-    return ToolMessage(content, tool_call_id=str(request.tool_call.get("id") or ""))
+def _tool_message(
+    content: str,
+    request: ToolCallRequest,
+    *,
+    status: Literal["success", "error"] = "success",
+) -> ToolMessage:
+    return ToolMessage(
+        content,
+        tool_call_id=str(request.tool_call.get("id") or ""),
+        status=status,
+    )

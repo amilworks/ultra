@@ -24,6 +24,20 @@ def test_build_chat_model_uses_openai_compatible_base_url():
     assert model.request_timeout.connect == 10.0
     assert model.stream_chunk_timeout == 42.0
     assert model.max_retries == 0
+    assert model.temperature == 1.0
+    assert model.top_p == 0.95
+
+
+def test_non_deepseek_model_keeps_provider_sampling_defaults():
+    model = build_chat_model(
+        RuntimeSettings(
+            openai_base_url="http://127.0.0.1:8003/v1",
+            openai_model="gpt-oss-120b",
+        )
+    )
+
+    assert model.temperature is None
+    assert model.top_p is None
 
 
 def test_build_chat_model_disables_request_timeout_when_setting_is_zero():
@@ -175,3 +189,58 @@ def test_build_chat_model_publishes_context_window_for_adaptive_summarization():
     # so SCOPED_DELEGATION_RESPONSE_FORMAT keeps its auto-retry path.
     assert _supports_provider_strategy(on, tools=[object()]) is False
     assert "structured_output" not in on.profile
+
+
+def test_thinking_fallback_disables_thinking_on_deepseek_payloads():
+    from ultra_deepagents.model import (
+        arm_thinking_fallback,
+        reset_thinking_fallback,
+        thinking_fallback_armed,
+    )
+
+    model = build_chat_model(
+        RuntimeSettings(openai_base_url="http://127.0.0.1:8003/v1", openai_model="deepseek_v4")
+    )
+    messages = [HumanMessage(content="Explain the first plot.")]
+    try:
+        # Unarmed (the default): the payload must be byte-identical to today's
+        # behavior — no extra_body, thinking stays a server-side default.
+        reset_thinking_fallback()
+        payload = model._get_request_payload(messages)
+        assert "extra_body" not in payload
+
+        arm_thinking_fallback()
+        assert thinking_fallback_armed()
+        payload = model._get_request_payload(messages)
+        assert payload["extra_body"]["chat_template_kwargs"]["enable_thinking"] is False
+    finally:
+        reset_thinking_fallback()
+
+
+def test_thinking_fallback_merges_existing_extra_body_and_skips_other_models():
+    from ultra_deepagents.model import arm_thinking_fallback, reset_thinking_fallback
+
+    try:
+        arm_thinking_fallback()
+
+        # deepseek_v4: caller-supplied extra_body/chat_template_kwargs survive the merge.
+        model = build_chat_model(
+            RuntimeSettings(openai_base_url="http://127.0.0.1:8003/v1", openai_model="deepseek_v4")
+        )
+        payload = model._get_request_payload(
+            [HumanMessage(content="hi")],
+            extra_body={"chat_template_kwargs": {"reasoning_effort": "low"}, "keep": 1},
+        )
+        template_kwargs = payload["extra_body"]["chat_template_kwargs"]
+        assert template_kwargs["enable_thinking"] is False
+        assert template_kwargs["reasoning_effort"] == "low"
+        assert payload["extra_body"]["keep"] == 1
+
+        # Non-deepseek endpoints are untouched even while armed.
+        other = build_chat_model(
+            RuntimeSettings(openai_base_url="http://127.0.0.1:8003/v1", openai_model="gpt-oss-120b")
+        )
+        payload = other._get_request_payload([HumanMessage(content="hi")])
+        assert "extra_body" not in payload
+    finally:
+        reset_thinking_fallback()

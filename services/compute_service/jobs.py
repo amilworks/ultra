@@ -18,10 +18,14 @@ Reliability contract (the user's "launch back to back to back with no errors"):
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import math
 import shutil
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,10 +43,69 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED})
+IDEMPOTENCY_CONFLICT_DETAIL = "Idempotency key is already bound to a different request."
+INVALID_JOB_SPEC_DETAIL = "Job spec must contain only finite JSON values."
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class IdempotencyConflictError(RuntimeError):
+    """Raised when a retained idempotency key is reused for another request."""
+
+    def __init__(self) -> None:
+        super().__init__(IDEMPOTENCY_CONFLICT_DETAIL)
+
+
+class InvalidJobSpecError(ValueError):
+    """Raised when a job spec cannot be represented faithfully as JSON."""
+
+    def __init__(self) -> None:
+        super().__init__(INVALID_JOB_SPEC_DETAIL)
+
+
+def _typed_json_value(value: Any) -> list[Any]:
+    """Return a deterministic JSON value that preserves each source JSON type."""
+    value_type = type(value)
+    if value is None:
+        return ["null"]
+    if value_type is bool:
+        return ["bool", value]
+    if value_type is int:
+        return ["int", str(value)]
+    if value_type is float:
+        if not math.isfinite(value):
+            raise InvalidJobSpecError
+        return ["float", value.hex()]
+    if value_type is str:
+        return ["string", value]
+    if value_type is list:
+        return ["array", [_typed_json_value(item) for item in value]]
+    if value_type is dict:
+        if any(type(key) is not str for key in value):
+            raise InvalidJobSpecError
+        return [
+            "object",
+            [[key, _typed_json_value(value[key])] for key in sorted(value)],
+        ]
+    raise InvalidJobSpecError
+
+
+def validate_job_spec(spec: dict[str, Any]) -> None:
+    """Reject values that cannot be represented faithfully in persisted JSON."""
+    _typed_json_value(spec)
+
+
+def _request_identity(executor_key: str, spec: dict[str, Any]) -> bytes:
+    canonical = _typed_json_value({"executor": executor_key, "spec": spec})
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).digest()
 
 
 class JobProgress(BaseModel):
@@ -137,8 +200,7 @@ class JobManager:
         self.worker_tasks = []
 
     def _recover_on_startup(self) -> list[str]:
-        """Load persisted records; running→failed (process is gone), queued→requeue."""
-        requeue: list[str] = []
+        """Load persisted records and choose authoritative queued attempts."""
         for path in sorted(self.job_root.glob("*.json")):
             try:
                 record = JobRecord.model_validate_json(path.read_text(encoding="utf-8"))
@@ -156,12 +218,68 @@ class JobManager:
             # none and silently no-op (and _run_job_sync would synthesize a private
             # one that cancel() can't see).
             self._cancel_events.setdefault(record.job_id, threading.Event())
-            if record.idempotency_key:
-                self._idempotency[record.idempotency_key] = record.job_id
-            if record.status == STATUS_QUEUED:
-                requeue.append(record.job_id)
         self._evict_locked()
-        return requeue
+        self._rebuild_idempotency_index_locked()
+        return self._recovery_queue_locked()
+
+    @staticmethod
+    def _attempt_order(record: JobRecord) -> tuple[str, str]:
+        """Order server-created attempts deterministically, newest last."""
+        return (record.created_at, record.job_id)
+
+    def _idempotency_attempts_locked(self, idempotency_key: str) -> list[JobRecord]:
+        return [
+            record
+            for record in self._records.values()
+            if record.idempotency_key == idempotency_key
+        ]
+
+    @staticmethod
+    def _consistent_request_identity(attempts: list[JobRecord]) -> bytes | None:
+        identities: set[bytes] = set()
+        try:
+            for attempt in attempts:
+                identities.add(_request_identity(attempt.executor, attempt.spec))
+        except InvalidJobSpecError:
+            return None
+        if len(identities) != 1:
+            return None
+        return next(iter(identities))
+
+    def _recovery_queue_locked(self) -> list[str]:
+        histories: dict[str, list[JobRecord]] = {}
+        for record in self._records.values():
+            if record.idempotency_key is not None:
+                histories.setdefault(record.idempotency_key, []).append(record)
+
+        authoritative_queued: set[str] = set()
+        for attempts in histories.values():
+            if self._consistent_request_identity(attempts) is None:
+                continue
+            newest = max(attempts, key=self._attempt_order)
+            if newest.status == STATUS_QUEUED:
+                authoritative_queued.add(newest.job_id)
+
+        return [
+            record.job_id
+            for record in self._records.values()
+            if record.status == STATUS_QUEUED
+            and (
+                record.idempotency_key is None
+                or record.job_id in authoritative_queued
+            )
+        ]
+
+    def _rebuild_idempotency_index_locked(self) -> None:
+        self._idempotency.clear()
+        for record in self._records.values():
+            key = record.idempotency_key
+            if key is None:
+                continue
+            current_id = self._idempotency.get(key)
+            current = self._records.get(current_id) if current_id is not None else None
+            if current is None or self._attempt_order(record) > self._attempt_order(current):
+                self._idempotency[key] = record.job_id
 
     # -------------------------------------------------------------- persistence
     def _record_path(self, job_id: str) -> Path:
@@ -194,15 +312,29 @@ class JobManager:
         spec: dict[str, Any],
         idempotency_key: str | None = None,
     ) -> JobRecord:
+        admitted_spec = deepcopy(spec or {})
+        validate_job_spec(admitted_spec)
+        request_identity = (
+            _request_identity(executor_key, admitted_spec)
+            if idempotency_key is not None
+            else None
+        )
         with self._lock:
-            if idempotency_key and idempotency_key in self._idempotency:
-                existing = self._records.get(self._idempotency[idempotency_key])
-                # Dedup only on a still-useful record: a redelivery keyed on the
-                # same job RESUMES a queued/running one and reuses a succeeded
-                # result, but a terminally FAILED/CANCELLED record must NOT block a
-                # retry — fall through and mint a fresh job.
-                if existing is not None and existing.status not in (STATUS_FAILED, STATUS_CANCELLED):
-                    return existing.model_copy(deep=True)
+            if idempotency_key is not None:
+                attempts = self._idempotency_attempts_locked(idempotency_key)
+                if attempts:
+                    # Inspect every retained attempt before liveness/terminal state
+                    # so legacy mixed histories fail closed regardless of pointer.
+                    retained_identity = self._consistent_request_identity(attempts)
+                    if retained_identity is None or retained_identity != request_identity:
+                        raise IdempotencyConflictError
+                    existing = max(attempts, key=self._attempt_order)
+                    self._idempotency[idempotency_key] = existing.job_id
+                    # A same-request redelivery resumes queued/running work and
+                    # reuses success, while failure/cancellation may retry under
+                    # the existing policy by minting a fresh job below.
+                    if existing.status not in (STATUS_FAILED, STATUS_CANCELLED):
+                        return existing.model_copy(deep=True)
             job_id = uuid4().hex
             now = _utc_now()
             record = JobRecord(
@@ -211,12 +343,12 @@ class JobManager:
                 status=STATUS_QUEUED,
                 created_at=now,
                 updated_at=now,
-                spec=dict(spec or {}),
+                spec=admitted_spec,
                 idempotency_key=idempotency_key,
             )
             self._records[job_id] = record
             self._cancel_events[job_id] = threading.Event()
-            if idempotency_key:
+            if idempotency_key is not None:
                 self._idempotency[idempotency_key] = job_id
             self._write_disk(record)
             self._evict_locked()
@@ -292,7 +424,7 @@ class JobManager:
             record.updated_at = record.started_at
             self._write_disk(record)
             executor_key = record.executor
-            spec = dict(record.spec)
+            spec = deepcopy(record.spec)
 
         executor = get_executor(executor_key)
         if executor is None:
@@ -381,15 +513,17 @@ class JobManager:
             key=lambda r: r.finished_at or r.created_at,
         )
         overflow = len(self._records) - self.history_limit
+        evicted = False
         for record in terminal[:overflow]:
             self._records.pop(record.job_id, None)
             self._contexts.pop(record.job_id, None)
             self._cancel_events.pop(record.job_id, None)
             self._last_persist.pop(record.job_id, None)
-            if record.idempotency_key and self._idempotency.get(record.idempotency_key) == record.job_id:
-                self._idempotency.pop(record.idempotency_key, None)
             self._record_path(record.job_id).unlink(missing_ok=True)
             shutil.rmtree(self.workspace_root / record.job_id, ignore_errors=True)
+            evicted = True
+        if evicted:
+            self._rebuild_idempotency_index_locked()
 
 
 def _jsonable(value: Any) -> dict[str, Any]:

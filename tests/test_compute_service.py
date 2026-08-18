@@ -17,11 +17,14 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
 from services.compute_service import executors as registry
 from services.compute_service.app import create_app
 from services.compute_service.executors.base import ExecutorManifest, JobCancelled, JobContext
-from services.compute_service.jobs import TERMINAL_STATUSES, JobManager
+from services.compute_service.jobs import (
+    TERMINAL_STATUSES,
+    IdempotencyConflictError,
+    JobManager,
+)
 from services.compute_service.settings import ServiceSettings
 
 
@@ -59,6 +62,17 @@ class BoomExecutor:
         raise ValueError("intentional failure")
 
 
+class RecordingExecutor:
+    manifest = ExecutorManifest(model_key="test", capability="recording", gpu=False)
+
+    def __init__(self) -> None:
+        self.job_ids: list[str] = []
+
+    def run(self, spec, ctx):
+        self.job_ids.append(ctx.job_id)
+        return {"executed_job_id": ctx.job_id}
+
+
 @pytest.fixture
 def clean_registry():
     saved = dict(registry._REGISTRY)
@@ -91,6 +105,37 @@ def _manager(tmp_path: Path, **kw) -> JobManager:
         max_concurrent=kw.pop("max_concurrent", 2),
         history_limit=kw.pop("history_limit", 50),
         progress_persist_interval=kw.pop("progress_persist_interval", 0.0),
+    )
+
+
+def _persist_job_record(
+    tmp_path: Path,
+    *,
+    job_id: str,
+    status: str,
+    created_at: str,
+    spec: dict,
+    idempotency_key: str | None,
+    executor: str = "test.echo",
+    result: dict | None = None,
+) -> None:
+    job_root = tmp_path / "jobs"
+    job_root.mkdir(parents=True, exist_ok=True)
+    (job_root / f"{job_id}.json").write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "executor": executor,
+                "status": status,
+                "created_at": created_at,
+                "updated_at": created_at,
+                "finished_at": created_at if status in TERMINAL_STATUSES else None,
+                "spec": spec,
+                "idempotency_key": idempotency_key,
+                "result": result,
+            }
+        ),
+        encoding="utf-8",
     )
 
 
@@ -174,6 +219,443 @@ def test_idempotency_key_dedupes(tmp_path, clean_registry):
         a = manager.submit(executor_key="test.echo", spec={}, idempotency_key="K").job_id
         b = manager.submit(executor_key="test.echo", spec={}, idempotency_key="K").job_id
         assert a == b
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_reordered_nested_object_keys_dedupe(tmp_path, clean_registry):
+    clean_registry.register(EchoExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        first = manager.submit(
+            executor_key="test.echo",
+            spec={"outer": {"alpha": 1, "beta": {"enabled": True, "scale": 2.0}}},
+            idempotency_key="nested",
+        )
+        duplicate = manager.submit(
+            executor_key="test.echo",
+            spec={"outer": {"beta": {"scale": 2.0, "enabled": True}, "alpha": 1}},
+            idempotency_key="nested",
+        )
+        assert duplicate.job_id == first.job_id
+        assert [record.job_id for record in manager.list_jobs()] == [first.job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def _assert_idempotency_conflict(
+    manager: JobManager,
+    *,
+    executor_key: str,
+    spec: dict,
+    idempotency_key: str,
+) -> None:
+    with pytest.raises(IdempotencyConflictError) as exc_info:
+        manager.submit(
+            executor_key=executor_key,
+            spec=spec,
+            idempotency_key=idempotency_key,
+        )
+    assert str(exc_info.value) == "Idempotency key is already bound to a different request."
+
+
+def test_idempotency_changed_spec_conflicts_without_enqueuing(tmp_path, clean_registry):
+    clean_registry.register(EchoExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        first = manager.submit(
+            executor_key="test.echo",
+            spec={"payload": {"threshold": 1}},
+            idempotency_key="same-key",
+        )
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.echo",
+            spec={"payload": {"threshold": 2, "private_marker": "do-not-echo"}},
+            idempotency_key="same-key",
+        )
+        assert [record.job_id for record in manager.list_jobs()] == [first.job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_changed_valid_executor_conflicts_without_enqueuing(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+    clean_registry.register(BoomExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        first = manager.submit(
+            executor_key="test.echo",
+            spec={"value": "original"},
+            idempotency_key="same-key",
+        )
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.boom",
+            spec={"value": "original"},
+            idempotency_key="same-key",
+        )
+        assert [record.job_id for record in manager.list_jobs()] == [first.job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("original", "changed"),
+    [(1, True), (1, 1.0), (True, 1.0)],
+)
+def test_idempotency_request_identity_preserves_json_scalar_types(
+    tmp_path,
+    clean_registry,
+    original,
+    changed,
+):
+    clean_registry.register(EchoExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        first = manager.submit(
+            executor_key="test.echo",
+            spec={"value": original},
+            idempotency_key="typed",
+        )
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.echo",
+            spec={"value": changed},
+            idempotency_key="typed",
+        )
+        assert [record.job_id for record in manager.list_jobs()] == [first.job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_non_finite_spec_is_rejected_without_enqueuing(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        with pytest.raises(ValueError, match="finite JSON values"):
+            manager.submit(
+                executor_key="test.echo",
+                spec={"value": float("nan")},
+                idempotency_key="non-finite",
+            )
+        assert manager.list_jobs() == []
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "newest_status",
+    ["succeeded", "queued"],
+)
+def test_idempotency_recovery_replays_newest_attempt_without_third_job(
+    tmp_path,
+    clean_registry,
+    newest_status,
+):
+    executor = RecordingExecutor()
+    clean_registry.register(executor)
+    older_id = "f" * 32
+    newest_id = "0" * 32
+    assert newest_id < older_id  # Deliberately opposite the creation order.
+    spec = {"payload": {"version": 1}}
+    sentinel_result = (
+        {"sentinel": "persisted-result"} if newest_status == "succeeded" else None
+    )
+    _persist_job_record(
+        tmp_path,
+        job_id=older_id,
+        status="failed",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec=spec,
+        idempotency_key="restart-key",
+        executor="test.recording",
+    )
+    _persist_job_record(
+        tmp_path,
+        job_id=newest_id,
+        status=newest_status,
+        created_at="2026-07-09T00:01:00+00:00",
+        spec=spec,
+        idempotency_key="restart-key",
+        executor="test.recording",
+        result=sentinel_result,
+    )
+
+    async def run():
+        manager = _manager(tmp_path, max_concurrent=1)
+        manager.start(asyncio.get_running_loop())
+        replay = manager.submit(
+            executor_key="test.recording",
+            spec=spec,
+            idempotency_key="restart-key",
+        )
+        assert replay.job_id == newest_id
+        assert replay.status == newest_status
+        assert replay.result == sentinel_result
+        assert manager.queue is not None
+        await manager.queue.join()
+        expected_executions = [newest_id] if newest_status == "queued" else []
+        assert executor.job_ids == expected_executions
+        assert {record.job_id for record in manager.list_jobs()} == {
+            older_id,
+            newest_id,
+        }
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_mixed_legacy_identities_conflict_without_new_job(
+    tmp_path,
+    clean_registry,
+):
+    executor = RecordingExecutor()
+    clean_registry.register(executor)
+    older_id = "f" * 32
+    newest_id = "0" * 32
+    assert newest_id < older_id  # Deliberately opposite the creation order.
+    _persist_job_record(
+        tmp_path,
+        job_id=older_id,
+        status="failed",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec={"payload": {"version": 1}},
+        idempotency_key="mixed-key",
+        executor="test.recording",
+    )
+    _persist_job_record(
+        tmp_path,
+        job_id=newest_id,
+        status="queued",
+        created_at="2026-07-09T00:01:00+00:00",
+        spec={"payload": {"version": 2}},
+        idempotency_key="mixed-key",
+        executor="test.recording",
+    )
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        assert manager.queue is not None
+        await manager.queue.join()
+        assert executor.job_ids == []
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.recording",
+            spec={"payload": {"version": 2}},
+            idempotency_key="mixed-key",
+        )
+        assert {record.job_id for record in manager.list_jobs()} == {
+            older_id,
+            newest_id,
+        }
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_runs_only_newest_of_two_matching_queued_attempts(
+    tmp_path,
+    clean_registry,
+):
+    executor = RecordingExecutor()
+    clean_registry.register(executor)
+    older_id = "f" * 32
+    newest_id = "0" * 32
+    assert newest_id < older_id  # Deliberately opposite the creation order.
+    spec = {"payload": {"version": 1}}
+    _persist_job_record(
+        tmp_path,
+        job_id=older_id,
+        status="queued",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec=spec,
+        idempotency_key="queued-key",
+        executor="test.recording",
+    )
+    _persist_job_record(
+        tmp_path,
+        job_id=newest_id,
+        status="queued",
+        created_at="2026-07-09T00:01:00+00:00",
+        spec=spec,
+        idempotency_key="queued-key",
+        executor="test.recording",
+    )
+
+    async def run():
+        manager = _manager(tmp_path, max_concurrent=1)
+        manager.start(asyncio.get_running_loop())
+        assert manager.queue is not None
+        await manager.queue.join()
+        assert executor.job_ids == [newest_id]
+        assert manager.get(older_id).status == "queued"
+        assert manager.get(newest_id).status == "succeeded"
+        replay = manager.submit(
+            executor_key="test.recording",
+            spec=spec,
+            idempotency_key="queued-key",
+        )
+        assert replay.job_id == newest_id
+        await asyncio.sleep(0)
+        assert executor.job_ids == [newest_id]
+        assert {record.job_id for record in manager.list_jobs()} == {
+            older_id,
+            newest_id,
+        }
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_invalid_retained_identity_quarantines_key(
+    tmp_path,
+    clean_registry,
+):
+    executor = RecordingExecutor()
+    clean_registry.register(executor)
+    job_id = "a" * 32
+    _persist_job_record(
+        tmp_path,
+        job_id=job_id,
+        status="queued",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec={"value": float("nan")},
+        idempotency_key="invalid-key",
+        executor="test.recording",
+    )
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        assert manager.queue is not None
+        await manager.queue.join()
+        assert executor.job_ids == []
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.recording",
+            spec={"value": 1.0},
+            idempotency_key="invalid-key",
+        )
+        assert [record.job_id for record in manager.list_jobs()] == [job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_preserves_unkeyed_queued_execution(
+    tmp_path,
+    clean_registry,
+):
+    executor = RecordingExecutor()
+    clean_registry.register(executor)
+    job_id = "b" * 32
+    _persist_job_record(
+        tmp_path,
+        job_id=job_id,
+        status="queued",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec={"value": "unkeyed"},
+        idempotency_key=None,
+        executor="test.recording",
+    )
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        assert manager.queue is not None
+        await manager.queue.join()
+        assert executor.job_ids == [job_id]
+        assert manager.get(job_id).status == "succeeded"
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_single_success_conflicts_before_result_reuse(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+    job_id = "c" * 32
+    sentinel_result = {"sentinel": "must-not-reuse"}
+    _persist_job_record(
+        tmp_path,
+        job_id=job_id,
+        status="succeeded",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec={"value": "original"},
+        idempotency_key="succeeded-key",
+        result=sentinel_result,
+    )
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.echo",
+            spec={"value": "changed"},
+            idempotency_key="succeeded-key",
+        )
+        assert manager.get(job_id).result == sentinel_result
+        assert [record.job_id for record in manager.list_jobs()] == [job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
+def test_idempotency_recovery_retains_empty_direct_key_binding(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+    job_id = "a" * 32
+    spec = {"value": "retained"}
+    _persist_job_record(
+        tmp_path,
+        job_id=job_id,
+        status="succeeded",
+        created_at="2026-07-09T00:00:00+00:00",
+        spec=spec,
+        idempotency_key="",
+    )
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        replay = manager.submit(
+            executor_key="test.echo",
+            spec=spec,
+            idempotency_key="",
+        )
+        assert replay.job_id == job_id
+        assert [record.job_id for record in manager.list_jobs()] == [job_id]
+        assert manager.queue is not None
+        await manager.queue.join()
         await manager.shutdown()
 
     asyncio.run(run())
@@ -316,6 +798,30 @@ def test_idempotency_allows_retry_after_failure(tmp_path, clean_registry):
     asyncio.run(run())
 
 
+def test_idempotency_changed_spec_conflicts_after_failure(tmp_path, clean_registry):
+    clean_registry.register(BoomExecutor())
+
+    async def run():
+        manager = _manager(tmp_path)
+        manager.start(asyncio.get_running_loop())
+        first = manager.submit(
+            executor_key="test.boom",
+            spec={"attempt": {"version": 1}},
+            idempotency_key="failed-key",
+        )
+        assert await _wait_terminal(manager, first.job_id) == "failed"
+        _assert_idempotency_conflict(
+            manager,
+            executor_key="test.boom",
+            spec={"attempt": {"version": 2, "private_marker": "do-not-echo"}},
+            idempotency_key="failed-key",
+        )
+        assert [record.job_id for record in manager.list_jobs()] == [first.job_id]
+        await manager.shutdown()
+
+    asyncio.run(run())
+
+
 def test_kill_processes_escalates_to_sigkill(tmp_path):
     # A child that ignores SIGTERM must still be reaped (escalation to SIGKILL),
     # so a stubborn CUDA child can't wedge the job slot.
@@ -386,6 +892,79 @@ def test_http_submit_get_cancel_flow(tmp_path, clean_registry):
             time.sleep(0.02)
         assert record["status"] == "succeeded"
         assert record["result"] == {"echo": 7, "steps": 2}
+
+
+def test_http_idempotency_conflict_is_generic_409_and_retains_one_job(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+    clean_registry.register(BoomExecutor())
+    with _client(tmp_path) as client:
+        first = client.post(
+            "/v1/jobs",
+            headers=AUTH,
+            json={
+                "executor": "test.echo",
+                "spec": {"value": "original"},
+                "idempotency_key": "do-not-echo-key",
+            },
+        )
+        assert first.status_code == 202, first.text
+
+        conflict = client.post(
+            "/v1/jobs",
+            headers=AUTH,
+            json={
+                "executor": "test.boom",
+                "spec": {"private_marker": "do-not-echo-spec"},
+                "idempotency_key": "do-not-echo-key",
+            },
+        )
+        assert conflict.status_code == 409
+        assert conflict.json() == {
+            "detail": "Idempotency key is already bound to a different request."
+        }
+        assert "do-not-echo-key" not in conflict.text
+        assert "do-not-echo-spec" not in conflict.text
+        assert "test.boom" not in conflict.text
+
+        jobs = client.get("/v1/jobs", headers=AUTH).json()["jobs"]
+        assert [record["job_id"] for record in jobs] == [first.json()["job_id"]]
+        submit_responses = client.get("/openapi.json").json()["paths"]["/v1/jobs"][
+            "post"
+        ]["responses"]
+        assert "409" in submit_responses
+
+
+def test_http_idempotency_non_finite_spec_is_validation_error(tmp_path, clean_registry):
+    clean_registry.register(EchoExecutor())
+    with _client(tmp_path) as client:
+        response = client.post(
+            "/v1/jobs",
+            headers={**AUTH, "Content-Type": "application/json"},
+            content=(
+                '{"executor":"test.echo","spec":{"value":NaN},'
+                '"idempotency_key":"non-finite"}'
+            ),
+        )
+        assert response.status_code == 422
+        assert client.get("/v1/jobs", headers=AUTH).json()["jobs"] == []
+
+
+def test_http_idempotency_empty_key_is_rejected_without_job(
+    tmp_path,
+    clean_registry,
+):
+    clean_registry.register(EchoExecutor())
+    with _client(tmp_path) as client:
+        response = client.post(
+            "/v1/jobs",
+            headers=AUTH,
+            json={"executor": "test.echo", "spec": {}, "idempotency_key": ""},
+        )
+        assert response.status_code == 422
+        assert client.get("/v1/jobs", headers=AUTH).json()["jobs"] == []
 
 
 def test_http_unknown_executor_is_400(tmp_path, clean_registry):

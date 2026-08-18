@@ -29,7 +29,13 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import executors as executor_registry
-from .jobs import JobManager
+from .jobs import (
+    IDEMPOTENCY_CONFLICT_DETAIL,
+    INVALID_JOB_SPEC_DETAIL,
+    IdempotencyConflictError,
+    InvalidJobSpecError,
+    JobManager,
+)
 from .settings import ServiceSettings
 
 logger = logging.getLogger("ultra.compute")
@@ -38,7 +44,7 @@ logger = logging.getLogger("ultra.compute")
 class SubmitJobRequest(BaseModel):
     executor: str = Field(..., description="model_key.capability, e.g. rarespot.train")
     spec: dict[str, Any] = Field(default_factory=dict)
-    idempotency_key: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1)
 
 
 class ComputeRuntime:
@@ -129,7 +135,13 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
             "load_errors": executor_registry.load_errors(),
         }
 
-    @app.post("/v1/jobs", status_code=202)
+    @app.post(
+        "/v1/jobs",
+        status_code=202,
+        responses={
+            409: {"description": "Idempotency key conflicts with retained request identity."}
+        },
+    )
     async def submit_job(request: Request, body: SubmitJobRequest) -> dict[str, Any]:
         _require_auth(request, runtime)
         if runtime.startup_error is not None:
@@ -140,12 +152,20 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
                 detail=f"unknown executor {body.executor!r}; known: "
                 + ", ".join(m.key for m in executor_registry.list_manifests()),
             )
-        record = await asyncio.to_thread(
-            runtime.manager.submit,
-            executor_key=body.executor,
-            spec=body.spec,
-            idempotency_key=body.idempotency_key,
-        )
+        try:
+            record = await asyncio.to_thread(
+                runtime.manager.submit,
+                executor_key=body.executor,
+                spec=body.spec,
+                idempotency_key=body.idempotency_key,
+            )
+        except IdempotencyConflictError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=IDEMPOTENCY_CONFLICT_DETAIL,
+            ) from None
+        except InvalidJobSpecError:
+            raise HTTPException(status_code=422, detail=INVALID_JOB_SPEC_DETAIL) from None
         return {"job_id": record.job_id, "status": record.status, "created_at": record.created_at}
 
     @app.get("/v1/jobs/{job_id}")

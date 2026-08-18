@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
+const typographySource = readFileSync(path.join(process.cwd(), "src/typography.css"), "utf8");
 
 /** The light `:root` block, up to the first closing brace at column 0. */
 const lightRoot = stylesSource.slice(
@@ -22,6 +23,13 @@ const darkBlock = (() => {
 })();
 
 describe("light theme ink", () => {
+  it("uses Ultra Sans as the product face with Inter as its coverage fallback", () => {
+    const productStack =
+      '"Ultra Sans", "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif';
+    expect(typographySource).toContain(`--font-sans: ${productStack};`);
+    expect(typographySource).toContain(`--font-reading: ${productStack};`);
+  });
+
   it("puts body and secondary text on the Meridian magnitude ladder", () => {
     // Meridian Drift · Day. Hierarchy is a geometric series in CONTRAST RATIO
     // at 1.80x per step, solved numerically against the ground the text sits
@@ -219,11 +227,12 @@ describe("light theme ink", () => {
     expect(linkHover).not.toMatch(TEXT_COLOR);
   });
 
-  it("drops the ss02 stylistic set for stock Inter", () => {
+  it("keeps Ultra Sans on its authored default glyph system", () => {
     expect(stylesSource).toMatch(/font-feature-settings:\s*"liga" 1, "calt" 1;/);
-    // Assert on the DECLARATION, not the file: the comment above it names ss02
-    // to explain why it was dropped, and should not fail its own guard.
+    // The custom C/O/G/s are defaults. The slashed zero remains dormant until a
+    // data surface opts in, so no global stylistic set belongs here.
     expect(stylesSource).not.toMatch(/font-feature-settings:[^;]*ss02/);
+    expect(stylesSource).not.toMatch(/font-feature-settings:[^;]*zero/);
   });
 });
 
@@ -250,8 +259,8 @@ describe("response reading typography", () => {
   it("keeps reading size and leading in the comfortable band", () => {
     expect(lightRoot).toMatch(/--font-size-reading:\s*1rem;/);
     expect(lightRoot).toMatch(/--line-height-reading:\s*1\.62;/);
-    // Inter Regular at 16px keeps long-form answers lighter than compact UI at
-    // 430 while retaining Inter's tall x-height and open counters.
+    // Ultra Sans Regular at 16px keeps long-form answers lighter than the
+    // custom family's compact UI design point at 430 / opsz 15.
     expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
   });
 

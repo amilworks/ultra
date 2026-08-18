@@ -136,7 +136,8 @@ export function CiftiCarpet({ carpet }: Props) {
       }
       ctx.textAlign = "right";
       ctx.fillStyle = ink;
-      ctx.font = '600 11px "BisQue Inter Variable", system-ui, sans-serif';
+      ctx.font =
+        '600 11px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif';
       const twoLine = bandH[i] >= 30 && Math.abs(ly - cy) <= 1.5;
       ctx.fillText(shortStructure(structures[i].name), R.x - 10, twoLine ? ly - 6 : ly);
       if (twoLine) {
@@ -236,7 +237,7 @@ export function CiftiCarpet({ carpet }: Props) {
         document.fonts,
         [
           {
-            query: '600 11px "BisQue Inter Variable"',
+            query: '600 11px "Ultra Sans"',
             sample: "CORTEX_LEFT",
           },
           {

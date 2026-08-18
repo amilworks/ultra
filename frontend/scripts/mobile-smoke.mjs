@@ -10,7 +10,7 @@ import { createTypographyRequestAudit } from "./typography-request-audit.mjs";
 const baseUrl = process.env.MOBILE_SMOKE_URL ?? "http://localhost:5173";
 const smokeNonce = String(process.env.MOBILE_SMOKE_NONCE || "");
 const artifactDir = path.resolve(".playwright-cli/mobile-smoke");
-const interFamily = "BisQue Inter Variable";
+const primaryFamily = "Ultra Sans";
 
 const cases = [
   { name: "phone-small", width: 320, height: 568, mobile: true },
@@ -242,7 +242,7 @@ async function captureTypographyMetrics(page, testCase) {
         monoComment,
       },
     };
-  }, { family: interFamily, mobile: testCase.mobile });
+  }, { family: primaryFamily, mobile: testCase.mobile });
 }
 
 async function captureVariationEvidence(page, testCase) {
@@ -291,7 +291,7 @@ async function captureVariationEvidence(page, testCase) {
       "// scientific calibration 0123456789"
     );
     document.body.append(host);
-  }, interFamily);
+  }, primaryFamily);
 
   const geometry = await page.evaluate(() => {
     const read = (kind) => {
@@ -329,7 +329,7 @@ async function captureVariationEvidence(page, testCase) {
   );
   assert(
     !opsz14.equals(opsz32),
-    `${testCase.name}: Inter opsz 14 and 32 rasterized identically`
+    `${testCase.name}: Ultra Sans opsz 14 and 32 rasterized identically`
   );
   assert(
     !monoNormal.equals(monoItalic),
@@ -362,7 +362,7 @@ function assertNoHorizontalOverflow(metrics, caseName, surface) {
 
 function assertTypographyMetrics(typography, testCase) {
   for (const [fontCase, result] of Object.entries(typography.loaded)) {
-    assert(result.faceCount > 0, `${testCase.name}: ${fontCase} resolved no Inter face`);
+    assert(result.faceCount > 0, `${testCase.name}: ${fontCase} resolved no Ultra Sans face`);
     assert(result.ready, `${testCase.name}: ${fontCase} did not finish loading`);
   }
   assert(
@@ -371,8 +371,8 @@ function assertTypographyMetrics(typography, testCase) {
   );
 
   const expectedWeights = {
-    // Compact UI stays at 430. The 16px long-form reading register uses Inter
-    // Regular 400 for a lighter sustained-reading texture, and the welcome
+    // Compact UI stays at Ultra Sans 430. The 16px long-form reading register
+    // uses Regular 400 for a lighter sustained-reading texture, and the welcome
     // invitation is quieter still. Keep these browser assertions aligned with
     // check-typography-contract.mjs and light-theme-ink.test.ts.
     body: "430",
@@ -405,7 +405,7 @@ function assertTypographyMetrics(typography, testCase) {
     const style = typography.roles[role];
     assert(style, `${testCase.name}: missing product typography role ${role}`);
     assert(
-      style.family.includes(interFamily),
+      style.family.includes(primaryFamily),
       `${testCase.name}: ${role} uses unexpected family ${style.family}`
     );
     assert(
@@ -437,10 +437,9 @@ function assertTypographyMetrics(typography, testCase) {
       typography.roles.monoComment.synthesis === "none",
     `${testCase.name}: scientific code comment is not genuine JetBrains Mono 400 italic`
   );
-  // The smoke deliberately cold-holds Inter to exercise font-display: swap.
-  // Desktop swaps both the always-visible sidebar and the chat canvas; on the
-  // Linux CI fallback this settles at 0.0270, while the mobile canvas remains
-  // below the original stricter ceiling. Keep both contracts explicit rather
+  // The smoke deliberately cold-holds Ultra Sans to exercise font-display: swap.
+  // Desktop exposes more always-visible labels than the mobile canvas, so it
+  // retains a separate conservative budget. Keep both contracts explicit rather
   // than weakening the phone budget or dropping the cold-font proof.
   const clsBudget = testCase.mobile ? 0.01 : 0.03;
   assert(
@@ -463,7 +462,7 @@ async function runCase(browser, testCase) {
     releaseHeldNormalFont = resolve;
   });
   let heldNormalFontSeen = false;
-  await page.route(/InterVariable-v4\.1\.woff2(?:[?#]|$)/, async (route) => {
+  await page.route(/UltraSans-Variable\.woff2(?:[?#]|$)/, async (route) => {
     heldNormalFontSeen = true;
     await heldNormalFont;
     await route.continue();
@@ -501,7 +500,7 @@ async function runCase(browser, testCase) {
   // Establish a stable fallback layout before starting a typography-only CLS
   // window. No network-idle wait is possible while the normal face is held.
   await page.waitForTimeout(250);
-  assert(heldNormalFontSeen, `${testCase.name}: normal Inter request was not cold-held`);
+  assert(heldNormalFontSeen, `${testCase.name}: normal Ultra Sans request was not cold-held`);
   await page.evaluate(() => globalThis.__startUltraTypographyCls());
   releaseHeldNormalFont();
   await page.evaluate(async (family) => {
@@ -510,7 +509,7 @@ async function runCase(browser, testCase) {
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     );
-  }, interFamily);
+  }, primaryFamily);
 
   const typography = await captureTypographyMetrics(page, testCase);
   assertTypographyMetrics(typography, testCase);
@@ -579,12 +578,12 @@ async function runCase(browser, testCase) {
   const { attempted, successfulLocal } = requestAudit.assertLocalSuccess(assert, testCase.name);
   pageGuard.assertNoBlockedRequests(assert, testCase.name);
   assert(
-    successfulLocal.some(({ url }) => url.includes("InterVariable-v4.1.woff2")),
-    `${testCase.name}: normal Inter asset was not requested`
+    successfulLocal.some(({ url }) => url.includes("UltraSans-Variable.woff2")),
+    `${testCase.name}: normal Ultra Sans asset was not requested`
   );
   assert(
-    successfulLocal.some(({ url }) => url.includes("InterVariable-Italic-v4.1.woff2")),
-    `${testCase.name}: italic Inter asset was not requested`
+    successfulLocal.some(({ url }) => url.includes("UltraSans-Italic-Variable.woff2")),
+    `${testCase.name}: italic Ultra Sans asset was not requested`
   );
   result.localTypographyAssets = [
     ...new Set(attempted.map(({ url }) => new URL(url).pathname)),

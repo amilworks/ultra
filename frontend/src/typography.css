@@ -1,4 +1,20 @@
 @font-face {
+  font-family: "Ultra Sans";
+  src: url("./assets/fonts/UltraSans-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 1000;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Ultra Sans";
+  src: url("./assets/fonts/UltraSans-Italic-Variable.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 100 1000;
+  font-display: swap;
+}
+
+@font-face {
   font-family: "BisQue Inter Variable";
   src: url("./assets/fonts/InterVariable-v4.1.woff2") format("woff2");
   font-style: normal;
@@ -15,12 +31,11 @@
 }
 
 :root {
-  /* system-ui sits ahead of Segoe UI so the pre-swap frame is covered on every
-     platform: system-ui resolves to San Francisco on Apple and Segoe on
-     Windows, whereas a Segoe-only fallback dropped straight to generic
-     sans-serif on macOS/iOS — the widest metric jump of the three. */
-  --font-sans: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
-  --font-reading: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
+  /* Ultra Sans is the authored product face. Inter follows it for characters
+     outside Ultra Sans's current development-snapshot coverage; system-ui then
+     protects the pre-swap frame and the final unsupported-glyph case. */
+  --font-sans: "Ultra Sans", "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
+  --font-reading: "Ultra Sans", "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
   /* Wordmark inks ride the Meridian magnitude ladder, solved against the
      SIDEBAR ground the brand actually sits on: emphasis = m0, context = m1
      (8.07:1 light / 8.10:1 dark). Dark emphasis is deliberately NOT brighter

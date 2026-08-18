@@ -83,7 +83,8 @@ export function CiftiConnectivity({ conn }: Props) {
     ctx.strokeRect(R.x + 0.5, R.y + 0.5, R.w, R.h);
 
     // Structure band separators (both axes) + left/bottom labels.
-    ctx.font = '600 10px "BisQue Inter Variable", system-ui, sans-serif';
+    ctx.font =
+      '600 10px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif';
     for (const b of bands) {
       const p0 = (b.start / n) * R.w;
       if (b.start > 0) {
@@ -165,7 +166,7 @@ export function CiftiConnectivity({ conn }: Props) {
         document.fonts,
         [
           {
-            query: '600 10px "BisQue Inter Variable"',
+            query: '600 10px "Ultra Sans"',
             sample: "CORTEX_LEFT",
           },
           {

@@ -10,18 +10,67 @@ const failures = [];
 
 const expectedFonts = [
   {
-    file: "InterVariable-v4.1.woff2",
+    family: "Ultra Sans",
+    label: "Ultra Sans",
+    primary: true,
+    file: "UltraSans-Variable.woff2",
     style: "normal",
-    bytes: 352_240,
-    sha256: "693b77d4f32ee9b8bfc995589b5fad5e99adf2832738661f5402f9978429a8e3",
-    url: "https://rsms.me/inter/font-files/InterVariable.woff2?v=4.1",
+    weightRange: "100 1000",
+    axes: ["`wght` 100–1000", "`opsz` 9–40"],
+    bytes: 126_880,
+    sha256: "f060de034541b34034450670bc9becf7c0640f57f2c23dff311ca04a7ff5c97d",
+    source:
+      "https://github.com/amilworks/ultra-sans/tree/717ad23b67802f2e2d521e566ca3d390b48a83c1",
   },
   {
+    family: "Ultra Sans",
+    label: "Ultra Sans",
+    primary: true,
+    file: "UltraSans-Italic-Variable.woff2",
+    style: "italic",
+    weightRange: "100 1000",
+    axes: ["`wght` 100–1000", "`opsz` 9–40"],
+    bytes: 154_524,
+    sha256: "26470a9271f845356cfd113a15e5df9e623d440bacab5498e45ad16051e5771d",
+    source:
+      "https://github.com/amilworks/ultra-sans/tree/717ad23b67802f2e2d521e566ca3d390b48a83c1",
+  },
+  {
+    family: "BisQue Inter Variable",
+    label: "Inter v4.1 fallback",
+    primary: false,
+    file: "InterVariable-v4.1.woff2",
+    style: "normal",
+    weightRange: "100 900",
+    axes: ["`wght` 100–900", "`opsz` 14–32"],
+    bytes: 352_240,
+    sha256: "693b77d4f32ee9b8bfc995589b5fad5e99adf2832738661f5402f9978429a8e3",
+    source: "https://rsms.me/inter/font-files/InterVariable.woff2?v=4.1",
+  },
+  {
+    family: "BisQue Inter Variable",
+    label: "Inter v4.1 fallback",
+    primary: false,
     file: "InterVariable-Italic-v4.1.woff2",
     style: "italic",
+    weightRange: "100 900",
+    axes: ["`wght` 100–900", "`opsz` 14–32"],
     bytes: 387_976,
     sha256: "e564f652916db6c139570fefb9524a77c4d48f30c92928de9db19b6b5c7a262a",
-    url: "https://rsms.me/inter/font-files/InterVariable-Italic.woff2?v=4.1",
+    source: "https://rsms.me/inter/font-files/InterVariable-Italic.woff2?v=4.1",
+  },
+];
+
+const expectedFamilies = [
+  {
+    family: "Ultra Sans",
+    label: "Ultra Sans",
+    weightRange: "100 1000",
+  },
+  {
+    family: "BisQue Inter Variable",
+    label: "Inter v4.1 fallback",
+    weightRange: "100 900",
   },
 ];
 
@@ -90,7 +139,7 @@ const caddyfile = fs.existsSync(caddyPath) ? fs.readFileSync(caddyPath, "utf8") 
 const sourceFontDir = path.join(sourceRoot, "assets", "fonts");
 const sourceFontFiles = walkFiles(sourceFontDir);
 const sourceFontBinaries = sourceFontFiles.filter((file) => /\.(?:woff2?|ttf|otf)$/i.test(file));
-check(sourceFontBinaries.length === 2, `Expected two source font binaries, found ${sourceFontBinaries.length}`);
+check(sourceFontBinaries.length === 4, `Expected four source font binaries, found ${sourceFontBinaries.length}`);
 check(
   sourceFontBinaries.every((file) => file.endsWith(".woff2")),
   "Source font assets must use WOFF2 only"
@@ -102,44 +151,86 @@ for (const font of expectedFonts) {
   if (fs.existsSync(fontPath)) {
     const bytes = fs.readFileSync(fontPath);
     check(bytes.length === font.bytes, `${font.file} has ${bytes.length} bytes; expected ${font.bytes}`);
-    check(digest(bytes) === font.sha256, `${font.file} SHA-256 does not match official v4.1`);
+    check(
+      digest(bytes) === font.sha256,
+      `${font.file} SHA-256 does not match the pinned ${font.label} artifact`
+    );
   }
   for (const provenanceValue of [
     font.file,
     font.style,
-    font.url,
+    font.source,
     String(font.bytes),
     font.sha256,
-    "`wght` 100–900",
-    "`opsz` 14–32",
+    ...font.axes,
   ]) {
     check(provenance.includes(provenanceValue), `Provenance is missing ${provenanceValue}`);
   }
 }
 
-const licensePath = path.join(sourceFontDir, "OFL-1.1.txt");
-check(fs.existsSync(licensePath), "Missing Inter OFL-1.1 license");
-if (fs.existsSync(licensePath)) {
-  const licenseBytes = fs.readFileSync(licensePath);
-  check(licenseBytes.length === 4_380, "Inter OFL-1.1 license byte count changed");
-  check(
-    digest(licenseBytes) === "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
-    "Inter OFL-1.1 license is not the verbatim v4.1 upstream notice"
-  );
+check(
+  provenance.includes("Amil Khan") &&
+    provenance.includes("development snapshot") &&
+    provenance.includes("primary product face"),
+  "Provenance must identify Ultra Sans authorship, status, and product role"
+);
+
+for (const license of [
+  {
+    file: "OFL-DM-Sans.txt",
+    label: "DM Sans OFL-1.1",
+    bytes: 4_389,
+    sha256: "2af94f4fb533be8fa23282eb33e08ca311ddf47c2f32777e2040b282deeec65c",
+  },
+  {
+    file: "OFL-1.1.txt",
+    label: "Inter OFL-1.1",
+    bytes: 4_380,
+    sha256: "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
+  },
+]) {
+  const licensePath = path.join(sourceFontDir, license.file);
+  check(fs.existsSync(licensePath), `Missing ${license.label} license`);
+  if (fs.existsSync(licensePath)) {
+    const licenseBytes = fs.readFileSync(licensePath);
+    check(licenseBytes.length === license.bytes, `${license.label} license byte count changed`);
+    check(
+      digest(licenseBytes) === license.sha256,
+      `${license.label} license is not the verbatim upstream notice`
+    );
+  }
 }
 
-const sourceFaces = cssBlocks(typographyCss, "@font-face").filter((block) =>
-  block.includes("BisQue Inter Variable")
+const productStack =
+  '"Ultra Sans", "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif';
+check(
+  typographyCss.includes(`--font-sans: ${productStack};`) &&
+    typographyCss.includes(`--font-reading: ${productStack};`),
+  "Ultra Sans must lead both product sans stacks with Inter as the first fallback"
 );
-check(sourceFaces.length === 2, `Expected two Inter @font-face rules, found ${sourceFaces.length}`);
-for (const font of expectedFonts) {
-  const face = sourceFaces.find((block) => new RegExp(`font-style:\\s*${font.style}`).test(block));
-  check(Boolean(face), `Missing ${font.style} Inter face`);
-  if (face) {
-    check(face.includes(font.file), `${font.style} face does not reference ${font.file}`);
-    check(/font-weight:\s*100 900\s*;/.test(face), `${font.style} face must expose weight 100–900`);
-    check(/font-display:\s*swap\s*;/.test(face), `${font.style} face must use font-display: swap`);
-    check(/format\(["']woff2["']\)/.test(face), `${font.style} face must declare WOFF2`);
+
+for (const family of expectedFamilies) {
+  const sourceFaces = cssBlocks(typographyCss, "@font-face").filter((block) =>
+    block.includes(`font-family: "${family.family}"`)
+  );
+  check(
+    sourceFaces.length === 2,
+    `Expected two ${family.label} @font-face rules, found ${sourceFaces.length}`
+  );
+  for (const font of expectedFonts.filter(({ family: name }) => name === family.family)) {
+    const face = sourceFaces.find((block) =>
+      new RegExp(`font-style:\\s*${font.style}`).test(block)
+    );
+    check(Boolean(face), `Missing ${font.style} ${family.label} face`);
+    if (face) {
+      check(face.includes(font.file), `${font.style} ${family.label} face does not reference ${font.file}`);
+      check(
+        new RegExp(`font-weight:\\s*${family.weightRange.replace(" ", "\\s+")}\\s*;`).test(face),
+        `${font.style} ${family.label} face must expose weight ${family.weightRange.replace(" ", "–")}`
+      );
+      check(/font-display:\s*swap\s*;/.test(face), `${font.style} ${family.label} face must use font-display: swap`);
+      check(/format\(["']woff2["']\)/.test(face), `${font.style} ${family.label} face must declare WOFF2`);
+    }
   }
 }
 check(!/\blocal\s*\(/i.test(typographyCss), "Typography CSS must not bypass vendored faces with local()");
@@ -164,7 +255,7 @@ check(
 );
 check(
   /benefit\s+has not yet been measured/.test(provenance) &&
-    /italic face must remain\s+demand-loaded/.test(provenance),
+    /italic faces must remain\s+demand-loaded/.test(provenance),
   "Provenance must record the unmeasured no-preload tradeoff and demand-loaded italic policy"
 );
 
@@ -182,9 +273,9 @@ for (const cssFile of productionCssFiles) {
 }
 
 for (const [token, weight] of [
-  // Compact UI stays at Inter 430. Long-form answers use Regular 400 at 16px
-  // with generous leading so their texture remains lighter during sustained
-  // reading without compromising Inter's tall x-height and open counters.
+  // Compact UI stays at Ultra Sans's verified wght-430 design point. Long-form
+  // answers use Regular 400 at 16px with generous leading so their texture
+  // remains lighter during sustained reading.
   ["body", "430"],
   ["reading-body", "400"],
   ["invitation", "350"],
@@ -343,17 +434,23 @@ for (const [selector, token] of [
 }
 
 check(
-  carpetSource.includes('600 11px "BisQue Inter Variable"') &&
+  carpetSource.includes(
+    '600 11px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif'
+  ) &&
+    carpetSource.includes('query: \'600 11px "Ultra Sans"\'') &&
     carpetSource.includes('400 11px "JetBrains Mono"') &&
     carpetSource.includes('400 10px "JetBrains Mono"') &&
     carpetSource.includes("scheduleFontsReadyRedraw"),
-  "CIFTI carpet must redraw after all exact Inter and JetBrains canvas fonts resolve"
+  "CIFTI carpet must paint with the product stack and redraw after Ultra Sans and JetBrains resolve"
 );
 check(
-  connectivitySource.includes('600 10px "BisQue Inter Variable"') &&
+  connectivitySource.includes(
+    '600 10px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif'
+  ) &&
+    connectivitySource.includes('query: \'600 10px "Ultra Sans"\'') &&
     connectivitySource.includes('400 10px "JetBrains Mono"') &&
     connectivitySource.includes("scheduleFontsReadyRedraw"),
-  "CIFTI connectivity must redraw after all exact Inter and JetBrains canvas fonts resolve"
+  "CIFTI connectivity must paint with the product stack and redraw after Ultra Sans and JetBrains resolve"
 );
 
 const packageJson = JSON.parse(packageSource);
@@ -389,12 +486,18 @@ if (checkDist) {
   if (fs.existsSync(distRoot)) {
     const distFiles = walkFiles(distRoot);
     const distRelative = (file) => path.relative(distRoot, file).replaceAll(path.sep, "/");
-    const interLike = distFiles.filter((file) => /intervariable/i.test(path.basename(file)));
-    const interFontFiles = interLike.filter((file) => /\.(?:woff2?|ttf|otf)$/i.test(file));
-    check(interFontFiles.length === 2, `Expected two emitted Inter font files, found ${interFontFiles.length}`);
+    const productFontFiles = distFiles.filter(
+      (file) =>
+        /(?:ultrasans|intervariable)/i.test(path.basename(file)) &&
+        /\.(?:woff2?|ttf|otf)$/i.test(file)
+    );
     check(
-      interFontFiles.every((file) => file.endsWith(".woff2")),
-      "Production emitted a non-WOFF2 Inter font"
+      productFontFiles.length === 4,
+      `Expected four emitted product font files, found ${productFontFiles.length}`
+    );
+    check(
+      productFontFiles.every((file) => file.endsWith(".woff2")),
+      "Production emitted a non-WOFF2 product font"
     );
 
     const emittedByHash = new Map(
@@ -407,11 +510,14 @@ if (checkDist) {
       emitted: emittedByHash.get(font.sha256),
     }));
     for (const font of emittedExpected) {
-      check(Boolean(font.emitted), `Production build is missing exact ${font.style} Inter v4.1 bytes`);
+      check(
+        Boolean(font.emitted),
+        `Production build is missing exact ${font.style} ${font.label} bytes`
+      );
       if (font.emitted) {
         check(
           fs.statSync(font.emitted).size === font.bytes,
-          `Emitted ${font.style} Inter byte count changed`
+          `Emitted ${font.style} ${font.label} byte count changed`
         );
       }
     }
@@ -419,45 +525,63 @@ if (checkDist) {
       (total, font) => total + (font.emitted ? fs.statSync(font.emitted).size : 0),
       0
     );
-    check(emittedTotal === 740_216, `Emitted Inter payload is ${emittedTotal} bytes; expected 740216`);
+    check(
+      emittedTotal === 1_021_620,
+      `Emitted product-font payload is ${emittedTotal} bytes; expected 1021620`
+    );
 
     const builtCssFiles = distFiles.filter((file) => file.endsWith(".css"));
-    const cssWithInter = builtCssFiles.filter((file) =>
-      fs.readFileSync(file, "utf8").includes("BisQue Inter Variable")
+    const cssWithProductFonts = builtCssFiles.filter((file) => {
+      const css = fs.readFileSync(file, "utf8");
+      return css.includes("Ultra Sans") && css.includes("BisQue Inter Variable");
+    });
+    check(
+      cssWithProductFonts.length === 1,
+      `Expected one emitted CSS asset with both product families, found ${cssWithProductFonts.length}`
     );
-    check(cssWithInter.length === 1, `Expected one emitted CSS asset with Inter faces, found ${cssWithInter.length}`);
 
-    let normalFacePath = null;
-    if (cssWithInter.length === 1) {
-      const cssFile = cssWithInter[0];
+    let primaryNormalFacePath = null;
+    if (cssWithProductFonts.length === 1) {
+      const cssFile = cssWithProductFonts[0];
       const css = fs.readFileSync(cssFile, "utf8");
-      const builtFaces = cssBlocks(css, "@font-face").filter((block) =>
-        block.includes("BisQue Inter Variable")
-      );
-      check(builtFaces.length === 2, `Expected two built Inter @font-face rules, found ${builtFaces.length}`);
-      for (const font of expectedFonts) {
-        const face = builtFaces.find((block) => new RegExp(`font-style:\\s*${font.style}`).test(block));
-        check(Boolean(face), `Built CSS is missing ${font.style} Inter face`);
-        if (!face) {
-          continue;
-        }
-        check(/font-weight:\s*100 900/.test(face), `Built ${font.style} face lost weight 100–900`);
-        check(/font-display:\s*swap/.test(face), `Built ${font.style} face lost font-display: swap`);
-        check(/format\(["']?woff2["']?\)/.test(face), `Built ${font.style} face lost WOFF2 format`);
-        const rawUrl = face.match(/url\((["']?)([^"')]+)\1\)/)?.[2];
-        check(Boolean(rawUrl), `Built ${font.style} face is missing its URL`);
-        if (rawUrl) {
-          const cssRelative = distRelative(cssFile);
-          const resolved = rawUrl.startsWith("/")
-            ? rawUrl.slice(1)
-            : path.posix.normalize(path.posix.join(path.posix.dirname(cssRelative), rawUrl));
-          const expectedPath = emittedByHash.get(font.sha256);
-          check(
-            expectedPath && resolved === distRelative(expectedPath),
-            `Built ${font.style} face URL does not resolve to the verified asset`
+      for (const family of expectedFamilies) {
+        const builtFaces = cssBlocks(css, "@font-face").filter((block) =>
+          block.includes(`font-family:${family.family}`) ||
+          block.includes(`font-family:"${family.family}"`)
+        );
+        check(
+          builtFaces.length === 2,
+          `Expected two built ${family.label} @font-face rules, found ${builtFaces.length}`
+        );
+        for (const font of expectedFonts.filter(({ family: name }) => name === family.family)) {
+          const face = builtFaces.find((block) =>
+            new RegExp(`font-style:\\s*${font.style}`).test(block)
           );
-          if (font.style === "normal") {
-            normalFacePath = resolved;
+          check(Boolean(face), `Built CSS is missing ${font.style} ${family.label} face`);
+          if (!face) {
+            continue;
+          }
+          check(
+            new RegExp(`font-weight:\\s*${family.weightRange.replace(" ", "\\s+")}`).test(face),
+            `Built ${font.style} ${family.label} face lost weight ${family.weightRange.replace(" ", "–")}`
+          );
+          check(/font-display:\s*swap/.test(face), `Built ${font.style} ${family.label} face lost font-display: swap`);
+          check(/format\(["']?woff2["']?\)/.test(face), `Built ${font.style} ${family.label} face lost WOFF2 format`);
+          const rawUrl = face.match(/url\((["']?)([^"')]+)\1\)/)?.[2];
+          check(Boolean(rawUrl), `Built ${font.style} ${family.label} face is missing its URL`);
+          if (rawUrl) {
+            const cssRelative = distRelative(cssFile);
+            const resolved = rawUrl.startsWith("/")
+              ? rawUrl.slice(1)
+              : path.posix.normalize(path.posix.join(path.posix.dirname(cssRelative), rawUrl));
+            const expectedPath = emittedByHash.get(font.sha256);
+            check(
+              expectedPath && resolved === distRelative(expectedPath),
+              `Built ${font.style} ${family.label} URL does not resolve to the verified asset`
+            );
+            if (font.primary && font.style === "normal") {
+              primaryNormalFacePath = resolved;
+            }
           }
         }
       }
@@ -481,19 +605,26 @@ if (checkDist) {
       const href = fontPreloads[0][0].match(/\bhref=["']([^"']+)["']/i)?.[1];
       check(Boolean(href), "Font preload is missing href");
       if (href) {
-        check(href.replace(/^\//, "") === normalFacePath, "Font preload does not match normal-face CSS URL");
-        const italicPath = emittedExpected.find(({ style }) => style === "italic")?.emitted;
         check(
-          !italicPath || href.replace(/^\//, "") !== distRelative(italicPath),
-          "Italic Inter must remain demand-loaded and must never be preloaded"
+          href.replace(/^\//, "") === primaryNormalFacePath,
+          "Font preload does not match the Ultra Sans normal-face CSS URL"
+        );
+        const italicPaths = emittedExpected
+          .filter(({ style }) => style === "italic")
+          .map(({ emitted }) => emitted && distRelative(emitted));
+        check(
+          !italicPaths.includes(href.replace(/^\//, "")),
+          "Italic product faces must remain demand-loaded and must never be preloaded"
         );
       }
     }
 
-    console.log("Verified emitted Inter inventory:");
+    console.log("Verified emitted product-font inventory:");
     for (const font of emittedExpected) {
       if (font.emitted) {
-        console.log(`- ${distRelative(font.emitted)}: ${font.bytes} bytes (${font.style})`);
+        console.log(
+          `- ${distRelative(font.emitted)}: ${font.bytes} bytes (${font.label}, ${font.style})`
+        );
       }
     }
     console.log(`- total: ${emittedTotal} bytes; font preloads: ${fontPreloads.length}`);

@@ -17,9 +17,9 @@
      Keep this in rem rather than ch: ch resolves per element, which gives prose
      and headings different right edges when their font sizes differ. */
   --reading-measure: 45rem;
-  /* Inter 430 keeps compact UI labels crisp. Long-form reading uses Regular 400
-     at 16px with 1.62 leading, reducing dark texture and night-mode bloom while
-     preserving Inter's tall x-height and open counters. The welcome invitation
+  /* Ultra Sans was built and verified around the compact UI design point of
+     wght 430 / opsz 15. Long-form reading uses Regular 400 at 16px with 1.62
+     leading, reducing dark texture and night-mode bloom. The welcome invitation
      is deliberately quieter still; it is orientation, not document structure. */
   --font-weight-body: 430;
   --font-weight-reading-body: 400;
@@ -32,7 +32,7 @@
      legibility job the comment below describes, not a display job. */
   --font-weight-strong: 670;
   --font-weight-reading-heading: 600;
-  /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
+  /* 600, not 700. Ultra Sans 700 is Bold and 600 is SemiBold, and at 700 an inline
      **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
@@ -63,44 +63,29 @@
      that is what the chip background is for. Measured in
      frontend/font-lab/mono.html. */
   --font-weight-mono: 400;
-  /* Optical size for display type. `font-optical-sizing: auto` maps the CSS
-     px size onto Inter's opsz axis and clamps at 32, so anything above 32px
-     gets Inter's narrowest cut — the axis takes ~8.5% off the round lowercase
-     between opsz 14 and 32. 24 is where Inter's x-height/cap-height ratio
-     (0.7275) meets the consensus of the grotesques Ultra was measured against:
-     Graphik 0.7315, Söhne 0.7284, TWK Lausanne 0.7240, all within 1% of each
-     other and all well below Inter at text sizes (0.7503).
-     Applied ONLY to type that renders above ~24px, which in practice is the
-     hero titles. Every other heading already sits at 18–23px, where auto
-     resolves at or below 24 — pinning those would make them NARROWER, the
-     opposite of the intent. Compared in frontend/font-lab/optical.html. */
+  /* Ultra Sans exposes opsz 9–40. Text and compact UI use automatic sizing;
+     brand-scale headlines pin the approved opsz-24 display register used by the
+     font specimen, retaining rounder professional proportions instead of moving
+     every large title toward the narrower 34–40 cuts. Applied only above ~24px. */
   --display-optical-size: 24;
-  /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
-     Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
-     was previously enabled to buy identity from the letterforms. In use it read
-     as a stylistic quirk rather than the clean, professional voice this product
-     wants, so the type is stock Inter again. Identity comes from the type
-     system — the scale, the weights, the tracking curve below — not from
-     substituted glyphs.
+  /* Preserve Ultra Sans's default glyph system. Its custom C/O/G/s geometry is
+     already in the base outlines, while the slashed zero remains a dormant,
+     data-only alternate. Identity comes from those defaults plus the type roles,
+     not from globally substituted glyphs.
      NOTE: font-feature-settings REPLACES rather than merges — any component
      that sets its own would drop these. Keep this the only declaration. */
   font-feature-settings: "liga" 1, "calt" 1;
 
-  /* TRACKING — derive, don't eyeball.
-     Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
-     applied as `em`. Rough values: 12px→0, 15px→-0.009, 19px→-0.016,
-     23px→-0.019, 26px→-0.020, 34px+→-0.022.
-
-     Inter v4 ships an `opsz` axis spanning 14–32 (see assets/fonts/PROVENANCE.md)
-     and `font-optical-sizing: auto` is on, so between those sizes the font is
-     already compensating and only a light hand is needed. Outside that band the
-     axis clamps and the metric must be supplied manually — which is why the
-     34px hero carries more tracking than anything else here, and why type below
-     14px should carry almost none.
+  /* TRACKING — one restrained product curve. Ultra Sans inherits DM Sans's
+     spacing and covers opsz 9–40, so most text needs no manual compensation.
+     Role-level refinements stay gentle: ~11px eyebrows open to +0.02em, 15px UI
+     sits near -0.009em, and display roles progress from roughly -0.018em at
+     26px to -0.022em at 34px. These are hierarchy adjustments, not a blanket
+     family override.
 
      Two things this does NOT govern: uppercase/label tracking (positive values
      of 0.02–0.08em, a different job entirely) and monospace, which has its own
-     spacing design — the Inter curve does not apply to either. */
+     spacing design — the proportional curve does not apply to either. */
   /* ══ MERIDIAN DRIFT · DAY ══════════════════════════════════════════════
      The plate. Every neutral below is near-achromatic on purpose — channel
      spread 1–2 — because the identity's crispness comes from value, not from
@@ -219,8 +204,8 @@
      "Yesterday", "Last 7 days". A section label is the quietest thing in its
      group; it must never outrank the rows it labels. Any group that needs to
      feel more prominent buys that with space, not with louder type.
-     The 0.02em tracking is deliberate: at ~11px Inter needs positive tracking
-     to stay legible (see the tracking note in typography.css). */
+     The 0.02em tracking is deliberate: an ~11px uppercase eyebrow needs a
+     little air to stay legible (see the tracking note above). */
   --sidebar-eyebrow-size: 0.68rem;
   --sidebar-eyebrow-weight: var(--font-weight-panel-heading);
   --sidebar-eyebrow-color: var(--text-muted);
@@ -561,8 +546,8 @@ body {
   margin: 0;
   font-size: 2.45rem;
   font-weight: 400;
-  /* 39–46px across breakpoints, the largest type in the product and furthest
-     past Inter's opsz ceiling. See --display-optical-size. */
+  /* 39–46px across breakpoints, the largest type in the product. It shares the
+     approved display register rather than drifting to a different optical cut. */
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.08;
@@ -2507,10 +2492,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: clamp(1.65rem, 3.2vw, 2.35rem);
   font-weight: var(--font-weight-strong);
-  /* 26.4–37.6px, the only type in the app that rides the top of the opsz axis.
-     Left on `auto` it renders at Inter's narrowest cut; pinned it keeps the
-     rounder proportions. Both properties are required — `font-variation-settings`
-     alone loses to the automatic axis. See --display-optical-size. */
+  /* 26.4–37.6px. Pinning the axis keeps every breakpoint on Ultra Sans's
+     approved opsz-24 display register. Both properties are required because
+     `font-optical-sizing: auto` otherwise overrides the explicit axis value. */
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   letter-spacing: 0;
@@ -2758,16 +2742,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
   /* The hero is an invitation rather than a document heading, so it uses the
-     quieter invitation weight. Tracking is NOT restrained here: the tracking has to
-     be supplied by hand — see the tracking note at the top of this file. Inter's
-     metric for ~34px is -0.022em; -0.01em left the largest text in the product
-     visibly the loosest.
-     The opsz pin below replaces what used to be a ceiling problem. At 34px on
-     `auto` this ran past Inter's opsz range (14–32) and rendered at the axis
-     maximum — the narrowest cut Inter has. Pinned at 24 it keeps the rounder
-     proportions the reference grotesques share. The hand-set tracking still
-     applies on top and is unchanged: it was measured against the glyph metric,
-     not the axis. */
+     quieter invitation weight. The -0.022em display tracking keeps the largest
+     sentence from becoming the loosest, and the opsz-24 pin matches the rounder
+     display register used by the Ultra Sans specimen. */
   font-weight: var(--font-weight-invitation);
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
@@ -13731,7 +13708,7 @@ details {
   font-family: var(--font-reading);
   font-weight: var(--font-weight-reading-heading);
   line-height: 1.24;
-  /* Baseline for h4–h6, which set no size and so render at the inherited 15px.
+  /* Baseline for h4–h6, which set no size and so render at the inherited 16px.
      h1–h3 override per level below: one flat value across six levels was tuned
      for h3 and drifted in both directions — too loose on h1, too tight on h4+. */
   letter-spacing: -0.009em;
@@ -13866,8 +13843,7 @@ details {
   font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-main);
-  /* 13.8px is below Inter's opsz floor (14), so the axis is already serving the
-     Text cut — it needs barely any help. */
+  /* A compact 13.8px title needs only a trace of tightening. */
   letter-spacing: -0.005em;
 }
 

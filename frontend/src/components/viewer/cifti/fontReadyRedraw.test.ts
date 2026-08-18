@@ -12,10 +12,10 @@ const deferred = <T>() => {
 
 describe("scheduleFontsReadyRedraw", () => {
   it("waits for every requested family and then redraws exactly once", async () => {
-    const interLoad = deferred<FontFace[]>();
+    const ultraSansLoad = deferred<FontFace[]>();
     const monoLoad = deferred<FontFace[]>();
     const load = vi.fn((query: string) =>
-      query.includes("JetBrains") ? monoLoad.promise : interLoad.promise
+      query.includes("JetBrains") ? monoLoad.promise : ultraSansLoad.promise
     );
     const redraw = vi.fn();
 
@@ -23,7 +23,7 @@ describe("scheduleFontsReadyRedraw", () => {
       { load } as unknown as Pick<FontFaceSet, "load">,
       [
         {
-          query: '600 11px "BisQue Inter Variable"',
+          query: '600 11px "Ultra Sans"',
           sample: "CORTEX_LEFT",
         },
         {
@@ -36,7 +36,7 @@ describe("scheduleFontsReadyRedraw", () => {
     expect(load).toHaveBeenCalledTimes(2);
     expect(load).toHaveBeenNthCalledWith(
       1,
-      '600 11px "BisQue Inter Variable"',
+      '600 11px "Ultra Sans"',
       "CORTEX_LEFT"
     );
     expect(load).toHaveBeenNthCalledWith(
@@ -45,8 +45,8 @@ describe("scheduleFontsReadyRedraw", () => {
       "frame index 12,345"
     );
 
-    interLoad.resolve([]);
-    await interLoad.promise;
+    ultraSansLoad.resolve([]);
+    await ultraSansLoad.promise;
     await Promise.resolve();
     expect(redraw).not.toHaveBeenCalled();
 
@@ -70,7 +70,7 @@ describe("scheduleFontsReadyRedraw", () => {
       { load } as unknown as Pick<FontFaceSet, "load">,
       [
         {
-          query: '600 10px "BisQue Inter Variable"',
+          query: '600 10px "Ultra Sans"',
           sample: "CORTEX_LEFT",
         },
         {

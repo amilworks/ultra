@@ -182,14 +182,12 @@ for (const cssFile of productionCssFiles) {
 }
 
 for (const [token, weight] of [
-  // 440, not 400. Inter's stroke-to-letter ratio sets lighter than the
-  // grotesques Ultra was measured against: stem/x-height 0.1609 at w400 versus
-  // Söhne Buch's 0.1721, driven by Inter's larger x-height rather than a
-  // thinner stem. The matching weight solves to 430 by two independent
-  // methods (outline geometry and integrated rendered ink); 440 is one step
-  // past; 430 is the match itself, adopted after living with 440.
+  // Compact UI stays at Inter 430. Long-form answers use Regular 400 at 16px
+  // with generous leading so their texture remains lighter during sustained
+  // reading without compromising Inter's tall x-height and open counters.
   ["body", "430"],
-  ["reading-body", "430"],
+  ["reading-body", "400"],
+  ["invitation", "350"],
   ["nav", "500"],
   ["action", "500"],
   ["data", "500"],
@@ -197,11 +195,11 @@ for (const [token, weight] of [
   ["panel-heading", "600"],
   ["page-heading", "600"],
   ["reading-heading", "600"],
-  // 670, dropped from 700 once body moved to 440 narrowed the gap to 260 and
+  // 670, dropped from 700 once body moved above 400 narrowed the contrast and
   // the hero title read as a shout. Still outranks reading-heading.
   ["strong", "670"],
   // 400, and pinned rather than inherited. JetBrains Mono is STATIC faces and
-  // CSS font-matching rounds a 400-500 target UP, so when body moved to 430
+  // CSS font-matching rounds a 400-500 target UP, so when compact UI moved to 430
   // every mono surface that inherited body weight silently jumped to Mono 500.
   // 400 is nearest the stroke/x-height parity solve (~426) and is the grade
   // code editors ship. See frontend/font-lab/mono.html.
@@ -221,17 +219,16 @@ for (const [token, weight] of [
 for (const [pattern, message] of [
   [/--font-size-body:\s*0\.9375rem;/, "Desktop body must remain 15px"],
   [/--line-height-body:\s*1\.5;/, "Desktop body line-height must remain 1.5"],
-  // 15px, matching --font-size-body. NOTE the 0.9375rem literal is what scopes
-  // this to the desktop :root — these patterns run over the whole file, and the
-  // phone override below is still 1rem, so a 1rem pattern would match THAT and
-  // pass for the wrong reason.
-  [/--font-size-reading:\s*0\.9375rem;/, "Desktop chat reading must remain 15px"],
+  [/:root\s*\{[^}]*--font-size-reading:\s*1rem;/s, "Desktop chat reading must remain 16px"],
   [/--line-height-reading:\s*1\.62;/, "Desktop chat reading line-height must remain 1.62"],
   [/--user-chat-width:\s*49rem;/, "Desktop chat reading measure must remain 49rem"],
+  [/:root\s*\{[^}]*--reading-measure:\s*45rem;/s, "Desktop prose measure must remain 45rem"],
   [/@media \(max-width: 640px\)[\s\S]*--line-height-reading:\s*1\.68;/, "Phone reading line-height must remain 1.68"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
   [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
+  [/\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Desktop welcome must use the invitation role"],
+  [/\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Mobile welcome must use the invitation role"],
   // Mono surfaces must pin their weight. Static mono faces + CSS rounding turn
   // an inherited body weight into a silent grade jump (430 -> 500); these two
   // registers are the reading surfaces where that reads as shouting.

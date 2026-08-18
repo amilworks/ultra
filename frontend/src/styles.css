@@ -8,56 +8,22 @@
 
 :root {
   --font-size-body: 0.9375rem;
-  --font-size-reading: 0.9375rem;
+  --font-size-reading: 1rem;
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
-  /* Reading MEASURE, which is the half of legibility that font-size alone can't
-     buy. The chat column is 49rem so tables, code and figures have room; at that
-     width prose ran a measured mean of 86.5 characters per line (sampled across
-     8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
-     comfortably. Past ~75 the return sweep starts finding the wrong next line and
-     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
-     numbers are comparable — all AT THE THEN-16px READING SIZE, so read them as
-     the calibration record, not as current values: 37.5rem = 72.3 cpl,
-     40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9, unconstrained (49rem) = 92.9.
-     44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
-     column is a modest share of a wide screen and reads cramped when held to the
-     middle of the band. Note 42.5rem and 44rem measured identically here — the
-     extra 24px moved no wrap points in this sample — so 44rem is not buying more
-     characters than 42.5 so much as more slack before the next wrap. The cap
-     still does real work: unconstrained is 92.9, and that was the measure that
-     made readers re-scan.
-     Do not read the 45–75 band as violated silently — it is exceeded knowingly,
-     and the number to re-measure against is 92.9, not 75.
-     In rem, NOT ch, even though ch looks like the natural unit for a measure:
-     `ch` resolves against each ELEMENT's font-size, so one shared token handed
-     the h2 an 867px measure and the h3 763px while body prose got 654px — three
-     different right edges instead of one column. A measure is a property of the
-     column, not of the type inside it.
-     Applies to PROSE only; block content that genuinely needs width keeps the
-     full 49rem column.
-     RESCALED when reading dropped 16px -> 15px: the measure is in rem, so a
-     smaller font at a fixed rem width buys MORE characters per line, not fewer.
-     Holding 44rem would have stretched the calibrated 83.9 cpl to ~89.5 — most
-     of the way to the unconstrained 92.9 that made readers re-scan. 41.25rem is
-     44 x 15/16, which preserves 83.9 cpl at the new size. The character count is
-     the calibrated quantity here; the rem value is just how it is expressed. */
-  --reading-measure: 41.25rem;
-  /* 440, not 400. Inter's 400 sets 4% lighter than the grotesques Ultra is
-     measured against — the gap is not stroke width but the ratio of stroke to
-     letter. Inter's stem is only 2.7% thinner than Söhne Buch's (0.0876em vs
-     0.0900em), but Inter's x-height is larger (0.5444 vs 0.5230), so the same
-     stroke covers proportionally less: stem/x-height 0.1609 against 0.1721.
-     Two independent measurements put the matching weight at 430 — solving
-     stem/x-height from the outlines gives 431, and integrating rendered ink
-     over the x-height band gives 430 — and it holds across the optical range
-     because Inter's x-height does not move with weight. 440 is one step past
-     the match; 430 is the match itself. This product is read at 13–15px for long
-     stretches. Shipped at 440 first and dialled back to the measured match
-     after living with it. Measured in frontend/font-lab/weight.html. */
+  /* Long-form answers use a 16px reading register and a 45rem prose measure.
+     The surrounding 49rem column remains available to tables, code and figures.
+     Keep this in rem rather than ch: ch resolves per element, which gives prose
+     and headings different right edges when their font sizes differ. */
+  --reading-measure: 45rem;
+  /* Inter 430 keeps compact UI labels crisp. Long-form reading uses Regular 400
+     at 16px with 1.62 leading, reducing dark texture and night-mode bloom while
+     preserving Inter's tall x-height and open counters. The welcome invitation
+     is deliberately quieter still; it is orientation, not document structure. */
   --font-weight-body: 430;
-  --font-weight-reading-body: 430;
+  --font-weight-reading-body: 400;
+  --font-weight-invitation: 350;
   /* 670, not 700. At 700 the hero title read as a shout rather than a heading
      once body moved off 400 and closed the gap from 300 to 270. Dropping 30
      restores the step without giving up the contrast. Scattered `font-weight:
@@ -71,9 +37,8 @@
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 430 → 600 is a narrower step than
-     the 400 → 600 this was tuned against, but still unmistakable at reading
-     size; nothing now outweighs a heading.
+     dark blots and cost more than it marked. 400 → 600 remains unmistakable at
+     reading size; nothing now outweighs a heading.
      --font-weight-strong (UI chrome) is 670 — different job, sparse use. */
   --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
@@ -87,8 +52,8 @@
      when body moved 400 -> 430, every mono surface that inherited body weight
      silently jumped a whole grade to Mono 500. Nobody chose that; the loaded
      face proved it (only the 500 face was fetched).
-     400 is the measured choice, by the same stroke/x-height yardstick that set
-     body to 430: JBM 400 stem/x = 0.1636 vs prose@430 = 0.1721 (-5%); JBM 500
+     400 is the measured choice, by the same stroke/x-height yardstick used for
+     compact UI at 430: JBM 400 stem/x = 0.1636 vs UI@430 = 0.1721 (-5%); JBM 500
      = 0.1964 (+14%). The exact parity weight solves to ~426 — 400 is 2.9x
      closer than 500, it is the grade every code editor ships, and the chip
      already carries salience from its tint and ink hue; bolder strokes on top
@@ -2677,7 +2642,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .mobile-chat-hero-title {
   margin: 0;
   font-size: 1.6rem;
-  font-weight: 400;
+  font-weight: var(--font-weight-invitation);
   /* 25.6px — just past the pin point, so it gets the same treatment as
      .hero-title rather than drifting narrower than its desktop counterpart. */
   font-optical-sizing: none;
@@ -2792,8 +2757,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
-  /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight. Tracking is NOT restrained here: the tracking has to
+  /* The hero is an invitation rather than a document heading, so it uses the
+     quieter invitation weight. Tracking is NOT restrained here: the tracking has to
      be supplied by hand — see the tracking note at the top of this file. Inter's
      metric for ~34px is -0.022em; -0.01em left the largest text in the product
      visibly the loosest.
@@ -2803,7 +2768,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      proportions the reference grotesques share. The hand-set tracking still
      applies on top and is unchanged: it was measured against the glyph metric,
      not the axis. */
-  font-weight: 400;
+  font-weight: var(--font-weight-invitation);
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.2;

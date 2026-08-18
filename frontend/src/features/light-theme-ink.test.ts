@@ -229,17 +229,11 @@ describe("light theme ink", () => {
 
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
-    // Measured on ONE fixed set of 5 answer paragraphs so the values compare,
-    // all AT THE THEN-16px READING SIZE — the calibration record, not current
-    // values: 37.5rem = 72.3 cpl, 40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9,
-    // unconstrained = 92.9. 44rem sits KNOWINGLY above the 45–75 guideline at
-    // ~84 — the column is a modest share of a wide screen and reads cramped when
-    // held to the middle of the band. The cap still does real work: the measure
-    // that made readers re-scan was the unconstrained 92.9, not 75.
-    // 41.25rem = 44 x 15/16, rescaled when reading dropped to 15px. The measure
-    // is in rem, so a smaller font at fixed rem width buys MORE characters — 44rem
-    // would have stretched 83.9 cpl to ~89.5. The cpl is the calibrated quantity.
-    expect(lightRoot).toMatch(/--reading-measure:\s*41\.25rem;/);
+    // A fixed answer sample at 16px put 44rem at 83.9 characters per line and
+    // the unconstrained 49rem column at 92.9. A 45rem cap keeps the intentionally
+    // relaxed conversational measure near that calibrated wrap point while
+    // preserving the wider column for code, tables and figures.
+    expect(lightRoot).toMatch(/--reading-measure:\s*45rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.
@@ -254,13 +248,21 @@ describe("response reading typography", () => {
   });
 
   it("keeps reading size and leading in the comfortable band", () => {
-    expect(lightRoot).toMatch(/--font-size-reading:\s*0\.9375rem;/);
+    expect(lightRoot).toMatch(/--font-size-reading:\s*1rem;/);
     expect(lightRoot).toMatch(/--line-height-reading:\s*1\.62;/);
-    // 440, not 400: Inter's stem/x-height (0.1609 at w400) sets lighter than the
-    // grotesques this was measured against (Söhne Buch 0.1721). Matching weight
-    // solves to 430 by two independent methods. Shipped at 440 first, then dialled
-    // back to the measured match. See frontend/font-lab/weight.html.
-    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*430;/);
+    // Inter Regular at 16px keeps long-form answers lighter than compact UI at
+    // 430 while retaining Inter's tall x-height and open counters.
+    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
+  });
+
+  it("keeps the welcome invitation quieter than document structure", () => {
+    expect(lightRoot).toMatch(/--font-weight-invitation:\s*350;/);
+    expect(stylesSource).toMatch(
+      /\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s
+    );
   });
 
   it("never lets inline emphasis outweigh a heading", () => {
@@ -272,8 +274,8 @@ describe("response reading typography", () => {
     expect(heading).toBe("600");
     expect(strong).toBe("600");
     expect(Number(strong)).toBeLessThanOrEqual(Number(heading));
-    // UI chrome is 670 — different job, sparse use. Dropped from 700 once body
-    // moved to 440 closed the gap from 300 to 260 and the hero read as a shout.
+    // UI chrome is 670 — different job, sparse use. Dropped from 700 once compact
+    // UI moved above 400 and the hero began to read as a shout.
     expect(lightRoot).toMatch(/--font-weight-strong:\s*670;/);
     // Whatever the chrome weight is, it must still outrank a reading heading.
     const chromeStrong = lightRoot.match(/--font-weight-strong:\s*(\d+);/)?.[1];
@@ -285,8 +287,8 @@ describe("response reading typography", () => {
     // 400-500 target UP: when body moved 400 -> 430, every mono surface that
     // inherited body weight silently jumped a full grade to Mono 500. The mono
     // register is therefore pinned, never inherited. 400 is the measured pick:
-    // stroke/x-height parity with prose@430 solves to ~426 (JBM 400 = 0.1636,
-    // prose = 0.1721, JBM 500 = 0.1964). See frontend/font-lab/mono.html.
+    // stroke/x-height parity with compact UI@430 solves to ~426 (JBM 400 =
+    // 0.1636, UI = 0.1721, JBM 500 = 0.1964). See frontend/font-lab/mono.html.
     expect(lightRoot).toMatch(/--font-weight-mono:\s*400;/);
     const mustPin = [
       /\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,

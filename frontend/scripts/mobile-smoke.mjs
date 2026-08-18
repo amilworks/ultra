@@ -371,15 +371,16 @@ function assertTypographyMetrics(typography, testCase) {
   );
 
   const expectedWeights = {
-    // The calibrated variable body and reading registers intentionally use
-    // 430. Keep this browser-level assertion aligned with the source contract
-    // checked by check-typography-contract.mjs and light-theme-ink.test.ts.
+    // Compact UI stays at 430. The 16px long-form reading register uses Inter
+    // Regular 400 for a lighter sustained-reading texture, and the welcome
+    // invitation is quieter still. Keep these browser assertions aligned with
+    // check-typography-contract.mjs and light-theme-ink.test.ts.
     body: "430",
     composer: "430",
-    invitation: "400",
+    invitation: "350",
     action: "500",
-    reading: "430",
-    readingItalic: "430",
+    reading: "400",
+    readingItalic: "400",
     // 600, matching the reading heading rather than exceeding it. At 700 an
     // inline **emphasis** rendered HEAVIER than every heading above it (h2/h3/h4
     // are all 600), and at h4's 16px it beat the heading at identical size.

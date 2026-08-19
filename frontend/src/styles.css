@@ -2499,14 +2499,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
 }
 
-.app-history-action-button {
-  transition:
-    background-color 160ms var(--motion-ease),
-    color 160ms var(--motion-ease),
-    border-color 160ms var(--motion-ease),
-    transform 160ms var(--motion-ease);
-}
-
 .chat-width-frame {
   width: 100%;
   max-width: var(--user-chat-width);
@@ -14280,12 +14272,6 @@ details {
   .app-sidebar[data-mobile="true"] .app-history-rename-input {
     height: 2.7rem;
     font-size: 1rem;
-  }
-
-  .app-sidebar[data-mobile="true"] .app-history-action-button {
-    width: 2.25rem;
-    height: 2.25rem;
-    border-radius: 0.8rem;
   }
 
   .app-composer-shell {

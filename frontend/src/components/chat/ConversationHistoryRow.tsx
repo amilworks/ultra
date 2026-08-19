@@ -1,25 +1,23 @@
-import { memo } from "react";
+import { memo, type KeyboardEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { Input } from "@/components/ui/input";
 import {
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   mobileSidebarCloseProps,
-  mobileSidebarKeepOpenProps,
-  useSidebar,
 } from "@/components/ui/sidebar";
-import { Check, Copy, Link2, MoreHorizontal, Pencil, Trash, X } from "lucide-react";
+import { Check, Copy, Link2, Pencil, Trash, X } from "lucide-react";
 import { RunningStatusPill } from "./RunningStatusPill";
 import type { HistoryItem } from "@/features/chat/history";
 
-type ConversationHistoryActionsProps = {
+type ConversationHistoryMenuProps = {
+  children: ReactNode;
   conversationId: string;
   conversationTitle: string;
   deleting: boolean;
@@ -30,7 +28,8 @@ type ConversationHistoryActionsProps = {
   onDelete: (conversationId: string) => void;
 };
 
-const ConversationHistoryActions = ({
+const ConversationHistoryMenu = ({
+  children,
   conversationId,
   conversationTitle,
   deleting,
@@ -39,69 +38,48 @@ const ConversationHistoryActions = ({
   onCopyId,
   onRename,
   onDelete,
-}: ConversationHistoryActionsProps) => {
-  const { isMobile } = useSidebar();
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <SidebarMenuAction asChild showOnHover {...mobileSidebarKeepOpenProps}>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label={`Conversation actions for ${conversationTitle}`}
-            disabled={deleting}
-            className="app-history-action-button size-7 rounded-md border border-transparent bg-transparent p-0 text-muted-foreground shadow-none hover:bg-sidebar-accent hover:text-sidebar-accent-foreground data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-          >
-            <MoreHorizontal />
-            <span className="sr-only">Conversation actions</span>
-          </Button>
-        </SidebarMenuAction>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        className="w-52 rounded-lg"
-        side={isMobile ? "bottom" : "right"}
-        align={isMobile ? "end" : "start"}
-        sideOffset={8}
+}: ConversationHistoryMenuProps) => (
+  <ContextMenu>
+    <ContextMenuTrigger asChild disabled={deleting}>
+      {children}
+    </ContextMenuTrigger>
+    <ContextMenuContent className="w-52 rounded-lg">
+      <ContextMenuItem
+        disabled={deleting || renaming}
+        onSelect={() => {
+          if (deleting || renaming) {
+            return;
+          }
+          onRename(conversationId, conversationTitle);
+        }}
       >
-        <DropdownMenuItem
-          disabled={deleting || renaming}
-          onClick={() => {
-            if (deleting || renaming) {
-              return;
-            }
-            onRename(conversationId, conversationTitle);
-          }}
-        >
-          <Pencil className="text-muted-foreground" />
-          <span>Rename chat</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void onCopyLink(conversationId)}>
-          <Link2 className="text-muted-foreground" />
-          <span>Copy chat link</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => void onCopyId(conversationId)}>
-          <Copy className="text-muted-foreground" />
-          <span>Copy chat ID</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          variant="destructive"
-          disabled={deleting}
-          onClick={() => {
-            if (deleting) {
-              return;
-            }
-            onDelete(conversationId);
-          }}
-        >
-          <Trash />
-          <span>Delete chat</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-};
+        <Pencil className="text-muted-foreground" />
+        <span>Rename chat</span>
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => void onCopyLink(conversationId)}>
+        <Link2 className="text-muted-foreground" />
+        <span>Copy chat link</span>
+      </ContextMenuItem>
+      <ContextMenuItem onSelect={() => void onCopyId(conversationId)}>
+        <Copy className="text-muted-foreground" />
+        <span>Copy chat ID</span>
+      </ContextMenuItem>
+      <ContextMenuItem
+        variant="destructive"
+        disabled={deleting}
+        onSelect={() => {
+          if (deleting) {
+            return;
+          }
+          onDelete(conversationId);
+        }}
+      >
+        <Trash />
+        <span>Delete chat</span>
+      </ContextMenuItem>
+    </ContextMenuContent>
+  </ContextMenu>
+);
 
 type ConversationRenameEditorProps = {
   conversation: HistoryItem;
@@ -188,6 +166,23 @@ type ConversationHistoryRowProps = {
   onDelete: (conversationId: string) => void;
 };
 
+const openConversationMenuFromKeyboard = (event: KeyboardEvent<HTMLButtonElement>): void => {
+  if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+    return;
+  }
+
+  event.preventDefault();
+  const bounds = event.currentTarget.getBoundingClientRect();
+  event.currentTarget.dispatchEvent(
+    new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: bounds.left + Math.min(24, bounds.width / 2),
+      clientY: bounds.top + bounds.height / 2,
+    })
+  );
+};
+
 export const ConversationHistoryRow = memo(function ConversationHistoryRow({
   conversation,
   active,
@@ -201,20 +196,7 @@ export const ConversationHistoryRow = memo(function ConversationHistoryRow({
 }: ConversationHistoryRowProps) {
   return (
     <SidebarMenuItem className="app-history-item">
-      <SidebarMenuButton
-        isActive={active}
-        className="app-history-button group/history h-auto py-2"
-        onClick={() => onOpen(conversation)}
-        {...mobileSidebarCloseProps}
-      >
-        <div className="flex min-w-0 w-full items-center gap-2">
-          <span className="truncate">{conversation.title}</span>
-          <div className="ml-auto flex items-center gap-1.5">
-            {conversation.running ? <RunningStatusPill size="compact" /> : null}
-          </div>
-        </div>
-      </SidebarMenuButton>
-      <ConversationHistoryActions
+      <ConversationHistoryMenu
         conversationId={conversation.id}
         conversationTitle={conversation.title}
         deleting={deleting}
@@ -223,7 +205,24 @@ export const ConversationHistoryRow = memo(function ConversationHistoryRow({
         onCopyId={onCopyId}
         onRename={onRename}
         onDelete={onDelete}
-      />
+      >
+        <SidebarMenuButton
+          isActive={active}
+          className="app-history-button h-auto py-2"
+          onClick={() => onOpen(conversation)}
+          onKeyDown={openConversationMenuFromKeyboard}
+          aria-haspopup="menu"
+          aria-keyshortcuts="Shift+F10"
+          {...mobileSidebarCloseProps}
+        >
+          <div className="flex min-w-0 w-full items-center gap-2">
+            <span className="truncate">{conversation.title}</span>
+            <div className="ml-auto flex items-center gap-1.5">
+              {conversation.running ? <RunningStatusPill size="compact" /> : null}
+            </div>
+          </div>
+        </SidebarMenuButton>
+      </ConversationHistoryMenu>
     </SidebarMenuItem>
   );
 });

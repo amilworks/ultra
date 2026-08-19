@@ -83,8 +83,7 @@ export function CiftiConnectivity({ conn }: Props) {
     ctx.strokeRect(R.x + 0.5, R.y + 0.5, R.w, R.h);
 
     // Structure band separators (both axes) + left/bottom labels.
-    ctx.font =
-      '600 10px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif';
+    ctx.font = '600 10px "BisQue Ultra Sans", system-ui, sans-serif';
     for (const b of bands) {
       const p0 = (b.start / n) * R.w;
       if (b.start > 0) {
@@ -123,7 +122,7 @@ export function CiftiConnectivity({ conn }: Props) {
     ctx.strokeStyle = line;
     ctx.strokeRect(cbx + 0.5, cby + 0.5, cbw, cbh);
     ctx.fillStyle = muted;
-    ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+    ctx.font = '10px "BisQue Ultra Mono", ui-monospace, monospace';
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(`+${magnitude.toFixed(2)}`, cbx + cbw + 5, cby + 4);
@@ -166,11 +165,11 @@ export function CiftiConnectivity({ conn }: Props) {
         document.fonts,
         [
           {
-            query: '600 10px "Ultra Sans"',
+            query: '600 10px "BisQue Ultra Sans"',
             sample: "CORTEX_LEFT",
           },
           {
-            query: '400 10px "JetBrains Mono"',
+            query: '400 10px "BisQue Ultra Mono"',
             sample: "+0.75 0 −0.75",
           },
         ],

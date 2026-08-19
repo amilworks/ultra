@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ultra Sans round-capital source comparison</title>
+  <style>
+    @font-face {
+      font-family: "Ultra Current";
+      src: url("_cmp/us.woff2") format("woff2");
+      font-weight: 100 1000;
+    }
+    @font-face {
+      font-family: "Ultra Candidate";
+      src: url("_cmp/candidate.woff2") format("woff2");
+      font-weight: 100 1000;
+    }
+    @font-face {
+      font-family: "DM Sans Source";
+      src: url("sources/DMSans%5Bopsz,wght%5D.ttf") format("truetype");
+      font-weight: 100 1000;
+    }
+    @font-face {
+      font-family: "Inter Source";
+      src: url("sources/InterVariable-v4.1.woff2") format("woff2");
+      font-weight: 100 900;
+    }
+    @font-face {
+      font-family: "Ultra Mono";
+      src: url("build/UltraMono-Variable.woff2") format("woff2");
+      font-weight: 300 600;
+    }
+    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; background: #f7f7f5; color: #111; }
+    header { max-width: 76rem; margin: 0 auto 28px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 650; letter-spacing: -.03em; }
+    p { margin: 0; color: #656565; font-size: 13px; line-height: 1.5; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; max-width: 76rem; margin: auto; }
+    .card { border: 1px solid #dededb; border-radius: 14px; padding: 20px; background: #fff; overflow: hidden; }
+    .label { margin-bottom: 14px; color: #737373; font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+    .large { font-family: var(--face); font-size: clamp(92px, 11vw, 150px); font-optical-sizing: none; font-variation-settings: "opsz" 9, "wght" 400; line-height: .9; letter-spacing: .04em; white-space: nowrap; }
+    .small { margin-top: 24px; display: flex; gap: 22px; align-items: baseline; font-family: var(--face); font-optical-sizing: none; font-variation-settings: "opsz" 9, "wght" 400; white-space: nowrap; }
+    .small span:nth-child(1) { font-size: 10px; }
+    .small span:nth-child(2) { font-size: 12px; }
+    .small span:nth-child(3) { font-size: 15px; }
+    .small span:nth-child(4) { font-size: 18px; }
+    .ultra { --face: "Ultra Current"; }
+    .candidate { --face: "Ultra Candidate"; }
+    .dm { --face: "DM Sans Source"; }
+    .inter { --face: "Inter Source"; }
+    .mono { --face: "Ultra Mono"; }
+    @media (max-width: 760px) {
+      body { padding: 18px; }
+      .grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-color-scheme: dark) {
+      body { background: #101010; color: #f4f4f2; }
+      .card { background: #171717; border-color: #303030; }
+      .label, p { color: #969696; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>C / O / G source geometry</h1>
+    <p>Same 400 weight and text optical size. The reference crop is approximately 10–11 CSS px, so each card includes a small-size ladder.</p>
+  </header>
+  <main class="grid">
+    <section class="card ultra">
+      <div class="label">Current Ultra Sans — geometric circle treatment</div>
+      <div class="large">C O G</div>
+      <div class="small"><span>G O C</span><span>G O C</span><span>G O C</span><span>G O C</span></div>
+    </section>
+    <section class="card candidate">
+      <div class="label">Ultra candidate — Inter skeleton / DM Sans system</div>
+      <div class="large">C O G</div>
+      <div class="small"><span>G O C</span><span>G O C</span><span>G O C</span><span>G O C</span></div>
+    </section>
+    <section class="card dm">
+      <div class="label">DM Sans — family skeleton and optical compensation</div>
+      <div class="large">C O G</div>
+      <div class="small"><span>G O C</span><span>G O C</span><span>G O C</span><span>G O C</span></div>
+    </section>
+    <section class="card inter">
+      <div class="label">Inter — compact UI aperture and terminals</div>
+      <div class="large">C O G</div>
+      <div class="small"><span>G O C</span><span>G O C</span><span>G O C</span><span>G O C</span></div>
+    </section>
+    <section class="card mono">
+      <div class="label">Ultra Mono — firm bar and small-size separation</div>
+      <div class="large">C O G</div>
+      <div class="small"><span>G O C</span><span>G O C</span><span>G O C</span><span>G O C</span></div>
+    </section>
+  </main>
+</body>
+</html>

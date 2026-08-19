@@ -15,7 +15,7 @@ describe("scheduleFontsReadyRedraw", () => {
     const ultraSansLoad = deferred<FontFace[]>();
     const monoLoad = deferred<FontFace[]>();
     const load = vi.fn((query: string) =>
-      query.includes("JetBrains") ? monoLoad.promise : ultraSansLoad.promise
+      query.includes("Ultra Mono") ? monoLoad.promise : ultraSansLoad.promise
     );
     const redraw = vi.fn();
 
@@ -23,11 +23,11 @@ describe("scheduleFontsReadyRedraw", () => {
       { load } as unknown as Pick<FontFaceSet, "load">,
       [
         {
-          query: '600 11px "Ultra Sans"',
+          query: '600 11px "BisQue Ultra Sans"',
           sample: "CORTEX_LEFT",
         },
         {
-          query: '400 11px "JetBrains Mono"',
+          query: '400 11px "BisQue Ultra Mono"',
           sample: "frame index 12,345",
         },
       ],
@@ -36,12 +36,12 @@ describe("scheduleFontsReadyRedraw", () => {
     expect(load).toHaveBeenCalledTimes(2);
     expect(load).toHaveBeenNthCalledWith(
       1,
-      '600 11px "Ultra Sans"',
+      '600 11px "BisQue Ultra Sans"',
       "CORTEX_LEFT"
     );
     expect(load).toHaveBeenNthCalledWith(
       2,
-      '400 11px "JetBrains Mono"',
+      '400 11px "BisQue Ultra Mono"',
       "frame index 12,345"
     );
 
@@ -70,11 +70,11 @@ describe("scheduleFontsReadyRedraw", () => {
       { load } as unknown as Pick<FontFaceSet, "load">,
       [
         {
-          query: '600 10px "Ultra Sans"',
+          query: '600 10px "BisQue Ultra Sans"',
           sample: "CORTEX_LEFT",
         },
         {
-          query: '400 10px "JetBrains Mono"',
+          query: '400 10px "BisQue Ultra Mono"',
           sample: "+0.75 0 −0.75",
         },
       ],

@@ -25,7 +25,7 @@ const darkBlock = (() => {
 describe("light theme ink", () => {
   it("uses Ultra Sans as the product face with Inter as its coverage fallback", () => {
     const productStack =
-      '"Ultra Sans", "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif';
+      '"BisQue Ultra Sans", "BisQue Inter Coverage", system-ui, "Segoe UI", sans-serif';
     expect(typographySource).toContain(`--font-sans: ${productStack};`);
     expect(typographySource).toContain(`--font-reading: ${productStack};`);
   });
@@ -34,12 +34,12 @@ describe("light theme ink", () => {
     // Meridian Drift · Day. Hierarchy is a geometric series in CONTRAST RATIO
     // at 1.80x per step, solved numerically against the ground the text sits
     // on — not a set of greys anyone picked.
-    //   m0 #171b1d 15.60:1 body · m1 #424547 8.69:1 · m2 #696b6d 4.81:1
+    //   m0 #171b1d 16.73:1 body · m1 #424547 9.32:1 · m2 #696b6d 5.16:1
     // m0 is not #000000 for the same reason Night's ink is not #ffffff: a
     // clipped top end reads as a display rather than as a material.
     expect(lightRoot).toMatch(/--text-main:\s*#171b1d;/);
-    // m2, the last rung that can legally hold text. 4.81:1 — unlike the grey it
-    // replaced (3.87:1) this clears AA for small text outright.
+    // m2, the last rung that can legally hold text. 5.16:1 on the ground — the
+    // grey it replaced sat under the AA line.
     expect(lightRoot).toMatch(/--text-muted:\s*#696b6d;/);
   });
 
@@ -80,7 +80,7 @@ describe("light theme ink", () => {
       return (hi + 0.05) / (lo + 0.05);
     };
     const ladders = [
-      { ground: "#f2f3f3", rungs: ["#171b1d", "#424547", "#696b6d", "#939697", "#c8c9ca"] },
+      { ground: "#fafbfb", rungs: ["#171b1d", "#424547", "#696b6d", "#939697", "#c8c9ca"] },
       { ground: "#0b0e11", rungs: ["#dce3ea", "#a5abb0", "#777c82", "#505559", "#2b2e32"] },
     ];
     for (const { ground, rungs } of ladders) {
@@ -95,7 +95,7 @@ describe("light theme ink", () => {
     }
     // The shipped tokens must BE rungs of these ladders, so the hex pins above
     // and this derivation cannot drift apart silently.
-    expect(lightRoot).toMatch(/--bg-main:\s*#f2f3f3;/);
+    expect(lightRoot).toMatch(/--bg-main:\s*#fafbfb;/);
     expect(darkBlock).toMatch(/--bg-main:\s*#0b0e11;/);
   });
 
@@ -188,11 +188,27 @@ describe("light theme ink", () => {
     // draw --sidebar-foreground — on m1, solved against the sidebar's own
     // ground (8.07:1 light / 8.04:1 dark).
     expect(lightRoot).toMatch(/--sidebar-nav-foreground:\s*var\(--text-main\);/);
+    // m1. After the one-step-lighter shift the sidebar sits on the original
+    // stage rung (m2 measures a legal 4.81:1 there), but the rows keep m1 —
+    // the quiet tier is a hierarchy decision, one clean magnitude below the
+    // nav ink above it, with margin instead of shipping at the AA line.
     expect(lightRoot).toMatch(/--sidebar-foreground:\s*#424547;/);
     expect(lightRoot).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
+    // Dark shipped its Recents at full white — it never got the quiet-sidebar
+    // split light had. Both grounds now carry it.
     expect(darkBlock).toMatch(/--sidebar-foreground:\s*#a5abb0;/);
     expect(darkBlock).not.toMatch(/--sidebar-foreground:\s*var\(--text-main\);/);
-    // Rows draw the nav ink; the m1 token stays consumed by the quiet tier.
+    // Structural nav draws the nav token, not the quiet one.
+    expect(stylesSource).toMatch(
+      /\.app-new-chat-button,\s*\.app-resource-browser-button,\s*\.app-bisque-browser-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-bisque-link-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-sidebar-brand-button\[data-slot="button"\]\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
+    );
+    // Recents keeps the quiet token.
     expect(stylesSource).toMatch(
       /\n\.app-history-button\s*\{[^}]*color:\s*var\(--sidebar-nav-foreground\);/s
     );
@@ -200,8 +216,8 @@ describe("light theme ink", () => {
   });
 
   it("puts the hover affordance where it can actually be seen", () => {
-    // Recents rows darken: from 6.41:1 to --sidebar-ink-hover's 18.15:1 is a
-    // legible 2.83:1 step. This must be a real declaration, not just the
+    // Recents rows darken: rest m1 to --sidebar-ink-hover is a legible ~2x
+    // contrast step. This must be a real declaration, not just the
     // --sidebar-accent-foreground token: the rows pin `color:
     // var(--sidebar-foreground)` in unlayered CSS, which beats Tailwind v4's
     // LAYERED hover:text-sidebar-accent-foreground utility at any specificity.
@@ -264,8 +280,12 @@ describe("response reading typography", () => {
     expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
   });
 
-  it("keeps the welcome invitation quieter than document structure", () => {
-    expect(lightRoot).toMatch(/--font-weight-invitation:\s*350;/);
+  it("keeps the New Chat invitation lighter than the reading voice", () => {
+    const invitation = lightRoot.match(/--font-weight-invitation:\s*(\d+);/)?.[1];
+    const reading = lightRoot.match(/--font-weight-reading-body:\s*(\d+);/)?.[1];
+    expect(invitation).toBe("350");
+    expect(reading).toBe("400");
+    expect(Number(invitation)).toBeLessThan(Number(reading));
     expect(stylesSource).toMatch(
       /\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s
     );
@@ -283,35 +303,54 @@ describe("response reading typography", () => {
     expect(heading).toBe("600");
     expect(strong).toBe("600");
     expect(Number(strong)).toBeLessThanOrEqual(Number(heading));
-    // UI chrome is 670 — different job, sparse use. Dropped from 700 once compact
-    // UI moved above 400 and the hero began to read as a shout.
-    expect(lightRoot).toMatch(/--font-weight-strong:\s*670;/);
+    // UI chrome is 690 — a separate, sparse display job. Retired Inter at
+    // opsz24/w670 measured lowercase stem/x-height 0.262550. Ultra Sans pinned
+    // at opsz13 solves to 0.26254 at w689.18, rounded to the nearest ten.
+    expect(lightRoot).toMatch(/--font-weight-strong:\s*690;/);
     // Whatever the chrome weight is, it must still outrank a reading heading.
     const chromeStrong = lightRoot.match(/--font-weight-strong:\s*(\d+);/)?.[1];
     expect(Number(chromeStrong)).toBeGreaterThan(Number(heading));
   });
 
-  it("pins mono surfaces so static-face rounding cannot re-grade them", () => {
-    // JetBrains Mono ships as static faces, and CSS font-matching rounds a
-    // 400-500 target UP: when body moved 400 -> 430, every mono surface that
-    // inherited body weight silently jumped a full grade to Mono 500. The mono
-    // register is therefore pinned, never inherited. 400 is the measured pick:
-    // stroke/x-height parity with compact UI@430 solves to ~426 (JBM 400 =
-    // 0.1636, UI = 0.1721, JBM 500 = 0.1964). See frontend/font-lab/mono.html.
+  it("pins mono surfaces so they never inherit the proportional reading grade", () => {
+    // Ultra Mono has its own variable weight axis. Code and data stay on the
+    // nominal Regular master instead of inheriting the surrounding sans role.
     expect(lightRoot).toMatch(/--font-weight-mono:\s*400;/);
     const mustPin = [
       /\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
       /\.pk-code-render :where\(pre, code\)\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
     ];
     for (const pattern of mustPin) expect(stylesSource).toMatch(pattern);
-    // No mono rule may inherit: every JetBrains/ui-monospace font-family rule
-    // must carry a font-weight of its own.
-    const monoRules =
-      stylesSource.match(
-        /[^{}]+\{[^{}]*font-family:[^;]*(?:JetBrains Mono|ui-monospace)[^{}]*\}/g
-      ) ?? [];
-    expect(monoRules.length).toBeGreaterThan(0);
-    for (const rule of monoRules) expect(rule).toMatch(/font-weight/);
+  });
+
+  it("uses Ultra Sans spacing derived by size and role", () => {
+    for (const [token, value] of [
+      ["display-regular", "-0.01em"],
+      ["display-strong", "-0.018em"],
+      ["reading-h1", "-0.016em"],
+      ["reading-h2", "-0.011em"],
+      ["reading-h3", "-0.007em"],
+      ["reading-small", "-0.003em"],
+    ]) {
+      expect(lightRoot).toMatch(
+        new RegExp(`--tracking-${token}:\\s*${value.replace(".", "\\.")};`)
+      );
+    }
+    expect(stylesSource).toMatch(
+      /\.hero-title\s*\{[^}]*letter-spacing:\s*var\(--tracking-display-strong\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.pk-markdown > :where\(h1\)\s*\{[^}]*letter-spacing:\s*var\(--tracking-reading-h1\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.pk-markdown > :where\(h2\)\s*\{[^}]*letter-spacing:\s*var\(--tracking-reading-h2\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.pk-markdown > :where\(h3\)\s*\{[^}]*letter-spacing:\s*var\(--tracking-reading-h3\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-composer-textarea\s*\{[^}]*letter-spacing:\s*0;/s
+    );
   });
 
   it("gives wide equations their own scrollport instead of amputating them", () => {

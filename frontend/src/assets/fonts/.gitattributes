@@ -1,0 +1,6 @@
+# These upstream OFL notices are byte-pinned by the typography contract.
+# Preserve their original CRLF bytes and keep Git from normalizing or
+# whitespace-checking the vendored copies.
+OFL-1.1-DMMono.txt -text -diff
+OFL-1.1-DMSans.txt -text -diff
+OFL-1.1-JetBrainsMono.txt -text -diff

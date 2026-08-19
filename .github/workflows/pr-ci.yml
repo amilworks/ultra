@@ -111,5 +111,8 @@ jobs:
       - name: Run Deep Agents unit tests
         run: make deepagents-test
 
+      - name: Run compute service tests
+        run: uv run --project backend/deepagents_runtime --locked --extra dev python -m pytest -q tests/test_compute_service.py
+
       - name: Run Deep Agents autonomy tests
         run: make deepagents-autonomy-test

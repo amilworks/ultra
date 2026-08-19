@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ultra Mono specimen</title>
+<style>
+@font-face{font-family:"Ultra Mono";src:url("build/UltraMono-Variable.woff2") format("woff2");
+ font-weight:300 600;font-style:normal}
+@font-face{font-family:"Ultra Mono";src:url("build/UltraMono-Italic-Variable.woff2") format("woff2");
+ font-weight:300 600;font-style:italic}
+@font-face{font-family:"DM Mono Ref";src:url("sources/JetBrainsMono%5Bwght%5D.ttf");font-weight:100 800}
+body{margin:0;background:#fff;color:#16181a;font-family:system-ui;font-synthesis:none}
+h2{font-size:11px;letter-spacing:.1em;font-weight:700;text-transform:uppercase;color:#52525b;
+ margin:0;padding:10px 16px;background:#fafafa;border-top:1px solid #d4d4d8;border-bottom:1px solid #e8e8e8}
+.row{padding:10px 16px;border-bottom:1px solid #f1f1f1;display:flex;align-items:baseline;gap:18px}
+.tag{flex:0 0 120px;font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#8b8f94}
+.um{font-family:"Ultra Mono",monospace}
+.dark{background:#0f1214;color:#e6edf3}.dark .tag{color:#7d8590}.dark h2{background:#151a1d;color:#8b949e;border-color:#262c31}
+.big{font-size:44px;line-height:1.25}
+.mid{font-size:20px;line-height:1.5}
+.code{font-size:13px;line-height:1.62;white-space:pre}
+.huge{font-size:74px;line-height:1.2}
+</style>
+</head>
+<body>
+
+<h2>Weight ladder — is the generated 600 a family member?</h2>
+<div class="row"><div class="tag">300 light</div><div class="um big" style="font-weight:300">Hyperspectral 0123 λσΔ</div></div>
+<div class="row"><div class="tag">400 regular</div><div class="um big" style="font-weight:400">Hyperspectral 0123 λσΔ</div></div>
+<div class="row"><div class="tag">500 medium</div><div class="um big" style="font-weight:500">Hyperspectral 0123 λσΔ</div></div>
+<div class="row"><div class="tag">600 GENERATED</div><div class="um big" style="font-weight:600">Hyperspectral 0123 λσΔ</div></div>
+
+<h2>Counter watchlist at 600 — the glyphs extrapolation could crush</h2>
+<div class="row"><div class="tag">600 huge</div><div class="um huge" style="font-weight:600">a e s g 8 @ &amp; % § æ œ B R</div></div>
+<div class="row"><div class="tag">500 same</div><div class="um huge" style="font-weight:500">a e s g 8 @ &amp; % § æ œ B R</div></div>
+
+<h2>Greek graft — stems must read even with Latin at every weight</h2>
+<div class="row"><div class="tag">300</div><div class="um mid" style="font-weight:300">peak λ = 680 nm · σ = 4.1 · Δθ = 0.75 · αβγφω · ΩΣΦΛΠΘ next to HELIX hlx</div></div>
+<div class="row"><div class="tag">400</div><div class="um mid" style="font-weight:400">peak λ = 680 nm · σ = 4.1 · Δθ = 0.75 · αβγφω · ΩΣΦΛΠΘ next to HELIX hlx</div></div>
+<div class="row"><div class="tag">500</div><div class="um mid" style="font-weight:500">peak λ = 680 nm · σ = 4.1 · Δθ = 0.75 · αβγφω · ΩΣΦΛΠΘ next to HELIX hlx</div></div>
+<div class="row"><div class="tag">600</div><div class="um mid" style="font-weight:600">peak λ = 680 nm · σ = 4.1 · Δθ = 0.75 · αβγφω · ΩΣΦΛΠΘ next to HELIX hlx</div></div>
+
+<h2>Italic — DM's −10° with sheared Greek beside it</h2>
+<div class="row"><div class="tag">400 italic</div><div class="um mid" style="font-style:italic"># fit gaussian: μ̂=680, σ=4.1, λ peak — wavelength sweep αβδ</div></div>
+<div class="row"><div class="tag">500 italic</div><div class="um mid" style="font-style:italic;font-weight:500"># fit gaussian: σ=4.1, λ peak — wavelength sweep αβδ</div></div>
+
+<h2>Grid — Greek and Latin must share the 600-unit cell exactly</h2>
+<div class="row"><div class="tag">columns</div><div class="um code">0123456789012345678901234
+λσΔθαβγφωπΩΣΦΛΠΘδεζηικμνξ
+abcdefghijklmnopqrstuvwxy
+ABCDEFGHIJKLMNOPQRSTUVWXY
+|||||||||||||||||||||||||</div></div>
+
+<div class="dark">
+<h2>Night — code at Ultra's real 13px</h2>
+<div class="row"><div class="tag">400 / 13px</div><div class="um code"># wavelength sweep, λ in nm
+spec = load("s3://ultra/ngff/plate_01.zarr")
+peak = spec[l1I0O].argmax()   # 680 nm
+σ = 4.1; Δθ = 0.75; µm = 0.108</div></div>
+<div class="row"><div class="tag">600 / 11px cues</div><div class="um" style="font-weight:600;font-size:11px">L · R · A · P · S · I&nbsp;&nbsp;&nbsp;AXIAL 089/512&nbsp;&nbsp;&nbsp;CORONAL 256/512</div></div>
+</div>
+
+</body>
+</html>

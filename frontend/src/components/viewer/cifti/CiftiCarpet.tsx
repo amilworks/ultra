@@ -136,14 +136,13 @@ export function CiftiCarpet({ carpet }: Props) {
       }
       ctx.textAlign = "right";
       ctx.fillStyle = ink;
-      ctx.font =
-        '600 11px "Ultra Sans", "BisQue Inter Variable", system-ui, sans-serif';
+      ctx.font = '600 11px "BisQue Ultra Sans", system-ui, sans-serif';
       const twoLine = bandH[i] >= 30 && Math.abs(ly - cy) <= 1.5;
       ctx.fillText(shortStructure(structures[i].name), R.x - 10, twoLine ? ly - 6 : ly);
       if (twoLine) {
         const count = Math.round(((structures[i].end - structures[i].start) / rows) * sourceRows);
         ctx.fillStyle = muted;
-        ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+        ctx.font = '10px "BisQue Ultra Mono", ui-monospace, monospace';
         ctx.fillText("~" + count.toLocaleString(), R.x - 10, ly + 7);
       }
     }
@@ -154,7 +153,7 @@ export function CiftiCarpet({ carpet }: Props) {
     ctx.lineWidth = 1;
     ctx.strokeRect(R.x + 0.5, R.y + 0.5, R.w, R.h);
     ctx.fillStyle = muted;
-    ctx.font = '11px "JetBrains Mono", ui-monospace, monospace';
+    ctx.font = '11px "BisQue Ultra Mono", ui-monospace, monospace';
     ctx.textAlign = "center";
     ctx.textBaseline = "top";
     const span = view.f1 - view.f0;
@@ -183,7 +182,7 @@ export function CiftiCarpet({ carpet }: Props) {
     ctx.strokeStyle = line;
     ctx.strokeRect(cbx + 0.5, cby + 0.5, cbw, cbh);
     ctx.fillStyle = muted;
-    ctx.font = '10px "JetBrains Mono", ui-monospace, monospace';
+    ctx.font = '10px "BisQue Ultra Mono", ui-monospace, monospace';
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
     ctx.fillText(`+${clipZ}σ`, cbx + cbw + 5, cby + 4);
@@ -237,15 +236,15 @@ export function CiftiCarpet({ carpet }: Props) {
         document.fonts,
         [
           {
-            query: '600 11px "Ultra Sans"',
+            query: '600 11px "BisQue Ultra Sans"',
             sample: "CORTEX_LEFT",
           },
           {
-            query: '400 11px "JetBrains Mono"',
+            query: '400 11px "BisQue Ultra Mono"',
             sample: "frame index 12,345",
           },
           {
-            query: '400 10px "JetBrains Mono"',
+            query: '400 10px "BisQue Ultra Mono"',
             sample: "+3σ 0 −3σ",
           },
         ],

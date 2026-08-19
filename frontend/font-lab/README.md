@@ -1,9 +1,108 @@
 # Ultra Sans — font lab
 
-A build pipeline that produces **Ultra Sans**, a derivative typeface, from the
-Inter Variable v4.1 binaries Ultra already vendors. No font editor required, no
-new outlines drawn: it reassigns which of Inter's *existing* 2,937 glyphs are
-the default ones.
+Two build pipelines live here. Both produce derivative typefaces without a font
+editor and without drawing new outlines.
+
+| Script | Base | What it does | Status |
+| --- | --- | --- | --- |
+| `build_ultra_tabular.py` | DM Sans + Inter | `tnum` + Greek grafted over both axes + dormant slashed zero | **ADOPTED — the shipping product face (Ultra Sans)** |
+| `build_ultra_mono.py` | DM Mono + JetBrains Mono | Variable 300–600 mono with grafted Greek | **ADOPTED — the shipping product monospace (Ultra Mono)** |
+| `build_ultra_sans.py` | Inter v4.1 | Bakes Inter's alternates in as defaults | Explored, never adopted |
+
+`build_ultra_mono.py` rebuilds DM Mono from its upstream Glyphs sources (the
+shipped statics are not point-compatible — 62/76 glyph mismatches from
+per-instance overlap removal), instances compatible masters from the fontmake
+VF, extends the family's own two-master weight vector to a generated 600
+(counter-collapse-checked; tightest counter keeps 69% of its area), and grafts
+76 Greek codepoints per master from weight-solved JetBrains Mono instances
+(lowercase and capitals scaled separately to DM's x/cap heights, italic sheared
+1° to DM's −10°). Every glyph at every instance stays on the 600/1000em grid —
+asserted, not assumed. Byte-reproducible; digests pinned in the typography
+contract. `sans-specimen.html` renders the sans Greek graft, slashed zero, and
+tabular regression checks; `mono-specimen.html` renders the mono ladder, counter watchlist, graft
+adjacency, and grid checks against the built files.
+
+Both emit into `build/`. The tabular build is the one currently wired into the
+app; the Inter experiment below is kept for its measurements, which still inform
+the type system even though its output was never shipped.
+
+## `build_ultra_tabular.py` — the shipping face
+
+```bash
+python frontend/font-lab/build_ultra_tabular.py              # build + verify
+python frontend/font-lab/build_ultra_tabular.py --verify-only
+```
+
+Stock DM Sans ships **no `tnum` feature** and proportional digits spanning
+310/1000em, so `font-variant-numeric: tabular-nums` had nothing to activate and
+Ultra's right-aligned numeric columns staggered. CSS cannot fix that; it needs
+glyphs. This adds ten `<digit>.tnum` composites plus the feature — and, since
+the same rebuild: **104 Greek codepoints grafted from Inter** (solved per master
+location over the wght x opsz grid, horizontal-corrected where Inter's opsz
+saturates) and a **generated slashed zero** behind a dormant `zero` feature.
+
+Three measured facts keep it exact rather than modelled — see the module
+docstring for the full reasoning:
+
+1. **`0` is the widest digit at every axis location** (checked over opsz 9–40 ×
+   wght 100–1000), so the tabular advance *is* `advance(zero)`.
+2. **HVAR is dropped after a phantom-advance rebuild** — the italic's HVAR
+   diverged from its phantoms by up to 4 units, so HVAR-true advances are
+   sampled at all 12 master locations, every glyph's phantom deltas are rebuilt
+   from them (verified exact), and HVAR is removed; all advances flow one way.
+3. The centring shift is linear in the advances and gvar deltas are additive, so
+   the shift's deltas are the same linear combination of the base digits'.
+
+**Two traps worth remembering.** Sampling the axis corners and writing absolute
+deltas is wrong — gvar deltas are additive residuals, so the `{opsz,wght}` corner
+double-counts what `{opsz}` and `{wght}` already contributed; that overshot by 51
+units (7%) at opsz 40 / wght 1000. And leaving the four phantom points `None`
+pins the advance to its default everywhere, which looks fine at 400 and collides
+once weight widens the digits.
+
+Digits are centred on **ink**, not the advance box: centring the box left `1` 44
+units off centre. The ink correction is near-constant across the axes (drift 10
+units, 0.15px at 15px) so it is applied statically.
+
+Builds are byte-reproducible (`recalcTimestamp=False`), which is what lets
+`check-typography-contract.mjs` pin the output digest — and pinning the digest is
+how the contract guarantees `tnum` is present without parsing WOFF2.
+
+### Round capitals: reference shape, Ultra metrics
+
+`C O G` were previously forced toward perfect circles. That looked geometric
+at display scale but missed the supplied 10–11px reference: its `O` is subtly
+vertical, `C` is narrower and more open, and `G` is narrower than `O` with a
+long, immediately legible horizontal bar. At the normal text master, the old
+outline aspects were `C .927 / O 1.000 / G 1.000`; the redraw is
+`C .825 / O .865 / G .834`, matching the reference's closest source geometry.
+
+The build now reconstructs `C O G Q Ø` at all 12 masters from three explicit
+roles:
+
+- **Inter** supplies the round-cap skeleton and aperture/terminal geometry; at
+  the reference raster size it had the lowest mean pixel error of the measured
+  candidates.
+- **DM Sans** remains the typeface system: each Inter master is weight-solved
+  to DM's round-cap stroke and scaled to its overshoot height, while the
+  original DM advance and optical centre stay fixed. Kerning coverage and line
+  lengths therefore do not move.
+- **Ultra Mono / DM Mono** is the 10px diagnostic for G-bar clarity, not an
+  outline donor. Its compressed widths are useful in code but would reduce
+  recognition in proportional body text.
+
+The roman and italic use the same construction. Point structure is checked
+before variation deltas are written; the build then verifies C/O/G proportions,
+stroke agreement, cap overshoot, unchanged advances, and the mark-to-bowl
+relationships in `Ç Ö Ğ` across the axis grid. `g-compare.html` renders the
+reference sources, current shipping face, and the new candidate at 10–18px and
+display scale.
+
+## `build_ultra_sans.py` — the Inter experiment (not adopted)
+
+Produces a derivative from the Inter Variable v4.1 binaries. No font editor
+required, no new outlines drawn: it reassigns which of Inter's *existing* 2,937
+glyphs are the default ones.
 
 ```bash
 python frontend/font-lab/build_ultra_sans.py --all
@@ -210,34 +309,6 @@ gives up Inter's optical compensation at small sizes — the widening and openin
 that exists to aid reading. Söhne makes the same compromise by being static.
 Pinning at display only, leaving `auto` for body, keeps the compensation at the
 cost of not being "true Söhne" throughout.
-
-## Mono: the silent grade jump, and the pin
-
-`mono.html` documents the code-typography pass. The finding: **JetBrains Mono is
-static faces, and CSS font-matching rounds a 400–500 target upward** — so when
-body moved 400 → 430, all twenty mono rules that inherited body weight silently
-jumped to Mono 500. `document.fonts` proved it: only the 500 face was fetched.
-
-| | stem (em) | x-height | stem/x | vs prose@430 | ink density | vs prose |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Prose — Inter 430 | 0.0937 | 0.5444 | 0.1721 | — | 111.7 | — |
-| **JBM 400** | 0.0900 | 0.5500 | **0.1636** | **−5%** | 89.9 | −19.5% |
-| JBM 500 | 0.1080 | 0.5500 | 0.1964 | +14% | 103.4 | −7.4% |
-
-Stroke ratio and texture density disagree, and that disagreement is the point:
-mono's fixed 0.6em advance makes any weight read lighter *as a block* while its
-strokes read heavier *as letterforms*. Chips are read as letterforms — stroke
-parity is the criterion — and the parity solve lands at ≈426. 400 is 2.9×
-closer than 500, matches what code editors ship, and stays safe under Night
-bloom. Hence `--font-weight-mono: 400`, pinned at every mono `font-family`
-site; the contract and `light-theme-ink.test.ts` now refuse any mono rule that
-inherits its weight.
-
-Deliberately unchanged: block leading 1.2 (authored in `code-block.tsx`; the
-JetBrains IDE default this face was drawn for — ink pitch 13.4px clears the
-15.6px box), inline `0.88em` (x-height parity would want 0.99em, but the wide
-advance already inflates mono; chip contrast holds at 6.7:1 dark / 5.1:1
-light — both clear of AA), and the nine mono rules that pinned explicit weights at authoring time.
 
 ## Known limitation: italic
 

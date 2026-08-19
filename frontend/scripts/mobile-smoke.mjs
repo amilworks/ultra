@@ -10,7 +10,8 @@ import { createTypographyRequestAudit } from "./typography-request-audit.mjs";
 const baseUrl = process.env.MOBILE_SMOKE_URL ?? "http://localhost:5173";
 const smokeNonce = String(process.env.MOBILE_SMOKE_NONCE || "");
 const artifactDir = path.resolve(".playwright-cli/mobile-smoke");
-const primaryFamily = "Ultra Sans";
+const uiFamily = "BisQue Ultra Sans";
+const brandFamily = "BisQue Inter Variable";
 
 const cases = [
   { name: "phone-small", width: 320, height: 568, mobile: true },
@@ -132,7 +133,7 @@ async function captureTypographyMetrics(page, testCase) {
       };
     }
     const monoItalicFaces = await document.fonts.load(
-      'italic 400 16px "JetBrains Mono"',
+      'italic 400 16px "BisQue Ultra Mono"',
       "// scientific comment"
     );
     await document.fonts.ready;
@@ -152,6 +153,7 @@ async function captureTypographyMetrics(page, testCase) {
         color: style.color,
         synthesis: style.fontSynthesis,
         opticalSizing: style.fontOpticalSizing,
+        variationSettings: style.fontVariationSettings,
       };
     };
 
@@ -210,7 +212,7 @@ async function captureTypographyMetrics(page, testCase) {
       monoItalic: {
         faceCount: monoItalicFaces.length,
         ready: document.fonts.check(
-          'italic 400 16px "JetBrains Mono"',
+          'italic 400 16px "BisQue Ultra Mono"',
           "// scientific comment"
         ),
       },
@@ -242,7 +244,7 @@ async function captureTypographyMetrics(page, testCase) {
         monoComment,
       },
     };
-  }, { family: primaryFamily, mobile: testCase.mobile });
+  }, { family: uiFamily, mobile: testCase.mobile });
 }
 
 async function captureVariationEvidence(page, testCase) {
@@ -250,7 +252,7 @@ async function captureVariationEvidence(page, testCase) {
     await Promise.all([
       document.fonts.load(`400 48px "${family}"`, "Hamburgefontsiv 0123456789"),
       document.fonts.load(
-        'italic 400 40px "JetBrains Mono"',
+        'italic 400 40px "BisQue Ultra Mono"',
         "// scientific calibration 0123456789"
       ),
     ]);
@@ -282,16 +284,16 @@ async function captureVariationEvidence(page, testCase) {
     );
     makeRow(
       "mono-normal",
-      'font-family:"JetBrains Mono";font-size:40px;font-weight:400;font-style:normal;line-height:1.35',
+      'font-family:"BisQue Ultra Mono";font-size:40px;font-weight:400;font-style:normal;line-height:1.35',
       "// scientific calibration 0123456789"
     );
     makeRow(
       "mono-italic",
-      'font-family:"JetBrains Mono";font-size:40px;font-weight:400;font-style:italic;line-height:1.35',
+      'font-family:"BisQue Ultra Mono";font-size:40px;font-weight:400;font-style:italic;line-height:1.35',
       "// scientific calibration 0123456789"
     );
     document.body.append(host);
-  }, primaryFamily);
+  }, uiFamily);
 
   const geometry = await page.evaluate(() => {
     const read = (kind) => {
@@ -333,7 +335,7 @@ async function captureVariationEvidence(page, testCase) {
   );
   assert(
     !monoNormal.equals(monoItalic),
-    `${testCase.name}: JetBrains Mono normal and italic rasterized identically`
+    `${testCase.name}: Ultra Mono normal and italic rasterized identically`
   );
 
   const hash = (bytes) => createHash("sha256").update(bytes).digest("hex").slice(0, 16);
@@ -367,7 +369,7 @@ function assertTypographyMetrics(typography, testCase) {
   }
   assert(
     typography.monoItalic.faceCount > 0 && typography.monoItalic.ready,
-    `${testCase.name}: genuine JetBrains Mono italic did not load`
+    `${testCase.name}: genuine Ultra Mono italic did not load`
   );
 
   const expectedWeights = {
@@ -404,8 +406,11 @@ function assertTypographyMetrics(typography, testCase) {
   for (const [role, expectedWeight] of Object.entries(expectedWeights)) {
     const style = typography.roles[role];
     assert(style, `${testCase.name}: missing product typography role ${role}`);
+    const expectedFamily = role === "brandBisque" || role === "brandUltra"
+      ? brandFamily
+      : uiFamily;
     assert(
-      style.family.includes(primaryFamily),
+      style.family.includes(expectedFamily),
       `${testCase.name}: ${role} uses unexpected family ${style.family}`
     );
     assert(
@@ -418,24 +423,31 @@ function assertTypographyMetrics(typography, testCase) {
       style.opticalSizing === expectedOpticalSizing,
       `${testCase.name}: ${role} optical sizing ${style.opticalSizing} != ${expectedOpticalSizing}`
     );
+    if (role === "invitation") {
+      assert(
+        style.variationSettings.includes('"opsz" 13'),
+        `${testCase.name}: invitation lost its pinned display optical size`
+      );
+    }
   }
   assert(
     typography.roles.readingItalic.style === "italic",
     `${testCase.name}: markdown emphasis did not compute to true italic`
   );
   assert(
-    typography.roles.brandUltra.color === typography.roles.body.color &&
+    typography.roles.brandBisque.color === "rgb(66, 69, 71)" &&
+      typography.roles.brandUltra.color === "rgb(23, 27, 29)" &&
       typography.roles.brandUltra.color !== typography.roles.brandBisque.color,
     `${testCase.name}: wordmark did not compute to distinct light-theme monochrome roles ` +
       `(body ${typography.roles.body.color}, BisQue ${typography.roles.brandBisque.color}, ` +
       `Ultra ${typography.roles.brandUltra.color})`
   );
   assert(
-    typography.roles.monoComment.family.includes("JetBrains Mono") &&
+    typography.roles.monoComment.family.includes("BisQue Ultra Mono") &&
       typography.roles.monoComment.weight === "400" &&
       typography.roles.monoComment.style === "italic" &&
       typography.roles.monoComment.synthesis === "none",
-    `${testCase.name}: scientific code comment is not genuine JetBrains Mono 400 italic`
+    `${testCase.name}: scientific code comment is not genuine Ultra Mono 400 italic`
   );
   // The smoke deliberately cold-holds Ultra Sans to exercise font-display: swap.
   // Desktop exposes more always-visible labels than the mobile canvas, so it
@@ -509,7 +521,7 @@ async function runCase(browser, testCase) {
     await new Promise((resolve) =>
       requestAnimationFrame(() => requestAnimationFrame(resolve))
     );
-  }, primaryFamily);
+  }, uiFamily);
 
   const typography = await captureTypographyMetrics(page, testCase);
   assertTypographyMetrics(typography, testCase);
@@ -584,6 +596,10 @@ async function runCase(browser, testCase) {
   assert(
     successfulLocal.some(({ url }) => url.includes("UltraSans-Italic-Variable.woff2")),
     `${testCase.name}: italic Ultra Sans asset was not requested`
+  );
+  assert(
+    successfulLocal.some(({ url }) => url.includes("InterVariable-v4.1.woff2")),
+    `${testCase.name}: Inter wordmark asset was not requested`
   );
   result.localTypographyAssets = [
     ...new Set(attempted.map(({ url }) => new URL(url).pathname)),

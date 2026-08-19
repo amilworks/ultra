@@ -6,11 +6,38 @@ import {
   isHydratableRunArtifactVisual,
   isReportRunDocument,
   resolveRunOutputArtifactUrl,
+  runDocumentCodeLanguage,
+  runDocumentPreviewFormat,
   rewriteArtifactMarkdownImageUrls,
   runReportDocumentFormat,
   runReportPathKey,
   shouldHydrateRunArtifacts,
 } from "./run-artifact-hydration";
+
+describe("runDocumentPreviewFormat", () => {
+  it("previews reports, source artifacts, and PDFs through explicit safe paths", () => {
+    expect(runDocumentPreviewFormat("report.md", "text/markdown")).toBe("markdown");
+    expect(runDocumentPreviewFormat("report.html", "text/html")).toBe("html");
+    expect(runDocumentPreviewFormat("analysis.py", "text/x-python")).toBe("source");
+    expect(runDocumentPreviewFormat("results.csv", "text/csv")).toBe("source");
+    expect(runDocumentPreviewFormat("notes.txt", "text/plain")).toBe("source");
+    expect(runDocumentPreviewFormat("paper.pdf", "application/pdf")).toBe("pdf");
+  });
+
+  it("never sends binary scientific data through the text decoder", () => {
+    expect(runDocumentPreviewFormat("volume.h5", "application/x-hdf5")).toBeNull();
+    expect(runDocumentPreviewFormat("table.parquet", "application/octet-stream")).toBeNull();
+    expect(runDocumentPreviewFormat("array.npy", "application/octet-stream")).toBeNull();
+  });
+
+  it("maps source files to stable syntax-highlighting languages", () => {
+    expect(runDocumentCodeLanguage("analysis.py", "text/plain")).toBe("python");
+    expect(runDocumentCodeLanguage("notebook.ipynb", "application/json")).toBe("json");
+    expect(runDocumentCodeLanguage("results.tsv", "text/tab-separated-values")).toBe("csv");
+    expect(runDocumentCodeLanguage("config.yml", "application/yaml")).toBe("yaml");
+    expect(runDocumentCodeLanguage("README.txt", "text/plain")).toBe("text");
+  });
+});
 
 describe("isHydratableRunArtifactVisual", () => {
   it("keeps code artifacts out of the image preview grid while preserving plots", () => {

@@ -8592,20 +8592,53 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .chat-document-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
   max-width: 100%;
-  padding: 0.4rem 0.6rem;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-panel);
   color: inherit;
   text-decoration: none;
+  overflow: hidden;
   transition: border-color 140ms var(--motion-ease), transform 140ms var(--motion-ease);
 }
 
 .chat-document-chip:hover {
   border-color: var(--line-strong);
   transform: translateY(-1px);
+}
+
+.chat-document-chip[data-open="true"] {
+  border-color: color-mix(in oklab, var(--text-main) 26%, transparent);
+}
+
+.chat-document-chip:focus-within {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.chat-document-chip-fallback,
+.chat-document-chip-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.4rem 0.6rem;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  text-decoration: none;
+}
+
+.chat-document-chip-open {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chat-document-chip-open:focus-visible,
+.chat-document-chip-download:focus-visible {
+  outline: none;
 }
 
 .chat-document-chip-icon {
@@ -8632,7 +8665,21 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .chat-document-chip-download {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  flex: none;
+  border-left: 1px solid var(--line);
+  background: transparent;
   color: var(--text-muted);
+  text-decoration: none;
+  transition: background 140ms var(--motion-ease), color 140ms var(--motion-ease);
+}
+
+.chat-document-chip-download:hover {
+  background: var(--bg-main);
+  color: var(--text-main);
 }
 
 /* ============================= REPORT CANVAS =============================
@@ -8975,13 +9022,34 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   scrollbar-width: thin;
 }
 
-/* HTML reports fill the body; the sandboxed frame is the document. */
-.report-canvas-html-frame {
+/* HTML reports and PDFs fill the body; each frame is the document. */
+.report-canvas-html-frame,
+.report-canvas-pdf-frame {
   display: block;
   width: 100%;
   height: 100%;
   border: none;
   background: var(--bg-panel-strong);
+}
+
+/* Code, structured data, and plain-text outputs reuse the platform's bounded
+   source renderer, but the canvas itself owns scrolling and chrome. */
+.report-canvas-source {
+  min-height: 100%;
+  background: var(--bg-panel-strong);
+}
+
+.report-canvas-source .pk-code-render {
+  min-height: 100%;
+  max-height: none;
+  background: transparent;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.report-canvas-source .pk-code-render :where(code) {
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 /* Markdown reports read like the transcript: same measure, same rhythm. */

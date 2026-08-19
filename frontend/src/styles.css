@@ -8,42 +8,25 @@
 
 :root {
   --font-size-body: 0.9375rem;
-  --font-size-reading: 0.9375rem;
+  --font-size-reading: 1rem;
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
-  /* Reading MEASURE, which is the half of legibility that font-size alone cannot
-     buy. The Ultra Sans calibration at 16px/430, 1.62 leading, `text-wrap:
-     pretty`, and five fixed technical paragraphs found 45rem to be the widest
-     no-regression step: 44rem and 45rem both produced 12 lines at a mean 81.5
-     characters, while 45.5rem began lengthening internal lines and 46rem
-     crossed a wrap cliff to 11 lines / 88.9 characters. Desktop reading is
-     15px on current main, so 42.1875rem = 45 × 15/16: the same calibrated
-     character measure, and 15px wider than the prior 41.25rem desktop cap.
-     The chat column remains 49rem so tables, code, equations, and figures retain
-     their evidence width. The prose cap is deliberately in rem, not ch: ch would
-     resolve against each element's font size and give headings different right
-     edges from paragraphs. A measure is a property of the column, not of the
-     type inside it.
-     Applies to PROSE only; block content that genuinely needs width keeps the
-     full 49rem column. */
-  --reading-measure: 42.1875rem;
-  /* Compact UI and long-form reading share the measured 430 grade. Keeping the
-     grade constant across the 15px desktop and 16px phone roles avoids an
-     optical weight jump when the responsive breakpoint changes. */
+  /* Long-form answers use the user-approved 16px Regular reading register and
+     a 45rem prose measure. The surrounding 49rem column remains available to
+     tables, code, equations, and figures. Keep the cap in rem rather than ch:
+     the measure belongs to the column, not each element's font size. */
+  --reading-measure: 45rem;
+  /* Compact UI uses Ultra Sans's measured 430 grade. Reading steps down to
+     Regular 400 at 16px to reduce dark texture and Night-mode bloom, while the
+     welcome invitation is quieter still because it is orientation rather than
+     document structure. */
   --font-weight-body: 430;
-  --font-weight-reading-body: 430;
-  /* The welcome question is an invitation, not a conclusion. At opsz 13,
-     Ultra Sans w350 has a stem/x-height ratio of 0.15158 versus 0.16535 at
-     w400 and 0.17323 at the 430 compact UI voice. W300 falls to 0.13780 and looks
-     fragile on the Day ground. The six live welcome prompts keep identical
-     advances from w300–430, so this lighter role needs no tracking correction. */
+  --font-weight-reading-body: 400;
   --font-weight-invitation: 350;
-  /* 690 is the display-axis solve, not a renamed conventional weight. The old
-     Inter display role rendered at opsz 24 / w670 with a lowercase stem-to-
-     x-height ratio of 0.26255. Ultra Sans pinned at opsz 13 reaches 0.26254 at
-     w689.18, rounded to 690. Small labels that explicitly use 700 keep doing
-     their separate legibility job. */
+  /* 690 is the display-axis solve, not a renamed conventional weight. Retired
+     Inter at opsz 24 / w670 measured a 0.26255 lowercase stem/x-height ratio;
+     Ultra Sans pinned at opsz 13 reaches 0.26254 at w689.18. */
   --font-weight-strong: 690;
   --font-weight-reading-heading: 600;
   /* 600, not 700. At 700 an inline
@@ -51,7 +34,7 @@
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 430 → 600 is still an unmistakable
+     dark blots and cost more than it marked. 400 → 600 remains an unmistakable
      structural step without turning every emphasized phrase into a dark blot;
      nothing in answer prose outweighs a heading. The 690 strong role is a
      separate display job. */
@@ -62,6 +45,9 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
+  /* Ultra Mono is pinned to its nominal Regular master, never inherited from
+     the surrounding proportional role. */
+  --font-weight-mono: 400;
   /* Optical size for display type. `font-optical-sizing: auto` maps the CSS px
      size onto the opsz axis, so large type gets the narrowest cut — DM Sans
      takes 8.5% off the round lowercase across its axis, close to Inter's 8.2%.
@@ -79,21 +65,10 @@
      0.5960em, 5.7% wider. Every other heading sits at 18–23px where the ratio
      is already near target. Compared in frontend/font-lab/optical.html. */
   --display-optical-size: 13;
-  /* Ligatures and contextual alternates, and nothing else. DM Sans carries both
-     (`liga`, `calt`) so this declaration survives the move from Inter unchanged.
-     Its own stylistic sets are deliberately left off, for the same reason
-     Inter's "ss02" was switched off before it: ss02 is a single-storey `a`,
-     ss03 an alternate `g`, ss04 a spurless `u`, ss07 open figures. Each buys
-     identity from the letterforms, and in use that read as a stylistic quirk
-     rather than the clean, professional voice this product wants. Identity
-     comes from the type system — the scale, the weights, the tracking curve
-     below — not from substituted glyphs.
-     NOT AVAILABLE HERE, unlike Inter: DM Sans ships no `tnum` and no `zero`.
-     `font-variant-numeric: tabular-nums` therefore has no feature to activate
-     and silently does nothing — DM Sans's digits are proportional, spanning
-     310/1000em between narrowest and widest, so right-aligned numeric columns
-     stagger. Fixing it needs generated tabular digits, not CSS; see the
-     font-lab note in frontend/font-lab/README.md.
+  /* Preserve Ultra Sans's default glyph system. Its custom C/O/G/s geometry is
+     already in the base outlines. Ligatures and contextual alternates stay on;
+     stylistic sets stay off. Generated `tnum` and slashed `zero` remain explicit
+     component-level capabilities rather than global substitutions.
      NOTE: font-feature-settings REPLACES rather than merges — any component
      that sets its own would drop these. Keep this the only declaration. */
   font-feature-settings: "liga" 1, "calt" 1;
@@ -260,8 +235,8 @@
      "Yesterday", "Last 7 days". A section label is the quietest thing in its
      group; it must never outrank the rows it labels. Any group that needs to
      feel more prominent buys that with space, not with louder type.
-    The 0.02em tracking is deliberate: at ~11px Ultra Sans needs positive
-    tracking to stay legible (see the tracking note above). */
+     The 0.02em tracking is deliberate: at ~11px Ultra Sans needs positive
+     tracking to stay legible (see the tracking note above). */
   --sidebar-eyebrow-size: 0.68rem;
   --sidebar-eyebrow-weight: var(--font-weight-panel-heading);
   /* m2, which the one-step-lighter shift made legal here again: the sidebar

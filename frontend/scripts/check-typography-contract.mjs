@@ -30,22 +30,23 @@ const expectedFonts = [
 // Ultra Sans, the product face: DM Sans plus generated tabular figures, Greek
 // and reference-matched round capitals from Inter across the full two-axis
 // design space, and a dormant slashed-zero feature — built by
-// font-lab/build_ultra_tabular.py. That build is byte-reproducible, so pinning
-// its digest here also pins tnum, the 104 grafted codepoints, the C/O/G/Q/Oslash
-// redraw, and the zero feature. PROVENANCE.md pins the upstream digests.
+// the dedicated ultra-sans repository. That build is byte-reproducible, so
+// pinning its digest here also pins tnum, the 104 grafted codepoints, the
+// C/O/G/Q/Oslash and lowercase-s redraws, and the zero feature.
+const ultraSansRevision = "717ad23b67802f2e2d521e566ca3d390b48a83c1";
 const expectedUiFonts = [
   {
     file: "UltraSans-Variable.woff2",
     style: "normal",
-    bytes: 126_824,
-    sha256: "1794a295de6c0214c5d530d763668102bf23059cb3b75e248d4c80a1d6772758",
+    bytes: 126_880,
+    sha256: "f060de034541b34034450670bc9becf7c0640f57f2c23dff311ca04a7ff5c97d",
     upstreamSha256: "8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d",
   },
   {
     file: "UltraSans-Italic-Variable.woff2",
     style: "italic",
-    bytes: 153_972,
-    sha256: "753ab3be31d45a905d79fd25074864beca038eef37071b7bea1507354b677bfd",
+    bytes: 154_524,
+    sha256: "26470a9271f845356cfd113a15e5df9e623d440bacab5498e45ad16051e5771d",
     upstreamSha256: "22259c0cc8237221b80f44c76ba8d36e6bce3cda72779f5b2773643d499720ae",
   },
 ];
@@ -186,13 +187,49 @@ for (const font of expectedFonts) {
   }
 }
 
+check(
+  provenance.includes("Amil Khan") &&
+    provenance.includes("development snapshot") &&
+    provenance.includes("primary product face") &&
+    provenance.includes("Electrical and Computer Engineering") &&
+    provenance.includes(ultraSansRevision) &&
+    /lowercase [`']?s/i.test(provenance),
+  "Provenance must identify Ultra Sans authorship, source revision, s redraw, status, and product role"
+);
+
+for (const license of [
+  {
+    file: "OFL-DM-Sans.txt",
+    label: "DM Sans OFL-1.1",
+    bytes: 4_389,
+    sha256: "2af94f4fb533be8fa23282eb33e08ca311ddf47c2f32777e2040b282deeec65c",
+  },
+  {
+    file: "OFL-1.1.txt",
+    label: "Inter OFL-1.1",
+    bytes: 4_380,
+    sha256: "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a",
+  },
+]) {
+  const licensePath = path.join(sourceFontDir, license.file);
+  check(fs.existsSync(licensePath), `Missing ${license.label} license`);
+  if (fs.existsSync(licensePath)) {
+    const licenseBytes = fs.readFileSync(licensePath);
+    check(licenseBytes.length === license.bytes, `${license.label} license byte count changed`);
+    check(
+      digest(licenseBytes) === license.sha256,
+      `${license.label} license is not the verbatim upstream notice`
+    );
+  }
+}
+
 for (const font of expectedUiFonts) {
   const fontPath = path.join(sourceFontDir, font.file);
   check(fs.existsSync(fontPath), `Missing source font: ${font.file}`);
   if (fs.existsSync(fontPath)) {
     const bytes = fs.readFileSync(fontPath);
     check(bytes.length === font.bytes, `${font.file} has ${bytes.length} bytes; expected ${font.bytes}`);
-    check(digest(bytes) === font.sha256, `${font.file} SHA-256 does not match the vendored conversion`);
+    check(digest(bytes) === font.sha256, `${font.file} SHA-256 does not match the pinned Ultra Sans build`);
   }
   for (const provenanceValue of [
     font.file,
@@ -306,39 +343,14 @@ if (fs.existsSync(monoBuilder)) {
   );
 }
 
-// The shipped product face is generated, not downloaded, so the generator is
-// part of its provenance: without it in the tree, the binary cannot be
-// regenerated or audited and PROVENANCE.md points at nothing.
-const tabularBuilder = path.join(frontendRoot, "font-lab", "build_ultra_tabular.py");
+// Ultra Sans source authority lives in its dedicated repository. The app pins
+// one immutable font-producing revision rather than treating its local design
+// lab as the release source.
 check(
-  fs.existsSync(tabularBuilder),
-  "font-lab/build_ultra_tabular.py is missing; it builds the shipped Ultra Sans binaries"
+  provenance.includes("https://github.com/amilworks/ultra-sans") &&
+    provenance.includes(ultraSansRevision),
+  "Ultra Sans provenance must point to the dedicated repository and pinned revision"
 );
-if (fs.existsSync(tabularBuilder)) {
-  const builder = fs.readFileSync(tabularBuilder, "utf8");
-  check(
-    builder.includes("recalcTimestamp=False"),
-    "Tabular build must pin head.modified, or its digest stops being reproducible"
-  );
-  check(
-    builder.includes("assert_zero_is_widest"),
-    "Tabular build must keep re-checking the zero-is-widest invariant it relies on"
-  );
-  check(
-    builder.includes("graft_greek") && builder.includes("VariationModel"),
-    "Sans build must keep the model-derived Greek graft"
-  );
-  check(
-    builder.includes("drop_hvar_after_proof") && builder.includes("add_slashed_zero"),
-    "Sans build must keep the HVAR phantom rebuild and the slashed-zero generator"
-  );
-  check(
-    builder.includes("redraw_round_capitals(") &&
-      builder.includes("_solve_inter_round_weight") &&
-      builder.includes('ROUND_CAP_CHARS = ("C", "O", "G", "Q", "Ø")'),
-    "Sans build must keep the reference-matched C/O/G/Q/Oslash redraw"
-  );
-}
 
 const dmLicensePath = path.join(sourceFontDir, "OFL-1.1-DMSans.txt");
 check(fs.existsSync(dmLicensePath), "Missing DM Sans OFL-1.1 license");
@@ -507,7 +519,7 @@ check(
 );
 check(
   /benefit\s+has not yet been measured/.test(provenance) &&
-    /italic face must remain\s+demand-loaded/.test(provenance),
+    /italic faces must remain\s+demand-loaded/.test(provenance),
   "Provenance must record the unmeasured no-preload tradeoff and demand-loaded italic policy"
 );
 
@@ -525,13 +537,11 @@ for (const cssFile of productionCssFiles) {
 }
 
 for (const [token, weight] of [
-  // At opsz 15/16, Ultra Sans w430 has a 0.0888em lowercase stem over a
-  // 0.5027/0.5020em x-height. W440 expands the stem to 0.0904em, which adds
-  // unnecessary ink in Night while preserving no useful hierarchy.
+  // Compact UI stays at Ultra Sans's verified wght-430 design point. Long-form
+  // answers use Regular 400 at 16px with generous leading so their texture
+  // remains lighter during sustained reading.
   ["body", "430"],
-  ["reading-body", "430"],
-  // The welcome question is deliberately lighter than the reading voice:
-  // w350 remains calm and legible where w300 became fragile on the Day ground.
+  ["reading-body", "400"],
   ["invitation", "350"],
   ["nav", "500"],
   ["action", "500"],
@@ -544,6 +554,9 @@ for (const [token, weight] of [
   // Sans pinned at opsz13 reaches 0.26254 at w689.18, rounded to 690. It still
   // outranks reading-heading while matching the intended optical mass.
   ["strong", "690"],
+  // Ultra Mono stays on its nominal Regular master rather than inheriting a
+  // proportional text role.
+  ["mono", "400"],
   // 600, matching reading-heading rather than exceeding it. At 700 an inline
   // **emphasis** in an answer outweighed every heading above it (h2/h3/h4 are
   // all 600), and at h4's 16px it beat the heading at identical size. Emphasis
@@ -559,24 +572,18 @@ for (const [token, weight] of [
 for (const [pattern, message] of [
   [/--font-size-body:\s*0\.9375rem;/, "Desktop body must remain 15px"],
   [/--line-height-body:\s*1\.5;/, "Desktop body line-height must remain 1.5"],
-  // 15px, matching --font-size-body. NOTE the 0.9375rem literal is what scopes
-  // this to the desktop :root — these patterns run over the whole file, and the
-  // phone override below is still 1rem, so a 1rem pattern would match THAT and
-  // pass for the wrong reason.
-  [/--font-size-reading:\s*0\.9375rem;/, "Desktop chat reading must remain 15px"],
+  [/:root\s*\{[^}]*--font-size-reading:\s*1rem;/s, "Desktop chat reading must remain 16px"],
   [/--line-height-reading:\s*1\.62;/, "Desktop chat reading line-height must remain 1.62"],
-  [
-    /--reading-measure:\s*42\.1875rem;/,
-    "Response prose measure must preserve the measured 45-em calibration at 15px",
-  ],
   [/--user-chat-width:\s*49rem;/, "Desktop chat reading measure must remain 49rem"],
+  [/:root\s*\{[^}]*--reading-measure:\s*45rem;/s, "Desktop prose measure must remain 45rem"],
   [/@media \(max-width: 640px\)[\s\S]*--line-height-reading:\s*1\.68;/, "Phone reading line-height must remain 1.68"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
   [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
-  // Mono surfaces must pin their weight. Static mono faces + CSS rounding turn
-  // an inherited body weight into a silent grade jump (430 -> 500); these two
-  // registers are the reading surfaces where that reads as shouting.
+  [/\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Desktop welcome must use the invitation role"],
+  [/\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Mobile welcome must use the invitation role"],
+  // Mono surfaces must pin their weight so code and data never inherit the
+  // proportional reading grade.
   [/\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s, "Inline code must pin var(--font-weight-mono)"],
   [/\.pk-code-render :where\(pre, code\)\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s, "Code blocks must pin var(--font-weight-mono)"],
 ]) {
@@ -750,12 +757,18 @@ if (checkDist) {
   if (fs.existsSync(distRoot)) {
     const distFiles = walkFiles(distRoot);
     const distRelative = (file) => path.relative(distRoot, file).replaceAll(path.sep, "/");
-    const interLike = distFiles.filter((file) => /intervariable/i.test(path.basename(file)));
-    const interFontFiles = interLike.filter((file) => /\.(?:woff2?|ttf|otf)$/i.test(file));
-    check(interFontFiles.length === 2, `Expected two emitted Inter font files, found ${interFontFiles.length}`);
+    const productFontFiles = distFiles.filter(
+      (file) =>
+        /(?:ultrasans|intervariable)/i.test(path.basename(file)) &&
+        /\.(?:woff2?|ttf|otf)$/i.test(file)
+    );
     check(
-      interFontFiles.every((file) => file.endsWith(".woff2")),
-      "Production emitted a non-WOFF2 Inter font"
+      productFontFiles.length === 4,
+      `Expected four emitted product font files, found ${productFontFiles.length}`
+    );
+    check(
+      productFontFiles.every((file) => file.endsWith(".woff2")),
+      "Production emitted a non-WOFF2 product font"
     );
 
     const emittedByHash = new Map(
@@ -768,7 +781,10 @@ if (checkDist) {
       emitted: emittedByHash.get(font.sha256),
     }));
     for (const font of emittedExpected) {
-      check(Boolean(font.emitted), `Production build is missing exact ${font.style} Inter v4.1 bytes`);
+      check(
+        Boolean(font.emitted),
+        `Production build is missing exact ${font.style} Inter v4.1 bytes`
+      );
       if (font.emitted) {
         check(
           fs.statSync(font.emitted).size === font.bytes,
@@ -802,7 +818,7 @@ if (checkDist) {
       (total, font) => total + (font.emitted ? fs.statSync(font.emitted).size : 0),
       0
     );
-    check(emittedUiTotal === 280_796, `Emitted Ultra Sans payload is ${emittedUiTotal} bytes; expected 280796`);
+    check(emittedUiTotal === 281_404, `Emitted Ultra Sans payload is ${emittedUiTotal} bytes; expected 281404`);
 
     // Mono: Ultra Mono + its coverage net, by digest; and the fontsource
     // static fleet must be gone from dist entirely.
@@ -832,9 +848,10 @@ if (checkDist) {
     const cssWithInter = builtCssFiles.filter((file) =>
       fs.readFileSync(file, "utf8").includes("BisQue Inter Variable")
     );
-    check(cssWithInter.length === 1, `Expected one emitted CSS asset with Inter faces, found ${cssWithInter.length}`);
-
-    let normalFacePath = null;
+    check(
+      cssWithInter.length === 1,
+      `Expected one emitted CSS asset with Inter faces, found ${cssWithInter.length}`
+    );
     if (cssWithInter.length === 1) {
       const cssFile = cssWithInter[0];
       const css = fs.readFileSync(cssFile, "utf8");
@@ -843,16 +860,12 @@ if (checkDist) {
       );
       check(builtFaces.length === 2, `Expected two built Inter @font-face rules, found ${builtFaces.length}`);
       for (const font of expectedFonts) {
-        const face = builtFaces.find((block) => new RegExp(`font-style:\\s*${font.style}`).test(block));
+        const face = builtFaces.find((block) =>
+          new RegExp(`font-style:\\s*${font.style}`).test(block)
+        );
         check(Boolean(face), `Built CSS is missing ${font.style} Inter face`);
-        if (!face) {
-          continue;
-        }
-        check(/font-weight:\s*100 900/.test(face), `Built ${font.style} face lost weight 100–900`);
-        check(/font-display:\s*swap/.test(face), `Built ${font.style} face lost font-display: swap`);
-        check(/format\(["']?woff2["']?\)/.test(face), `Built ${font.style} face lost WOFF2 format`);
-        const rawUrl = face.match(/url\((["']?)([^"')]+)\1\)/)?.[2];
-        check(Boolean(rawUrl), `Built ${font.style} face is missing its URL`);
+        const rawUrl = face?.match(/url\((["']?)([^"')]+)\1\)/)?.[2];
+        check(Boolean(rawUrl), `Built ${font.style} Inter face is missing its URL`);
         if (rawUrl) {
           const cssRelative = distRelative(cssFile);
           const resolved = rawUrl.startsWith("/")
@@ -861,15 +874,13 @@ if (checkDist) {
           const expectedPath = emittedByHash.get(font.sha256);
           check(
             expectedPath && resolved === distRelative(expectedPath),
-            `Built ${font.style} face URL does not resolve to the verified asset`
+            `Built ${font.style} Inter URL does not resolve to the verified asset`
           );
-          if (font.style === "normal") {
-            normalFacePath = resolved;
-          }
         }
       }
     }
 
+    let primaryNormalFacePath = null;
     const cssWithUi = builtCssFiles.filter((file) =>
       fs.readFileSync(file, "utf8").includes("BisQue Ultra Sans")
     );
@@ -884,6 +895,28 @@ if (checkDist) {
         builtUiFaces.every((block) => /font-weight:\s*100 1000/.test(block)),
         "Built Ultra Sans faces lost weight 100–1000"
       );
+      for (const font of expectedUiFonts) {
+        const face = builtUiFaces.find((block) =>
+          new RegExp(`font-style:\\s*${font.style}`).test(block)
+        );
+        check(Boolean(face), `Built CSS is missing ${font.style} Ultra Sans face`);
+        const rawUrl = face?.match(/url\((["']?)([^"')]+)\1\)/)?.[2];
+        check(Boolean(rawUrl), `Built ${font.style} Ultra Sans face is missing its URL`);
+        if (rawUrl) {
+          const cssRelative = distRelative(cssWithUi[0]);
+          const resolved = rawUrl.startsWith("/")
+            ? rawUrl.slice(1)
+            : path.posix.normalize(path.posix.join(path.posix.dirname(cssRelative), rawUrl));
+          const expectedPath = emittedByHash.get(font.sha256);
+          check(
+            expectedPath && resolved === distRelative(expectedPath),
+            `Built ${font.style} Ultra Sans URL does not resolve to the verified asset`
+          );
+          if (font.style === "normal") {
+            primaryNormalFacePath = resolved;
+          }
+        }
+      }
       // Minifiers rewrite percentages; if this is ever dropped or normalised the
       // Greek backstop silently starts rendering a size too large.
       const builtCoverage = cssBlocks(css, "@font-face").filter((block) =>
@@ -930,22 +963,27 @@ if (checkDist) {
       const href = fontPreloads[0][0].match(/\bhref=["']([^"']+)["']/i)?.[1];
       check(Boolean(href), "Font preload is missing href");
       if (href) {
-        check(href.replace(/^\//, "") === normalFacePath, "Font preload does not match normal-face CSS URL");
-        const italicPath = emittedExpected.find(({ style }) => style === "italic")?.emitted;
         check(
-          !italicPath || href.replace(/^\//, "") !== distRelative(italicPath),
-          "Italic Inter must remain demand-loaded and must never be preloaded"
+          href.replace(/^\//, "") === primaryNormalFacePath,
+          "Font preload does not match the Ultra Sans normal-face CSS URL"
+        );
+        const italicPaths = [...emittedExpected, ...emittedUi]
+          .filter(({ style }) => style === "italic")
+          .map(({ emitted }) => emitted && distRelative(emitted));
+        check(
+          !italicPaths.includes(href.replace(/^\//, "")),
+          "Italic product faces must remain demand-loaded and must never be preloaded"
         );
       }
     }
 
-    console.log("Verified emitted Inter inventory:");
-    for (const font of emittedExpected) {
+    console.log("Verified emitted sans-font inventory:");
+    for (const font of [...emittedExpected, ...emittedUi]) {
       if (font.emitted) {
         console.log(`- ${distRelative(font.emitted)}: ${font.bytes} bytes (${font.style})`);
       }
     }
-    console.log(`- total: ${emittedTotal} bytes; font preloads: ${fontPreloads.length}`);
+    console.log(`- Inter total: ${emittedTotal} bytes; font preloads: ${fontPreloads.length}`);
   }
 }
 

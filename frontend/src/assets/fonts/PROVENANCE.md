@@ -1,10 +1,17 @@
 # Vendored font provenance
 
-Ultra ships four families with three jobs. **Ultra Sans** is the product face —
+Ultra ships four families with three jobs. **Ultra Sans** is the primary product face —
 UI chrome, reading copy, headings. **Ultra Mono** is the product monospace —
 code, data readouts, viewer cues, file contents — behind **JetBrains Mono** as
 its coverage net. **Inter** draws the `BisQue Ultra` wordmark and backstops the
 glyphs Ultra Sans lacks.
+
+Ultra Sans was designed and authored by **Amil Khan**, a PhD student in the
+Department of Electrical and Computer Engineering at the University of
+California, Santa Barbara, for **Ultra**, an agentic system for science. This
+describes the derivative work; DM Sans, DM Mono, Inter, and JetBrains Mono retain
+their original credits and licenses. The UCSB affiliation identifies the author
+and does not imply University endorsement.
 
 ## Ultra Sans — the product face
 
@@ -15,16 +22,19 @@ from Inter — see below), and the weakest `0`/`O` distinction of every candidat
 face measured (a generated slashed-zero alternate behind a dormant `zero`
 feature).
 
-Built by `frontend/font-lab/build_ultra_tabular.py`, which fetches the upstream
-masters, verifies them against the digests below, performs the feature additions
-and round-cap redraw, renames, and emits WOFF2. The build is byte-reproducible
-(`head.modified` pinned to upstream), so the output digests below are stable and
-re-derivable.
+The source authority is the dedicated
+[Ultra Sans repository](https://github.com/amilworks/ultra-sans). This
+application pins the last font-producing development snapshot at
+[`717ad23b67802f2e2d521e566ca3d390b48a83c1`](https://github.com/amilworks/ultra-sans/tree/717ad23b67802f2e2d521e566ca3d390b48a83c1).
+Its `font-lab/build_ultra_tabular.py` verifies the upstream masters, performs the
+feature additions and reference C/O/G plus lowercase `s` redraws, renames the
+family, and emits WOFF2. The build is byte-reproducible (`head.modified` pinned
+to upstream), so the output digests below are stable and re-derivable.
 
 | Asset | Style | Variable axes | Bytes | SHA-256 |
 | --- | --- | --- | ---: | --- |
-| `UltraSans-Variable.woff2` | normal | `wght` 100–1000; `opsz` 9–40 | 126824 | `1794a295de6c0214c5d530d763668102bf23059cb3b75e248d4c80a1d6772758` |
-| `UltraSans-Italic-Variable.woff2` | italic | `wght` 100–1000; `opsz` 9–40 | 153972 | `753ab3be31d45a905d79fd25074864beca038eef37071b7bea1507354b677bfd` |
+| `UltraSans-Variable.woff2` | normal | `wght` 100–1000; `opsz` 9–40 | 126880 | `f060de034541b34034450670bc9becf7c0640f57f2c23dff311ca04a7ff5c97d` |
+| `UltraSans-Italic-Variable.woff2` | italic | `wght` 100–1000; `opsz` 9–40 | 154524 | `26470a9271f845356cfd113a15e5df9e623d440bacab5498e45ad16051e5771d` |
 
 Derived from these upstream DM Sans masters:
 
@@ -33,19 +43,21 @@ Derived from these upstream DM Sans masters:
 | `DMSans[opsz,wght].ttf` | `https://raw.githubusercontent.com/google/fonts/main/ofl/dmsans/DMSans%5Bopsz,wght%5D.ttf` | `8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d` |
 | `DMSans-Italic[opsz,wght].ttf` | `https://raw.githubusercontent.com/google/fonts/main/ofl/dmsans/DMSans-Italic%5Bopsz,wght%5D.ttf` | `22259c0cc8237221b80f44c76ba8d36e6bce3cda72779f5b2773643d499720ae` |
 
-License: SIL Open Font License 1.1, preserved verbatim as `OFL-1.1-DMSans.txt`
-(4482 bytes). DM Sans declares **no Reserved Font Name** — its copyright line is
+License: SIL Open Font License 1.1, preserved verbatim as `OFL-DM-Sans.txt`
+(4389 bytes). DM Sans declares **no Reserved Font Name** — its copyright line is
 bare — so renaming and redistributing a modified version is permitted outright.
 Obligations met: the upstream copyright (name ID 0) and license (IDs 13/14) are
 carried through untouched, the derivative note is appended to the description
 rather than substituted, and Ultra Sans itself remains under OFL 1.1.
+Name ID 9 leads with Amil Khan and retains the DM Sans and Inter design lineage;
+IDs 10–12 record the full authorship statement and project URLs.
 
 ### What was added, and why it is safe
 
 The numeric feature does not alter source outlines: each tabular digit is a
 **composite** of the original digit, recentred inside a shared advance, so the
-base figure and all of its variation are inherited. The deliberate exception is
-the documented `C O G Q Ø` redraw below.
+base figure and all of its variation are inherited. The deliberate exceptions
+are the documented `C O G Q Ø` and lowercase `s` redraws below.
 
 Three measured facts underpin the construction, all re-checked by the build:
 
@@ -116,6 +128,28 @@ verification checks the reference proportions, DM-matched stroke and overshoot,
 unchanged advances, and the original mark-to-bowl relationship in `Ç Ö Ğ`
 across regular, italic, text, display, and axis extremes. `Q` and `Ø` follow the
 same bowl system so the change does not stop at the three specimen letters.
+
+### Reference-matched lowercase s — sentence rhythm at body size
+
+The approved reference was a 24×32-device-pixel crop. At that exact raster
+height, the DM-derived Ultra `s` measured `0.782` width/height with nearly equal
+upper/lower ink mass (`0.988`); the reference measured `0.750` and `0.948`.
+Its smaller upper bowl, fuller lower bowl, stronger diagonal waist, and 2–5%
+more open exits keep repeated `s` shapes from becoming wide, dark interruptions
+inside a sentence. Inter opsz 20 / wght 430 was the closest measured source;
+changing only DM's weight or optical size did not reproduce the white shape.
+
+Inter supplies the roman and italic skeleton. DM opsz `9/24/40` samples Inter
+`14/29/32`, placing Ultra's body setting near the approved opsz-20 reference.
+At every one of the 12 masters, the source is independently weight-solved
+against DM's lowercase stem and scaled uniformly to DM's exact `s` overshoot.
+Both original sidebearings are retained; the advance changes only by the
+ink-width delta. The normal body result is aspect `0.763` with an 11-unit
+advance reduction (about 0.17px at 15px), while extreme bold masters may widen
+enough to preserve their counters. Composite deltas keep accented forms centred
+over the new base. Build-time verification pins the body silhouette, normal and
+italic narrowing, side-space, vertical overshoot, accent relationships, and
+interpolation across the complete weight and optical-size grid.
 
 ### Slashed zero — capability, dormant by default
 
@@ -231,7 +265,10 @@ This replaced `@fontsource/jetbrains-mono` — 14 per-weight CSS imports emittin
 
 ## Inter — wordmark, and coverage backstop
 
-Ultra vendors the unmodified official Inter Variable v4.1 webfont assets.
+Ultra vendors the unmodified official Inter Variable v4.1 webfont assets. Inter
+draws the wordmark at its native scale and provides a metric-adjusted coverage
+backstop behind Ultra Sans. Both families are local WOFF2 assets; the application
+makes no network request to a font host.
 
 | Asset | Style | Variable axes | Official source | Bytes | SHA-256 |
 | --- | --- | --- | --- | ---: | --- |
@@ -258,6 +295,6 @@ The same two files back **two** `@font-face` families, deliberately:
 Only WOFF2 is shipped. We deliberately do not preload a font today: the benefit
 has not yet been measured against the extra early-bandwidth cost on Ultra's
 scientific workspaces. If future production measurements justify preloading,
-only the normal face may be considered. The italic face must remain
+only the Ultra Sans normal face may be considered. Both italic faces must remain
 demand-loaded. The post-build typography contract requires any future preload
-URL to exactly match the emitted normal-face URL.
+URL to exactly match the emitted Ultra Sans normal-face URL.

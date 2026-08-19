@@ -12,10 +12,10 @@ const deferred = <T>() => {
 
 describe("scheduleFontsReadyRedraw", () => {
   it("waits for every requested family and then redraws exactly once", async () => {
-    const interLoad = deferred<FontFace[]>();
+    const ultraSansLoad = deferred<FontFace[]>();
     const monoLoad = deferred<FontFace[]>();
     const load = vi.fn((query: string) =>
-      query.includes("Ultra Mono") ? monoLoad.promise : interLoad.promise
+      query.includes("Ultra Mono") ? monoLoad.promise : ultraSansLoad.promise
     );
     const redraw = vi.fn();
 
@@ -45,8 +45,8 @@ describe("scheduleFontsReadyRedraw", () => {
       "frame index 12,345"
     );
 
-    interLoad.resolve([]);
-    await interLoad.promise;
+    ultraSansLoad.resolve([]);
+    await ultraSansLoad.promise;
     await Promise.resolve();
     expect(redraw).not.toHaveBeenCalled();
 

@@ -373,16 +373,16 @@ function assertTypographyMetrics(typography, testCase) {
   );
 
   const expectedWeights = {
-    // Ultra Sans at the optical sizes the product actually renders: w430 keeps
-    // the intended text texture without w440's excess Night-mode ink.
+    // Compact UI stays at Ultra Sans 430. The 16px long-form reading register
+    // uses Regular 400 for a lighter sustained-reading texture, and the welcome
+    // invitation is quieter still. Keep these browser assertions aligned with
+    // check-typography-contract.mjs and light-theme-ink.test.ts.
     body: "430",
     composer: "430",
-    // The New Chat question stays below the reading voice; importance begins
-    // higher in the hierarchy rather than at the invitation itself.
     invitation: "350",
     action: "500",
-    reading: "430",
-    readingItalic: "430",
+    reading: "400",
+    readingItalic: "400",
     // 600, matching the reading heading rather than exceeding it. At 700 an
     // inline **emphasis** rendered HEAVIER than every heading above it (h2/h3/h4
     // are all 600), and at h4's 16px it beat the heading at identical size.
@@ -449,10 +449,9 @@ function assertTypographyMetrics(typography, testCase) {
       typography.roles.monoComment.synthesis === "none",
     `${testCase.name}: scientific code comment is not genuine Ultra Mono 400 italic`
   );
-  // The smoke deliberately cold-holds Inter to exercise font-display: swap.
-  // Desktop swaps both the always-visible sidebar and the chat canvas; on the
-  // Linux CI fallback this settles at 0.0270, while the mobile canvas remains
-  // below the original stricter ceiling. Keep both contracts explicit rather
+  // The smoke deliberately cold-holds Ultra Sans to exercise font-display: swap.
+  // Desktop exposes more always-visible labels than the mobile canvas, so it
+  // retains a separate conservative budget. Keep both contracts explicit rather
   // than weakening the phone budget or dropping the cold-font proof.
   const clsBudget = testCase.mobile ? 0.01 : 0.03;
   assert(

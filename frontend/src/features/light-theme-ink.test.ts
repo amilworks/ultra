@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
+const typographySource = readFileSync(path.join(process.cwd(), "src/typography.css"), "utf8");
 
 /** The light `:root` block, up to the first closing brace at column 0. */
 const lightRoot = stylesSource.slice(
@@ -22,6 +23,13 @@ const darkBlock = (() => {
 })();
 
 describe("light theme ink", () => {
+  it("uses Ultra Sans as the product face with Inter as its coverage fallback", () => {
+    const productStack =
+      '"BisQue Ultra Sans", "BisQue Inter Coverage", system-ui, "Segoe UI", sans-serif';
+    expect(typographySource).toContain(`--font-sans: ${productStack};`);
+    expect(typographySource).toContain(`--font-reading: ${productStack};`);
+  });
+
   it("puts body and secondary text on the Meridian magnitude ladder", () => {
     // Meridian Drift · Day. Hierarchy is a geometric series in CONTRAST RATIO
     // at 1.80x per step, solved numerically against the ground the text sits
@@ -235,21 +243,22 @@ describe("light theme ink", () => {
     expect(linkHover).not.toMatch(TEXT_COLOR);
   });
 
-  it("drops the ss02 stylistic set for stock Inter", () => {
+  it("keeps Ultra Sans on its authored default glyph system", () => {
     expect(stylesSource).toMatch(/font-feature-settings:\s*"liga" 1, "calt" 1;/);
-    // Assert on the DECLARATION, not the file: the comment above it names ss02
-    // to explain why it was dropped, and should not fail its own guard.
+    // The custom C/O/G/s are defaults. The slashed zero remains dormant until a
+    // data surface opts in, so no global stylistic set belongs here.
     expect(stylesSource).not.toMatch(/font-feature-settings:[^;]*ss02/);
+    expect(stylesSource).not.toMatch(/font-feature-settings:[^;]*zero/);
   });
 });
 
 describe("response reading typography", () => {
   it("gives prose a measure without narrowing what needs the width", () => {
-    // The 16px/430 calibration found 45rem to be the widest no-regression
-    // measure. Desktop reading is 15px on current main, so 42.1875rem is the
-    // exact 45 × 15/16 port: the same character measure, 15px wider than the
-    // prior 41.25rem cap.
-    expect(lightRoot).toMatch(/--reading-measure:\s*42\.1875rem;/);
+    // A fixed answer sample at 16px put 44rem at 83.9 characters per line and
+    // the unconstrained 49rem column at 92.9. A 45rem cap keeps the intentionally
+    // relaxed conversational measure near that calibrated wrap point while
+    // preserving the wider column for code, tables and figures.
+    expect(lightRoot).toMatch(/--reading-measure:\s*45rem;/);
     // In rem, NOT ch: `ch` resolves per ELEMENT font-size, so one token handed
     // the h2 an 867px measure and the h3 763px while prose got 654px — three
     // right edges instead of one column.
@@ -264,19 +273,18 @@ describe("response reading typography", () => {
   });
 
   it("keeps reading size and leading in the comfortable band", () => {
-    expect(lightRoot).toMatch(/--font-size-reading:\s*0\.9375rem;/);
+    expect(lightRoot).toMatch(/--font-size-reading:\s*1rem;/);
     expect(lightRoot).toMatch(/--line-height-reading:\s*1\.62;/);
-    // At the optical sizes actually used (15/16), Ultra Sans w430 has a
-    // 0.0888em lowercase stem over a 0.5027/0.5020em x-height. W440 expands
-    // that stem to 0.0904em, adding unnecessary Night-mode ink.
-    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*430;/);
+    // Ultra Sans Regular at 16px keeps long-form answers lighter than the
+    // custom family's compact UI design point at 430 / opsz 15.
+    expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
   });
 
   it("keeps the New Chat invitation lighter than the reading voice", () => {
     const invitation = lightRoot.match(/--font-weight-invitation:\s*(\d+);/)?.[1];
     const reading = lightRoot.match(/--font-weight-reading-body:\s*(\d+);/)?.[1];
     expect(invitation).toBe("350");
-    expect(reading).toBe("430");
+    expect(reading).toBe("400");
     expect(Number(invitation)).toBeLessThan(Number(reading));
     expect(stylesSource).toMatch(
       /\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s
@@ -302,6 +310,17 @@ describe("response reading typography", () => {
     // Whatever the chrome weight is, it must still outrank a reading heading.
     const chromeStrong = lightRoot.match(/--font-weight-strong:\s*(\d+);/)?.[1];
     expect(Number(chromeStrong)).toBeGreaterThan(Number(heading));
+  });
+
+  it("pins mono surfaces so they never inherit the proportional reading grade", () => {
+    // Ultra Mono has its own variable weight axis. Code and data stay on the
+    // nominal Regular master instead of inheriting the surrounding sans role.
+    expect(lightRoot).toMatch(/--font-weight-mono:\s*400;/);
+    const mustPin = [
+      /\.pk-inline-code\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
+      /\.pk-code-render :where\(pre, code\)\s*\{[^}]*font-weight:\s*var\(--font-weight-mono\);/s,
+    ];
+    for (const pattern of mustPin) expect(stylesSource).toMatch(pattern);
   });
 
   it("uses Ultra Sans spacing derived by size and role", () => {

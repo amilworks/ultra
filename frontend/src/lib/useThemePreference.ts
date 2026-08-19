@@ -31,7 +31,7 @@ export function useThemePreference(themePreference: ThemePreference): "light" | 
       // override BOTH of them, media attribute and all, or an OS-light device
       // set to Dark keeps a paper-white address bar. Grounds, not hexes from
       // anywhere else: these are --bg-main in each theme block.
-      const ground = shouldUseDark ? "#0b0e11" : "#f2f3f3";
+      const ground = shouldUseDark ? "#0b0e11" : "#fafbfb";
       document
         .querySelectorAll('meta[name="theme-color"]')
         .forEach((meta) => meta.setAttribute("content", ground));

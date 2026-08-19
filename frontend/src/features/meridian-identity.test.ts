@@ -47,15 +47,21 @@ describe("the point of light — brass is reserved", () => {
     expect(stylesSource.match(/#e8b84b/gi)).toHaveLength(1);
   });
 
-  it("gives brass its three wired meanings: running, thinking, the field", () => {
+  it("keeps the Day constellation quiet without weakening Night's live signal", () => {
     // Running conversations — the point of light in the sidebar.
     expect(stylesSource).toMatch(
       /\.running-status-pill\s*\{[^}]*--running-status-ink:\s*var\(--accent-live\);/s
     );
-    // Live thinking — the constellation and the trace.
-    expect(stylesSource).toMatch(
-      /\.thinking-constellation\s*\{[^}]*color:\s*var\(--accent-live\);/s
+    // The large moving constellation can use m3 on paper because motion
+    // carries its state; Night restores brass for legibility and atmosphere.
+    expect(lightRoot).toMatch(/--thinking-constellation-ink:\s*#939697;/);
+    expect(darkBlock).toMatch(
+      /--thinking-constellation-ink:\s*var\(--accent-live\);/
     );
+    expect(stylesSource).toMatch(
+      /\.thinking-constellation\s*\{[^}]*color:\s*var\(--thinking-constellation-ink\);/s
+    );
+    // The compact trace remains the high-salience live accent in both themes.
     expect(stylesSource).toMatch(
       /\.thinking-bar-trace\s*\{[^}]*color:\s*var\(--accent-live\);/s
     );
@@ -96,6 +102,8 @@ describe("the palette holds — no off-ladder colour returns", () => {
       "#4f8073", "#28594e", "#536b8f", "#6f8f85",
       // ad-hoc semantics, now tokens
       "#b45309", "#a16207", "#d4503b",
+      // pre-shift Day surfaces, superseded by the one-step-lighter family
+      "#e9ebeb", "#e4e6e6", "#e3e5e5", "#f8f9f9", "#fcfcfc",
     ];
     // --status-warn's own definition is the one permitted #b45309.
     const withoutWarnDefinition = stylesSource.replace("--status-warn: #b45309;", "");
@@ -158,9 +166,15 @@ describe("the symbol set", () => {
 });
 
 describe("de-boxed chrome — depth by value, edges only where real", () => {
-  it("separates resource cards by value step, not enclosure", () => {
+  it("separates resource cards by a Day-raised value step, not enclosure", () => {
+    expect(lightRoot).toContain("--bg-raised: #ffffff;");
+    expect(lightRoot).toContain("0 8px 24px rgba(23, 27, 29, 0.025);");
+    // Night's native panel already separates from its ground. The shared
+    // surface contract must not add paper-like elevation there.
+    expect(darkBlock).toContain("--bg-raised: var(--bg-panel-strong);");
+    expect(darkBlock).toContain("--shadow-raised: none;");
     expect(stylesSource).toMatch(
-      /\.resource-browser-card\s*\{[^}]*border:\s*1px solid transparent;[^}]*background:\s*var\(--bg-panel-strong\);/s
+      /\.resource-browser-card\s*\{[^}]*border:\s*1px solid transparent;[^}]*background:\s*var\(--bg-raised\);[^}]*box-shadow:\s*var\(--shadow-raised\);/s
     );
     // Hover is lift and shadow — a border appearing on hover would
     // reintroduce the box the rule deletes.
@@ -177,7 +191,7 @@ describe("de-boxed chrome — depth by value, edges only where real", () => {
   });
 
   it("sinks the search well instead of bordering it", () => {
-    expect(lightRoot).toMatch(/--bg-sunk:\s*#e4e6e6;/);
+    expect(lightRoot).toMatch(/--bg-sunk:\s*#edeeee;/);
     expect(darkBlock).toMatch(/--bg-sunk:\s*#0d1012;/);
     expect(stylesSource).toMatch(
       /\.resource-browser-search-field\s*\{[^}]*border:\s*1px solid transparent;[^}]*background:\s*var\(--bg-sunk\);/s
@@ -225,6 +239,12 @@ describe("de-boxed chrome — depth by value, edges only where real", () => {
 });
 
 describe("the composer — calm focus, and a baseline that records", () => {
+  it("keeps the read-mode instruction legible at every breakpoint", () => {
+    expect(stylesSource).toMatch(
+      /\.app-composer-shell\[data-composer-compact="true"\]:not\(:focus-within\)\s*\.app-composer-textarea::placeholder\s*\{[^}]*color:\s*var\(--text-muted\);/s
+    );
+  });
+
   it("reserves the 2px focus line for the keyboard", () => {
     // Clicking the product's most-used text control is self-announcing (the
     // caret); the old :focus-within rule fired a 2px ink line across it on
@@ -257,14 +277,18 @@ describe("the composer — calm focus, and a baseline that records", () => {
       /\.app-composer-shell \.pk-file-upload\s*\{\s*position:\s*relative;/s
     );
     // The recorder is its OWN geometry, not the compact thinking-bar glyph:
-    // 96x10 viewBox rendered in a 6rem x 10px box (1:1 units, crisp stroke),
-    // flat lead-in and long tail lying on the baseline, wiggle centred at
-    // y=5. The compact icon letterboxed into a floating squiggle once.
+    // its coordinate box begins at the hairline's exact origin, the path
+    // leaves and returns to y=5, and its butt caps end exactly at x=0/x=96.
     const icons = read("src/components/icons/MeridianIcons.tsx");
     expect(icons).toMatch(/RecorderTraceIcon[\s\S]{0,600}viewBox="0 0 96 10"/);
-    expect(icons).toMatch(/M1 5h18l3-3\.4 3 6 3-7 3 5 3-2\.6 3 1\.8h56/);
+    expect(icons).toMatch(
+      /RecorderTraceIcon[\s\S]{0,600}strokeLinecap="butt"[\s\S]{0,300}M0 5H18L21 1\.6L24 7\.6L27 0\.6L30 5\.6L33 3L36 5H96/
+    );
     expect(stylesSource).toMatch(
-      /\.app-composer-recorder\s*\{[^}]*width:\s*6rem;[^}]*height:\s*10px;/s
+      /\.app-composer-recorder\s*\{[^}]*left:\s*0;[^}]*top:\s*0;[^}]*width:\s*6rem;[^}]*height:\s*10px;[^}]*transform:\s*translateY\(-50%\);/s
+    );
+    expect(stylesSource).toMatch(
+      /\.app-composer-recorder path\s*\{[^}]*animation:\s*trace-write 3\.4s linear infinite;/s
     );
   });
 });
@@ -280,9 +304,9 @@ describe("the field — one impossibility, welcome stage only", () => {
     expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*pointer-events:\s*none;/s);
   });
 
-  it("is fluid, density-scaled, and cannot outgrow its container", () => {
+  it("is fluid, precision-scaled, and cannot outgrow its container", () => {
     // Width is a share of the column, height leans on the viewport, and the
-    // drawing scales star count by AREA so wide never reads sparse.
+    // curve sampling scales by AREA so the analytic map stays smooth.
     expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*width:\s*min\(46rem, 100%\);/s);
     expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*height:\s*clamp\(/s);
     const fieldSource = read("src/components/chat/MeridianField.tsx");
@@ -292,5 +316,17 @@ describe("the field — one impossibility, welcome stage only", () => {
     // max-width cap must both stay.
     expect(fieldSource).toContain("canvas.clientWidth === drawnWidth");
     expect(fieldSource).toContain('maxWidth: "100%"');
+  });
+
+  it("uses an analytic registration map rather than decorative topography", () => {
+    const fieldSource = read("src/components/chat/MeridianField.tsx");
+    expect(fieldSource).toContain("function registrationMap");
+    expect(fieldSource).toContain("TWIST_RADIANS");
+    expect(fieldSource).toContain("RADIAL_EXPANSION");
+    expect(fieldSource).toContain("drawCoordinateFamily");
+    expect(fieldSource).toContain("T(a) = a");
+    expect(fieldSource).not.toMatch(
+      /createRng|createFieldSampler|drawContours|drawTransect|starCount|speckCount|diffraction|extinction|halation|réseau/i
+    );
   });
 });

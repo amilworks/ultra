@@ -60,12 +60,11 @@ export function TraceIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
-/* The recorder variant of the trace: built to lie ON a hairline, not to sit
-   beside text. Flat lead-in, wiggle, long flat tail, baseline centred at
-   y=5 of a 96x10 viewBox — render it in a 6rem x 10px box so the units map
-   1:1 and the stroke stays crisp. The compact TraceIcon above letterboxes
-   badly on a baseline (its 40x12 box centres and shrinks inside a wide
-   host, and its flat runs sit at y=8): that mismatch shipped once. */
+/* The recorder variant of the trace: built to replace the opening segment of
+   a hairline, not to sit beside it. The path begins at (0, 5), returns exactly
+   to y=5 after the measured excursion, and ends at (96, 5). Butt end caps keep
+   those endpoints coincident with the 96x10 coordinate box; rendered at
+   6rem x 10px, its units map 1:1. */
 export function RecorderTraceIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
@@ -73,12 +72,15 @@ export function RecorderTraceIcon(props: SVGProps<SVGSVGElement>) {
       fill="none"
       stroke="currentColor"
       strokeWidth={1.3}
-      strokeLinecap="round"
+      strokeLinecap="butt"
       strokeLinejoin="round"
       aria-hidden="true"
       {...props}
     >
-      <path pathLength={1} d="M1 5h18l3-3.4 3 6 3-7 3 5 3-2.6 3 1.8h56" />
+      <path
+        pathLength={1}
+        d="M0 5H18L21 1.6L24 7.6L27 0.6L30 5.6L33 3L36 5H96"
+      />
     </svg>
   );
 }

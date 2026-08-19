@@ -1,19 +1,5 @@
 import { Component, StrictMode, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import "@fontsource/jetbrains-mono/latin-300.css";
-import "@fontsource/jetbrains-mono/latin-400.css";
-import "@fontsource/jetbrains-mono/latin-400-italic.css";
-import "@fontsource/jetbrains-mono/latin-500.css";
-import "@fontsource/jetbrains-mono/latin-600.css";
-import "@fontsource/jetbrains-mono/latin-700.css";
-import "@fontsource/jetbrains-mono/latin-800.css";
-import "@fontsource/jetbrains-mono/latin-ext-300.css";
-import "@fontsource/jetbrains-mono/latin-ext-400.css";
-import "@fontsource/jetbrains-mono/latin-ext-400-italic.css";
-import "@fontsource/jetbrains-mono/latin-ext-500.css";
-import "@fontsource/jetbrains-mono/latin-ext-600.css";
-import "@fontsource/jetbrains-mono/latin-ext-700.css";
-import "@fontsource/jetbrains-mono/latin-ext-800.css";
 import { App } from "./App";
 import { installGlobalErrorReporting, reportClientError } from "./lib/client-diagnostics";
 import "./typography.css";
@@ -78,8 +64,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
             <p
               style={{
                 marginTop: "0.65rem",
-                fontFamily:
-                  '"JetBrains Mono","SF Mono","Menlo",monospace',
+                fontFamily: "var(--font-mono)",
                 fontSize: "0.8rem",
                 color: "var(--text-muted)",
               }}

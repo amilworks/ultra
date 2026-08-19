@@ -295,7 +295,7 @@ function CodeBlockCode({
   const contentClassName = cn(
     "pk-code-render w-full overflow-auto overscroll-contain text-[13px] leading-[1.2]",
     "[&_pre]:m-0 [&_pre]:min-w-full",
-    "[&_code]:font-[\"JetBrains_Mono\",\"SF_Mono\",\"Menlo\",monospace] [&_code]:text-[13px] [&_code]:leading-[1.2]",
+    "[&_code]:font-[family-name:var(--font-mono)] [&_code]:text-[13px] [&_code]:leading-[1.2]",
     className
   );
 

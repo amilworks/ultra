@@ -40,7 +40,7 @@
   color: var(--text-muted);
 }
 .cifti-badge {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.66rem;
   letter-spacing: 0.03em;
   color: var(--text-muted);
@@ -50,7 +50,7 @@
   padding: 1px 8px;
 }
 .cifti-dims {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 .cifti-header-actions {
@@ -180,7 +180,7 @@
   color: var(--bg-panel-strong, #fff);
   border-radius: 8px;
   padding: 6px 9px;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   line-height: 1.35;
   white-space: nowrap;
@@ -203,7 +203,7 @@
   background: var(--bg-panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.76rem;
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;

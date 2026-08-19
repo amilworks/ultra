@@ -1,6 +1,13 @@
 # Built typeface binaries — regenerate with build_ultra_sans.py --all
+# or build_ultra_tabular.py
 build/
 __pycache__/
+_cmp/
+
+# Upstream masters cached by build_ultra_tabular.py. Redistributable (OFL), but
+# they are a build cache, not a source of truth — the script re-fetches and
+# digest-checks them, and the digests live in src/assets/fonts/PROVENANCE.md.
+sources/
 
 # Third-party TRIAL fonts used as local design references only.
 # Proprietary, all rights reserved. Never commit, ship, or derive from these.

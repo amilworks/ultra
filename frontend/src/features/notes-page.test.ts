@@ -188,7 +188,8 @@ describe("the ultra:// scheme in shared markdown", () => {
 describe("plaintext mode is the raw source — and the type says so", () => {
   it("body edits in the house mono; Markdown mode flips to the reading face", () => {
     const body = styles.match(/\.notes-body-input\s*\{[^}]*\}/s)?.[0];
-    expect(body).toContain('"JetBrains Mono"');
+    expect(body).toContain("font-family: var(--font-mono);");
+    expect(body).toContain("font-weight: var(--font-weight-mono);");
     expect(body).toContain("font-variant-ligatures: none;");
     expect(body).toContain("tab-size: 2;");
     // The typographic flip IS the mode signal: the other surface reads like

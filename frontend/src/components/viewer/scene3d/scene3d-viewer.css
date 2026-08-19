@@ -46,12 +46,12 @@
   border-radius: 999px;
   background: var(--bg-panel-strong, var(--bg-panel));
   color: var(--text-muted);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.66rem;
   letter-spacing: 0.03em;
 }
 .scene3d-count {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 .scene3d-header-actions {
@@ -133,7 +133,7 @@
   color: var(--text-main);
 }
 .scene3d-layer-count {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
   opacity: 0.72;
@@ -150,7 +150,7 @@
 }
 .scene3d-point-control label span {
   color: var(--text-main);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 .scene3d-point-control input[type="range"] {
@@ -317,7 +317,7 @@
   border-radius: 10px;
   background: var(--bg-panel);
   color: var(--text-muted);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.76rem;
   font-variant-numeric: tabular-nums;
 }
@@ -389,7 +389,7 @@
 .scene3d-camera-validation > summary span:nth-child(2) {
   margin-left: auto;
   color: var(--text-muted);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   font-weight: 400;
 }
@@ -424,7 +424,7 @@
   align-items: center;
   gap: 0.4rem;
   color: var(--text-muted);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   font-variant-numeric: tabular-nums;
 }
@@ -441,7 +441,7 @@
   max-width: 100%;
   overflow: hidden;
   color: var(--text-main);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -474,7 +474,7 @@
   border-radius: 6px;
   background: rgb(11 13 16 / 78%);
   color: #c7ccd4;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.64rem;
 }
 
@@ -513,7 +513,7 @@
 .scene3d-details summary span:nth-child(2) {
   margin-left: auto;
   color: var(--text-muted);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.7rem;
   font-weight: 400;
 }
@@ -576,7 +576,7 @@
   margin: 0;
   overflow-wrap: anywhere;
   color: var(--text-main);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-family: var(--font-mono);
 }
 
 .scene3d-status {

@@ -326,17 +326,6 @@ def main() -> int:
 
     # OFL 1.1 §2: the notice travels with every copy.
     shutil.copy(UPSTREAM / "OFL-1.1.txt", BUILD / "OFL-1.1.txt")
-
-    # Stage the JetBrains Mono faces mono.html measures against (also OFL).
-    # Sourced from the app's own dependency so the specimen can never drift
-    # from what the product ships.
-    jbm = REPO / "frontend" / "node_modules" / "@fontsource" / "jetbrains-mono" / "files"
-    for weight in (400, 500):
-        src = jbm / f"jetbrains-mono-latin-{weight}-normal.woff2"
-        if src.exists():
-            shutil.copy(src, BUILD / f"jbm-{weight}.woff2")
-        else:
-            print(f"  note: {src.name} not found (run pnpm install) — mono.html needs it")
     print(f"\nwrote {BUILD.relative_to(REPO)}/  (OFL-1.1.txt included)")
     return 0
 

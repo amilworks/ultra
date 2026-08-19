@@ -231,10 +231,20 @@ describe("de-boxed chrome — depth by value, edges only where real", () => {
     expect(shell).toContain("box-shadow: none");
   });
 
-  it("de-boxes the secondary toolbar control into the same sunk family", () => {
+  it("de-boxes the resource toolbar controls into one quiet sunk family", () => {
     expect(stylesSource).toMatch(
-      /\.resource-browser-filter-trigger\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*var\(--bg-sunk\);/s
+      /\.resource-browser-new-menu,\s*\.resource-browser-filter-trigger,\s*\.resource-browser-refresh\s*\{[^}]*border-color:\s*transparent;[^}]*background:\s*var\(--bg-sunk\);[^}]*box-shadow:\s*none;/s
     );
+  });
+
+  it("uses Meridian file marks for source code and unclassified formats", () => {
+    const icons = read("src/components/icons/MeridianIcons.tsx");
+    const browser = read("src/components/ResourceBrowser.tsx");
+    expect(icons).toContain("export function MeridianSourceFileIcon");
+    expect(icons).toContain("export function MeridianFileIcon");
+    expect(browser).toContain("isSourceCodeName(resource.original_name)");
+    expect(browser).toContain("MeridianSourceFileIcon");
+    expect(browser).toContain("MeridianFileIcon");
   });
 });
 

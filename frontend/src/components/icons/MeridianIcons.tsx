@@ -103,3 +103,49 @@ export function TransitIcon(props: SVGProps<SVGSVGElement>) {
     </svg>
   );
 }
+
+/* File identity marks use the same measured stroke and round joins as the
+   instrument symbols above. The folded sheet says “stored artifact”; the
+   internal mark says what kind of evidence it contains without borrowing a
+   vendor or language logo. */
+export function MeridianFileIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      data-meridian-icon="file"
+      {...props}
+    >
+      <path d="M6.75 3.25h6.5l4.5 4.5v13H6.75z" />
+      <path d="M13.25 3.25v4.5h4.5" />
+      <circle cx="12.25" cy="14.25" r="2.2" />
+      <path d="M12.25 10.65v1.4M12.25 16.45v1.4M8.65 14.25h1.4M14.45 14.25h1.4" />
+      <circle cx="12.25" cy="14.25" r="0.6" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function MeridianSourceFileIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      data-meridian-icon="source-file"
+      {...props}
+    >
+      <path d="M6.75 3.25h6.5l4.5 4.5v13H6.75z" />
+      <path d="M13.25 3.25v4.5h4.5" />
+      <path d="M8.75 15.25h1.55l1.05-2.55 1.35 4.05 1.15-2.55h1.65" />
+    </svg>
+  );
+}

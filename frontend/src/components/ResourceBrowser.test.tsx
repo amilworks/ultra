@@ -186,6 +186,19 @@ const fileResource: ResourceRecord = {
   sync_status: "local_complete",
 };
 
+const pythonResource: ResourceRecord = {
+  file_id: "file_python_preview",
+  original_name: "compute_xrd.py",
+  content_type: "application/octet-stream",
+  size_bytes: 19_800,
+  sha256: "sha-python-preview",
+  created_at: "2026-07-09T22:30:00Z",
+  source_type: "upload",
+  resource_kind: "file",
+  has_thumbnail: false,
+  sync_status: "local_complete",
+};
+
 const taggedFileResource: ResourceRecord = {
   ...fileResource,
   tags: ["NPH", "Under 70"],
@@ -380,13 +393,55 @@ describe("ResourceBrowser", () => {
     clearStoredResourceViewMode();
   });
 
+  it("previews Python source and identifies scientific fallback formats", async () => {
+    const quickPeekFetch = vi.fn().mockResolvedValue({
+      file_id: pythonResource.file_id,
+      original_name: pythonResource.original_name,
+      content_type: "text/x-python",
+      format: "text",
+      total_size_bytes: 64,
+      offset: 0,
+      returned_bytes: 64,
+      next_offset: 64,
+      truncated: false,
+      encoding: "utf-8",
+      eol: "lf",
+      line_count: 2,
+      approx_total_lines: 2,
+      text: "def compute_xrd(sample):\n    return sample.peaks\n",
+    });
+
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[pythonResource, fileResource]}
+        quickPeekFetch={quickPeekFetch}
+      />
+    );
+
+    const pythonCard = screen.getByLabelText("Resource compute_xrd.py");
+    const volumeCard = screen.getByLabelText("Resource NPH_shunt_002_70yo.nii.gz");
+    expect(pythonCard).toHaveAttribute("data-preview", "true");
+    expect(within(pythonCard).getByText("Upload · Python · 19.3 KB")).toBeInTheDocument();
+    expect(within(volumeCard).getByText("Upload · NIfTI · 9.3 MB")).toBeInTheDocument();
+    expect(volumeCard.querySelector('[data-meridian-icon="file"]')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(pythonCard.querySelector(".resource-thumb-snippet")?.textContent).toContain(
+        "compute_xrd"
+      );
+    });
+    expect(within(pythonCard).getByText("PY")).toBeInTheDocument();
+    expect(quickPeekFetch).toHaveBeenCalledWith(pythonResource.file_id, expect.any(Number));
+  });
+
   it("renders calm same-surface cards without redundant badges or external links", () => {
     render(<ResourceBrowser {...baseProps} />);
 
     expect(screen.getByText("prairie-cell-image.png")).toBeInTheDocument();
     expect(screen.getByText("NPH_shunt_002_70yo.nii.gz")).toBeInTheDocument();
     expect(screen.getByAltText("prairie-cell-image.png")).toHaveAttribute("src", "/thumb/file_image");
-    expect(screen.getByText("File")).toBeInTheDocument();
+    expect(screen.getByText("NIfTI")).toBeInTheDocument();
     expect(screen.queryByText("BisQue viewer")).not.toBeInTheDocument();
     expect(screen.queryByText("Image service")).not.toBeInTheDocument();
     expect(screen.queryByText("Cataloged on BisQue")).not.toBeInTheDocument();

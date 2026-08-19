@@ -58,7 +58,8 @@ import { VideoThumbnail } from "./viewer/VideoThumbnail";
 import { ZScrubThumbnail } from "./viewer/ZScrubThumbnail";
 import { ResourceQuickPeek } from "./ResourceQuickPeek";
 import { ResourceThumbnailPreview } from "./ResourceThumbnailPreview";
-import { classifyTextResource } from "@/lib/textFormat";
+import { classifyTextResource, fileTypeLabel, isSourceCodeName } from "@/lib/textFormat";
+import { MeridianFileIcon, MeridianSourceFileIcon } from "@/components/icons/MeridianIcons";
 import { resourceDisplayName } from "@/features/resources/presentation";
 import {
   ArrowLeft,
@@ -66,7 +67,6 @@ import {
   CloudUpload,
   Download,
   Eye,
-  File,
   FileText,
   Folder,
   FolderMinus,
@@ -347,6 +347,14 @@ const resourceKindLabel = (kind: string): string => {
   return normalized[0].toUpperCase() + normalized.slice(1);
 };
 
+const resourceTypeLabel = (resource: ResourceRecord): string => {
+  const kind = String(resource.resource_kind || "").toLowerCase();
+  if (kind === "image" || kind === "video" || kind === "table") {
+    return resourceKindLabel(kind);
+  }
+  return fileTypeLabel(resource.original_name) ?? resourceKindLabel(resource.resource_kind);
+};
+
 const sourceLabel = (value: string): string => {
   if (value === "bisque_import") {
     return "BisQue";
@@ -583,19 +591,22 @@ const resourceShareGrantRoleLabel = (value: string): string => {
     .replace(/^\w/, (first) => first.toUpperCase());
 };
 
-const iconForKind = (kind: string) => {
-  switch (String(kind || "").toLowerCase()) {
+const iconForResource = (resource: ResourceRecord) => {
+  switch (String(resource.resource_kind || "").toLowerCase()) {
     case "image":
       return ImageIcon;
     case "video":
       return Film;
     case "table":
       return Table2;
-    case "document":
-      return FileText;
-    default:
-      return File;
   }
+  if (isSourceCodeName(resource.original_name)) {
+    return MeridianSourceFileIcon;
+  }
+  if (String(resource.resource_kind || "").toLowerCase() === "document") {
+    return FileText;
+  }
+  return MeridianFileIcon;
 };
 
 const isVideoResource = (resource: ResourceRecord): boolean =>
@@ -2922,7 +2933,7 @@ export function ResourceBrowser({
                         </tr>
                       ) : null}
                       {tableResources.map((resource, rowOffset) => {
-                        const KindIcon = iconForKind(resource.resource_kind);
+                        const KindIcon = iconForResource(resource);
                         const displayName = resourceDisplayName(resource);
                         const isDeleting = Boolean(deletingFileIds[resource.file_id]);
                         const isDeleted = isDeletedResource(resource);
@@ -3008,7 +3019,7 @@ export function ResourceBrowser({
                                     </span>
                                   </div>
                                 </td>
-                                <td>{resourceKindLabel(resource.resource_kind)}</td>
+                                <td>{resourceTypeLabel(resource)}</td>
                                 <td>{sourceLabel(resource.source_type)}</td>
                                 <td>{formatBytes(resource.size_bytes)}</td>
                                 <td>
@@ -3059,7 +3070,7 @@ export function ResourceBrowser({
               ) : (
                 <div className="resource-browser-grid">
                   {cardResources.map((resource) => {
-                    const KindIcon = iconForKind(resource.resource_kind);
+                    const KindIcon = iconForResource(resource);
                     const displayName = resourceDisplayName(resource);
                     const resolvedThumbnailUrl =
                       resource.has_thumbnail === true ? thumbnailUrlFor(resource) : "";
@@ -3087,7 +3098,7 @@ export function ResourceBrowser({
                     const resourceTags = normalizeResourceTags(resource.tags);
                     const secondaryLine = [
                       sourceLabel(resource.source_type),
-                      resourceKindLabel(resource.resource_kind),
+                      resourceTypeLabel(resource),
                       formatBytes(resource.size_bytes),
                     ].join(" · ");
                     // Single-slot status chips. The meta box fits exactly three
@@ -3209,12 +3220,12 @@ export function ResourceBrowser({
                               kind={textPreviewKind}
                               fetchHead={quickPeekFetch}
                               fallbackIcon={KindIcon}
-                              fallbackLabel={resourceKindLabel(resource.resource_kind)}
+                              fallbackLabel={resourceTypeLabel(resource)}
                             />
                           ) : (
                             <div className="resource-browser-preview-fallback">
                               <KindIcon className="size-6" aria-hidden="true" />
-                              <span>{resourceKindLabel(resource.resource_kind)}</span>
+                              <span>{resourceTypeLabel(resource)}</span>
                             </div>
                           )}
                           {hasPreviewSurface && statusChipNodes.length > 0 ? (

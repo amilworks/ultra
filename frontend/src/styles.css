@@ -2938,13 +2938,25 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .resource-browser-new-menu,
+.resource-browser-filter-trigger,
 .resource-browser-refresh {
-  border-radius: 0.72rem;
+  min-height: 2.55rem;
+  border-color: transparent;
+  border-radius: 0.95rem;
+  background: var(--bg-sunk);
+  box-shadow: none;
+}
+
+.resource-browser-new-menu:hover,
+.resource-browser-filter-trigger:hover,
+.resource-browser-refresh:hover {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
 }
 
 .resource-browser-refresh {
-  width: 2.45rem;
-  height: 2.45rem;
+  width: 2.55rem;
+  height: 2.55rem;
 }
 
 .resource-browser-title {
@@ -3052,18 +3064,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    declaring an edge nothing needed. */
 .resource-browser-filter-trigger {
   flex: 0 0 auto;
-  min-height: 2.55rem;
-  border-radius: 0.95rem;
   padding-inline: 0.9rem;
   white-space: nowrap;
-  border-color: transparent;
-  background: var(--bg-sunk);
-  box-shadow: none;
-}
-
-.resource-browser-filter-trigger:hover {
-  border-color: transparent;
-  background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
 }
 
 .resource-browser-filter-count {
@@ -4082,7 +4084,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .resource-browser-table-title {
   color: var(--text-main);
-  font-weight: 600;
+  font-size: 0.82rem;
+  font-weight: var(--font-weight-action);
+  line-height: 1.35;
 }
 
 .resource-browser-table-subtitle,
@@ -4604,17 +4608,23 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .resource-browser-card[data-preview="false"] .resource-browser-preview-fallback {
-  gap: 0;
+  gap: 0.12rem;
   align-items: flex-end;
-  padding-right: 0.42rem;
+  padding-right: 0.35rem;
 }
 
 .resource-browser-card[data-preview="false"] .resource-browser-preview-fallback span {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+  position: static;
+  width: auto;
+  height: auto;
+  max-width: 3rem;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  font-weight: var(--font-weight-mono);
+  letter-spacing: 0.03em;
+  line-height: 1.1;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -4659,13 +4669,14 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .resource-browser-card[data-preview="false"] .resource-browser-meta {
-  justify-content: center;
+  justify-content: stretch;
+  align-content: center;
   padding: 0.72rem 2.95rem 0.68rem 0.15rem;
 }
 
 .resource-browser-name {
   margin: 0;
-  min-height: 2.5em;
+  min-height: 2.64em;
   /* Filenames are unbreakable underscore tokens, so without this they overflow
      the column horizontally with no ellipsis (measured 274px of text in a 213px
      box at the 240px minimum column). The 2-line clamp still governs height, so
@@ -4674,16 +4685,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  font-size: 0.9rem;
-  font-weight: 600;
-  line-height: 1.25;
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-action);
+  line-height: 1.32;
   color: var(--text-main);
   overflow: hidden;
-}
-
-.resource-browser-card[data-preview="false"] .resource-browser-name {
-  min-height: 0;
-  -webkit-line-clamp: 1;
 }
 
 .resource-browser-details,
@@ -6459,12 +6465,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     min-height: 2.75rem;
     border-radius: 1rem;
     padding-inline: 0;
-  }
-
-  .resource-browser-refresh {
-    border: 1px solid var(--line);
-    background: color-mix(in oklab, var(--bg-panel-strong) 84%, var(--bg-main) 16%);
-    box-shadow: 0 1px 2px rgba(12, 12, 12, 0.04);
   }
 
   .resource-browser-new-menu svg[data-icon="inline-end"] {

@@ -77,6 +77,18 @@ describe("resource browser responsive layout", () => {
     );
   });
 
+  it("treats filenames as scan text instead of dense mini-headings", () => {
+    expect(stylesSource).toMatch(
+      /\.resource-browser-name\s*\{[^}]*-webkit-line-clamp:\s*2;[^}]*font-size:\s*var\(--font-size-body\);[^}]*font-weight:\s*var\(--font-weight-action\);[^}]*line-height:\s*1\.32;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.resource-browser-card\[data-preview="false"\]\s*\.resource-browser-meta\s*\{[^}]*justify-content:\s*stretch;/s
+    );
+    expect(stylesSource).not.toMatch(
+      /\.resource-browser-card\[data-preview="false"\]\s*\.resource-browser-name\s*\{[^}]*-webkit-line-clamp:\s*1;/s
+    );
+  });
+
   it("keeps one source of truth for the mobile resources toolbar", () => {
     // A later `max-width: 640px` copy of these rules used to win on cascade order,
     // so edits to the 720px block silently no-op'd on small phones.

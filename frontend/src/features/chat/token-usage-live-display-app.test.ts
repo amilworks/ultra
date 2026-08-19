@@ -28,6 +28,11 @@ describe("assistant token usage live display wiring", () => {
     expect(assistantHeader).toContain("isStreamingAssistant ? (");
     expect(assistantHeader).toContain("<AnimatedTokenCount value={tokenUsage.total_tokens} />");
     expect(assistantHeader).toContain("formatTokens(tokenUsage.total_tokens)");
+    // This is inline prose metadata, not an aligned numeric column. Tabular
+    // figures put the narrow `1` inside the same wide cell as `9`, which makes
+    // a value such as 91.0K look as though it contains an accidental space.
+    expect(assistantHeader).toContain('className="proportional-nums"');
+    expect(assistantHeader).not.toContain('className="tabular-nums"');
     expect(assistantHeader).not.toContain(
       ") : reasonedDurationLabel || summaryModeLabel || tokenUsage ? ("
     );

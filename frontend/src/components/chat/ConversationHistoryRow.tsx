@@ -53,15 +53,24 @@ const ConversationHistoryMenu = ({
           onRename(conversationId, conversationTitle);
         }}
       >
-        <Pencil className="text-muted-foreground" />
+        <Pencil
+          aria-hidden="true"
+          className="conversation-history-menu-icon text-muted-foreground"
+        />
         <span>Rename chat</span>
       </ContextMenuItem>
       <ContextMenuItem onSelect={() => void onCopyLink(conversationId)}>
-        <Link2 className="text-muted-foreground" />
+        <Link2
+          aria-hidden="true"
+          className="conversation-history-menu-icon text-muted-foreground"
+        />
         <span>Copy chat link</span>
       </ContextMenuItem>
       <ContextMenuItem onSelect={() => void onCopyId(conversationId)}>
-        <Copy className="text-muted-foreground" />
+        <Copy
+          aria-hidden="true"
+          className="conversation-history-menu-icon text-muted-foreground"
+        />
         <span>Copy chat ID</span>
       </ContextMenuItem>
       <ContextMenuItem
@@ -74,7 +83,7 @@ const ConversationHistoryMenu = ({
           onDelete(conversationId);
         }}
       >
-        <Trash />
+        <Trash aria-hidden="true" className="conversation-history-menu-icon" />
         <span>Delete chat</span>
       </ContextMenuItem>
     </ContextMenuContent>

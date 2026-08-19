@@ -94,6 +94,11 @@ describe("ConversationHistoryRow", () => {
     expect(screen.getByRole("menuitem", { name: "Copy chat link" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Copy chat ID" })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "Delete chat" })).toBeInTheDocument();
+    const menuIcons = screen.getByRole("menu").querySelectorAll(".conversation-history-menu-icon");
+    expect(menuIcons).toHaveLength(4);
+    for (const icon of menuIcons) {
+      expect(icon).toHaveAttribute("aria-hidden", "true");
+    }
 
     fireEvent.click(renameItem);
 

@@ -251,9 +251,9 @@ describe("Ultra monochrome identity contract", () => {
     );
 
     // Measured on the grounds the wordmark actually sits on — the sidebar in
-    // each theme — not on pure white/black, which no Meridian surface is.
+    // each theme — not on pure white/black, which the wordmark never touches.
     for (const color of ["#424547", "#171b1d"]) {
-      expect(contrastRatio(color, "#e9ebeb")).toBeGreaterThanOrEqual(4.5);
+      expect(contrastRatio(color, "#f2f3f3")).toBeGreaterThanOrEqual(4.5);
     }
     for (const color of ["#a5abb0", "#dce3ea"]) {
       expect(contrastRatio(color, "#0f1214")).toBeGreaterThanOrEqual(4.5);

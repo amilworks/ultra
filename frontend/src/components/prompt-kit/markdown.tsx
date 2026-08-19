@@ -24,6 +24,7 @@ import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
 import { cn } from "@/lib/utils";
 import { reportClientError } from "@/lib/client-diagnostics";
 import { CodeBlock, CodeBlockCode } from "./code-block";
+import { rehypeStreamingTextReveal } from "./streaming-text-reveal";
 
 // Lazy so recharts (bundled) only loads when a chart actually appears in chat.
 const ChatChart = lazy(() => import("@/components/chat/ChatChart"));
@@ -33,7 +34,13 @@ export type MarkdownProps = {
   id?: string;
   className?: string;
   components?: Partial<Components>;
+  streamingReveal?: boolean;
 };
+
+// A pathological unbroken paragraph should not pay for a decorative traversal
+// on every stream frame. Ordinary prose stays far below this bound; beyond it,
+// legibility and catch-up throughput win and the response renders normally.
+const STREAMING_REVEAL_MAX_BLOCK_CHARACTERS = 12_000;
 
 // Sentinels from the Unicode private-use area. marked treats them as ordinary
 // inline text, so a masked span is never split across block boundaries.
@@ -666,6 +673,7 @@ function MarkdownComponent({
   id,
   className,
   components = BASE_COMPONENTS,
+  streamingReveal = false,
 }: MarkdownProps) {
   const [mathPlugins, setMathPlugins] = useState<{
     rehypeKatex: unknown;
@@ -726,20 +734,33 @@ function MarkdownComponent({
     () => (mathPlugins ? [mathPlugins.rehypeKatex] : []),
     [mathPlugins]
   );
+  const streamingRehypePlugins = useMemo<Array<unknown>>(
+    () => [...rehypePlugins, rehypeStreamingTextReveal],
+    [rehypePlugins]
+  );
   const pluginKey = mathPlugins ? "math" : "base";
 
   return (
     <div className={cn("pk-markdown", className)}>
-      {blocks.map((block, index) => (
-        <MemoizedMarkdownBlock
-          key={`${blockId}-block-${index}`}
-          content={block}
-          components={components}
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          pluginKey={pluginKey}
-        />
-      ))}
+      {blocks.map((block, index) => {
+        const revealsStreamingTail =
+          streamingReveal &&
+          index === blocks.length - 1 &&
+          block.length <= STREAMING_REVEAL_MAX_BLOCK_CHARACTERS &&
+          !hasMathMarkdownSyntax(block);
+        return (
+          <MemoizedMarkdownBlock
+            key={`${blockId}-block-${index}`}
+            content={block}
+            components={components}
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={
+              revealsStreamingTail ? streamingRehypePlugins : rehypePlugins
+            }
+            pluginKey={`${pluginKey}-${revealsStreamingTail ? "streaming" : "stable"}`}
+          />
+        );
+      })}
     </div>
   );
 }

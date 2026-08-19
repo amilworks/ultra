@@ -2,27 +2,30 @@ import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 /* The one impossibility. Meridian rations wonder to a single surface — this
-   field above the welcome prompt — and to a single warm point inside it.
-   Night draws the deep field: silver magnitudes thinning toward the lower
-   edge (atmospheric extinction), the meridian reference line, and one brass
-   point with diffraction spikes. Day draws the PLATE — the same sky as a
-   measured negative: réseau grid, dark specks, halation blooming the bright
-   ones, and the brass ring marking the object under measurement.
+   registration map above the welcome prompt — and to one warm invariant.
 
-   Static on purpose: a long exposure is a record of time, not an animation.
-   Everything derives from the live theme tokens at draw time, and the drawing
-   is deterministic (seeded), so theme flips and resizes repaint the identical
-   sky. */
+   The story is mathematical and product-specific. An orthogonal source frame
+   is carried through one smooth analytic transform into a registered frame.
+   Every coordinate moves except the brass observation: T(a) = a. That fixed
+   point stands for the scientific fact that must survive changes of modality,
+   scale, representation, and analysis.
 
-const SEED = 20260806;
+   Static on purpose: registration is a record, not an animation. Day and
+   Night are two exposures of identical geometry, drawn only from live tokens.
+   The construction is analytic rather than random, so every repaint is exact. */
 
-function createRng(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-}
+export const MERIDIAN_INVARIANT = { u: 0.62, v: 0.44 } as const;
+const ANCHOR_U = MERIDIAN_INVARIANT.u;
+const ANCHOR_V = MERIDIAN_INVARIANT.v;
+const MERIDIAN_STEP = 0.08;
+const PARALLEL_STEP = 0.16;
+const TWIST_RADIANS = 0.46;
+const TWIST_FALLOFF = 1.35;
+const RADIAL_EXPANSION = 0.045;
+
+type Point = readonly [x: number, y: number];
+type CoordinateAxis = "meridian" | "parallel";
+type CoordinateValue = { offset: number; value: number };
 
 /** Parses #rrggbb or rgb()/rgba() strings; returns null for anything else. */
 function parseColor(value: string): [number, number, number] | null {
@@ -46,8 +49,235 @@ function relativeLuminance([r, g, b]: [number, number, number]): number {
   return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
 }
 
-const rgba = ([r, g, b]: [number, number, number], a: number): string =>
-  `rgba(${r}, ${g}, ${b}, ${a})`;
+const rgba = ([r, g, b]: [number, number, number], alpha: number): string =>
+  `rgba(${r}, ${g}, ${b}, ${alpha})`;
+
+/**
+ * Smooth polar twist with a small positive radial term. The map tends to the
+ * identity away from the anchor, remains one-to-one at this bounded strength,
+ * and fixes the anchor exactly because radius zero always maps to radius zero.
+ */
+export function registrationMap(
+  u: number,
+  v: number,
+  width: number,
+  height: number
+): Point {
+  const aspect = width / height;
+  const sourceX = (u - ANCHOR_U) * aspect;
+  const sourceY = v - ANCHOR_V;
+  const radiusSquared = sourceX * sourceX + sourceY * sourceY;
+  const influence = Math.exp(-radiusSquared / TWIST_FALLOFF);
+  const angle = TWIST_RADIANS * influence;
+  const scale = 1 + RADIAL_EXPANSION * influence;
+  const cosine = Math.cos(angle);
+  const sine = Math.sin(angle);
+  const registeredX = (sourceX * cosine - sourceY * sine) * scale;
+  const registeredY = (sourceX * sine + sourceY * cosine) * scale;
+
+  return [
+    width * (ANCHOR_U + registeredX / aspect),
+    height * (ANCHOR_V + registeredY),
+  ];
+}
+
+function coordinateValues(
+  anchor: number,
+  step: number,
+  minimum: number,
+  maximum: number
+): CoordinateValue[] {
+  const firstOffset = Math.ceil((minimum - anchor) / step);
+  const lastOffset = Math.floor((maximum - anchor) / step);
+  const values: CoordinateValue[] = [];
+  for (let offset = firstOffset; offset <= lastOffset; offset++) {
+    values.push({ offset, value: anchor + offset * step });
+  }
+  return values;
+}
+
+function traceCoordinate(
+  context: CanvasRenderingContext2D,
+  axis: CoordinateAxis,
+  fixed: number,
+  minimum: number,
+  maximum: number,
+  step: number,
+  width: number,
+  height: number
+): void {
+  context.beginPath();
+  let first = true;
+  for (let parameter = minimum; parameter < maximum; parameter += step) {
+    const u = axis === "meridian" ? fixed : parameter;
+    const v = axis === "meridian" ? parameter : fixed;
+    const [x, y] = registrationMap(u, v, width, height);
+    if (first) {
+      context.moveTo(x, y);
+      first = false;
+    } else {
+      context.lineTo(x, y);
+    }
+  }
+  const endU = axis === "meridian" ? fixed : maximum;
+  const endV = axis === "meridian" ? maximum : fixed;
+  const [endX, endY] = registrationMap(endU, endV, width, height);
+  context.lineTo(endX, endY);
+}
+
+function drawRegistrationFrame(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  line: string,
+  meridians: CoordinateValue[],
+  parallels: CoordinateValue[]
+): void {
+  const pad = 10;
+  const cornerLength = 9;
+  context.strokeStyle = line;
+  context.lineWidth = 1;
+
+  for (const [x, y, horizontal, vertical] of [
+    [pad, pad, 1, 1],
+    [width - pad, pad, -1, 1],
+    [pad, height - pad, 1, -1],
+    [width - pad, height - pad, -1, -1],
+  ] as const) {
+    context.beginPath();
+    context.moveTo(x + horizontal * cornerLength, y);
+    context.lineTo(x, y);
+    context.lineTo(x, y + vertical * cornerLength);
+    context.stroke();
+  }
+
+  for (const { offset, value } of meridians) {
+    if (Math.abs(offset) % 2 !== 0) {
+      continue;
+    }
+    const x = value * width;
+    const tick = offset === 0 ? 4 : 2.5;
+    context.beginPath();
+    context.moveTo(x, pad - tick);
+    context.lineTo(x, pad + tick);
+    context.moveTo(x, height - pad - tick);
+    context.lineTo(x, height - pad + tick);
+    context.stroke();
+  }
+
+  for (const { offset, value } of parallels) {
+    const y = value * height;
+    const tick = offset === 0 ? 4 : 2.5;
+    context.beginPath();
+    context.moveTo(pad - tick, y);
+    context.lineTo(pad + tick, y);
+    context.moveTo(width - pad - tick, y);
+    context.lineTo(width - pad + tick, y);
+    context.stroke();
+  }
+}
+
+function drawSourceAxes(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  line: string
+): void {
+  const pad = 10;
+  const anchorX = width * ANCHOR_U;
+  const anchorY = height * ANCHOR_V;
+  context.save();
+  context.strokeStyle = line;
+  context.lineWidth = 0.75;
+  context.setLineDash([1, 5]);
+  context.beginPath();
+  context.moveTo(anchorX, pad);
+  context.lineTo(anchorX, height - pad);
+  context.moveTo(pad, anchorY);
+  context.lineTo(width - pad, anchorY);
+  context.stroke();
+  context.restore();
+}
+
+function drawCoordinateFamily(
+  context: CanvasRenderingContext2D,
+  axis: CoordinateAxis,
+  coordinates: CoordinateValue[],
+  minimum: number,
+  maximum: number,
+  curveStep: number,
+  width: number,
+  height: number,
+  ink: [number, number, number],
+  night: boolean
+): void {
+  for (const { offset, value } of coordinates) {
+    const major = offset === 0;
+    const secondary = Math.abs(offset) % 2 === 0;
+    const baseAlpha = axis === "meridian" ? 0.17 : 0.12;
+    const themeAdjustment = night ? 0.025 : 0.01;
+    const hierarchy = secondary ? 0.045 : 0;
+    const majorAlpha = axis === "meridian" ? 0.46 : 0.34;
+    context.strokeStyle = rgba(
+      ink,
+      major ? majorAlpha : baseAlpha + themeAdjustment + hierarchy
+    );
+    context.lineWidth = major ? 1 : secondary ? 0.85 : 0.7;
+    traceCoordinate(
+      context,
+      axis,
+      value,
+      minimum,
+      maximum,
+      curveStep,
+      width,
+      height
+    );
+    context.stroke();
+  }
+}
+
+function drawInvariantTicks(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  meridians: CoordinateValue[],
+  parallels: CoordinateValue[],
+  ink: [number, number, number],
+  night: boolean
+): void {
+  context.fillStyle = rgba(ink, night ? 0.5 : 0.56);
+  for (const { offset, value } of meridians) {
+    if (offset === 0) {
+      continue;
+    }
+    const [x, y] = registrationMap(value, ANCHOR_V, width, height);
+    context.fillRect(x - 0.6, y - 0.6, 1.2, 1.2);
+  }
+  for (const { offset, value } of parallels) {
+    if (offset === 0) {
+      continue;
+    }
+    const [x, y] = registrationMap(ANCHOR_U, value, width, height);
+    context.fillRect(x - 0.6, y - 0.6, 1.2, 1.2);
+  }
+}
+
+function drawInvariant(
+  context: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  live: [number, number, number]
+): void {
+  const anchorX = width * ANCHOR_U;
+  const anchorY = height * ANCHOR_V;
+  const half = 6;
+  context.strokeStyle = rgba(live, 1);
+  context.fillStyle = rgba(live, 1);
+  context.lineWidth = 1.2;
+  context.strokeRect(anchorX - half, anchorY - half, half * 2, half * 2);
+  context.fillRect(anchorX - 1.35, anchorY - 1.35, 2.7, 2.7);
+}
 
 export function MeridianField({ className }: { className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -78,188 +308,100 @@ export function MeridianField({ className }: { className?: string }) {
       const ink = parseColor(styles.color);
       const live = parseColor(styles.getPropertyValue("--accent-live"));
       const ground = parseColor(styles.getPropertyValue("--bg-main"));
-      // --line is an rgba() string and is used verbatim as a strokeStyle.
       const line = styles.getPropertyValue("--line").trim();
       if (!ink || !live || !ground) {
         return;
       }
       const night = relativeLuminance(ground) < 0.5;
-      const rand = createRng(SEED);
-      const anchorX = width * 0.62;
-      const anchorY = height * (night ? 0.4 : 0.44);
+      const pad = 10;
+      const minimumU = pad / width;
+      const maximumU = 1 - minimumU;
+      const minimumV = pad / height;
+      const maximumV = 1 - minimumV;
+      const meridians = coordinateValues(
+        ANCHOR_U,
+        MERIDIAN_STEP,
+        minimumU,
+        maximumU
+      );
+      const parallels = coordinateValues(
+        ANCHOR_V,
+        PARALLEL_STEP,
+        minimumV,
+        maximumV
+      );
+      const precisionScale = Math.max(
+        0.72,
+        Math.sqrt(Math.min(1, (width * height) / 117760))
+      );
+      const curveStep = 0.012 / precisionScale;
 
-      /* Density scales with AREA, so a wide field never reads sparse and a
-         phone-width one never reads crowded — calibrated to the original
-         544x164 drawing (~110 stars). */
-      const starCount = Math.round(Math.min(150, Math.max(46, (width * height) / 800)));
-      const speckCount = Math.round(Math.min(160, Math.max(50, (width * height) / 740)));
+      drawRegistrationFrame(
+        context,
+        width,
+        height,
+        line,
+        meridians,
+        parallels
+      );
+      drawSourceAxes(context, width, height, line);
 
-      if (night) {
-        /* The deep field: magnitudes, extinction, one point of light. */
-        for (let i = 0; i < starCount; i++) {
-          const x = rand() * width;
-          const y = rand() * height;
-          const magnitude = Math.pow(rand(), 3);
-          const extinction = 1 - 0.35 * (y / height);
-          context.globalAlpha = (0.18 + 0.72 * magnitude) * extinction;
-          context.fillStyle = rgba(ink, 1);
-          context.beginPath();
-          context.arc(x, y, 0.4 + magnitude * 1.3, 0, Math.PI * 2);
-          context.fill();
-        }
-        context.globalAlpha = 1;
+      context.save();
+      context.beginPath();
+      context.rect(pad, pad, width - pad * 2, height - pad * 2);
+      context.clip();
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      drawCoordinateFamily(
+        context,
+        "parallel",
+        parallels,
+        minimumU,
+        maximumU,
+        curveStep,
+        width,
+        height,
+        ink,
+        night
+      );
+      drawCoordinateFamily(
+        context,
+        "meridian",
+        meridians,
+        minimumV,
+        maximumV,
+        curveStep,
+        width,
+        height,
+        ink,
+        night
+      );
+      context.restore();
 
-        /* The meridian — the one definite line — with transit ticks. */
-        context.strokeStyle = line;
-        context.lineWidth = 1;
-        context.beginPath();
-        context.moveTo(anchorX, 0);
-        context.lineTo(anchorX, height);
-        context.stroke();
-        for (let y = 10, tick = 0; y < height; y += 14, tick++) {
-          const half = tick % 2 === 0 ? 7 : 4;
-          context.beginPath();
-          context.moveTo(anchorX - half, y);
-          context.lineTo(anchorX + half, y);
-          context.stroke();
-        }
-
-        /* The point of light: halo, diffraction spikes, hot core. */
-        const halo = context.createRadialGradient(
-          anchorX,
-          anchorY,
-          0,
-          anchorX,
-          anchorY,
-          26
-        );
-        halo.addColorStop(0, rgba(live, 0.32));
-        halo.addColorStop(1, rgba(live, 0));
-        context.fillStyle = halo;
-        context.beginPath();
-        context.arc(anchorX, anchorY, 26, 0, Math.PI * 2);
-        context.fill();
-        context.lineWidth = 0.9;
-        for (const [dx, dy] of [
-          [1, 0],
-          [0, 1],
-        ] as const) {
-          const spike = context.createLinearGradient(
-            anchorX - dx * 17,
-            anchorY - dy * 17,
-            anchorX + dx * 17,
-            anchorY + dy * 17
-          );
-          spike.addColorStop(0, rgba(live, 0));
-          spike.addColorStop(0.5, rgba(live, 0.75));
-          spike.addColorStop(1, rgba(live, 0));
-          context.strokeStyle = spike;
-          context.beginPath();
-          context.moveTo(anchorX - dx * 17, anchorY - dy * 17);
-          context.lineTo(anchorX + dx * 17, anchorY + dy * 17);
-          context.stroke();
-        }
-        context.fillStyle = rgba(live, 1);
-        context.beginPath();
-        context.arc(anchorX, anchorY, 2.4, 0, Math.PI * 2);
-        context.fill();
-        context.fillStyle = rgba(ink, 1);
-        context.beginPath();
-        context.arc(anchorX, anchorY, 0.9, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        /* The plate: réseau, corner fiducials, dark specks, the marked object. */
-        const pad = 10;
-        context.strokeStyle = line;
-        context.lineWidth = 1;
-        for (let x = pad + 26; x < width - pad; x += 26) {
-          context.beginPath();
-          context.moveTo(x, pad);
-          context.lineTo(x, height - pad);
-          context.stroke();
-        }
-        for (let y = pad + 26; y < height - pad; y += 26) {
-          context.beginPath();
-          context.moveTo(pad, y);
-          context.lineTo(width - pad, y);
-          context.stroke();
-        }
-        context.strokeRect(pad, pad, width - pad * 2, height - pad * 2);
-        context.strokeStyle = rgba(ink, 0.4);
-        for (const [cx, cy] of [
-          [pad, pad],
-          [width - pad, pad],
-          [pad, height - pad],
-          [width - pad, height - pad],
-        ] as const) {
-          context.beginPath();
-          context.moveTo(cx - 5, cy);
-          context.lineTo(cx + 5, cy);
-          context.moveTo(cx, cy - 5);
-          context.lineTo(cx, cy + 5);
-          context.stroke();
-        }
-
-        const softBlur = "filter" in context;
-        for (let i = 0; i < speckCount; i++) {
-          const x = pad + rand() * (width - pad * 2);
-          const y = pad + rand() * (height - pad * 2);
-          const magnitude = Math.pow(rand(), 3);
-          if (magnitude > 0.55 && softBlur) {
-            /* Halation: the emulsion blooms around the brightest objects. */
-            context.save();
-            context.filter = "blur(1.5px)";
-            context.globalAlpha = 0.3;
-            context.fillStyle = rgba(ink, 1);
-            context.beginPath();
-            context.arc(x, y, (0.4 + magnitude * 1.3) * 2.2, 0, Math.PI * 2);
-            context.fill();
-            context.restore();
-          }
-          context.globalAlpha = 0.25 + 0.65 * magnitude;
-          context.fillStyle = rgba(ink, 1);
-          context.beginPath();
-          context.arc(x, y, 0.4 + magnitude * 1.3, 0, Math.PI * 2);
-          context.fill();
-        }
-        context.globalAlpha = 1;
-
-        /* The observer's annotation: this is the one being measured. */
-        context.fillStyle = rgba(ink, 1);
-        context.beginPath();
-        context.arc(anchorX, anchorY, 2.2, 0, Math.PI * 2);
-        context.fill();
-        context.strokeStyle = rgba(live, 1);
-        context.lineWidth = 1.3;
-        context.beginPath();
-        context.arc(anchorX, anchorY, 8.5, 0, Math.PI * 2);
-        context.stroke();
-        for (const [dx, dy] of [
-          [0, -1],
-          [0, 1],
-          [-1, 0],
-          [1, 0],
-        ] as const) {
-          context.beginPath();
-          context.moveTo(anchorX + dx * 10.5, anchorY + dy * 10.5);
-          context.lineTo(anchorX + dx * 14, anchorY + dy * 14);
-          context.stroke();
-        }
-      }
+      drawInvariantTicks(
+        context,
+        width,
+        height,
+        meridians,
+        parallels,
+        ink,
+        night
+      );
+      drawInvariant(context, width, height, live);
     };
 
     draw();
     /* Redraw only when the LAYOUT size actually changed. Setting the canvas
        width attribute inside a ResizeObserver callback is a feedback loop the
-       moment CSS fails to constrain the element (a dev-server hiccup did
-       exactly this once: attribute width at 2x dpr became the natural width,
-       which re-fired the observer, which doubled it again to full-bleed).
-       The guard breaks the cycle; the inline max-width below caps the blast
-       radius if it ever recurs. */
+       moment CSS fails to constrain the element. The guard breaks that cycle;
+       the inline max-width below caps the blast radius if it ever recurs. */
     let drawnWidth = canvas.clientWidth;
     let drawnHeight = canvas.clientHeight;
     const onResize = (): void => {
-      if (canvas.clientWidth === drawnWidth && canvas.clientHeight === drawnHeight) {
+      if (
+        canvas.clientWidth === drawnWidth &&
+        canvas.clientHeight === drawnHeight
+      ) {
         return;
       }
       drawnWidth = canvas.clientWidth;
@@ -269,7 +411,6 @@ export function MeridianField({ className }: { className?: string }) {
     const resizeObserver =
       typeof ResizeObserver !== "undefined" ? new ResizeObserver(onResize) : null;
     resizeObserver?.observe(canvas);
-    // Theme flips restamp the html class; the drawing re-reads tokens then.
     const themeObserver =
       typeof MutationObserver !== "undefined" ? new MutationObserver(draw) : null;
     themeObserver?.observe(document.documentElement, {
@@ -286,8 +427,6 @@ export function MeridianField({ className }: { className?: string }) {
     <canvas
       ref={canvasRef}
       className={cn("meridian-field", className)}
-      // Belt for the observer guard's braces: even with zero stylesheet the
-      // attribute-sized canvas can never outgrow its container.
       style={{ maxWidth: "100%" }}
       aria-hidden="true"
     />

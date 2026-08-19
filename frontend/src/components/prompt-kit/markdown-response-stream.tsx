@@ -49,7 +49,9 @@ const normalizeStreamingMarkdown = (source: string): string => {
   return closeOpenMathBlock(closeOpenFence(source));
 };
 
-export type MarkdownResponseStreamProps = Omit<ResponseStreamProps, "as">;
+export type MarkdownResponseStreamProps = Omit<ResponseStreamProps, "as"> & {
+  revealNewText?: boolean;
+};
 
 export function MarkdownResponseStream({
   textStream,
@@ -60,6 +62,7 @@ export function MarkdownResponseStream({
   fadeDuration,
   segmentDelay,
   characterChunkSize,
+  revealNewText = true,
 }: MarkdownResponseStreamProps) {
   const { displayedText } = useTextStream({
     textStream,
@@ -83,7 +86,12 @@ export function MarkdownResponseStream({
         </div>
       }
     >
-      <LazyMarkdown className={className}>{normalizedPreview}</LazyMarkdown>
+      <LazyMarkdown
+        className={className}
+        streamingReveal={revealNewText}
+      >
+        {normalizedPreview}
+      </LazyMarkdown>
     </Suspense>
   );
 }

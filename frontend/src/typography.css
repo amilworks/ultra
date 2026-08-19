@@ -1,3 +1,72 @@
+/* DM Sans is the product face: UI chrome, reading copy, headings — everything
+   except the wordmark. Inter stays vendored for two distinct jobs below. */
+@font-face {
+  font-family: "BisQue Ultra Sans";
+  src: url("./assets/fonts/UltraSans-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 1000;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "BisQue Ultra Sans";
+  src: url("./assets/fonts/UltraSans-Italic-Variable.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 100 1000;
+  font-display: swap;
+}
+
+/* Ultra Mono is the product monospace: code, data readouts, viewer cues, file
+   contents. A derivative of DM Mono (the designed counterpart of the DM Sans
+   family Ultra Sans derives from) built in font-lab/build_ultra_mono.py:
+   variable wght 300–600 where upstream ships three statics capped at 500 — the
+   600 continues the family's own two-master weight vector, so the six viewer
+   rules that ask for mono 600 finally render a real SemiBold instead of
+   font-synthesis:none snapping them to Medium — and with Greek grafted from
+   weight-matched JetBrains Mono instances, because DM Mono ships exactly one
+   Greek codepoint (π) and Ultra writes λ, σ, Δ, θ in code and data constantly. */
+@font-face {
+  font-family: "BisQue Ultra Mono";
+  src: url("./assets/fonts/UltraMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 300 600;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "BisQue Ultra Mono";
+  src: url("./assets/fonts/UltraMono-Italic-Variable.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 300 600;
+  font-display: swap;
+}
+
+/* JetBrains Mono, the glyph-coverage net behind Ultra Mono (Cyrillic, box
+   drawing, arrows — the long tail a data viewer can meet in arbitrary files).
+   Deliberately NO size-adjust, unlike the sans coverage face: both fonts share
+   the same 600/1000em cell, so at 100% a fallback glyph stays exactly on the
+   mono grid and columns keep aligning. Scaling JetBrains down to match Ultra
+   Mono's x-height (496 vs 550) would shrink its advance to 541 and break the
+   grid on every substituted glyph — for monospace, the grid outranks optical
+   size matching. The x-height jump on rare fallback glyphs is the accepted,
+   documented cost. */
+@font-face {
+  font-family: "BisQue Mono Coverage";
+  src: url("./assets/fonts/JetBrainsMono-Variable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "BisQue Mono Coverage";
+  src: url("./assets/fonts/JetBrainsMono-Italic-Variable.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 100 800;
+  font-display: swap;
+}
+
+/* Inter, unmodified, at its own scale. Sole consumer is the wordmark. */
 @font-face {
   font-family: "BisQue Inter Variable";
   src: url("./assets/fonts/InterVariable-v4.1.woff2") format("woff2");
@@ -14,13 +83,52 @@
   font-display: swap;
 }
 
+/* The same Inter bytes again, x-height-matched to Ultra Sans, as the LONG-TAIL
+   coverage net: Cyrillic, Latin Extended beyond DM's set, symbols. Greek is no
+   longer this face's job — 104 Greek codepoints are grafted into Ultra Sans
+   itself (weight- and proportion-solved per master, so they work in canvas text
+   and match at every weight; see font-lab/build_ultra_tabular.py). `size-adjust:
+   96.4%` is Ultra Sans's x-height over Inter's (526.0 / 545.9 per 1000em), so a
+   substituted glyph matches the surrounding text rather than announcing itself.
+   Deliberately carries no `unicode-range`: a scoped range would drop unlisted
+   gaps to system-ui instead. Costs no extra bytes — same URL as the wordmark
+   face, so the browser fetches it once. */
+@font-face {
+  font-family: "BisQue Inter Coverage";
+  src: url("./assets/fonts/InterVariable-v4.1.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  size-adjust: 96.4%;
+}
+
+@font-face {
+  font-family: "BisQue Inter Coverage";
+  src: url("./assets/fonts/InterVariable-Italic-v4.1.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  size-adjust: 96.4%;
+}
+
 :root {
-  /* system-ui sits ahead of Segoe UI so the pre-swap frame is covered on every
-     platform: system-ui resolves to San Francisco on Apple and Segoe on
-     Windows, whereas a Segoe-only fallback dropped straight to generic
-     sans-serif on macOS/iOS — the widest metric jump of the three. */
-  --font-sans: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
-  --font-reading: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
+  /* Ultra Sans leads both product stacks. Inter Coverage is metric-adjusted to
+     catch the long tail of glyphs the DM Sans derivative does not carry, then
+     system-ui and Segoe cover the pre-swap frame on every platform. */
+  --font-sans: "BisQue Ultra Sans", "BisQue Inter Coverage", system-ui, "Segoe UI", sans-serif;
+  --font-reading: "BisQue Ultra Sans", "BisQue Inter Coverage", system-ui, "Segoe UI", sans-serif;
+  /* The wordmark alone stays Inter, at Inter's own scale — no size-adjust, so
+     "BisQue Ultra" is drawn exactly as it has always been drawn. */
+  --font-brand: "BisQue Inter Variable", system-ui, "Segoe UI", sans-serif;
+  /* THE mono stack. Before this token existed, the codebase carried four
+     different mono stacks — explicit JetBrains lists, bare ui-monospace runs,
+     and two var(--font-mono) consumers whose token was never defined, so the
+     channel-browser index silently rendered in the sans. One token, one voice.
+     Ultra Mono's weights are used at their nominal values: by the band-
+     normalized standard this repo measures ink with (stem/x-height), Ultra
+     Mono 400 sits at 0.169 vs JetBrains 400 at 0.165 — the incumbent's
+     perceived weight within 2.4%, so no re-derived tokens are needed. */
+  --font-mono: "BisQue Ultra Mono", "BisQue Mono Coverage", ui-monospace, SFMono-Regular, Menlo, monospace;
   /* Wordmark inks ride the Meridian magnitude ladder, solved against the
      SIDEBAR ground the brand actually sits on: emphasis = m0, context = m1
      (8.07:1 light / 8.10:1 dark). Dark emphasis is deliberately NOT brighter
@@ -46,7 +154,7 @@
   display: inline-flex;
   align-items: baseline;
   gap: 0.24em;
-  font-family: var(--font-sans);
+  font-family: var(--font-brand);
   line-height: inherit;
 }
 

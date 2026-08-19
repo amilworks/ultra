@@ -12,69 +12,49 @@
   --font-size-nav: 0.875rem;
   --line-height-body: 1.5;
   --line-height-reading: 1.62;
-  /* Reading MEASURE, which is the half of legibility that font-size alone can't
-     buy. The chat column is 49rem so tables, code and figures have room; at that
-     width prose ran a measured mean of 86.5 characters per line (sampled across
-     8 real answer paragraphs, range 77–106) against the 45–75 the eye tracks
-     comfortably. Past ~75 the return sweep starts finding the wrong next line and
-     the reader re-reads. Measured on one fixed set of 5 answer paragraphs, so the
-     numbers are comparable — all AT THE THEN-16px READING SIZE, so read them as
-     the calibration record, not as current values: 37.5rem = 72.3 cpl,
-     40rem = 78.8, 42.5rem = 83.9, 44rem = 83.9, unconstrained (49rem) = 92.9.
-     44rem is a deliberate call to sit just ABOVE the 45–75 guideline at ~84: the
-     column is a modest share of a wide screen and reads cramped when held to the
-     middle of the band. Note 42.5rem and 44rem measured identically here — the
-     extra 24px moved no wrap points in this sample — so 44rem is not buying more
-     characters than 42.5 so much as more slack before the next wrap. The cap
-     still does real work: unconstrained is 92.9, and that was the measure that
-     made readers re-scan.
-     Do not read the 45–75 band as violated silently — it is exceeded knowingly,
-     and the number to re-measure against is 92.9, not 75.
-     In rem, NOT ch, even though ch looks like the natural unit for a measure:
-     `ch` resolves against each ELEMENT's font-size, so one shared token handed
-     the h2 an 867px measure and the h3 763px while body prose got 654px — three
-     different right edges instead of one column. A measure is a property of the
-     column, not of the type inside it.
+  /* Reading MEASURE, which is the half of legibility that font-size alone cannot
+     buy. The Ultra Sans calibration at 16px/430, 1.62 leading, `text-wrap:
+     pretty`, and five fixed technical paragraphs found 45rem to be the widest
+     no-regression step: 44rem and 45rem both produced 12 lines at a mean 81.5
+     characters, while 45.5rem began lengthening internal lines and 46rem
+     crossed a wrap cliff to 11 lines / 88.9 characters. Desktop reading is
+     15px on current main, so 42.1875rem = 45 × 15/16: the same calibrated
+     character measure, and 15px wider than the prior 41.25rem desktop cap.
+     The chat column remains 49rem so tables, code, equations, and figures retain
+     their evidence width. The prose cap is deliberately in rem, not ch: ch would
+     resolve against each element's font size and give headings different right
+     edges from paragraphs. A measure is a property of the column, not of the
+     type inside it.
      Applies to PROSE only; block content that genuinely needs width keeps the
-     full 49rem column.
-     RESCALED when reading dropped 16px -> 15px: the measure is in rem, so a
-     smaller font at a fixed rem width buys MORE characters per line, not fewer.
-     Holding 44rem would have stretched the calibrated 83.9 cpl to ~89.5 — most
-     of the way to the unconstrained 92.9 that made readers re-scan. 41.25rem is
-     44 x 15/16, which preserves 83.9 cpl at the new size. The character count is
-     the calibrated quantity here; the rem value is just how it is expressed. */
-  --reading-measure: 41.25rem;
-  /* 440, not 400. Inter's 400 sets 4% lighter than the grotesques Ultra is
-     measured against — the gap is not stroke width but the ratio of stroke to
-     letter. Inter's stem is only 2.7% thinner than Söhne Buch's (0.0876em vs
-     0.0900em), but Inter's x-height is larger (0.5444 vs 0.5230), so the same
-     stroke covers proportionally less: stem/x-height 0.1609 against 0.1721.
-     Two independent measurements put the matching weight at 430 — solving
-     stem/x-height from the outlines gives 431, and integrating rendered ink
-     over the x-height band gives 430 — and it holds across the optical range
-     because Inter's x-height does not move with weight. 440 is one step past
-     the match; 430 is the match itself. This product is read at 13–15px for long
-     stretches. Shipped at 440 first and dialled back to the measured match
-     after living with it. Measured in frontend/font-lab/weight.html. */
+     full 49rem column. */
+  --reading-measure: 42.1875rem;
+  /* Compact UI and long-form reading share the measured 430 grade. Keeping the
+     grade constant across the 15px desktop and 16px phone roles avoids an
+     optical weight jump when the responsive breakpoint changes. */
   --font-weight-body: 430;
   --font-weight-reading-body: 430;
-  /* 670, not 700. At 700 the hero title read as a shout rather than a heading
-     once body moved off 400 and closed the gap from 300 to 270. Dropping 30
-     restores the step without giving up the contrast. Scattered `font-weight:
-     700` on small labels (0.5–0.92rem table headers, section eyebrows) is
-     deliberately NOT swept into this token — at those sizes 700 is doing the
-     legibility job the comment below describes, not a display job. */
-  --font-weight-strong: 670;
+  /* The welcome question is an invitation, not a conclusion. At opsz 13,
+     Ultra Sans w350 has a stem/x-height ratio of 0.15158 versus 0.16535 at
+     w400 and 0.17323 at the 430 compact UI voice. W300 falls to 0.13780 and looks
+     fragile on the Day ground. The six live welcome prompts keep identical
+     advances from w300–430, so this lighter role needs no tracking correction. */
+  --font-weight-invitation: 350;
+  /* 690 is the display-axis solve, not a renamed conventional weight. The old
+     Inter display role rendered at opsz 24 / w670 with a lowercase stem-to-
+     x-height ratio of 0.26255. Ultra Sans pinned at opsz 13 reaches 0.26254 at
+     w689.18, rounded to 690. Small labels that explicitly use 700 keep doing
+     their separate legibility job. */
+  --font-weight-strong: 690;
   --font-weight-reading-heading: 600;
-  /* 600, not 700. Inter's 700 is Bold and 600 is SemiBold, and at 700 an inline
+  /* 600, not 700. At 700 an inline
      **emphasis** measured HEAVIER than every heading above it — h2/h3/h4 are all
      600, so a bolded phrase out-shouted the section it sat under, and at h4's
      16px it beat the heading at identical size. Ultra's answers are emphasis-dense
      (findings, verdicts, method names), so 700 also stippled long passages with
-     dark blots and cost more than it marked. 430 → 600 is a narrower step than
-     the 400 → 600 this was tuned against, but still unmistakable at reading
-     size; nothing now outweighs a heading.
-     --font-weight-strong (UI chrome) is 670 — different job, sparse use. */
+     dark blots and cost more than it marked. 430 → 600 is still an unmistakable
+     structural step without turning every emphasized phrase into a dark blot;
+     nothing in answer prose outweighs a heading. The 690 strong role is a
+     separate display job. */
   --font-weight-reading-strong: 600;
   --font-weight-nav: 500;
   --font-weight-action: 500;
@@ -82,60 +62,66 @@
   --font-weight-label: 600;
   --font-weight-panel-heading: 600;
   --font-weight-page-heading: 600;
-  /* Mono is pinned, never inherited. JetBrains Mono ships as STATIC faces
-     (300/400/500/600), and CSS font-matching rounds a 400-500 target UP — so
-     when body moved 400 -> 430, every mono surface that inherited body weight
-     silently jumped a whole grade to Mono 500. Nobody chose that; the loaded
-     face proved it (only the 500 face was fetched).
-     400 is the measured choice, by the same stroke/x-height yardstick that set
-     body to 430: JBM 400 stem/x = 0.1636 vs prose@430 = 0.1721 (-5%); JBM 500
-     = 0.1964 (+14%). The exact parity weight solves to ~426 — 400 is 2.9x
-     closer than 500, it is the grade every code editor ships, and the chip
-     already carries salience from its tint and ink hue; bolder strokes on top
-     of that read as shouting, especially on Night where bloom adds weight.
-     Texture (ink per letter-area) runs lighter than prose either way (-19.5%
-     at 400) because mono's fixed 0.6em advance spends more of each em on air —
-     that is what the chip background is for. Measured in
-     frontend/font-lab/mono.html. */
-  --font-weight-mono: 400;
-  /* Optical size for display type. `font-optical-sizing: auto` maps the CSS
-     px size onto Inter's opsz axis and clamps at 32, so anything above 32px
-     gets Inter's narrowest cut — the axis takes ~8.5% off the round lowercase
-     between opsz 14 and 32. 24 is where Inter's x-height/cap-height ratio
-     (0.7275) meets the consensus of the grotesques Ultra was measured against:
-     Graphik 0.7315, Söhne 0.7284, TWK Lausanne 0.7240, all within 1% of each
-     other and all well below Inter at text sizes (0.7503).
-     Applied ONLY to type that renders above ~24px, which in practice is the
-     hero titles. Every other heading already sits at 18–23px, where auto
-     resolves at or below 24 — pinning those would make them NARROWER, the
-     opposite of the intent. Compared in frontend/font-lab/optical.html. */
-  --display-optical-size: 24;
-  /* Inter's recommended pairing, and nothing else. "ss02" (Inter's
-     Disambiguation set — slashed zero, tailed lowercase l, serifed capital I)
-     was previously enabled to buy identity from the letterforms. In use it read
-     as a stylistic quirk rather than the clean, professional voice this product
-     wants, so the type is stock Inter again. Identity comes from the type
-     system — the scale, the weights, the tracking curve below — not from
-     substituted glyphs.
+  /* Optical size for display type. `font-optical-sizing: auto` maps the CSS px
+     size onto the opsz axis, so large type gets the narrowest cut — DM Sans
+     takes 8.5% off the round lowercase across its axis, close to Inter's 8.2%.
+     This token holds the SAME target as before: the x-height/cap-height ratio
+     of the grotesques Ultra was measured against — Graphik 0.7315, Söhne
+     0.7284, TWK Lausanne 0.7240, a consensus of ~0.7275.
+     The number changed because the font did. Inter met 0.7275 at opsz 24;
+     DM Sans meets it at 12.7, so this is 13 (x/cap 0.7257). Both were solved
+     the same way, and the solve reproduces Inter's documented 0.7275 at 24.
+     Do not read 24 → 13 as "smaller optical size" — the two axes are not the
+     same scale. DM Sans spans 9–40 against Inter's 14–32, and DM Sans moves
+     its vertical proportions early (9→24) and its widths late (24→40).
+     Applied ONLY to type above ~24px, in practice the hero titles: at 34.4px
+     auto would resolve opsz 34.4 and set 'o' at 0.5640em; pinned at 13 it sets
+     0.5960em, 5.7% wider. Every other heading sits at 18–23px where the ratio
+     is already near target. Compared in frontend/font-lab/optical.html. */
+  --display-optical-size: 13;
+  /* Ligatures and contextual alternates, and nothing else. DM Sans carries both
+     (`liga`, `calt`) so this declaration survives the move from Inter unchanged.
+     Its own stylistic sets are deliberately left off, for the same reason
+     Inter's "ss02" was switched off before it: ss02 is a single-storey `a`,
+     ss03 an alternate `g`, ss04 a spurless `u`, ss07 open figures. Each buys
+     identity from the letterforms, and in use that read as a stylistic quirk
+     rather than the clean, professional voice this product wants. Identity
+     comes from the type system — the scale, the weights, the tracking curve
+     below — not from substituted glyphs.
+     NOT AVAILABLE HERE, unlike Inter: DM Sans ships no `tnum` and no `zero`.
+     `font-variant-numeric: tabular-nums` therefore has no feature to activate
+     and silently does nothing — DM Sans's digits are proportional, spanning
+     310/1000em between narrowest and widest, so right-aligned numeric columns
+     stagger. Fixing it needs generated tabular digits, not CSS; see the
+     font-lab note in frontend/font-lab/README.md.
      NOTE: font-feature-settings REPLACES rather than merges — any component
      that sets its own would drop these. Keep this the only declaration. */
   font-feature-settings: "liga" 1, "calt" 1;
 
-  /* TRACKING — derive, don't eyeball.
-     Inter's metric is  tracking(px) = -0.0223 + 0.185 * e^(-0.1745 * px),
-     applied as `em`. Rough values: 12px→0, 15px→-0.009, 19px→-0.016,
-     23px→-0.019, 26px→-0.020, 34px+→-0.022.
+  /* TRACKING — derived for Ultra Sans, not copied from Inter.
+     DM Sans carries its own opsz axis from 9–40, covering every mixed-case size
+     in this UI. Porting Inter's external tracking curve on top of that axis was
+     a double correction. The values below instead preserve the retired Inter
+     face's NATIVE shaped geometry: HarfBuzz `kern`/`liga`/`calt`, the live
+     weight and optical size, and a fixed seven-string scientific/UI corpus.
 
-     Inter v4 ships an `opsz` axis spanning 14–32 (see assets/fonts/PROVENANCE.md)
-     and `font-optical-sizing: auto` is on, so between those sizes the font is
-     already compensating and only a light hand is needed. Outside that band the
-     axis clamps and the metric must be supplied manually — which is why the
-     34px hero carries more tracking than anything else here, and why type below
-     14px should carry almost none.
+       display regular: DM opsz13/w400 -> Inter opsz24/w400  = -0.010em
+       display strong:  DM opsz13/w690 -> Inter opsz24/w670  = -0.018em
+       reading h1 23.2px/w600                            = -0.016em
+       reading h2 20.5px/w600                            = -0.011em
+       reading h3 17.9px/w600                            = -0.007em
+       reading h4–h6 16px/w600                           = -0.003em
 
-     Two things this does NOT govern: uppercase/label tracking (positive values
-     of 0.02–0.08em, a different job entirely) and monospace, which has its own
-     spacing design — the Inter curve does not apply to either. */
+     Body, composer, compact UI titles, and 13.8px chart titles use native zero
+     tracking: all sit inside DM Sans's text optical range. Uppercase/eyebrow
+     tracking remains positive by role, and monospace/numeric tracking is a
+     separate system. */
+  --tracking-display-regular: -0.01em;
+  --tracking-display-strong: -0.018em;
+  --tracking-reading-h1: -0.016em;
+  --tracking-reading-h2: -0.011em;
+  --tracking-reading-h3: -0.007em;
+  --tracking-reading-small: -0.003em;
   /* ══ MERIDIAN DRIFT · DAY ══════════════════════════════════════════════
      The plate. Every neutral below is near-achromatic on purpose — channel
      spread 1–2 — because the identity's crispness comes from value, not from
@@ -145,11 +131,11 @@
      THE MAGNITUDE LADDER. Hierarchy is a geometric series in CONTRAST RATIO,
      one step = 1.80x, solved numerically against the ground the text sits on:
 
-       m0  #171B1D  15.60:1  body ink
-       m1  #424547   8.69:1  secondary / navigation
-       m2  #696B6D   4.81:1  tertiary — the LAST legible step
-       m3  #939697   2.68:1  large text and UI edges only
-       m4  #C8C9CA   1.49:1  hairlines, never text
+       m0  #171B1D  16.73:1  body ink
+       m1  #424547   9.32:1  secondary / navigation
+       m2  #696B6D   5.16:1  tertiary — the LAST legible step
+       m3  #939697   2.87:1  large text and UI edges only
+       m4  #C8C9CA   1.60:1  hairlines, never text
 
      In contrast space, NOT luminance space, and that distinction is load-
      bearing. The ladder was first solved as a luminance series, which works on
@@ -160,23 +146,38 @@
      so ONE step governs Day and Night. The widest step that keeps m2 at AA on
      both grounds is 1.815x; 1.80 sits just inside that on purpose.
      Re-derive with scripts/, do not eyeball a new grey. ══════════════════ */
-  --bg-page: #edeeee;
-  --bg-panel: rgba(248, 249, 249, 0.9);
-  --bg-panel-strong: #f8f9f9;
-  --bg-main: #f2f3f3;
-  /* m0. 15.60:1 on --bg-main. Not #000000, for the same reason Night's ink is
+  /* The Day surface family sits ONE zoning step (~1.076x) lighter than its
+     original solve — a whole-scene shift that preserved every interval, so the
+     sidebar landed exactly on the old stage rung. The cost lives at the top:
+     lifted surfaces are clamped by the white ceiling, so the card lift is
+     compressed (1.03x, was 1.05x) and separation up there leans on shadow. */
+  --bg-page: #f5f6f6;
+  --bg-panel: rgba(254, 254, 254, 0.9);
+  --bg-panel-strong: #fefefe;
+  /* Raised work surfaces need one more value step than generic panels in Day:
+     panel-strong on main disappeared on modest displays once the enclosing
+     Resources card was removed. Keep the edge transparent and use a paper-
+     light surface plus ambient elevation instead — separation without
+     putting the box back. Night already has enough surface delta, so its
+     theme block resolves these tokens to the native panel and no shadow. */
+  --bg-raised: #ffffff;
+  --shadow-raised:
+    0 1px 2px rgba(23, 27, 29, 0.035),
+    0 8px 24px rgba(23, 27, 29, 0.025);
+  --bg-main: #fafbfb;
+  /* m0. 16.73:1 on --bg-main. Not #000000, for the same reason Night's ink is
      not #ffffff: pure black on a light ground reads as a display rather than
      as carbon, and the ladder wants a material top end, not a clipped one. */
   --text-main: #171b1d;
   /* m1, formalized as a named rung. It already backs the quiet sidebar and
      the wordmark context; naming it lets interaction states step text one
      magnitude brighter (m2 -> m1) without minting a new grey — the search
-     well's focus treatment is the first consumer. 8.69:1 on this ground. */
+     well's focus treatment is the first consumer. 9.32:1 on this ground. */
   --text-secondary: #424547;
   /* m2 — the last rung that can legally hold text. Secondary content people
      actually READ (timestamps, counts, meta lines, the sidebar eyebrows via
-     --sidebar-eyebrow-color). 4.81:1, so unlike the grey it replaces (3.87:1,
-     which sat just UNDER AA for small text) this now clears AA outright.
+     --sidebar-eyebrow-color). 5.16:1 on the ground, comfortably past AA; the
+     grey it replaced sat under the line.
      Things that are inactive rather than secondary drop to m3/m4; see
      --composer-placeholder. */
   --text-muted: #696b6d;
@@ -222,6 +223,11 @@
      Day fires the pigment darker (4.55:1 on this ground) because night's
      brass measures 1.66:1 on paper — same material, different exposure. */
   --accent-live: #8a6a12;
+  /* The 36px thinking constellation is a supporting activity glyph, not the
+     primary live beacon. On Day it steps back to ladder m3 (#939697, 2.87:1):
+     motion carries its state while the quieter ink keeps it from outweighing
+     the Task label. Night restores brass where the dark ground needs light. */
+  --thinking-constellation-ink: #939697;
   /* Halation is a dark-ground phenomenon: glow on paper reads as a smudge.
      Day's halo is transparent, so every box-shadow drawn with it is a no-op
      and the night-only glow needs no per-theme component rules. */
@@ -229,7 +235,7 @@
   /* The recessed surface. Inputs and wells sit one value step BELOW the
      canvas instead of declaring their boundary with a border — the de-boxing
      rule: depth by value, edges only where a real edge exists. */
-  --bg-sunk: #e4e6e6;
+  --bg-sunk: #edeeee;
   --selection-bg: #c8c9ca;
   --selection-fg: #171b1d;
   --shadow: 0 10px 26px rgba(11, 14, 15, 0.10);
@@ -240,7 +246,7 @@
      one, because a dark surround is the radiology convention for the same
      reason. See the .dark block. */
   --viewer-bg: #e5e5e5;
-  --viewer-panel-bg: rgba(248, 249, 249, 0.9);
+  --viewer-panel-bg: rgba(254, 254, 254, 0.9);
   --radius-xl: 20px;
   --radius-lg: 16px;
   --radius-md: 12px;
@@ -254,10 +260,16 @@
      "Yesterday", "Last 7 days". A section label is the quietest thing in its
      group; it must never outrank the rows it labels. Any group that needs to
      feel more prominent buys that with space, not with louder type.
-     The 0.02em tracking is deliberate: at ~11px Inter needs positive tracking
-     to stay legible (see the tracking note in typography.css). */
+    The 0.02em tracking is deliberate: at ~11px Ultra Sans needs positive
+    tracking to stay legible (see the tracking note above). */
   --sidebar-eyebrow-size: 0.68rem;
   --sidebar-eyebrow-weight: var(--font-weight-panel-heading);
+  /* m2, which the one-step-lighter shift made legal here again: the sidebar
+     ground now sits on the original stage rung, where m2 measures 4.81:1.
+     PER-SURFACE RULE: these ~11px labels owe 4.5:1 on the SIDEBAR ground —
+     if that ground ever departs from a ladder-solved rung, re-measure and
+     solve a per-surface grey instead of trusting the token (Night needed
+     exactly that; see the .dark block). */
   --sidebar-eyebrow-color: var(--text-muted);
   --sidebar-eyebrow-tracking: 0.02em;
   --sidebar-item-gap: 0.625rem;
@@ -284,17 +296,17 @@
   --popover-foreground: var(--text-main);
   --primary: var(--brand);
   --primary-foreground: var(--bg-main);
-  --secondary: #e9ebeb;
+  --secondary: #f2f3f3;
   --secondary-foreground: var(--text-main);
-  --muted: #e9ebeb;
+  --muted: #f2f3f3;
   --muted-foreground: var(--text-muted);
-  --accent: #e9ebeb;
+  --accent: #f2f3f3;
   --accent-foreground: var(--text-main);
   --destructive: oklch(0.577 0.245 27.325);
   --border: #dcdede;
   --input: #dcdede;
   /* m2, not m3. A focus ring is a UI component and owes 3:1; m3 measures
-     2.68:1 and would miss it, so the ring takes the last legible rung. */
+     2.87:1 and would miss it, so the ring takes the last legible rung. */
   --ring: #696b6d;
   /* Ultra brand data palette — vibrant, one hue per index across light/dark,
      leads with blue (graphite is the neutral/context tail, slot 8).
@@ -328,16 +340,16 @@
      the falloff model applied to chrome: what is further from the work is
      further from the ground's opposite. It also makes the sidebar its own
      ground, which matters for the rung below. */
-  --sidebar: #e9ebeb;
-  /* m1, and the ladder had to be re-solved here rather than borrowed. Body ink
-     measures 14.49:1 against this ground (not --bg-main's 15.60:1), so m2 lands
-     at 4.47:1 — a hair UNDER AA for the 14px/500 row labels, which are
-     essential navigation and must not be decorative. m1 is the honest rung:
-     8.07:1 on this ground, exactly one magnitude below the nav ink above it,
-     and comfortably past AA.
-     It also gives hover somewhere to go: rest 8.07:1 -> --sidebar-ink-hover
-     16.19:1 is a 2x step, so the darkening reads as the affordance. Pinned to
-     --text-main it would have been a 1.12:1 no-op.
+  --sidebar: #f2f3f3;
+  /* After the one-step-lighter shift the sidebar sits EXACTLY on the original
+     stage rung, so every ink measurement here matches the first Day solve:
+     body ink 15.60:1, m1 8.69:1, m2 4.81:1. m2 is legal on this ground, but
+     the rows keep m1 anyway — the quiet tier is a HIERARCHY decision (one
+     clean magnitude below the nav ink above it), not just an AA patch, and m1
+     leaves margin instead of shipping at the line.
+     It also gives hover somewhere to go: rest 8.69:1 -> --sidebar-ink-hover
+     17.43:1 is a 2x step, so the darkening reads as the affordance. Pinned to
+     --text-main it would have been a no-op.
      This is the QUIET half of the sidebar: the Recents list, which is long,
      repetitive and the actual source of sidebar noise. The fixed structural nav
      opts back up to full ink via --sidebar-nav-foreground below. */
@@ -354,7 +366,7 @@
   --sidebar-nav-foreground: var(--text-main);
   --sidebar-primary: var(--brand);
   --sidebar-primary-foreground: var(--bg-main);
-  --sidebar-accent: #e3e5e5;
+  --sidebar-accent: #eceded;
   /* One step past --text-main on purpose — in Day, "nearer" means darker.
      Drives BOTH hover and data-[active=true], so the current page reads at full
      strength too. */
@@ -596,12 +608,13 @@ body {
   margin: 0;
   font-size: 2.45rem;
   font-weight: 400;
-  /* 39–46px across breakpoints, the largest type in the product and furthest
-     past Inter's opsz ceiling. See --display-optical-size. */
+  /* 39–46px across breakpoints. Ultra Sans stays pinned to the reference
+     display proportions; its regular display tracking is the shaped-width
+     match documented with the root tracking tokens. */
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.08;
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-display-regular);
 }
 
 .auth-hero-title {
@@ -820,13 +833,10 @@ body {
 
 .app-sidebar {
   border-right: 1px solid var(--line);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in oklab, var(--bg-main) 93%, var(--bg-panel-strong) 7%) 0%,
-      color-mix(in oklab, var(--bg-main) 88%, var(--bg-panel-strong) 12%) 100%
-    );
-  box-shadow: inset -1px 0 0 color-mix(in oklab, var(--line) 88%, transparent);
+  /* No background on purpose: the shadcn sidebar-inner child paints the ground
+     (opaque --sidebar) across this element's whole box, so any paint set here
+     never reaches the screen. A decorative gradient lived here for a while and
+     did nothing but mislead audits of the rendered ground. */
 }
 
 [data-slot="sidebar"] [data-slot="sidebar-gap"],
@@ -883,8 +893,6 @@ body {
 
 [data-slot="sidebar"][data-collapsible="icon"] .app-sidebar {
   border-right: 0;
-  background: transparent;
-  box-shadow: none;
 }
 
 [data-slot="sidebar"][data-collapsible="icon"] [data-slot="sidebar-inner"] {
@@ -2158,7 +2166,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-family: var(--font-sans);
   font-size: 0.98rem;
   font-weight: 500;
-  letter-spacing: -0.01em;
+  /* Inside DM Sans's text opsz range; native spacing is the calibrated state. */
+  letter-spacing: 0;
   line-height: 1.2;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2252,16 +2261,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     padding-top: calc((1.8rem - 20px) / 2);
     padding-bottom: calc((1.8rem - 20px) / 2);
   }
-  /* Takes the run-meta line's COLOUR as well as its type. The ghost-weight
-     --composer-placeholder is tuned for 15px; at 12px its 1.57:1 stops being a
-     quiet hint and becomes an unreadable one. --text-muted is 3.77:1 — still
-     clearly secondary, but legible at this size. Scoped to the desktop strip on
-     purpose: the phone collapse keeps 16px text, where the ghost weight still
-     reads and the established placeholder treatment should stand. */
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-textarea::placeholder {
-    color: var(--text-muted);
-  }
   /* visibility, not just opacity: these are real controls, and a 0-opacity
      button is still tabbable and still announced. Exactly one set of composer
      controls should ever be in the a11y tree. */
@@ -2276,6 +2275,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
     pointer-events: none;
     transition: opacity 160ms var(--motion-ease), visibility 0s linear 160ms;
   }
+}
+
+/* Read mode removes every other composer cue, so its placeholder is an
+   instruction rather than inactive chrome. Keep it on the final text rung at
+   every width: the default ghost token is only a hairline rung in Day and is
+   visibly lost on both mobile themes. */
+.app-composer-shell[data-composer-compact="true"]:not(:focus-within)
+  .app-composer-textarea::placeholder {
+  color: var(--text-muted);
 }
 
 /* Phone-only: collapse the composer to a slim line while the user reads back
@@ -2542,13 +2550,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: clamp(1.65rem, 3.2vw, 2.35rem);
   font-weight: var(--font-weight-strong);
-  /* 26.4–37.6px, the only type in the app that rides the top of the opsz axis.
-     Left on `auto` it renders at Inter's narrowest cut; pinned it keeps the
-     rounder proportions. Both properties are required — `font-variation-settings`
-     alone loses to the automatic axis. See --display-optical-size. */
+  /* 26.4–37.6px. Pinning preserves the reference grotesques' rounder display
+     proportions; the strong tracking token pairs that geometry with the
+     re-derived w690 display weight. Both optical declarations are required —
+     automatic sizing would otherwise override the explicit axis value. */
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-display-strong);
   color: var(--text-main);
 }
 
@@ -2677,12 +2685,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .mobile-chat-hero-title {
   margin: 0;
   font-size: 1.6rem;
-  font-weight: 400;
-  /* 25.6px — just past the pin point, so it gets the same treatment as
-     .hero-title rather than drifting narrower than its desktop counterpart. */
+  font-weight: var(--font-weight-invitation);
+  /* Same light invitation geometry as the desktop welcome question. */
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
-  letter-spacing: -0.018em;
+  letter-spacing: var(--tracking-display-regular);
   color: var(--text-main);
 }
 
@@ -2760,13 +2767,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 /* The field above the prompt — the only surface where the language's one
    impossibility lives (MeridianField.tsx draws it from the live tokens).
    Height is deliberately modest: the welcome stage's calm is its emptiness,
-   and the sky must never crowd the greeting on a phone. */
+   and the measurement must never crowd the greeting on a phone. */
 .meridian-field {
-  /* Fluid, not fixed: the sky takes a wide share of the column and settles
-     between phone and cinema widths; the drawing scales its star DENSITY by
-     area (MeridianField.tsx), so wide never reads sparse and narrow never
-     reads crowded. Height leans on viewport height so short laptop windows
-     give the sky back to the greeting. */
+  /* Fluid, not fixed: the registration map takes a wide share of the column
+     and settles between phone and cinema widths. Its curve PRECISION scales
+     by area (MeridianField.tsx), while the coordinate relationships remain
+     exact. Height leans on viewport height so short laptop windows give the
+     field back to the greeting. */
   width: min(46rem, 100%);
   height: clamp(96px, 16vh, 172px);
   color: var(--text-main);
@@ -2792,22 +2799,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   max-width: 24rem;
   font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
-  /* The hero is an invitation rather than a document heading, so it keeps the
-     regular reading weight. Tracking is NOT restrained here: the tracking has to
-     be supplied by hand — see the tracking note at the top of this file. Inter's
-     metric for ~34px is -0.022em; -0.01em left the largest text in the product
-     visibly the loosest.
-     The opsz pin below replaces what used to be a ceiling problem. At 34px on
-     `auto` this ran past Inter's opsz range (14–32) and rendered at the axis
-     maximum — the narrowest cut Inter has. Pinned at 24 it keeps the rounder
-     proportions the reference grotesques share. The hand-set tracking still
-     applies on top and is unchanged: it was measured against the glyph metric,
-     not the axis. */
-  font-weight: 400;
+  /* An invitation rather than a document heading: the light 350 role, pinned
+     reference proportions, and the regular shaped-width tracking role. DM Sans
+     covers this size natively, but the pin is intentional identity — opsz 13
+     holds the x-height/cap-height ratio shared by the reference grotesques
+     instead of letting the welcome phrase narrow with viewport size. */
+  font-weight: var(--font-weight-invitation);
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.2;
-  letter-spacing: -0.022em;
+  letter-spacing: var(--tracking-display-regular);
   color: var(--text-main);
 }
 
@@ -4123,17 +4124,19 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 /* DE-BOXED (the Meridian structural rule): the card separates from the canvas
-   by one value step — panel-strong on main — not by an enclosure. The border
-   is kept at 1px TRANSPARENT so layout is byte-identical and the selected
-   state below can still paint a real edge into the same box. Hover is lift
-   and shadow only; a border appearing on hover would reintroduce the box the
-   rule deletes. Selection keeps its edge on purpose: a selection boundary is
-   a real edge, like an ink contour on a silhouette. */
+   by a raised value step, not by an enclosure. Day adds restrained ambient
+   elevation because panel-on-main vanished on modest displays; Night resolves
+   the same tokens to its native panel with no resting shadow. The border stays
+   1px TRANSPARENT so layout is byte-identical and selection can still paint a
+   real edge into the same box. Hover is lift and shadow only; a border appearing
+   on hover would reintroduce the box the rule deletes. Selection keeps its edge
+   on purpose: a selection boundary is a real ink contour. */
 .resource-browser-card {
   position: relative;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: var(--bg-panel-strong);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-raised);
   overflow: hidden;
   height: 17.75rem;
   display: grid;
@@ -4216,8 +4219,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   position: absolute;
   bottom: 0.45rem;
   right: 0.45rem;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.6rem;
   letter-spacing: 0.04em;
   color: var(--text-muted);
@@ -4271,8 +4273,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .resource-thumb-snippet {
   margin: 0;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.66rem;
   line-height: 1.5;
   color: var(--text-muted);
@@ -5172,7 +5173,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   outline: none;
   background: transparent;
   resize: none;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
   font-size: 0.84rem;
   line-height: 1.7;
@@ -5271,7 +5272,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 /* The editor's bare inline <code> wears the same violet chip as chat's
    pk-inline-code — one register, both surfaces. */
 .notes-md-prose :not(pre) > code {
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
   font-size: 0.88em;
   background: var(--inline-code-bg);
@@ -5392,7 +5393,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   border-radius: var(--radius);
   background: color-mix(in oklab, var(--bg-panel-strong) 94%, transparent);
   overflow-x: auto;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
   font-size: 0.82rem;
   line-height: 1.65;
@@ -5461,7 +5462,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .notes-math-block.is-selected { box-shadow: 0 0 0 2px var(--ring); }
 
 .notes-math-editor {
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
   font-size: 0.84rem;
   color: var(--text-main);
@@ -6739,7 +6740,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 0;
   font-size: 1.2rem;
   font-weight: 600;
-  letter-spacing: -0.016em;
+  /* 19.2px/w600 geometry solve on Ultra Sans. */
+  letter-spacing: -0.009em;
   color: var(--text-main);
 }
 
@@ -6791,7 +6793,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
   font-size: 1.05rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  /* 16.8px/w600 geometry solve on Ultra Sans. */
+  letter-spacing: -0.005em;
 }
 
 .admin-kpi-grid {
@@ -7066,7 +7069,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .admin-runtime-grid strong {
   color: var(--text-main);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
   font-weight: 600;
   overflow-wrap: anywhere;
@@ -7151,8 +7154,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .admin-queue-consumer-heading strong {
   color: var(--text-main);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
@@ -7481,8 +7483,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .admin-org-row span {
   color: var(--text-muted);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -7628,8 +7629,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .admin-run-event-kind {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.73rem;
   color: var(--text-main);
 }
@@ -7798,7 +7798,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .chat-tool-card-title {
   font-size: 1rem;
   line-height: 1.25;
-  letter-spacing: -0.01em;
+  letter-spacing: var(--tracking-reading-small);
 }
 
 .chat-tool-card-subtitle {
@@ -9110,17 +9110,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    Gated in App.tsx by activeSending, so brass touches the composer only while
    a run is genuinely live; the mid-run steer/queue/stop controls carry the
    rest of the running state. */
-/* The recorder's anchor. The card itself clips (overflow: hidden), so the
-   trace hangs off the FileUpload wrapper, which shares the card's exact box
-   and clips nothing. Scoped to the composer: pk-file-upload is a shared
-   primitive and other uses must not gain a positioning context. */
+/* The recorder's coordinate system. The card itself clips (overflow: hidden),
+   so the trace hangs off the FileUpload wrapper, whose origin is exactly the
+   card hairline's origin and which clips nothing. Scoped to the composer:
+   pk-file-upload is shared and other uses must not gain positioning context. */
 .app-composer-shell .pk-file-upload {
   position: relative;
 }
 
 .app-composer-recorder {
   position: absolute;
-  left: 1.35rem;
+  left: 0;
   top: 0;
   width: 6rem;
   height: 10px;
@@ -9133,7 +9133,8 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-composer-recorder path {
   stroke-dasharray: 1;
   stroke-dashoffset: 1;
-  animation: trace-write 3.4s ease-in-out infinite;
+  /* A recorder advances at constant path velocity, then holds its reading. */
+  animation: trace-write 3.4s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -9156,12 +9157,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 0.85rem 1.35rem 0.35rem;
   font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
   line-height: 1.45;
-  /* Metric for the size this ACTUALLY renders at. The clamp above is dead —
-     .pk-prompt-input-textarea's `font: inherit` is declared later at equal
-     specificity and wins — so the field is 15px, not the 17.3px the clamp
-     implies, and -0.015em was the metric for a size that never happens.
-     (letter-spacing survives `font: inherit`; it is not part of that shorthand.) */
-  letter-spacing: -0.009em;
+  /* The field actually renders at the inherited 15px because
+     .pk-prompt-input-textarea's later `font: inherit` wins. Ultra Sans's native
+     text spacing is the measured match at this size; no external correction. */
+  letter-spacing: 0;
   /* Slim horizontal insets, defined here (unconditionally) so the JS overflow
      mirror can read the SAME values it measures against — see the composer
      measurement effect in App.tsx. Left clears the floating + attach; right
@@ -9247,9 +9246,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   font-size: inherit;
   line-height: var(--composer-line-height);
   font-weight: 400;
-  /* Tracks the placeholder exactly — same 15px, same metric — so the slim line
-     still reads as one layer: "Ask anything … Pro". */
-  letter-spacing: -0.009em;
+  /* Tracks the placeholder exactly — same 15px and native spacing — so the slim
+     line still reads as one layer: "Ask anything … Pro". */
+  letter-spacing: 0;
   color: var(--composer-placeholder);
   white-space: nowrap;
   /* visibility flips instantly (no hide-delay) so it leaves the a11y tree the
@@ -9613,9 +9612,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 1.35rem;
 }
 
-.running-status-pill[data-size="compact"] {
-  width: 1rem;
-  height: 1rem;
+@media (prefers-reduced-motion: reduce) {
+  .thinking-bar-trace path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
 }
 
 .running-status-point {
@@ -10068,7 +10069,7 @@ details {
 }
 
 /* Text / data resource viewer — a calm sibling of the PDF/image viewers.
-   Reading surface in JetBrains Mono with muted line numbers; CSV renders as a
+   Reading surface in Ultra Mono with muted line numbers; CSV renders as a
    hairline table. Windowed rows keep the DOM bounded regardless of file size. */
 .text-viewer {
   min-height: 0;
@@ -10105,8 +10106,7 @@ details {
 
 .text-viewer-chip {
   flex: 0 0 auto;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.66rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10237,8 +10237,7 @@ details {
   display: flex;
   width: max-content;
   min-width: 100%;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 22px;
 }
@@ -10267,8 +10266,7 @@ details {
 
 .text-viewer-pre-wrap {
   margin: 0;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -10309,6 +10307,7 @@ details {
 }
 .tv-c {
   color: var(--text-muted);
+  font-weight: 400;
   font-style: italic;
 }
 
@@ -10375,8 +10374,7 @@ details {
   left: 0;
   width: 44px;
   text-align: right;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   color: var(--text-muted);
   background: var(--bg-panel-strong);
 }
@@ -10556,8 +10554,7 @@ details {
 
 .resource-quick-peek-chip {
   flex: 0 0 auto;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.62rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10572,8 +10569,7 @@ details {
   max-height: 16rem;
   overflow: auto;
   padding: 0.6rem 0.75rem;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
   white-space: pre;
@@ -10808,7 +10804,7 @@ details {
   inset: 0;
   pointer-events: none;
   color: rgba(255, 255, 255, 0.92);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -10867,7 +10863,7 @@ details {
   background: rgba(8, 11, 17, 0.72);
   color: rgba(255, 255, 255, 0.82);
   box-shadow: 0 8px 20px rgba(2, 6, 18, 0.18);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.6rem;
   font-weight: 600;
   line-height: 1.15;
@@ -10951,7 +10947,7 @@ details {
   background: rgba(8, 11, 17, 0.72);
   color: rgba(255, 255, 255, 0.82);
   box-shadow: 0 8px 20px rgba(2, 6, 18, 0.18);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.58rem;
   font-weight: 600;
   line-height: 1.15;
@@ -11008,7 +11004,7 @@ details {
   gap: 0.28rem;
   max-width: min(34rem, calc(100% - 28px));
   color: rgba(255, 255, 255, 0.92);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.58rem;
   font-weight: 600;
   line-height: 1.15;
@@ -11081,7 +11077,7 @@ details {
   background: rgba(18, 15, 8, 0.72);
   color: rgba(255, 255, 255, 0.84);
   box-shadow: 0 8px 20px rgba(2, 6, 18, 0.18);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.58rem;
   font-weight: 600;
   line-height: 1.15;
@@ -11127,7 +11123,7 @@ details {
   background: rgba(8, 11, 17, 0.72);
   color: rgba(255, 255, 255, 0.82);
   box-shadow: 0 8px 20px rgba(2, 6, 18, 0.18);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.58rem;
   font-weight: 600;
   line-height: 1.15;
@@ -11233,7 +11229,7 @@ details {
   border-color: rgba(219, 227, 242, 0.14);
   background: rgba(255, 255, 255, 0.06);
   color: rgba(255, 255, 255, 0.82);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-size: 0.62rem;
   font-weight: 500;
   letter-spacing: 0;
@@ -12161,8 +12157,7 @@ details {
 .viewer-mpr-readout dd {
   margin: 0;
   color: var(--text-main);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.78rem;
   line-height: 1.3;
 }
@@ -12185,8 +12180,7 @@ details {
   border-radius: 999px;
   padding-inline: 0.5rem;
   color: color-mix(in oklab, var(--text-muted) 86%, var(--text-main) 14%);
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.68rem;
   line-height: 1;
 }
@@ -12880,7 +12874,7 @@ details {
 }
 
 .viewer-metadata-kv-value-mono .viewer-metadata-kv-text {
-  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.76rem;
   font-weight: 500;
   letter-spacing: -0.01em;
@@ -13642,6 +13636,57 @@ details {
   background-color: color-mix(in oklab, var(--brand) 32%, transparent);
 }
 
+/* The live prose tail resolves like a measurement reaching focus. Only one
+   word is wrapped at a time, and the two identical names alternate so a new
+   word restarts the transition without reanimating the settled paragraph. */
+.pk-stream-tail {
+  animation-duration: 180ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  animation-fill-mode: both;
+  will-change: filter, opacity;
+}
+
+.pk-stream-tail-phase-0 {
+  animation-name: pk-stream-focus-0;
+}
+
+.pk-stream-tail-phase-1 {
+  animation-name: pk-stream-focus-1;
+}
+
+@keyframes pk-stream-focus-0 {
+  from {
+    filter: blur(3px);
+    opacity: 0.38;
+  }
+
+  to {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+@keyframes pk-stream-focus-1 {
+  from {
+    filter: blur(3px);
+    opacity: 0.38;
+  }
+
+  to {
+    filter: blur(0);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-stream-tail {
+    animation: none;
+    filter: none;
+    opacity: 1;
+    will-change: auto;
+  }
+}
+
 .pk-markdown {
   display: flex;
   flex-direction: column;
@@ -13746,8 +13791,7 @@ details {
 
 .bisque-link-preview-copy span {
   color: var(--text-soft);
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, monospace);
-  font-weight: var(--font-weight-mono);
+  font-family: var(--font-mono);
   font-size: 0.72rem;
   overflow-wrap: anywhere;
 }
@@ -13766,10 +13810,9 @@ details {
   font-family: var(--font-reading);
   font-weight: var(--font-weight-reading-heading);
   line-height: 1.24;
-  /* Baseline for h4–h6, which set no size and so render at the inherited 15px.
-     h1–h3 override per level below: one flat value across six levels was tuned
-     for h3 and drifted in both directions — too loose on h1, too tight on h4+. */
-  letter-spacing: -0.009em;
+  /* Ultra Sans geometry solve for h4–h6; h1–h3 use their measured size-specific
+     tokens below instead of inheriting one correction across six levels. */
+  letter-spacing: var(--tracking-reading-small);
   text-wrap: balance;
 }
 
@@ -13779,17 +13822,17 @@ details {
 
 .pk-markdown > :where(h1) {
   font-size: 1.45rem;
-  letter-spacing: -0.019em;
+  letter-spacing: var(--tracking-reading-h1);
 }
 
 .pk-markdown > :where(h2) {
   font-size: 1.28rem;
-  letter-spacing: -0.017em;
+  letter-spacing: var(--tracking-reading-h2);
 }
 
 .pk-markdown > :where(h3) {
   font-size: 1.12rem;
-  letter-spacing: -0.014em;
+  letter-spacing: var(--tracking-reading-h3);
 }
 
 .pk-markdown p {
@@ -13901,9 +13944,8 @@ details {
   font-size: 0.86rem;
   font-weight: 600;
   color: var(--text-main);
-  /* 13.8px is below Inter's opsz floor (14), so the axis is already serving the
-     Text cut — it needs barely any help. */
-  letter-spacing: -0.005em;
+  /* 13.8px is inside Ultra Sans's text optical range; native spacing wins. */
+  letter-spacing: 0;
 }
 
 .pk-table-wrap {
@@ -14043,7 +14085,7 @@ details {
   color: var(--inline-code-ink);
   border-radius: 0.375rem;
   padding: 0.05rem 0.32rem;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
   font-size: 0.88em;
   white-space: pre-wrap;
@@ -14072,7 +14114,7 @@ details {
 }
 
 .pk-code-render :where(pre, code) {
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   font-weight: var(--font-weight-mono);
 }
 
@@ -14181,14 +14223,11 @@ details {
 }
 
 /* The live-thinking activity pulse: a canvas constellation drawing in
-   currentColor only. Muted ink — it signals activity, it is not content;
-   the reduced-motion variant is a static frame (handled in-component). */
+   currentColor only. The theme token makes it ladder-quiet on paper and
+   luminous on Night; reduced motion holds a static frame in-component. */
 .thinking-constellation {
   display: block;
-  /* Brass, not muted ink: live thinking IS the reserved meaning of
-     --accent-live, and the constellation only renders while the instrument
-     is working. The canvas reads currentColor, so the token themes it. */
-  color: var(--accent-live);
+  color: var(--thinking-constellation-ink);
 }
 
 @media (max-width: 640px) {
@@ -14557,6 +14596,8 @@ details {
   --bg-page: #090b0d;
   --bg-panel: rgba(21, 23, 25, 0.88);
   --bg-panel-strong: #151719;
+  --bg-raised: var(--bg-panel-strong);
+  --shadow-raised: none;
   --bg-main: #0b0e11;
   /* m0. Plate silver, not #ffffff: pure white on a dark ground blooms, the
      halation is worse on OLED, and it makes a long read tiring. 14.95:1 is
@@ -14595,6 +14636,7 @@ details {
   /* The point of light, at full brass — see the light block for the
      reservation. 10.50:1 on this ground. */
   --accent-live: #e8b84b;
+  --thinking-constellation-ink: var(--accent-live);
   /* Night is where halation is real: the glow around a running marker is the
      one bloom the theme permits, because it is the signal, not a surface. */
   --accent-live-halo: color-mix(in srgb, var(--accent-live) 45%, transparent);
@@ -14672,6 +14714,11 @@ details {
      asymmetry. m2 was rejected for the same reason as in Day: 4.46:1 on this
      ground is a hair under AA for the 14px/500 row labels. */
   --sidebar-foreground: #a5abb0;
+  /* m2 re-solved on the Night sidebar's own ground: plain m2 measures 4.467:1
+     there, a hair under AA for the ~11px labels, so the eyebrow takes the
+     nearest grey that clears the line (4.530:1). Same per-surface discipline
+     as Day's wordmark and focus ring. */
+  --sidebar-eyebrow-color: #787d83;
   --sidebar-primary: var(--brand);
   --sidebar-primary-foreground: var(--bg-main);
   --sidebar-accent: #1a1d20;

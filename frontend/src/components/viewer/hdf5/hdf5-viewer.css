@@ -201,7 +201,7 @@
   padding: 8px 10px;
   font-size: 0.76rem;
   line-height: 1.55;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   color: var(--text-main);
   white-space: pre-wrap;
   word-break: break-word;
@@ -253,7 +253,7 @@
   padding: 8px 10px;
   font-size: 0.74rem;
   line-height: 1.5;
-  font-family: "JetBrains Mono", "SF Mono", "Menlo", monospace;
+  font-family: var(--font-mono);
   color: var(--text-main);
   white-space: pre-wrap;
   word-break: break-word;

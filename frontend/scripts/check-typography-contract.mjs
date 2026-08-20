@@ -819,7 +819,11 @@ if (checkDist) {
       (total, font) => total + (font.emitted ? fs.statSync(font.emitted).size : 0),
       0
     );
-    check(emittedUiTotal === 281_404, `Emitted Ultra Sans payload is ${emittedUiTotal} bytes; expected 281404`);
+    const expectedUiTotal = expectedUiFonts.reduce((total, font) => total + font.bytes, 0);
+    check(
+      emittedUiTotal === expectedUiTotal,
+      `Emitted Ultra Sans payload is ${emittedUiTotal} bytes; expected ${expectedUiTotal}`
+    );
 
     // Mono: Ultra Mono + its coverage net, by digest; and the fontsource
     // static fleet must be gone from dist entirely.

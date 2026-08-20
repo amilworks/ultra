@@ -28,25 +28,25 @@ const expectedFonts = [
 ];
 
 // Ultra Sans, the product face: DM Sans plus generated tabular figures, Greek
-// and reference-matched round capitals from Inter across the full two-axis
-// design space, and a dormant slashed-zero feature — built by
-// the dedicated ultra-sans repository. That build is byte-reproducible, so
-// pinning its digest here also pins tnum, the 104 grafted codepoints, the
-// C/O/G/Q/Oslash and lowercase-s redraws, and the zero feature.
-const ultraSansRevision = "717ad23b67802f2e2d521e566ca3d390b48a83c1";
+// and reference-matched round capitals, lowercase s, and question marks from
+// Inter across the full two-axis design space, plus a dormant slashed-zero
+// feature — built by the dedicated ultra-sans repository. That build is
+// byte-reproducible, so pinning its digest here also pins tnum, the 104 grafted
+// codepoints, the C/O/G/Q/Oslash, s, ?/¿ redraws, and the zero feature.
+const ultraSansRevision = "3078939c29c3298954718a941e3d8dc9e0458525";
 const expectedUiFonts = [
   {
     file: "UltraSans-Variable.woff2",
     style: "normal",
-    bytes: 126_880,
-    sha256: "f060de034541b34034450670bc9becf7c0640f57f2c23dff311ca04a7ff5c97d",
+    bytes: 127_248,
+    sha256: "b7fff4a81ec342f76d4a88625a450699112a94a2e3280e8d4ad366adbe01221c",
     upstreamSha256: "8cd08d97e89c24d0aa92edd2f0f4c8ee6195eee9b7c9f154865a58b02f0c1c0d",
   },
   {
     file: "UltraSans-Italic-Variable.woff2",
     style: "italic",
-    bytes: 154_524,
-    sha256: "26470a9271f845356cfd113a15e5df9e623d440bacab5498e45ad16051e5771d",
+    bytes: 155_152,
+    sha256: "f136650cad07ed6c74ef2bdaf580cba947f14ef4d4978d27d2063ab72d1783d4",
     upstreamSha256: "22259c0cc8237221b80f44c76ba8d36e6bce3cda72779f5b2773643d499720ae",
   },
 ];
@@ -193,8 +193,9 @@ check(
     provenance.includes("primary product face") &&
     provenance.includes("Electrical and Computer Engineering") &&
     provenance.includes(ultraSansRevision) &&
-    /lowercase [`']?s/i.test(provenance),
-  "Provenance must identify Ultra Sans authorship, source revision, s redraw, status, and product role"
+    /lowercase [`']?s/i.test(provenance) &&
+    /question.mark/i.test(provenance),
+  "Provenance must identify Ultra Sans authorship, source revision, s/question redraws, status, and product role"
 );
 
 for (const license of [

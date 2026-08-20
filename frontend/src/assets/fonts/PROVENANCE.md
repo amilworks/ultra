@@ -25,16 +25,17 @@ feature).
 The source authority is the dedicated
 [Ultra Sans repository](https://github.com/amilworks/ultra-sans). This
 application pins the last font-producing development snapshot at
-[`717ad23b67802f2e2d521e566ca3d390b48a83c1`](https://github.com/amilworks/ultra-sans/tree/717ad23b67802f2e2d521e566ca3d390b48a83c1).
+[`3078939c29c3298954718a941e3d8dc9e0458525`](https://github.com/amilworks/ultra-sans/tree/3078939c29c3298954718a941e3d8dc9e0458525).
 Its `font-lab/build_ultra_tabular.py` verifies the upstream masters, performs the
-feature additions and reference C/O/G plus lowercase `s` redraws, renames the
-family, and emits WOFF2. The build is byte-reproducible (`head.modified` pinned
-to upstream), so the output digests below are stable and re-derivable.
+feature additions and reference C/O/G, lowercase `s`, and question-mark redraws,
+renames the family, and emits WOFF2. The build is byte-reproducible
+(`head.modified` pinned to upstream), so the output digests below are stable and
+re-derivable.
 
 | Asset | Style | Variable axes | Bytes | SHA-256 |
 | --- | --- | --- | ---: | --- |
-| `UltraSans-Variable.woff2` | normal | `wght` 100–1000; `opsz` 9–40 | 126880 | `f060de034541b34034450670bc9becf7c0640f57f2c23dff311ca04a7ff5c97d` |
-| `UltraSans-Italic-Variable.woff2` | italic | `wght` 100–1000; `opsz` 9–40 | 154524 | `26470a9271f845356cfd113a15e5df9e623d440bacab5498e45ad16051e5771d` |
+| `UltraSans-Variable.woff2` | normal | `wght` 100–1000; `opsz` 9–40 | 127248 | `b7fff4a81ec342f76d4a88625a450699112a94a2e3280e8d4ad366adbe01221c` |
+| `UltraSans-Italic-Variable.woff2` | italic | `wght` 100–1000; `opsz` 9–40 | 155152 | `f136650cad07ed6c74ef2bdaf580cba947f14ef4d4978d27d2063ab72d1783d4` |
 
 Derived from these upstream DM Sans masters:
 
@@ -57,7 +58,7 @@ IDs 10–12 record the full authorship statement and project URLs.
 The numeric feature does not alter source outlines: each tabular digit is a
 **composite** of the original digit, recentred inside a shared advance, so the
 base figure and all of its variation are inherited. The deliberate exceptions
-are the documented `C O G Q Ø` and lowercase `s` redraws below.
+are the documented `C O G Q Ø`, lowercase `s`, and question-mark redraws below.
 
 Three measured facts underpin the construction, all re-checked by the build:
 
@@ -150,6 +151,21 @@ enough to preserve their counters. Composite deltas keep accented forms centred
 over the new base. Build-time verification pins the body silhouette, normal and
 italic narrowing, side-space, vertical overshoot, accent relationships, and
 interpolation across the complete weight and optical-size grid.
+
+### Reference-matched question marks — open at interface scale
+
+The previous DM-derived `?` turned inward early and placed its neck and dot far
+left of the hook's optical centre. In Ultra's welcome headline this could read
+like a `P` followed by a detached dot. The replacement uses a broader open hook,
+a later inward turn, a short neck, and a circular dot on the same optical axis.
+
+Ultra reconstructs both `?` and `¿` from fitted Inter curve scaffolds at all 12
+masters. DM optical sizes `9/24/40` map to Inter `14/29/32`; source weights are
+solved after scaling against DM's lowercase stem. An Ultra-specific width curve
+then controls the hook while the dot is re-rounded and aligned to the neck in
+roman and italic. DM advances, vertical endpoints, and established ink centres
+remain unchanged. Verification covers the full master grid and the product
+headline setting (`wght` 350, `opsz` 13).
 
 ### Slashed zero — capability, dormant by default
 

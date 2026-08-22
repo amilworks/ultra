@@ -1,11 +1,10 @@
-"""NATS worker for immutable image and scene derivative jobs.
+"""NATS worker for immutable scientific image and scene derivatives.
 
 Consumes convert jobs from a JetStream subject, runs the (tested)
-:func:`~ultra_deepagents.imaging.job.run_derive_pyramid_job` off-thread (the
-convert shells out to ``imgcnv``), and acks. Pyramid metadata is read back via
-the real engine when available. The job *logic* is unit-tested in
-``test_imaging_job.py``; this module is the transport and needs a running NATS to
-exercise end-to-end.
+typed pyramid, scene, or source-bound video renderer off-thread, then acks only
+after durable publication. Pyramid metadata is read back via the real engine
+when available. The job logic is unit-tested independently; this module is the
+transport and needs a running NATS to exercise end-to-end.
 """
 
 from __future__ import annotations
@@ -29,6 +28,10 @@ from ultra_deepagents.imaging.derivative_manifest import (
     _publication_lock,
 )
 from ultra_deepagents.imaging.job import run_derive_pyramid_job
+from ultra_deepagents.imaging.video_export import (
+    run_video_export_job,
+    write_video_failure_marker,
+)
 from ultra_deepagents.scene3d.job import run_scene3d_derive_job
 
 logger = logging.getLogger(__name__)
@@ -136,7 +139,7 @@ def _extract_supported_payload(
     if job_type in (None, "", "image.derive_pyramid"):
         payload = extract_derive_pyramid_payload(envelope)
         return ("image.derive_pyramid", payload) if payload is not None else None
-    if job_type != "scene.derive":
+    if job_type not in {"scene.derive", "image.render_video"}:
         return None
 
     metadata = envelope.get("metadata")
@@ -146,7 +149,10 @@ def _extract_supported_payload(
     envelope_job_id = envelope.get("job_id")
     if envelope_job_id is not None:
         payload["force_id"] = str(envelope_job_id)
-    return "scene.derive", payload
+    if job_type == "image.render_video":
+        payload["owner_user_id"] = str(envelope.get("owner_user_id") or "")
+        payload["owner_org_id"] = str(envelope.get("owner_org_id") or "local-org")
+    return str(job_type), payload
 
 
 def _delivery_attempt(msg: Any) -> int:
@@ -340,6 +346,8 @@ async def _handle_message(
         )
         if job_type == "scene.derive":
             result = await asyncio.to_thread(run_scene3d_derive_job, job)
+        elif job_type == "image.render_video":
+            result = await asyncio.to_thread(run_video_export_job, job)
         else:
             result = await asyncio.to_thread(
                 run_derive_pyramid_job,
@@ -403,6 +411,17 @@ async def _handle_message(
             )
             if job_type == "image.derive_pyramid" and isinstance(exc, DeterministicDerivativeError):
                 marker_outcome = await asyncio.to_thread(_write_failure_marker, job, exc)
+                if marker_outcome == "stale":
+                    await finish_delivery("ack")
+                    return
+                if marker_outcome == "retryable":
+                    await finish_delivery("nak", delay_seconds=retry_delay_seconds)
+                    return
+            if job_type == "image.render_video":
+                code = getattr(exc, "code", "retry_limit_exhausted")
+                marker_outcome = await asyncio.to_thread(
+                    write_video_failure_marker, job, code
+                )
                 if marker_outcome == "stale":
                     await finish_delivery("ack")
                     return

@@ -118,6 +118,10 @@ services:
       ULTRA_CONTROL_NATS_URL: nats://${ULTRA_NATS_TOKEN:-local-dev-nats-token}@nats:4222
       ULTRA_CONTROL_NATS_IMAGE_JOBS_SUBJECT: ultra.data_agent.jobs
       ULTRA_CONTROL_NATS_IMAGE_WORKER_DURABLE: ultra-image-convert-worker
+      # Slice-video jobs fetch owner-scoped frames through the same strict control-plane
+      # renderer used by Lens; the worker credential stays in service configuration.
+      ULTRA_CONTROL_BASE_URL: http://control-plane:8000
+      ULTRA_CONTROL_WORKER_TOKEN: ${ULTRA_WORKER_TOKEN:-local-dev-worker-token}
     volumes:
       - ultra-uploads:/data/uploads
     depends_on:

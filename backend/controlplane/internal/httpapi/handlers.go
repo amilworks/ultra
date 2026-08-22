@@ -119,6 +119,7 @@ var (
 	workerDataAgentStatusPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
 	workerDataAgentEventsPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/events$`)
 	workerDataAgentOutputPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/outputs$`)
+	workerVideoFramePattern      = regexp.MustCompile(`^/v[12]/internal/uploads/[^/]+/render-frame$`)
 )
 
 func workerTokenFromRequest(r *http.Request) string {
@@ -200,6 +201,8 @@ func isWorkerDataAgentEndpoint(r *http.Request) bool {
 	case r.Method == http.MethodPost && workerDataAgentEventsPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && workerDataAgentOutputPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodGet && workerVideoFramePattern.MatchString(path):
 		return true
 	}
 	return false
@@ -650,6 +653,10 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/uploads/{file_id}/atlas", deps.handleServeUploadAtlas)
 			r.Get("/uploads/{file_id}/histogram", deps.handleGetUploadHistogramService)
 			r.Post("/uploads/{file_id}/derive-pyramid", deps.handleDeriveUploadPyramid)
+			r.Post("/uploads/{file_id}/video-exports", deps.handleCreateUploadVideoExport)
+			r.Get("/uploads/{file_id}/video-exports/{render_id}", deps.handleGetUploadVideoExport)
+			r.Get("/uploads/{file_id}/video-exports/{render_id}/download", deps.handleDownloadUploadVideoExport)
+			r.Get("/internal/uploads/{file_id}/render-frame", deps.handleServeUploadVideoFrame)
 			r.Get("/uploads/{file_id}/caption", deps.handleGetUploadCaption)
 			r.Get("/uploads/{file_id}/hdf5/dataset", deps.handleGetUploadHdf5Dataset)
 			r.Get("/uploads/{file_id}/hdf5/preview/slice", deps.handleServeUploadHdf5Slice)

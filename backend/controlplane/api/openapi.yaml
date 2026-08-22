@@ -1205,6 +1205,119 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/video-exports:
+    post:
+      operationId: createUploadVideoExport
+      description: >-
+        Create or reuse an immutable, source-bound MP4 derived from the same
+        calibrated Z-plane PNGs used by Lens. Preview exports preserve both
+        endpoints and uniformly sample at most 240 source planes. Complete exports
+        preserve every source plane and are limited to 1200 frames.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2UploadVideoExportRequest"
+      responses:
+        "200":
+          description: An identical source-bound export is already ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2UploadVideoExportResponse" }
+        "202":
+          description: Export queued or already in progress
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2UploadVideoExportResponse" }
+        "404":
+          description: Upload is not visible or its source object is missing
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "409":
+          description: Resource lifecycle changed while the export was being queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid frame schedule, source selector, or display recipe
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "501":
+          description: Required image rendering or background job service is not configured
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2NotConfiguredResponse" }
+        "502":
+          description: Export could not be published to the background job queue
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "503":
+          description: Required NGFF renderer is not configured or authoritative source metadata is temporarily unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/video-exports/{render_id}:
+    get:
+      operationId: getUploadVideoExport
+      description: Return durable queue, progress, failure, or ready status for one immutable export recipe.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - $ref: "#/components/parameters/VideoRenderID"
+      responses:
+        "200":
+          description: Video export status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2UploadVideoExportResponse" }
+        "404":
+          description: Export is not present for this upload generation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid render identity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+  /v2/uploads/{file_id}/video-exports/{render_id}/download:
+    get:
+      operationId: downloadUploadVideoExport
+      description: >-
+        Download an integrity-verified MP4 only when both its source generation
+        and published artifact still match the immutable manifest.
+      parameters:
+        - $ref: "#/components/parameters/FileID"
+        - $ref: "#/components/parameters/VideoRenderID"
+      responses:
+        "200":
+          description: Source-bound H.264 MP4 presentation derivative
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        "404":
+          description: Export is not present for this upload generation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "409":
+          description: Source or artifact integrity verification failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
+        "422":
+          description: Invalid render identity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/V2APIErrorResponse" }
   /v2/uploads/{file_id}/preview:
     get:
       operationId: getUploadPreview
@@ -5059,6 +5172,14 @@ components:
       in: path
       required: true
       schema: { type: string }
+    VideoRenderID:
+      name: render_id
+      in: path
+      required: true
+      description: Lowercase SHA-256 identity of the canonical source-bound video recipe.
+      schema:
+        type: string
+        pattern: "^[0-9a-f]{64}$"
     UploadSessionID:
       name: session_id
       in: path
@@ -6057,6 +6178,95 @@ components:
           type: string
           description: Basename of the strict publication manifest; never an absolute storage path.
         status: { type: string, enum: [queued] }
+    V2UploadVideoExportRequest:
+      type: object
+      additionalProperties: false
+      required: [mode, profile, fixed_z, fixed_t, channels, scalar_render_mode]
+      properties:
+        mode:
+          type: string
+          enum: [z_sweep, time_series]
+        profile:
+          type: string
+          enum: [preview, complete]
+        fixed_z:
+          type: integer
+          minimum: 0
+          description: Zero-based Z plane retained while exporting a time series.
+        fixed_t:
+          type: integer
+          minimum: 0
+          description: Zero-based timepoint retained while exporting a Z sweep.
+        channels:
+          type: array
+          minItems: 1
+          maxItems: 8
+          uniqueItems: true
+          items: { type: integer, minimum: 0 }
+        channel_colors:
+          type: array
+          maxItems: 8
+          description: Optional #RRGGBB colors in exactly the same order as channels.
+          items:
+            type: string
+            pattern: "^#[0-9A-Fa-f]{6}$"
+        enhancement:
+          type: string
+          maxLength: 128
+          description: Scalar medical display transform already active in Lens.
+        negative: { type: boolean }
+        scalar_render_mode:
+          type: string
+          enum: [intensity, mask]
+        scalar_threshold_value:
+          type: number
+          nullable: true
+        scalar_threshold_foreground:
+          type: string
+          enum: [above]
+    V2UploadVideoExportResponse:
+      type: object
+      required:
+        - render_id
+        - status
+        - mode
+        - profile
+        - fps
+        - source_frame_count
+        - frames_total
+        - frames_completed
+        - sampled
+      properties:
+        render_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        status:
+          type: string
+          enum: [queued, progress, ready, failed]
+        mode:
+          type: string
+          enum: [z_sweep, time_series]
+        profile:
+          type: string
+          enum: [preview, complete]
+        fps: { type: integer, enum: [24] }
+        source_frame_count:
+          type: integer
+          minimum: 2
+        frames_total:
+          type: integer
+          minimum: 1
+          maximum: 1200
+        frames_completed:
+          type: integer
+          minimum: 0
+          maximum: 1200
+        sampled:
+          type: boolean
+          description: True when the frame schedule is a uniform subset of the source axis.
+        download_url: { type: string }
+        filename: { type: string }
+        error_code: { type: string }
     V2UploadBundleFinalizeResponse:
       type: object
       required: [bundles]

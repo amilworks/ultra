@@ -163,9 +163,6 @@ describe("sidebar settings menu", () => {
       /\.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*background:\s*var\(--popover\);[^}]*color:\s*var\(--popover-foreground\);/s
     );
     expect(styles).toMatch(
-      /\.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*--settings-dialog-main-offset:\s*calc\(var\(--sidebar-width\) \/ 2\);[^}]*left:\s*calc\(50% \+ var\(--settings-dialog-main-offset\)\);[^}]*width:\s*min\(calc\(var\(--user-chat-width\) \+ 8rem\), calc\(100vw - 2rem\)\);/s
-    );
-    expect(styles).toMatch(
       /body:has\(\[data-slot="sidebar"\]\[data-state="collapsed"\]\) \.app-settings-dialog\[data-slot="dialog-content"\]\s*\{[^}]*--settings-dialog-main-offset:\s*calc\(var\(--sidebar-width-icon, 4rem\) \/ 2\);/s
     );
     expect(styles).toMatch(
@@ -205,6 +202,27 @@ describe("sidebar settings menu", () => {
     expect(styles).toMatch(/\.app-settings-bisque-link-status/);
     expect(styles).not.toMatch(/var\(--fg\)/);
     expect(styles).toMatch(/@media \(max-width: 760px\)/);
+  });
+
+  it("keeps the Settings dialog inside the viewport while centering on the main pane", () => {
+    const styles = readSource("src/styles.css");
+    const ruleMatch = styles.match(
+      /\.app-settings-dialog\[data-slot="dialog-content"\]\s*\{([^}]*)\}/s
+    );
+
+    expect(ruleMatch, "settings dialog rule is missing").not.toBeNull();
+    const rule = ruleMatch?.[1] ?? "";
+    expect(rule).toMatch(
+      /--settings-dialog-main-offset:\s*calc\(var\(--sidebar-width\) \/ 2\);/
+    );
+    expect(rule).toMatch(
+      /left:\s*min\(\s*calc\(50% \+ var\(--settings-dialog-main-offset\)\),\s*calc\(100vw - \(var\(--settings-dialog-width\) \/ 2\) - 1rem\)\s*\);/s
+    );
+    expect(rule).toMatch(
+      /--settings-dialog-width:\s*min\(calc\(var\(--user-chat-width\) \+ 8rem\), calc\(100vw - 2rem\)\);/
+    );
+    expect(rule).toMatch(/width:\s*var\(--settings-dialog-width\);/);
+    expect(rule).toMatch(/max-width:\s*var\(--settings-dialog-width\);/);
   });
 
   it("offers a sidebar CTA to link BisQue and opens settings on the BisQue tab", () => {

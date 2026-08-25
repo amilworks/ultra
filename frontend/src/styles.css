@@ -1214,9 +1214,13 @@ body {
 
 .app-settings-dialog[data-slot="dialog-content"] {
   --settings-dialog-main-offset: calc(var(--sidebar-width) / 2);
-  left: calc(50% + var(--settings-dialog-main-offset));
-  width: min(calc(var(--user-chat-width) + 8rem), calc(100vw - 2rem));
-  max-width: min(calc(var(--user-chat-width) + 8rem), calc(100vw - 2rem));
+  --settings-dialog-width: min(calc(var(--user-chat-width) + 8rem), calc(100vw - 2rem));
+  left: min(
+    calc(50% + var(--settings-dialog-main-offset)),
+    calc(100vw - (var(--settings-dialog-width) / 2) - 1rem)
+  );
+  width: var(--settings-dialog-width);
+  max-width: var(--settings-dialog-width);
   max-height: min(37rem, calc(100dvh - 2rem));
   overflow: hidden;
   padding: 0;

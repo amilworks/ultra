@@ -76,7 +76,15 @@ import {
   type StreamTokenEvent,
   type UploadProgressEvent,
 } from "./lib/api";
-import { buildNavUrl, navStateKey, parseNavFromSearch, type NavState } from "./lib/navUrl";
+import {
+  buildNavUrl,
+  LENS_MAX_FILE_IDS,
+  navStateKey,
+  normalizeLensFileIds,
+  parseNavFromSearch,
+  type NavState,
+} from "./lib/navUrl";
+import { registerLensOpener } from "./lib/lensNavigation";
 import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
 import { AnimatedTokenCount } from "./components/chat/AnimatedTokenCount";
 import { FigureCaption } from "./components/chat/FigureCaption";
@@ -986,10 +994,39 @@ const writeResourceUploadProgressToStorage = (items: ResourceUploadProgress[]): 
   }
 };
 
+// What a Lens open by file id asked for and how each id fared. Set on EVERY
+// outcome of openLensByFileIds (all found, some found, none found) so the URL
+// always encodes the request, never the result: re-opening that URL yields the
+// same nav key, so the state->URL sync has nothing to write and Back can never
+// bounce between "what was asked" and "what answered".
+type LensOpenOutcome = {
+  // The normalized (trimmed, deduped, capped) ids the open was asked for.
+  requestedFileIds: string[];
+  // Ids the catalog answered 404/403/410 for: removed, or not shared with this
+  // user (the backend does not distinguish). Drives the "not available" copy.
+  unavailableFileIds: string[];
+  // Ids whose lookup failed for any other reason (5xx, network, unexpected
+  // status). Transient by assumption, so the viewer offers a Retry.
+  failedFileIds: string[];
+};
+
 type ResourceViewerContext = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
-};
+} & Partial<LensOpenOutcome>;
+
+// Catalog statuses that mean "this id will not resolve for you right now, and
+// retrying will not change that": gone, forbidden, or never there.
+const LENS_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([403, 404, 410]);
+// A fulfilled lookup is not yet a usable record: a 2xx whose body is not a
+// resource (a proxy's HTML error page, a mock without the envelope, a future
+// envelope change) used to throw inside the opener as an unhandled rejection
+// the user never saw. It is a load failure, and must read as one (Retry).
+const isUsableResourceRecord = (value: unknown): value is ResourceRecord =>
+  typeof value === "object" &&
+  value !== null &&
+  typeof (value as { file_id?: unknown }).file_id === "string" &&
+  (value as { file_id: string }).file_id.length > 0;
 
 type PendingConversationDelete = {
   id: string;
@@ -9648,16 +9685,23 @@ export function App() {
     }
   };
 
+  // Enter Lens with a set of files. `lensOpen` is only passed by openLensByFileIds:
+  // it records what was asked for alongside what opened, and lets an open that
+  // found nothing still enter Lens (to show the notice) through this one path, so
+  // the URL sync always sees a single final state write per open. Every other
+  // caller (Resources tab, conversation files) passes files and nothing else.
   const openUploadedFilesInViewer = useCallback((
     selectedFiles: UploadedFileRecord[],
-    selectedLinksByFileId: Record<string, BisqueViewerLink>
+    selectedLinksByFileId: Record<string, BisqueViewerLink>,
+    lensOpen?: LensOpenOutcome
   ): void => {
-    if (selectedFiles.length === 0) {
+    if (selectedFiles.length === 0 && !lensOpen) {
       return;
     }
     setResourceViewerContext({
       uploadedFiles: uniqueByFileId(selectedFiles),
       bisqueLinksByFileId: selectedLinksByFileId,
+      ...lensOpen,
     });
     rememberActiveConversationScrollPosition();
     setActivePanel("scientific-viewer");
@@ -9695,63 +9739,167 @@ export function App() {
     openUploadedFilesInViewer([uploaded], bisqueLink ? { [uploaded.file_id]: bisqueLink } : {});
   };
 
-  // The figure lightbox's "Open in Lens" escape hatch: resolve the resource by id
-  // and hand it to the full scientific viewer.
-  useEffect(() => {
-    registerLightboxOpenInLens((fileId) => {
-      void apiClient
-        .getResource(fileId)
-        .then((resource) => openResourceInViewer(resource))
-        .catch(() => undefined);
-    });
-    return () => registerLightboxOpenInLens(null);
-    // openResourceInViewer is stable for this purpose; apiClient is the only dep.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiClient]);
-
   // --- URL-as-navigation-state -------------------------------------------------------
   // The app has no router; navigation is React state. Reflect the active panel + open
   // Lens resource in the URL so the browser Back/Forward buttons work, a refresh
   // restores the view, and a Lens view is a shareable deep link. This coexists with the
   // ?conversation= sync — buildNavUrl preserves every other param, so each layer only
   // ever touches its own keys.
-  const viewerResourceFileIds = useMemo(
-    () => (resourceViewerContext?.uploadedFiles ?? []).map((file) => file.file_id),
-    [resourceViewerContext]
-  );
+  const viewerResourceFileIds = useMemo(() => {
+    // A Lens opened by file id encodes what was REQUESTED, not what resolved: the
+    // notice is about those files, a refresh or re-share retries them, and — the
+    // load-bearing part — restoring that URL asks for the same ids again, so the
+    // nav key matches and the sync never pushes a second entry for one view.
+    const requestedIds = resourceViewerContext?.requestedFileIds ?? [];
+    if (requestedIds.length > 0) {
+      return requestedIds;
+    }
+    return (resourceViewerContext?.uploadedFiles ?? []).map((file) => file.file_id);
+  }, [resourceViewerContext]);
   const initialNavRef = useRef<NavState>(
     typeof window === "undefined"
       ? { panel: "chat", resourceFileIds: [], resourceCollectionId: null }
       : parseNavFromSearch(window.location.search)
   );
   const navRestoredRef = useRef(false);
+  // State (not a ref) on purpose: the state->URL effect must only start writing in a
+  // render that already carries the restored panel. A ref flipped inside the restore
+  // effect is visible to the state->URL effect of the SAME commit, which still sees
+  // the pre-restore "chat" panel and would rewrite a deep link to the chat URL.
+  const [navRestored, setNavRestored] = useState(false);
   const lastNavKeyRef = useRef<string | null>(null);
+  // Ids of the Lens open currently resolving, or null. While a Lens open is in flight
+  // the viewer panel may already be active with an empty (or stale) context; writing
+  // that intermediate state to the URL would push a bogus "?view=lens" entry. Cleared
+  // by the same open that set it, in the same tick as its final state write, so it
+  // can never outlive one navigation (unlike a sticky suppress flag).
+  const pendingLensOpenRef = useRef<string[] | null>(null);
+  const lensOpenGenerationRef = useRef(0);
 
-  // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
-  // Always fetches fresh by id (cheap, only on navigation) so it doesn't depend on the
-  // in-memory list and stays referentially stable.
-  const restoreViewerContextForFileIds = useCallback(
+  // The one way into Lens by file id — chat "Open in Lens" pills, the figure lightbox,
+  // deep links, Back/Forward, and the viewer's own Retry all funnel here. Fetches each
+  // id fresh (cheap; only on navigation) so it never depends on the in-memory list, and
+  // enters Lens through openUploadedFilesInViewer with the full outcome attached, so
+  // the URL sync sees exactly one final state per open. Per id: found -> opens;
+  // 404/403/410 -> unavailable (missing OR not shared — the backend does not
+  // distinguish); anything else (5xx, network) -> failed, retryable. A 401 is a
+  // session problem, surfaced as a toast, and never masquerades as "this file is gone".
+  const openLensByFileIds = useCallback(
     async (fileIds: string[]): Promise<void> => {
-      const ids = uniqueFileIds(fileIds);
+      // The same normalization the URL layer applies (trim, dedupe, cap), so the ids
+      // recorded here are byte-identical to what parseNavFromSearch yields for the
+      // URL they will be written to. Any drift here is a Back-button loop.
+      const ids = normalizeLensFileIds(fileIds);
       if (ids.length === 0) {
         return;
       }
-      const records = await Promise.all(ids.map((id) => apiClient.getResource(id).catch(() => null)));
-      const found = records.filter((record): record is ResourceRecord => record !== null);
-      if (found.length === 0) {
-        return;
-      }
-      const uploadedFiles = uniqueByFileId(found.map(resourceToUploadedFile));
-      const bisqueLinksByFileId: Record<string, BisqueViewerLink> = {};
-      for (const record of found) {
-        const bisqueLink = resourceToBisqueLink(record);
-        if (bisqueLink) {
-          bisqueLinksByFileId[record.file_id] = bisqueLink;
+      if (ids.length === LENS_MAX_FILE_IDS && fileIds.length > ids.length) {
+        // Only ids the cap cut count as ignored; duplicates and blanks were never asks.
+        const ignored = Array.from(
+          new Set(fileIds.map((id) => id.trim()).filter((id) => id.length > 0 && !ids.includes(id)))
+        );
+        if (ignored.length > 0) {
+          console.warn("Lens open capped", {
+            requested: ids.length + ignored.length,
+            opened: ids.length,
+            cap: LENS_MAX_FILE_IDS,
+            ignored,
+          });
         }
       }
-      setResourceViewerContext({ uploadedFiles, bisqueLinksByFileId });
+      const generation = ++lensOpenGenerationRef.current;
+      pendingLensOpenRef.current = ids;
+      const settled = await Promise.allSettled(ids.map((id) => apiClient.getResource(id)));
+      if (generation !== lensOpenGenerationRef.current) {
+        // A newer open superseded this one; its result owns the viewer now.
+        return;
+      }
+      const found: ResourceRecord[] = [];
+      const unavailableFileIds: string[] = [];
+      const failedFileIds: string[] = [];
+      let unauthorized = false;
+      settled.forEach((result, index) => {
+        if (result.status === "fulfilled") {
+          if (isUsableResourceRecord(result.value)) {
+            found.push(result.value);
+          } else {
+            failedFileIds.push(ids[index]);
+          }
+          return;
+        }
+        const reason: unknown = result.reason;
+        if (reason instanceof ApiError) {
+          if (reason.status === 401) {
+            unauthorized = true;
+            return;
+          }
+          if (LENS_UNAVAILABLE_STATUSES.has(reason.status)) {
+            unavailableFileIds.push(ids[index]);
+            return;
+          }
+        }
+        failedFileIds.push(ids[index]);
+      });
+      const outcome: LensOpenOutcome = { requestedFileIds: ids, unavailableFileIds, failedFileIds };
+      if (found.length > 0) {
+        const bisqueLinksByFileId: Record<string, BisqueViewerLink> = {};
+        for (const record of found) {
+          const bisqueLink = resourceToBisqueLink(record);
+          if (bisqueLink) {
+            bisqueLinksByFileId[record.file_id] = bisqueLink;
+          }
+        }
+        openUploadedFilesInViewer(found.map(resourceToUploadedFile), bisqueLinksByFileId, outcome);
+      } else if (unauthorized) {
+        showErrorToast("Your session has expired. Sign in again to open this resource.");
+      } else {
+        // Nothing opened: enter Lens anyway so the viewer can say why (unavailable
+        // notice, or the failed notice with Retry), carrying the requested ids so
+        // the URL still points at them.
+        openUploadedFilesInViewer([], {}, outcome);
+      }
+      pendingLensOpenRef.current = null;
     },
-    [apiClient]
+    [apiClient, openUploadedFilesInViewer]
+  );
+
+  // The viewer's Retry: ask for the same ids again. Reads the request off the
+  // context (not the URL) so a retry from a Lens opened by a chat pill works too.
+  const lensRequestedFileIds = resourceViewerContext?.requestedFileIds;
+  const retryLensOpen = useCallback((): void => {
+    if (lensRequestedFileIds && lensRequestedFileIds.length > 0) {
+      void openLensByFileIds(lensRequestedFileIds);
+    }
+  }, [lensRequestedFileIds, openLensByFileIds]);
+
+  // Leave Lens for the chat panel, forgetting the viewer context. Offered by the
+  // viewer's empty-state notice when there is no history entry to go Back to (a
+  // deep link opened in a fresh tab).
+  const openChatPanelFromLens = useCallback((): void => {
+    setActivePanel("chat");
+    setViewerOpen(false);
+    setResourceViewerContext(null);
+  }, []);
+
+  // Chat "Open in Lens" pills and the figure lightbox live in module-level renderers
+  // that cannot take a React handler; both read the registered opener at click time.
+  useEffect(() => {
+    registerLensOpener((fileIds) => {
+      void openLensByFileIds(fileIds);
+    });
+    registerLightboxOpenInLens((fileId) => {
+      void openLensByFileIds([fileId]);
+    });
+    return () => {
+      registerLensOpener(null);
+      registerLightboxOpenInLens(null);
+    };
+  }, [openLensByFileIds]);
+
+  // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
+  const restoreViewerContextForFileIds = useCallback(
+    (fileIds: string[]): Promise<void> => openLensByFileIds(fileIds),
+    [openLensByFileIds]
   );
 
   // One-time restore on load: apply a deep-linked panel + Lens resource once authenticated.
@@ -9761,6 +9909,22 @@ export function App() {
     }
     navRestoredRef.current = true;
     const initial = initialNavRef.current;
+    // Pre-arm the dedupe key with the deep-linked state, exactly as the popstate
+    // handler does: the state->URL effect then treats the restored state as already
+    // written and neither strips the deep link nor pushes history entries for it.
+    lastNavKeyRef.current = navStateKey(initial);
+    if (typeof window !== "undefined") {
+      // The only URL write a cold load makes: normalize a non-canonical deep link
+      // in place (never a push — there is nothing to go Back to yet).
+      const canonicalUrl = buildNavUrl(
+        { pathname: window.location.pathname, search: window.location.search, hash: window.location.hash },
+        initial
+      );
+      const currentRelativeUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (canonicalUrl !== currentRelativeUrl) {
+        window.history.replaceState(window.history.state, "", canonicalUrl);
+      }
+    }
     if (initial.panel !== "chat") {
       setActivePanel(initial.panel);
     }
@@ -9770,12 +9934,19 @@ export function App() {
     if (initial.panel === "resources" && initial.resourceCollectionId) {
       setActiveResourceCollectionId(initial.resourceCollectionId);
     }
+    setNavRestored(true);
   }, [authStatus, restoreViewerContextForFileIds]);
 
-  // State -> URL: push a history entry on each navigation (so Back reverses it), replace
-  // on the first sync, and skip writes that originated from Back/Forward (popstate).
+  // State -> URL: push a history entry on each navigation (so Back reverses it) and
+  // skip writes that originated from Back/Forward or a cold-load restore (both
+  // pre-arm lastNavKeyRef, so the restored state dedupes as already written).
   useEffect(() => {
-    if (typeof window === "undefined" || !navRestoredRef.current || authStatus !== "authenticated") {
+    if (typeof window === "undefined" || !navRestored || authStatus !== "authenticated") {
+      return;
+    }
+    if (activePanel === "scientific-viewer" && pendingLensOpenRef.current !== null) {
+      // Lens is resolving its files; the context it will write is the state worth a
+      // history entry, not this intermediate one.
       return;
     }
     const nav: NavState = {
@@ -9787,7 +9958,6 @@ export function App() {
     if (key === lastNavKeyRef.current) {
       return;
     }
-    const isFirstSync = lastNavKeyRef.current === null;
     lastNavKeyRef.current = key;
     const nextUrl = buildNavUrl(
       { pathname: window.location.pathname, search: window.location.search, hash: window.location.hash },
@@ -9797,12 +9967,8 @@ export function App() {
     if (nextUrl === currentRelativeUrl) {
       return;
     }
-    if (isFirstSync) {
-      window.history.replaceState(window.history.state, "", nextUrl);
-    } else {
-      window.history.pushState({}, "", nextUrl);
-    }
-  }, [activePanel, viewerResourceFileIds, activeResourceCollectionId, authStatus]);
+    window.history.pushState({}, "", nextUrl);
+  }, [activePanel, viewerResourceFileIds, activeResourceCollectionId, authStatus, navRestored]);
 
   // Back/Forward: restore the panel, Lens resource, Resources collection, and
   // conversation from the URL the browser navigated to. State is set to match the
@@ -13645,6 +13811,11 @@ export function App() {
                 uploadedFiles={viewerUploadedFiles}
                 bisqueLinksByFileId={viewerBisqueLinksByFileId}
                 apiClient={apiClient}
+                unavailableFileIds={resourceViewerContext?.unavailableFileIds ?? []}
+                failedFileIds={resourceViewerContext?.failedFileIds ?? []}
+                onOpenResources={openResourcesPanel}
+                onOpenChat={openChatPanelFromLens}
+                onRetry={retryLensOpen}
               />
             </Suspense>
           ) : (

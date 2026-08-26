@@ -66,6 +66,13 @@ type ServerDeps struct {
 	// run-status, run-events, run-lease, and worker-heartbeat endpoints. Empty
 	// disables worker-token auth.
 	WorkerToken string
+	// PublicURL is the browser-facing origin of the app (scheme://host, no
+	// trailing slash), used to make agent-facing links absolute. Empty keeps
+	// them relative, which the SPA resolves against its own origin. Only an
+	// EXPLICITLY configured origin belongs here — never one inferred from a
+	// redirect URI — because a wrong absolute origin turns an in-app link into
+	// a foreign one, while a relative link is correct on every host.
+	PublicURL string
 	// ModelPrices maps a (normalized) model id to its per-million-token price so
 	// the admin metrics cost panel can turn the token ledger into currency. Set
 	// by NewRouter from ULTRA_CONTROL_MODEL_PRICES; empty reports tokens only.
@@ -289,9 +296,13 @@ type runResourceHit struct {
 	TreeIdentity domain.JSONMap `json:"tree_identity,omitempty"`
 	SensorFormat domain.JSONMap `json:"sensor_format,omitempty"`
 	CreatedAt    *time.Time     `json:"created_at,omitempty"`
+	// LensURL opens this exact resource in the in-app Lens viewer. The agent
+	// copies it verbatim as the link of the file name; it is never a
+	// filesystem locator and the worker must not resolve it as one.
+	LensURL string `json:"lens_url,omitempty"`
 }
 
-func runResourceHitFromRecord(resource domain.ResourceRecord) runResourceHit {
+func runResourceHitFromRecord(resource domain.ResourceRecord, publicURL string) runResourceHit {
 	hit := runResourceHit{
 		ResourceID:   resource.ResourceID,
 		OriginalName: resource.OriginalName,
@@ -306,6 +317,7 @@ func runResourceHitFromRecord(resource domain.ResourceRecord) runResourceHit {
 		Metadata:     projectRunResourceMetadata(resource.Metadata),
 		TreeIdentity: projectCatalogTreeIdentity(resource),
 		SensorFormat: projectCatalogSensorFormat(resource),
+		LensURL:      lensURLForResource(publicURL, resource.ResourceID),
 	}
 	if !resource.CreatedAt.IsZero() {
 		created := resource.CreatedAt
@@ -3050,7 +3062,7 @@ func (deps ServerDeps) handleRunResourceSearch(w http.ResponseWriter, r *http.Re
 	}
 	hits := make([]runResourceHit, 0, len(page.Resources))
 	for _, resource := range page.Resources {
-		hits = append(hits, runResourceHitFromRecord(resource))
+		hits = append(hits, runResourceHitFromRecord(resource, deps.PublicURL))
 	}
 	writeJSON(w, http.StatusOK, runResourceSearchResponse{Resources: hits, TotalCount: page.TotalCount})
 }
@@ -3107,7 +3119,7 @@ func (deps ServerDeps) handleRunResourceResolve(w http.ResponseWriter, r *http.R
 			missing = append(missing, id)
 			continue
 		}
-		resources = append(resources, runResourceHitFromRecord(resource))
+		resources = append(resources, runResourceHitFromRecord(resource, deps.PublicURL))
 	}
 	writeJSON(w, http.StatusOK, runResourceResolveResponse{Resources: resources, Missing: missing})
 }

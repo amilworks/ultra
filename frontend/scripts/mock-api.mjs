@@ -1648,7 +1648,7 @@ const reportCanvasMessages = [
     role: "assistant",
     run_id: reportCanvasRunId,
     content:
-      "Checkpoint B clears A on every metric that matters for the survey: mAP@0.5 rises 0.79 → 0.86 and recall improves six points at the shipping threshold. The full evaluation is in the report, alongside the per-colony counts table.",
+      "Checkpoint B clears A on every metric that matters for the survey: mAP@0.5 rises 0.79 → 0.86 and recall improves six points at the shipping threshold. The full evaluation is in the report, alongside the per-colony counts table.\n\nInputs from your Resources library:\n\n| Resource | Type |\n| --- | --- |\n| [subject-b-nph-under70.nii.gz](/?view=lens&resource=file_query_dataset_b) | NIfTI |\n| [missing-scan.nii.gz](/?view=lens&resource=file_gone_404) | NIfTI |",
     created_at: "2026-07-31T18:01:40.000Z",
   },
 ];
@@ -2161,6 +2161,20 @@ const server = http.createServer(async (request, response) => {
     file.completed_at = completedAt;
     recomputeUploadSessionCounters(sessionRecord);
     sendJson(response, 200, { session: sessionRecord.session, file, resource });
+    return;
+  }
+
+  // Single-record lookup, the shape the Lens opener uses (apiClient.getResource):
+  // 404 for unknown ids, matching the control plane's no-existence-leak contract.
+  const singleResourceMatch = url.pathname.match(/^\/v2\/resources\/([^/]+)$/);
+  if (request.method === "GET" && singleResourceMatch) {
+    const wanted = decodeURIComponent(singleResourceMatch[1]);
+    const record = resourceFixtures.find((resource) => resource.file_id === wanted);
+    if (!record) {
+      sendJson(response, 404, { error: "resource not found" });
+      return;
+    }
+    sendJson(response, 200, { resource: record });
     return;
   }
 

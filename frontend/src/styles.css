@@ -13689,7 +13689,8 @@ details {
   opacity: 0.86;
 }
 
-.bisque-link-wrap {
+.bisque-link-wrap,
+.ultra-link-wrap {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -13697,7 +13698,8 @@ details {
   max-width: 100%;
 }
 
-.bisque-link-open {
+.bisque-link-open,
+.ultra-link-open {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -13711,11 +13713,13 @@ details {
   white-space: nowrap;
 }
 
-.bisque-link-open:hover {
+.bisque-link-open:hover,
+.ultra-link-open:hover {
   color: var(--text-main);
 }
 
-.bisque-link-open svg[data-icon] {
+.bisque-link-open svg[data-icon],
+.ultra-link-open svg[data-icon] {
   width: 0.75rem;
   height: 0.75rem;
 }
@@ -14048,7 +14052,9 @@ details {
 
 
 .pk-table-cell .bisque-link-wrap,
-.pk-table-head-cell .bisque-link-wrap {
+.pk-table-head-cell .bisque-link-wrap,
+.pk-table-cell .ultra-link-wrap,
+.pk-table-head-cell .ultra-link-wrap {
   display: flex;
   flex-direction: column;
   align-items: flex-start;

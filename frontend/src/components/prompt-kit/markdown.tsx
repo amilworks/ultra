@@ -1,5 +1,5 @@
 import { marked } from "marked";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Layers3 } from "lucide-react";
 import { lazy, memo, type ReactNode, Suspense, useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 
@@ -21,6 +21,8 @@ import {
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
 import { DEFAULT_BISQUE_BROWSER_URL } from "@/lib/config";
+import { getLensOpener } from "@/lib/lensNavigation";
+import { resolveLensLink } from "@/lib/navUrl";
 import { cn } from "@/lib/utils";
 import { reportClientError } from "@/lib/client-diagnostics";
 import { CodeBlock, CodeBlockCode } from "./code-block";
@@ -523,6 +525,42 @@ function BisqueMarkdownLink({
   );
 }
 
+// Ultra resource citations open OUR Lens in-app. Both anchors keep a real href
+// so a cold load, a middle-click, or a modifier-click still reaches the deep
+// link through the browser; only a plain left-click is intercepted, and only
+// when App has registered an opener (read at click time — this component is
+// module-level and the block memo would freeze anything captured at render).
+function LensMarkdownLink({
+  href,
+  fileIds,
+  children,
+  className,
+  ...props
+}: React.ComponentPropsWithoutRef<"a"> & { href: string; fileIds: string[] }) {
+  const handleClick = (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    const opener = getLensOpener();
+    if (!opener) {
+      return;
+    }
+    event.preventDefault();
+    opener(fileIds);
+  };
+  return (
+    <span className="ultra-link-wrap">
+      <a href={href} className={cn("pk-link", className)} onClick={handleClick} {...props}>
+        {children}
+      </a>
+      <a href={href} className="ultra-link-open" onClick={handleClick}>
+        <Layers3 data-icon="inline-start" />
+        Open in Lens
+      </a>
+    </span>
+  );
+}
+
 const BASE_COMPONENTS: Partial<Components> = {
   code: function CodeComponent({ className, children, ...props }) {
     const isInline =
@@ -561,6 +599,14 @@ const BASE_COMPONENTS: Partial<Components> = {
     );
   },
   a: function LinkComponent({ href, children, ...props }) {
+    const lens = typeof href === "string" ? resolveLensLink(href, window.location.origin) : null;
+    if (lens) {
+      return (
+        <LensMarkdownLink href={lens.href} fileIds={lens.fileIds} {...props}>
+          {children}
+        </LensMarkdownLink>
+      );
+    }
     return (
       <BisqueMarkdownLink href={href} {...props}>
         {children}

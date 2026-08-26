@@ -544,7 +544,7 @@ The chat renders GitHub-Flavored-Markdown pipe tables, which only display when t
 Table typography, so tables read as calmly as the surrounding prose:
 
 - Keep body cells plain text — no bold or italic inside cells — and style parallel tables in one answer identically. Bold is reserved for at most one genuine summary row (for example a totals row).
-- Wrap literal identifiers taken from data — class labels, file names, dataset/field/column names — in backticks so they render as code and survive line-wrapping intact.
+- Wrap literal identifiers taken from data — class labels, file names, dataset/field/column names — in backticks so they render as code and survive line-wrapping intact. The one exception is a file name that is itself a link to a tool-supplied viewer URL (a `[name](url)` cell): keep the link text plain, because backticks inside link text suppress the viewer link.
 - Keep cells terse (a value or a short label) and put explanation in prose near the table. Numeric columns right-align automatically; never pad cells with spaces to align them.
 """
 
@@ -789,6 +789,29 @@ take the output's resource_uri and call bisque_download_resource to materialize 
 for analysis, or report the output's client_view_url so the user can view it on BisQue. Do not
 treat a mex as an image; its results live in its outputs.
 Never expose or ask for BisQue credentials in the answer; the control plane owns account auth.
+"""
+
+ULTRA_RESOURCE_GUIDANCE = """
+The user's Ultra Resources library — what they call "my resources", "my files", "my uploads",
+"my data", or the Resources tab — is the catalog behind search_resources, and it is distinct
+from BisQue. When the user asks about their own resources, call search_resources FIRST. Use
+the bisque_* tools only when the user names BisQue, a BisQue URI or dataset is involved, or a
+hit carries source=bisque_import. When both apply, search both and present the results as two
+labelled groups (Ultra Resources, BisQue) rather than one merged list.
+Every search_resources hit (and every staged resource) carries lens_url: the in-app link that
+opens exactly that file in the Lens viewer. When you cite or list a resource, make its file
+name the markdown link text and use the tool's lens_url as the target — copy it verbatim,
+e.g. [norm_ct_1.tiff](/?view=lens&resource=file_abc). Never invent, shorten, or rewrite a
+resource id or link, never build a link from a name alone, and never link to a staged
+/workspace path: sandbox paths are for code, links are for the reader. Do not write an
+"Open in Lens" label yourself — the app renders that control next to each lens_url link.
+When you present an inventory, use a table whose first column is the linked file name (no
+backticks around a linked name), followed by kind, size, and any metadata that answers the
+question; keep the column count identical in every row.
+search_resources returning ok=false with error "catalog_unavailable" means the catalog could
+not be reached for this run, not that the user owns nothing — say so and offer to retry.
+Never use a lens_url for file access; stage_resource_for_analysis is the only way to read
+a resource's bytes.
 """
 
 # Shown instead of BISQUE_GUIDANCE when BisQue tools are NOT registered for this run,
@@ -1782,6 +1805,11 @@ def build_system_prompt(
     # Only advertise the BisQue tools when they are actually registered for this
     # run; otherwise the model is told to call tools it does not have (the
     # reported "bisque_module_runs is not among the registered tools" failure).
+    # Ultra Resources guidance rides with the catalog tools it describes: never in a
+    # cleanroom, and only when search_resources is registered for the run, so the
+    # model is never told to call (or link through) a tool it does not have.
+    if not cleanroom and (context is None or _should_register_resource_tools(context)):
+        sections.append(ULTRA_RESOURCE_GUIDANCE.strip())
     if not cleanroom:
         if context is None or _should_register_bisque_tools(context):
             sections.append(BISQUE_GUIDANCE.strip())
@@ -1849,6 +1877,12 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
         lines.append(
             f"- selected uploaded file ids: {file_ids} | use stage_uploaded_files_for_analysis"
         )
+    if _should_register_resource_tools(context):
+        lines.append(
+            "- your Ultra Resources library (the Resources tab) is searchable with "
+            "search_resources; every hit carries a lens_url — cite it verbatim as the "
+            "file name's link"
+        )
     if _has_bisque_account_binding(context):
         mutation_tools: list[str] = []
         if "bisque.upload" in context.remote_mutation_intents:
@@ -1864,7 +1898,7 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
             "- linked BisQue account available: use bisque_search_resources, "
             "bisque_download_resource, and bisque_module_runs through the control plane"
             f"{mutation_note}; "
-            "use scope='owner' for the user's own resources, sort='recent' for newest-first "
+            "use scope='owner' for the user's own BisQue resources, sort='recent' for newest-first "
             "queries, extensions=['png'] or extensions=['nii','nii.gz','nifti'] for file-type "
             "searches, resource_type='dataset' for dataset questions, and count_all=True for totals"
         )

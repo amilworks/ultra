@@ -15,8 +15,13 @@ from ultra_deepagents.context_tools import (
     stage_uploaded_files,
 )
 from ultra_deepagents.resources.tools import (
+    CATALOG_UNAVAILABLE,
+    build_resource_tools,
+    lens_deep_link,
+    normalize_resource_hits,
     resolve_catalog_resources,
     search_resources_catalog,
+    with_lens_url,
 )
 
 
@@ -345,3 +350,263 @@ def test_resource_tools_registered_only_for_authenticated_runs(tmp_path):
     anon = names_for("")
     assert "search_resources" not in anon
     assert "stage_resource_for_analysis" not in anon
+
+
+# ---------------------------------------------------------------------------
+# Lens deep links: the model cites the control plane's lens_url verbatim; when an
+# older control plane omits it the worker synthesizes the relative form, but only
+# for ids that pass the same safe-id charset the staging path enforces.
+# ---------------------------------------------------------------------------
+
+
+def test_with_lens_url_keeps_control_plane_link_verbatim():
+    hit = {
+        "resource_id": "file_norm_ct",
+        "original_name": "norm_ct_1.tiff",
+        "lens_url": "https://ultra.example.edu/?view=lens&resource=file_norm_ct",
+    }
+    assert with_lens_url(hit) is hit
+    # A relative control-plane link is equally authoritative — no rewriting.
+    relative = {"resource_id": "file_a", "lens_url": "/?view=lens&resource=file_a"}
+    assert with_lens_url(relative)["lens_url"] == "/?view=lens&resource=file_a"
+
+
+def test_with_lens_url_synthesizes_relative_link_for_safe_id():
+    assert with_lens_url({"resource_id": "file_norm.ct:1-2_x"}) == {
+        "resource_id": "file_norm.ct:1-2_x",
+        "lens_url": "/?view=lens&resource=file_norm.ct%3A1-2_x",
+    }
+    # Surrounding whitespace is not part of the id; the record itself is untouched.
+    padded = with_lens_url({"resource_id": "  file_b  ", "original_name": "b.tiff"})
+    assert padded["lens_url"] == "/?view=lens&resource=file_b"
+    assert padded["resource_id"] == "  file_b  "
+    assert padded["original_name"] == "b.tiff"
+
+
+def test_with_lens_url_never_synthesizes_for_unsafe_or_absent_ids():
+    for bad in ("../../etc/passwd", "a/b", "*", "id with space", "x&y=1", "id#frag", "", "   "):
+        hit = with_lens_url({"resource_id": bad, "original_name": "x"})
+        assert "lens_url" not in hit, bad
+    assert "lens_url" not in with_lens_url({"original_name": "no-id.tiff"})
+    assert "lens_url" not in with_lens_url({"resource_id": 42})
+    assert "lens_url" not in with_lens_url({"resource_id": ["file_a"]})
+
+
+def test_with_lens_url_replaces_blank_or_non_string_lens_url():
+    # A non-string lens_url cannot be emitted to the model as a link; it is dropped
+    # and re-synthesized for a safe id, or dropped outright for an unsafe one.
+    assert with_lens_url({"resource_id": "file_a", "lens_url": ""})["lens_url"] == (
+        "/?view=lens&resource=file_a"
+    )
+    assert with_lens_url({"resource_id": "file_a", "lens_url": None})["lens_url"] == (
+        "/?view=lens&resource=file_a"
+    )
+    assert with_lens_url({"resource_id": "file_a", "lens_url": {"href": "x"}})["lens_url"] == (
+        "/?view=lens&resource=file_a"
+    )
+    assert "lens_url" not in with_lens_url({"resource_id": "a/b", "lens_url": 7})
+
+
+def test_lens_deep_link_percent_encodes_every_reserved_character():
+    assert lens_deep_link("file_a") == "/?view=lens&resource=file_a"
+    assert lens_deep_link("a&b=c#d/e f") == "/?view=lens&resource=a%26b%3Dc%23d%2Fe%20f"
+
+
+def test_normalize_resource_hits_drops_non_dict_entries():
+    assert normalize_resource_hits(None) == []
+    assert normalize_resource_hits("file_a") == []
+    assert normalize_resource_hits([None, "x", 3, {"resource_id": "file_a"}]) == [
+        {"resource_id": "file_a", "lens_url": "/?view=lens&resource=file_a"}
+    ]
+
+
+def test_search_resources_passes_lens_url_through_and_synthesizes_missing(monkeypatch, tmp_path):
+    captured: dict = {}
+    _fake_httpx(
+        monkeypatch,
+        captured,
+        {
+            "resources": [
+                {
+                    "resource_id": "file_abs",
+                    "original_name": "abs.tiff",
+                    "lens_url": "https://ultra.example.edu/?view=lens&resource=file_abs",
+                },
+                {"resource_id": "file_rel", "original_name": "rel.tiff"},
+                {"resource_id": "../evil", "original_name": "evil"},
+                "not-a-hit",
+            ],
+            "total_count": 3,
+        },
+    )
+    result = search_resources_catalog(_settings(), context=_context(tmp_path), query="x")
+    assert result["ok"] is True
+    by_id = {hit["resource_id"]: hit for hit in result["resources"]}
+    assert by_id["file_abs"]["lens_url"] == (
+        "https://ultra.example.edu/?view=lens&resource=file_abs"
+    )
+    assert by_id["file_rel"]["lens_url"] == "/?view=lens&resource=file_rel"
+    assert "lens_url" not in by_id["../evil"]
+    assert len(result["resources"]) == 3
+    assert result["total_count"] == 3
+
+
+def test_search_resources_total_count_ignores_bool_and_non_int(monkeypatch, tmp_path):
+    for total in (True, "7", 3.5, None):
+        _fake_httpx(monkeypatch, {}, {"resources": [], "total_count": total})
+        result = search_resources_catalog(_settings(), context=_context(tmp_path), query="x")
+        assert result["total_count"] == 0, total
+
+
+def test_search_resources_failure_carries_machine_readable_reason_without_host_details(
+    monkeypatch, tmp_path
+):
+    class CatalogDownError(RuntimeError):
+        pass
+
+    def boom(*a, **k):
+        raise CatalogDownError("POST http://control.test/v2/runs/run-now/resource-search refused")
+
+    monkeypatch.setattr("httpx.Client", boom)
+    result = search_resources_catalog(_settings(), context=_context(tmp_path), query="x")
+    assert result == {
+        "ok": False,
+        "error": CATALOG_UNAVAILABLE,
+        "reason": "CatalogDownError",
+        "resources": [],
+    }
+    # The control-plane URL is an operator fact and never reaches the model.
+    assert "control.test" not in json.dumps(result)
+
+
+def test_resolve_resources_failure_carries_machine_readable_reason(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise TimeoutError("http://control.test timed out")
+
+    monkeypatch.setattr("httpx.Client", boom)
+    result = resolve_catalog_resources(
+        _settings(), context=_context(tmp_path), resource_ids=["file_a", "file_b"]
+    )
+    assert result["ok"] is False
+    assert result["error"] == CATALOG_UNAVAILABLE
+    assert result["reason"] == "TimeoutError"
+    assert result["missing"] == ["file_a", "file_b"]
+    assert "control.test" not in json.dumps(result)
+
+
+def test_resolve_resources_normalizes_lens_url_on_hits(monkeypatch, tmp_path):
+    _fake_httpx(
+        monkeypatch,
+        {},
+        {
+            "resources": [
+                {"resource_id": "file_a", "original_name": "a.tiff"},
+                {
+                    "resource_id": "file_b",
+                    "original_name": "b.tiff",
+                    "lens_url": "https://ultra.example.edu/?view=lens&resource=file_b",
+                },
+            ],
+            "missing": [],
+        },
+    )
+    result = resolve_catalog_resources(
+        _settings(), context=_context(tmp_path), resource_ids=["file_a", "file_b"]
+    )
+    links = {hit["resource_id"]: hit["lens_url"] for hit in result["resources"]}
+    assert links == {
+        "file_a": "/?view=lens&resource=file_a",
+        "file_b": "https://ultra.example.edu/?view=lens&resource=file_b",
+    }
+
+
+def _tool_runtime(context: AgentRunContext):
+    from langchain.tools import ToolRuntime
+
+    return ToolRuntime(
+        state={},
+        context=context,
+        config={},
+        stream_writer=lambda _: None,
+        tool_call_id="call-1",
+        store=None,
+        tools=[],
+    )
+
+
+def test_stage_tool_stamps_lens_url_on_staged_records_without_using_it_for_io(
+    monkeypatch, tmp_path
+):
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    (uploads / "file_a__a.tiff").write_bytes(b"TIFF")
+    # A hostile lens_url must never influence where bytes come from: the staged
+    # record still resolves through the upload store by id and keeps the link only
+    # as presentation metadata.
+    captured: dict = {}
+    _fake_httpx(
+        monkeypatch,
+        captured,
+        {
+            "resources": [
+                {
+                    "resource_id": "file_a",
+                    "original_name": "a.tiff",
+                    "source_type": "upload",
+                    "lens_url": "https://ultra.example.edu/?view=lens&resource=file_a",
+                },
+                {"resource_id": "file_gone", "original_name": "gone.tiff", "source_type": "upload"},
+            ],
+            "missing": ["file_other"],
+        },
+    )
+    tools = {t.name: t for t in build_resource_tools(_settings(), upload_roots=(str(uploads),))}
+    context = _context(tmp_path)
+    raw = tools["stage_resource_for_analysis"].invoke(
+        {"resource_ids": "file_a, file_gone", "runtime": _tool_runtime(context)}
+    )
+    public = json.loads(raw)
+    assert captured["json"] == {"resource_ids": ["file_a", "file_gone"]}
+    assert public["ok"] is True
+    assert public["missing"] == ["file_other"]
+    (staged,) = public["staged_resources"]
+    assert staged["resource_id"] == "file_a"
+    assert staged["sandbox_path"] == "/workspace/staged_resources/file_a/a.tiff"
+    assert staged["lens_url"] == "https://ultra.example.edu/?view=lens&resource=file_a"
+    assert (
+        Path(context.workspace_root) / "staged_resources" / "file_a" / "a.tiff"
+    ).read_bytes() == (b"TIFF")
+    # Unavailable records carry no link: there is nothing to open.
+    (unavailable,) = public["unavailable"]
+    assert unavailable["resource_id"] == "file_gone"
+    assert "lens_url" not in unavailable
+    assert str(uploads) not in raw
+
+
+def test_stage_tool_reports_catalog_unavailable_reason(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise ConnectionError("http://control.test refused")
+
+    monkeypatch.setattr("httpx.Client", boom)
+    tools = {t.name: t for t in build_resource_tools(_settings())}
+    raw = tools["stage_resource_for_analysis"].invoke(
+        {"resource_ids": ["file_a"], "runtime": _tool_runtime(_context(tmp_path))}
+    )
+    assert json.loads(raw) == {"ok": False, "error": CATALOG_UNAVAILABLE}
+    assert "control.test" not in raw
+
+
+def test_search_tool_output_carries_lens_url_and_describes_it(monkeypatch, tmp_path):
+    _fake_httpx(
+        monkeypatch,
+        {},
+        {"resources": [{"resource_id": "file_a", "original_name": "a.tiff"}], "total_count": 1},
+    )
+    tools = {t.name: t for t in build_resource_tools(_settings())}
+    search = tools["search_resources"]
+    description = str(search.description).lower()
+    assert "lens_url" in description
+    assert "the resources tab" in description
+    assert "catalog_unavailable" in description
+    raw = search.invoke({"query": "a", "runtime": _tool_runtime(_context(tmp_path))})
+    assert json.loads(raw)["resources"][0]["lens_url"] == "/?view=lens&resource=file_a"

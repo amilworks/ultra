@@ -3,15 +3,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   closeFigureLightbox,
   getFigureLightboxState,
-  getLightboxOpenInLens,
   openFigureLightbox,
-  registerLightboxOpenInLens,
   subscribeFigureLightbox,
 } from "./figureLightbox";
 
 afterEach(() => {
   closeFigureLightbox();
-  registerLightboxOpenInLens(null);
 });
 
 describe("figureLightbox store", () => {
@@ -44,12 +41,5 @@ describe("figureLightbox store", () => {
     expect(getFigureLightboxState()).not.toBeNull();
     closeFigureLightbox();
     expect(getFigureLightboxState()).toBeNull();
-  });
-
-  it("registers and exposes the open-in-Lens handler", () => {
-    const handler = vi.fn();
-    registerLightboxOpenInLens(handler);
-    getLightboxOpenInLens()?.("file-1");
-    expect(handler).toHaveBeenCalledWith("file-1");
   });
 });

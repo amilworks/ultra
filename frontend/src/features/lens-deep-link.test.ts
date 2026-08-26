@@ -14,6 +14,10 @@ const viewerSource = readFileSync(
   path.join(process.cwd(), "src/components/ScientificViewerPage.tsx"),
   "utf8"
 );
+const lightboxSource = readFileSync(
+  path.join(process.cwd(), "src/components/FigureLightboxOverlay.tsx"),
+  "utf8"
+);
 
 const sliceBetween = (source: string, start: string, end: string): string => {
   const from = source.indexOf(start);
@@ -29,7 +33,7 @@ const opener = sliceBetween(appSource, "const openLensByFileIds = useCallback(",
 const openerBody = sliceBetween(opener, "const openLensByFileIds = useCallback(", "const lensRequestedFileIds");
 
 describe("Lens deep-link opener", () => {
-  it("registers one shared opener for chat pills and the figure lightbox", () => {
+  it("registers ONE opener registry, shared by chat pills and the figure lightbox", () => {
     expect(appSource).toMatch(/import \{ registerLensOpener \} from "\.\/lib\/lensNavigation";/);
     const effect = sliceBetween(
       appSource,
@@ -37,32 +41,45 @@ describe("Lens deep-link opener", () => {
       "}, [openLensByFileIds]);"
     );
     expect(effect).toMatch(/registerLensOpener\(\(fileIds\) => \{\s*void openLensByFileIds\(fileIds\);/);
-    expect(effect).toMatch(/registerLightboxOpenInLens\(\(fileId\) => \{\s*void openLensByFileIds\(\[fileId\]\);/);
     expect(effect).toContain("registerLensOpener(null);");
-    expect(effect).toContain("registerLightboxOpenInLens(null);");
+    // The lightbox reads the SAME registry — no second parallel registration.
+    expect(appSource).not.toContain("registerLightboxOpenInLens");
+    expect(lightboxSource).toMatch(/import \{ getLensOpener \} from "@\/lib\/lensNavigation";/);
+    // Read at render time, so the button is hidden (never dead) with no opener.
+    expect(lightboxSource).toContain("const openInLens = getLensOpener();");
+    expect(lightboxSource).toContain("{active?.fileId && openInLens ? (");
+    expect(lightboxSource).toMatch(
+      /onClick=\{\(\) => \{\s*openInLens\(\[active\.fileId as string\]\);\s*onClose\(\);/
+    );
   });
 
   it("routes deep links, Back/Forward and the viewer's Retry through the same opener", () => {
-    expect(appSource).toMatch(
-      /const restoreViewerContextForFileIds = useCallback\(\s*\(fileIds: string\[\]\): Promise<void> => openLensByFileIds\(fileIds\),/
-    );
-    expect(appSource).toContain("void restoreViewerContextForFileIds(initial.resourceFileIds);");
-    expect(appSource).toContain("void restoreViewerContextForFileIds(nav.resourceFileIds);");
+    // The restore paths call the opener directly — no pass-through wrapper.
+    expect(appSource).not.toContain("restoreViewerContextForFileIds");
+    expect(appSource).toContain("void openLensByFileIds(initial.resourceFileIds);");
+    expect(appSource).toContain("void openLensByFileIds(nav.resourceFileIds);");
     // Retry re-asks for exactly the ids the context recorded as requested.
     expect(opener).toContain("const lensRequestedFileIds = resourceViewerContext?.requestedFileIds;");
     expect(opener).toMatch(/const retryLensOpen = useCallback\(\(\): void => \{\s*if \(lensRequestedFileIds && lensRequestedFileIds\.length > 0\) \{\s*void openLensByFileIds\(lensRequestedFileIds\);/);
     expect(appSource).toContain("onRetry={retryLensOpen}");
   });
 
-  it("normalizes with the URL layer's own function and cap, never a local copy", () => {
+  it("normalizes with the URL layer's own functions and cap, never a local copy", () => {
     expect(appSource).toMatch(
-      /import \{\s*buildNavUrl,\s*LENS_MAX_FILE_IDS,\s*navStateKey,\s*normalizeLensFileIds,\s*parseNavFromSearch,\s*type NavState,\s*\} from "\.\/lib\/navUrl";/
+      /import \{\s*buildNavUrl,\s*dedupeFileIds,\s*LENS_MAX_FILE_IDS,\s*navStateKey,\s*normalizeLensFileIds,\s*parseNavFromSearch,\s*type NavState,\s*\} from "\.\/lib\/navUrl";/
     );
     expect(appSource).not.toContain("LENS_OPEN_MAX_FILES");
+    // The app-wide id helper IS the URL layer's uncapped pass, not a third copy.
+    expect(appSource).toContain(
+      "const uniqueFileIds: (rows: string[]) => string[] = dedupeFileIds;"
+    );
     expect(opener).toContain("const ids = normalizeLensFileIds(fileIds);");
     expect(opener).not.toContain("uniqueFileIds(");
     expect(opener).not.toMatch(/\.slice\(0, /);
-    expect(opener).toContain("ids.length === LENS_MAX_FILE_IDS && fileIds.length > ids.length");
+    // The cap warning reports counts only, computed by the shared normalizer.
+    expect(opener).toContain("if (fileIds.length > ids.length) {");
+    expect(opener).toContain("const requested = dedupeFileIds(fileIds).length;");
+    expect(opener).not.toContain("ignored");
     expect(opener).toContain("Promise.allSettled(ids.map((id) => apiClient.getResource(id)))");
   });
 
@@ -77,7 +94,9 @@ describe("Lens deep-link opener", () => {
     // ...and so does a total miss, so the URL sync sees one final state either way.
     expect(opener).toContain("openUploadedFilesInViewer([], {}, outcome);");
     expect(openerBody).not.toContain("setResourceViewerContext(");
-    // The shared entry point only admits an empty file set when an outcome rides along.
+    // The shared entry point only admits an empty file set when an outcome rides
+    // along, and stamps a TOTAL outcome on every context — callers that pass no
+    // outcome get one defaulted from the files they open.
     const enter = sliceBetween(
       appSource,
       "const openUploadedFilesInViewer = useCallback(",
@@ -85,19 +104,31 @@ describe("Lens deep-link opener", () => {
     );
     expect(enter).toContain("lensOpen?: LensOpenOutcome");
     expect(enter).toContain("if (selectedFiles.length === 0 && !lensOpen) {");
-    expect(enter).toContain("...lensOpen,");
+    expect(enter).toContain("const outcome: LensOpenOutcome = lensOpen ?? {");
+    expect(enter).toContain(
+      "requestedFileIds: normalizeLensFileIds(selectedFiles.map((file) => file.file_id)),"
+    );
+    expect(enter).toContain("...outcome,");
+    expect(enter).not.toContain("...lensOpen,");
+    // The context type carries the outcome as required fields, so a new writer
+    // cannot silently drop it.
+    expect(appSource).toMatch(
+      /type ResourceViewerContext = \{\s*uploadedFiles: UploadedFileRecord\[\];\s*bisqueLinksByFileId: Record<string, BisqueViewerLink>;\s*\} & LensOpenOutcome;/
+    );
   });
 
-  it("classifies 401 as a session problem, 404/403/410 as unavailable, anything else as failed", () => {
+  it("classifies 401 as failed-plus-session-toast, 404/403/410 as unavailable, anything else as failed", () => {
     expect(appSource).toContain("const LENS_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([403, 404, 410]);");
     const classify = sliceBetween(opener, "settled.forEach((result, index) => {", "const outcome: LensOpenOutcome");
     const apiErrorBranch = classify.indexOf("if (reason instanceof ApiError) {");
     const unauthorized = classify.indexOf("if (reason.status === 401) {");
     const unavailable = classify.indexOf("if (LENS_UNAVAILABLE_STATUSES.has(reason.status)) {");
     const unavailablePush = classify.indexOf("unavailableFileIds.push(ids[index]);");
-    // Two failed pushes: the malformed-record guard inside the fulfilled branch
-    // (a 2xx without a usable record) and the rejection fall-through. The
-    // fall-through is the LAST one and must sit after the unavailable push.
+    // Three failed pushes: the malformed-record guard inside the fulfilled branch
+    // (a 2xx without a usable record), the 401 branch (retryable after re-auth,
+    // so it is a load failure with a Retry — never "this file is gone"), and the
+    // rejection fall-through. The fall-through is the LAST one and must sit
+    // after the unavailable push.
     const failedPush = classify.lastIndexOf("failedFileIds.push(ids[index]);");
     expect(apiErrorBranch).toBeGreaterThan(-1);
     expect(unauthorized).toBeGreaterThan(apiErrorBranch);
@@ -105,9 +136,58 @@ describe("Lens deep-link opener", () => {
     expect(unavailablePush).toBeGreaterThan(unavailable);
     // The fall-through (non-ApiError, other statuses, network) lands in failed.
     expect(failedPush).toBeGreaterThan(unavailablePush);
-    expect(classify.match(/failedFileIds\.push/g)).toHaveLength(2);
-    // A 401 surfaces as a toast and never as either notice.
-    expect(opener).toMatch(/else if \(unauthorized\) \{\s*showErrorToast\(/);
+    expect(classify.match(/failedFileIds\.push/g)).toHaveLength(3);
+    // The 401 branch pushes to failed AND flags the session problem.
+    expect(classify).toMatch(/unauthorized = true;\s*failedFileIds\.push\(ids\[index\]\);/);
+    // The session toast fires whenever any id hit a 401 — a partial open still
+    // tells the user their session is gone, not only a total miss.
+    expect(opener).toMatch(/if \(unauthorized\) \{\s*showErrorToast\(/);
+    expect(opener).not.toMatch(/else if \(unauthorized\)/);
+  });
+
+  it("arms one token per open and drops a settle that no longer owns it", () => {
+    // The single pending ref carries the ids AND the panel the open started on.
+    expect(appSource).toContain(
+      "const pendingLensOpenRef = useRef<{ ids: string[]; panelAtStart: ActivePanel } | null>(null);"
+    );
+    expect(appSource).not.toContain("lensOpenGenerationRef");
+    expect(opener).toContain("const token = { ids, panelAtStart: activePanel };");
+    expect(opener).toContain("pendingLensOpenRef.current = token;");
+    // Supersession is token IDENTITY: a newer open replaced the token, or a
+    // navigation away cleared it — either way this settle writes nothing.
+    expect(opener).toContain("if (pendingLensOpenRef.current !== token) {");
+    // Cancel-on-navigate: leaving for any panel other than the starting one or
+    // the viewer clears the token, so the settle cannot yank the user back.
+    const cancel = sliceBetween(
+      appSource,
+      "// Cancel-on-navigate:",
+      "// The one way into Lens by file id"
+    );
+    expect(cancel).toContain("activePanel !== pending.panelAtStart &&");
+    expect(cancel).toContain('activePanel !== "scientific-viewer"');
+    expect(cancel).toContain("pendingLensOpenRef.current = null;");
+    expect(cancel).toMatch(/\}, \[activePanel\]\);/);
+  });
+
+  it("short-circuits a reopen of ids already in flight or already fully open", () => {
+    // Same ids already resolving: that open's settle owns the viewer.
+    expect(opener).toContain(
+      "if (pendingLensOpenRef.current && sameIdList(pendingLensOpenRef.current.ids, ids)) {"
+    );
+    // Same ids fully open (no recorded miss): restore the panel in memory, no
+    // refetch. Any recorded miss keeps the refetch so Back retries it.
+    const restoreBranch = sliceBetween(
+      openerBody,
+      "resourceViewerContext &&",
+      "const token = { ids, panelAtStart: activePanel };"
+    );
+    expect(restoreBranch).toContain("sameIdList(resourceViewerContext.requestedFileIds ?? [], ids) &&");
+    expect(restoreBranch).toContain("(resourceViewerContext.unavailableFileIds ?? []).length === 0 &&");
+    expect(restoreBranch).toContain("(resourceViewerContext.failedFileIds ?? []).length === 0");
+    expect(restoreBranch).toContain("rememberActiveConversationScrollPosition();");
+    expect(restoreBranch).toContain('setActivePanel("scientific-viewer");');
+    expect(restoreBranch).toContain("setViewerOpen(false);");
+    expect(restoreBranch).not.toContain("apiClient.getResource");
   });
 
   it("feeds the viewer both miss lists plus Retry and Open chat", () => {
@@ -192,7 +272,7 @@ describe("Lens deep-link cold load", () => {
   it("skips the intermediate empty Lens state while an open is resolving, without a sticky flag", () => {
     expect(sync).toContain('activePanel === "scientific-viewer" && pendingLensOpenRef.current !== null');
     // Armed before the first await, cleared by the same call after its final state write.
-    const arm = opener.indexOf("pendingLensOpenRef.current = ids;");
+    const arm = opener.indexOf("pendingLensOpenRef.current = token;");
     const firstAwait = opener.indexOf("await Promise.allSettled");
     const lastWrite = opener.lastIndexOf("openUploadedFilesInViewer([], {}, outcome);");
     const clear = opener.lastIndexOf("pendingLensOpenRef.current = null;");
@@ -205,15 +285,28 @@ describe("Lens deep-link cold load", () => {
   it("writes the REQUESTED ids to the URL so re-opening that URL yields the same key", () => {
     // This is the Back-button guarantee: the URL encodes the request, the restore
     // re-issues the request, the context records the request, the key matches.
+    // requestedFileIds is stamped on every context, so there is no fallback to
+    // "whatever resolved" — only the null-context ?? [].
     const derive = sliceBetween(appSource, "const viewerResourceFileIds = useMemo(() => {", "}, [resourceViewerContext]);");
-    const requested = derive.indexOf("const requestedIds = resourceViewerContext?.requestedFileIds ?? [];");
-    const returnRequested = derive.indexOf("return requestedIds;");
-    const fallback = derive.indexOf("return (resourceViewerContext?.uploadedFiles ?? []).map((file) => file.file_id);");
-    expect(requested).toBeGreaterThan(-1);
-    expect(returnRequested).toBeGreaterThan(requested);
-    expect(fallback).toBeGreaterThan(returnRequested);
+    expect(derive).toContain("return resourceViewerContext?.requestedFileIds ?? [];");
+    expect(derive).not.toContain("uploadedFiles");
     expect(derive).not.toContain("unavailableFileIds");
     expect(sync).toContain("resourceFileIds: viewerResourceFileIds,");
+  });
+
+  it("re-stamps the request when a deletion rebuilds the viewer context", () => {
+    // Deleting an open file rebuilds the context around the survivors; the
+    // outcome fields stay total so the URL and Retry follow the deletion.
+    const rebuild = sliceBetween(
+      appSource,
+      "const nextLinks = { ...current.bisqueLinksByFileId };",
+      "const deleteResource = async"
+    );
+    expect(rebuild).toContain(
+      "requestedFileIds: normalizeLensFileIds(nextFiles.map((file) => file.file_id)),"
+    );
+    expect(rebuild).toContain("unavailableFileIds: [],");
+    expect(rebuild).toContain("failedFileIds: [],");
   });
   it("treats a fulfilled lookup without a usable record as a load failure, never a throw", () => {
     // Found in the mock harness: a 2xx without the { resource } envelope made

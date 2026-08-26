@@ -808,8 +808,11 @@ resource id or link, never build a link from a name alone, and never link to a s
 When you present an inventory, use a table whose first column is the linked file name (no
 backticks around a linked name), followed by kind, size, and any metadata that answers the
 question; keep the column count identical in every row.
-search_resources returning ok=false with error "catalog_unavailable" means the catalog could
-not be reached for this run, not that the user owns nothing — say so and offer to retry.
+search_resources returning ok=false never means the user owns nothing. error
+"catalog_unavailable" means the catalog could not be reached for this run (transient) —
+say so and offer to retry. error "catalog_refused" means the catalog answered but refused
+this run (a configuration or permissions problem, not an outage) — do not retry; tell the
+user what happened.
 Never use a lens_url for file access; stage_resource_for_analysis is the only way to read
 a resource's bytes.
 """

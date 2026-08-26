@@ -1,7 +1,8 @@
 // A tiny module-level store for the in-app figure lightbox. Any chat component
 // can open it by importing openFigureLightbox(...) — no context threading through
 // the (very large) App tree. A single <FigureLightboxRoot/> subscribes and renders
-// the overlay. "Open in Lens" is wired once by App via registerLightboxOpenInLens.
+// the overlay; its "Open in Lens" button reads App's one registered opener from
+// lib/lensNavigation, the same registry the chat pills use.
 
 export type LightboxFigure = {
   url: string;
@@ -17,7 +18,6 @@ export type LightboxFigure = {
 export type FigureLightboxState = { figures: LightboxFigure[]; index: number } | null;
 
 let state: FigureLightboxState = null;
-let openInLens: ((fileId: string) => void) | null = null;
 const listeners = new Set<() => void>();
 
 const emit = () => {
@@ -55,12 +55,4 @@ export function subscribeFigureLightbox(listener: () => void): () => void {
 
 export function getFigureLightboxState(): FigureLightboxState {
   return state;
-}
-
-export function registerLightboxOpenInLens(handler: ((fileId: string) => void) | null): void {
-  openInLens = handler;
-}
-
-export function getLightboxOpenInLens(): ((fileId: string) => void) | null {
-  return openInLens;
 }

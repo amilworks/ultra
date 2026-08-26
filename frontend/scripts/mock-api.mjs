@@ -2164,20 +2164,6 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  // Single-record lookup, the shape the Lens opener uses (apiClient.getResource):
-  // 404 for unknown ids, matching the control plane's no-existence-leak contract.
-  const singleResourceMatch = url.pathname.match(/^\/v2\/resources\/([^/]+)$/);
-  if (request.method === "GET" && singleResourceMatch) {
-    const wanted = decodeURIComponent(singleResourceMatch[1]);
-    const record = resourceFixtures.find((resource) => resource.file_id === wanted);
-    if (!record) {
-      sendJson(response, 404, { error: "resource not found" });
-      return;
-    }
-    sendJson(response, 200, { resource: record });
-    return;
-  }
-
   if (request.method === "GET" && url.pathname === "/v2/resources") {
     const query = String(url.searchParams.get("q") || "").trim();
     const kind = String(url.searchParams.get("kind") || "").trim();

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildNavUrl,
+  dedupeFileIds,
   LENS_MAX_FILE_IDS,
   lensDeepLinkFor,
   navStateKey,
@@ -20,6 +21,19 @@ const nav = (partial: Partial<NavState> & Pick<NavState, "panel">): NavState => 
 });
 
 const manyIds = (count: number): string[] => Array.from({ length: count }, (_, index) => `id-${index}`);
+
+describe("dedupeFileIds", () => {
+  it("coerces runtime junk instead of throwing", () => {
+    // App-wide id lists are assembled from API payloads; a null, a number or a
+    // padded entry must degrade, never crash the caller.
+    expect(dedupeFileIds([null, undefined, 42, "  a  ", "", "   ", "a"])).toEqual(["42", "a"]);
+  });
+
+  it("dedupes first-wins without a cap", () => {
+    expect(dedupeFileIds(["b", "a", "b"])).toEqual(["b", "a"]);
+    expect(dedupeFileIds(manyIds(30))).toHaveLength(30);
+  });
+});
 
 describe("normalizeLensFileIds", () => {
   it("trims and drops empty ids", () => {
@@ -200,6 +214,17 @@ describe("navUrl", () => {
         navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: ["a", "b"] }))
       );
     });
+
+    it("normalizes the ids itself, so key and URL cannot disagree for any caller", () => {
+      // A caller keying an un-normalized list (duplicates, padding, over-cap)
+      // must get the same key as the state buildNavUrl's URL restores to.
+      expect(navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: [" a ", "b", "a", ""] }))).toBe(
+        navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: ["a", "b"] }))
+      );
+      expect(navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: manyIds(30) }))).toBe(
+        navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: manyIds(LENS_MAX_FILE_IDS) }))
+      );
+    });
   });
 });
 
@@ -209,18 +234,27 @@ describe("lensDeepLinkFor", () => {
     expect(lensDeepLinkFor(["file-123"])).toBe("/?view=lens&resource=file-123");
   });
 
-  it("comma-joins multiple ids in one resource param, deduped and trimmed", () => {
-    expect(lensDeepLinkFor(["a", " b ", "a"])).toBe("/?view=lens&resource=a,b");
+  it("joins multiple ids in one resource param, deduped and trimmed, in buildNavUrl's canonical encoding", () => {
+    // Delegating to buildNavUrl means the URLSearchParams form (comma -> %2C):
+    // a deep link is byte-identical to the URL the state sync writes.
+    expect(lensDeepLinkFor(["a", " b ", "a"])).toBe("/?view=lens&resource=a%2Cb");
+    expect(lensDeepLinkFor(["a", "b"])).toBe(
+      buildNavUrl(loc(""), nav({ panel: "scientific-viewer", resourceFileIds: ["a", "b"] }))
+    );
   });
 
   it("caps at LENS_MAX_FILE_IDS like every other consumer", () => {
     const href = lensDeepLinkFor(manyIds(30));
-    expect(href).toBe(`/?view=lens&resource=${manyIds(24).join(",")}`);
+    expect(href).toBe(`/?view=lens&resource=${manyIds(24).join("%2C")}`);
     expect(parseNavFromSearch(href.slice(href.indexOf("?"))).resourceFileIds).toEqual(manyIds(24));
   });
 
-  it("percent-encodes each id individually", () => {
-    expect(lensDeepLinkFor(["a b", "c&d"])).toBe("/?view=lens&resource=a%20b,c%26d");
+  it("escapes reserved characters so an id can never split the param", () => {
+    expect(lensDeepLinkFor(["a b", "c&d"])).toBe("/?view=lens&resource=a+b%2Cc%26d");
+    expect(parseNavFromSearch("?view=lens&resource=a+b%2Cc%26d").resourceFileIds).toEqual([
+      "a b",
+      "c&d",
+    ]);
   });
 
   it("omits the resource param when no usable id is given", () => {
@@ -253,7 +287,9 @@ describe("resolveLensLink", () => {
   it("accepts multiple ids whether comma-joined raw or encoded", () => {
     expect(resolveLensLink("/?view=lens&resource=a,b", origin)?.fileIds).toEqual(["a", "b"]);
     expect(resolveLensLink("/?view=lens&resource=a%2Cb", origin)?.fileIds).toEqual(["a", "b"]);
-    expect(resolveLensLink("/?view=lens&resource=a%2Cb", origin)?.href).toBe("/?view=lens&resource=a,b");
+    // Either input encoding resolves to the one canonical (encoded) href.
+    expect(resolveLensLink("/?view=lens&resource=a,b", origin)?.href).toBe("/?view=lens&resource=a%2Cb");
+    expect(resolveLensLink("/?view=lens&resource=a%2Cb", origin)?.href).toBe("/?view=lens&resource=a%2Cb");
   });
 
   it("accepts the same-origin absolute form and preserves other params only as input", () => {

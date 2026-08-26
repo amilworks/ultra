@@ -29,9 +29,15 @@ from ultra_deepagents.context_tools import (
 
 _RESOURCE_TIMEOUT_SECONDS = 30.0
 _MAX_RESULTS = 100
-# Machine-readable reason the model sees when the control-plane catalog could not be
-# reached. It means "unknown", never "the user owns nothing" — the prompt says so.
+# Machine-readable errors the model sees when the control-plane catalog gave no
+# usable answer. Neither ever means "the user owns nothing" — the prompt says so.
+# catalog_unavailable: the catalog could not be reached or failed transiently
+# (network error, 5xx) — a retry is reasonable.
 CATALOG_UNAVAILABLE = "catalog_unavailable"
+# catalog_refused: the catalog answered and refused this run (4xx, or 501 for an
+# endpoint it does not serve) — configuration or permissions, so a retry within
+# the same run cannot change the answer.
+CATALOG_REFUSED = "catalog_refused"
 
 
 def lens_deep_link(resource_id: str) -> str:
@@ -74,8 +80,15 @@ def normalize_resource_hits(resources: Any) -> list[dict[str, Any]]:
 
 
 def _catalog_failure(exc: BaseException) -> dict[str, Any]:
+    import httpx
+
     # The exception text can carry the control-plane URL and host details, which are
-    # operator facts, not model-visible data; only the exception class survives.
+    # operator facts, not model-visible data; only the HTTP status or the exception
+    # class survives.
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        error = CATALOG_REFUSED if status < 500 or status == 501 else CATALOG_UNAVAILABLE
+        return {"ok": False, "error": error, "reason": f"http_{status}"}
     return {"ok": False, "error": CATALOG_UNAVAILABLE, "reason": type(exc).__name__}
 
 
@@ -208,7 +221,7 @@ def build_resource_tools(
         source: str = "",
         limit: int = 50,
     ) -> str:
-        """Search YOUR Resources library (the Resources tab) — the user's uploaded datasets, images, and prior results — by keyword. Use this to find data to analyze that was NOT attached to this chat, e.g. "the CT scans with 'norm' in the name", "the NPM1 image we looked at before", "my segmentation outputs". query matches resource names; kind filters by type (image, dataset, document, table, model); source filters origin (upload, bisque_import). Returns each match's resource_id, original_name, kind, size, metadata, and lens_url — the in-app link that opens that file in the Lens viewer; cite it verbatim as the file name's markdown link. ok=false with error "catalog_unavailable" means the catalog could not be reached, not that the user owns nothing. Then call stage_resource_for_analysis with the resource_id(s) to pull the file(s) into /workspace and analyze them with execute()."""
+        """Search YOUR Resources library (the Resources tab) — the user's uploaded datasets, images, and prior results — by keyword. Use this to find data to analyze that was NOT attached to this chat, e.g. "the CT scans with 'norm' in the name", "the NPM1 image we looked at before", "my segmentation outputs". query matches resource names; kind filters by type (image, dataset, document, table, model); source filters origin (upload, bisque_import). Returns each match's resource_id, original_name, kind, size, metadata, and lens_url — the in-app link that opens that file in the Lens viewer; cite it verbatim as the file name's markdown link. ok=false never means the user owns nothing: error "catalog_unavailable" means the catalog could not be reached (transient — a retry is reasonable), while "catalog_refused" means the catalog answered but refused this run (configuration or permissions — do not retry; tell the user what happened). Then call stage_resource_for_analysis with the resource_id(s) to pull the file(s) into /workspace and analyze them with execute()."""
         result = search_resources_catalog(
             settings,
             context=runtime.context,
@@ -230,11 +243,12 @@ def build_resource_tools(
             return json.dumps({"ok": False, "error": "no_resource_ids"}, indent=2, sort_keys=True)
         resolved = resolve_catalog_resources(settings, context=runtime.context, resource_ids=ids)
         if not resolved.get("ok"):
-            return json.dumps(
-                {"ok": False, "error": resolved.get("error", "resolve_failed")},
-                indent=2,
-                sort_keys=True,
-            )
+            # Forward the resolve failure's error AND reason so the model can tell a
+            # transient outage (retry) from a refusal (don't) without a second call.
+            failure: dict[str, Any] = {"ok": False, "error": resolved.get("error", "resolve_failed")}
+            if resolved.get("reason"):
+                failure["reason"] = resolved["reason"]
+            return json.dumps(failure, indent=2, sort_keys=True)
         result = stage_catalog_resources(
             runtime.context,
             upload_roots=resolved_upload_roots,

@@ -578,9 +578,17 @@ func configuredPublicURL(cfg config.Config) string {
 // localhost, a proxy alias, a second hostname) yields foreign-origin links the
 // SPA correctly refuses to treat as in-app navigation. A relative link is
 // right on every host; an absolute one is only right when the operator has
-// asserted the public origin via ULTRA_CONTROL_PUBLIC_URL.
+// asserted the public origin via ULTRA_CONTROL_PUBLIC_URL. The configured
+// value is normalized to a bare scheme://host origin: the SPA's deep-link
+// parser requires pathname "/", so a path (or query/fragment) left on the
+// value would silently defeat it, and a value that does not parse as an
+// absolute URL yields no origin at all — no link beats a broken absolute one.
 func explicitPublicURL(cfg config.Config) string {
-	return strings.TrimRight(strings.TrimSpace(cfg.PublicURL), "/")
+	parsed, err := url.Parse(strings.TrimSpace(cfg.PublicURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
 }
 
 func pingPostgres(ctx context.Context, pool *pgxpool.Pool) error {

@@ -15,6 +15,7 @@ from ultra_deepagents.context_tools import (
     stage_uploaded_files,
 )
 from ultra_deepagents.resources.tools import (
+    CATALOG_REFUSED,
     CATALOG_UNAVAILABLE,
     build_resource_tools,
     lens_deep_link,
@@ -71,6 +72,38 @@ def _fake_httpx(monkeypatch, captured: dict, payload: dict) -> None:
             captured["url"] = url
             captured["json"] = json
             captured["headers"] = headers or {}
+            return FakeResponse()
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+
+
+def _fake_httpx_status_error(monkeypatch, status: int) -> None:
+    """Every POST answers `status` and raise_for_status raises the real
+    httpx.HTTPStatusError, exactly as httpx would — so _catalog_failure's
+    isinstance classification is exercised, not a lookalike."""
+    import httpx
+
+    request = httpx.Request("POST", "http://control.test/v2/runs/run-now/resource-search")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError(
+                f"server returned {status}",
+                request=request,
+                response=httpx.Response(status, request=request),
+            )
+
+    class FakeClient:
+        def __init__(self, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
             return FakeResponse()
 
     monkeypatch.setattr("httpx.Client", FakeClient)
@@ -494,6 +527,42 @@ def test_resolve_resources_failure_carries_machine_readable_reason(monkeypatch, 
     assert "control.test" not in json.dumps(result)
 
 
+def test_catalog_answer_statuses_split_refused_from_unavailable(monkeypatch, tmp_path):
+    # A status the catalog ANSWERED with is a refusal when it cannot change on
+    # retry (4xx auth/permissions/config, and 501 for an unserved endpoint) and
+    # an outage when it can (other 5xx). The status reaches the model as the
+    # reason; the host never does.
+    cases = [
+        (401, CATALOG_REFUSED),
+        (404, CATALOG_REFUSED),
+        (501, CATALOG_REFUSED),
+        (500, CATALOG_UNAVAILABLE),
+        (503, CATALOG_UNAVAILABLE),
+    ]
+    for status, expected_error in cases:
+        _fake_httpx_status_error(monkeypatch, status)
+        result = search_resources_catalog(_settings(), context=_context(tmp_path), query="x")
+        assert result == {
+            "ok": False,
+            "error": expected_error,
+            "reason": f"http_{status}",
+            "resources": [],
+        }, status
+        assert "control.test" not in json.dumps(result)
+
+
+def test_resolve_resources_refused_status_carries_http_reason(monkeypatch, tmp_path):
+    _fake_httpx_status_error(monkeypatch, 401)
+    result = resolve_catalog_resources(
+        _settings(), context=_context(tmp_path), resource_ids=["file_a"]
+    )
+    assert result["ok"] is False
+    assert result["error"] == CATALOG_REFUSED
+    assert result["reason"] == "http_401"
+    assert result["missing"] == ["file_a"]
+    assert "control.test" not in json.dumps(result)
+
+
 def test_resolve_resources_normalizes_lens_url_on_hits(monkeypatch, tmp_path):
     _fake_httpx(
         monkeypatch,
@@ -583,7 +652,7 @@ def test_stage_tool_stamps_lens_url_on_staged_records_without_using_it_for_io(
     assert str(uploads) not in raw
 
 
-def test_stage_tool_reports_catalog_unavailable_reason(monkeypatch, tmp_path):
+def test_stage_tool_forwards_catalog_unavailable_error_and_reason(monkeypatch, tmp_path):
     def boom(*a, **k):
         raise ConnectionError("http://control.test refused")
 
@@ -592,7 +661,21 @@ def test_stage_tool_reports_catalog_unavailable_reason(monkeypatch, tmp_path):
     raw = tools["stage_resource_for_analysis"].invoke(
         {"resource_ids": ["file_a"], "runtime": _tool_runtime(_context(tmp_path))}
     )
-    assert json.loads(raw) == {"ok": False, "error": CATALOG_UNAVAILABLE}
+    assert json.loads(raw) == {
+        "ok": False,
+        "error": CATALOG_UNAVAILABLE,
+        "reason": "ConnectionError",
+    }
+    assert "control.test" not in raw
+
+
+def test_stage_tool_forwards_catalog_refused_error_and_reason(monkeypatch, tmp_path):
+    _fake_httpx_status_error(monkeypatch, 401)
+    tools = {t.name: t for t in build_resource_tools(_settings())}
+    raw = tools["stage_resource_for_analysis"].invoke(
+        {"resource_ids": ["file_a"], "runtime": _tool_runtime(_context(tmp_path))}
+    )
+    assert json.loads(raw) == {"ok": False, "error": CATALOG_REFUSED, "reason": "http_401"}
     assert "control.test" not in raw
 
 

@@ -78,6 +78,7 @@ import {
 } from "./lib/api";
 import {
   buildNavUrl,
+  dedupeFileIds,
   LENS_MAX_FILE_IDS,
   navStateKey,
   normalizeLensFileIds,
@@ -88,11 +89,7 @@ import { registerLensOpener } from "./lib/lensNavigation";
 import { FigureLightboxRoot } from "./components/FigureLightboxRoot";
 import { AnimatedTokenCount } from "./components/chat/AnimatedTokenCount";
 import { FigureCaption } from "./components/chat/FigureCaption";
-import {
-  openFigureLightbox,
-  registerLightboxOpenInLens,
-  type LightboxFigure,
-} from "./lib/figureLightbox";
+import { openFigureLightbox, type LightboxFigure } from "./lib/figureLightbox";
 import { bundleRootForRelativePath, groupPendingUploads } from "./lib/pendingBundles";
 import { filesFromClipboard } from "./lib/clipboardFiles";
 import {
@@ -994,26 +991,27 @@ const writeResourceUploadProgressToStorage = (items: ResourceUploadProgress[]): 
   }
 };
 
-// What a Lens open by file id asked for and how each id fared. Set on EVERY
-// outcome of openLensByFileIds (all found, some found, none found) so the URL
-// always encodes the request, never the result: re-opening that URL yields the
-// same nav key, so the state->URL sync has nothing to write and Back can never
-// bounce between "what was asked" and "what answered".
+// What a Lens open asked for and how each id fared. Stamped on EVERY viewer
+// context — openLensByFileIds passes its real outcome, and every other entry
+// into Lens defaults it from the files it opens — so the URL always encodes
+// the request, never the result: re-opening that URL yields the same nav key,
+// so the state->URL sync has nothing to write and Back can never bounce
+// between "what was asked" and "what answered".
 type LensOpenOutcome = {
   // The normalized (trimmed, deduped, capped) ids the open was asked for.
   requestedFileIds: string[];
   // Ids the catalog answered 404/403/410 for: removed, or not shared with this
   // user (the backend does not distinguish). Drives the "not available" copy.
   unavailableFileIds: string[];
-  // Ids whose lookup failed for any other reason (5xx, network, unexpected
-  // status). Transient by assumption, so the viewer offers a Retry.
+  // Ids whose lookup failed for any other reason (401, 5xx, network,
+  // unexpected status). Transient by assumption, so the viewer offers a Retry.
   failedFileIds: string[];
 };
 
 type ResourceViewerContext = {
   uploadedFiles: UploadedFileRecord[];
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
-} & Partial<LensOpenOutcome>;
+} & LensOpenOutcome;
 
 // Catalog statuses that mean "this id will not resolve for you right now, and
 // retrying will not change that": gone, forbidden, or never there.
@@ -1949,19 +1947,14 @@ const uniqueByFileId = (rows: UploadedFileRecord[]): UploadedFileRecord[] => {
   return Array.from(mapped.values());
 };
 
-const uniqueFileIds = (rows: string[]): string[] => {
-  const seen = new Set<string>();
-  const ordered: string[] = [];
-  rows.forEach((fileId) => {
-    const normalized = String(fileId || "").trim();
-    if (!normalized || seen.has(normalized)) {
-      return;
-    }
-    seen.add(normalized);
-    ordered.push(normalized);
-  });
-  return ordered;
-};
+// App-wide file-id hygiene is the URL layer's own uncapped pass (coerce, trim,
+// drop empties, first-wins dedupe); only the Lens funnel adds a cap on top.
+const uniqueFileIds: (rows: string[]) => string[] = dedupeFileIds;
+
+// Ordered equality for normalized id lists: two Lens requests mean the same
+// view exactly when their normalized lists match element for element.
+const sameIdList = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((id, index) => id === b[index]);
 
 type ConversationTranscriptActions = {
   onStopConversation: () => void;
@@ -9685,11 +9678,11 @@ export function App() {
     }
   };
 
-  // Enter Lens with a set of files. `lensOpen` is only passed by openLensByFileIds:
-  // it records what was asked for alongside what opened, and lets an open that
-  // found nothing still enter Lens (to show the notice) through this one path, so
-  // the URL sync always sees a single final state write per open. Every other
-  // caller (Resources tab, conversation files) passes files and nothing else.
+  // Enter Lens with a set of files. Every context carries a total LensOpenOutcome:
+  // openLensByFileIds passes its real one (which also lets an open that found
+  // nothing still enter Lens, to show the notice, through this one path), and every
+  // other caller (Resources tab, conversation files) gets one defaulted from the
+  // files it opens — so the URL sync always sees the requested ids on every view.
   const openUploadedFilesInViewer = useCallback((
     selectedFiles: UploadedFileRecord[],
     selectedLinksByFileId: Record<string, BisqueViewerLink>,
@@ -9698,10 +9691,15 @@ export function App() {
     if (selectedFiles.length === 0 && !lensOpen) {
       return;
     }
+    const outcome: LensOpenOutcome = lensOpen ?? {
+      requestedFileIds: normalizeLensFileIds(selectedFiles.map((file) => file.file_id)),
+      unavailableFileIds: [],
+      failedFileIds: [],
+    };
     setResourceViewerContext({
       uploadedFiles: uniqueByFileId(selectedFiles),
       bisqueLinksByFileId: selectedLinksByFileId,
-      ...lensOpen,
+      ...outcome,
     });
     rememberActiveConversationScrollPosition();
     setActivePanel("scientific-viewer");
@@ -9746,15 +9744,13 @@ export function App() {
   // ?conversation= sync — buildNavUrl preserves every other param, so each layer only
   // ever touches its own keys.
   const viewerResourceFileIds = useMemo(() => {
-    // A Lens opened by file id encodes what was REQUESTED, not what resolved: the
-    // notice is about those files, a refresh or re-share retries them, and — the
+    // A Lens view encodes what was REQUESTED, not what resolved: the notice is
+    // about those files, a refresh or re-share retries them, and — the
     // load-bearing part — restoring that URL asks for the same ids again, so the
     // nav key matches and the sync never pushes a second entry for one view.
-    const requestedIds = resourceViewerContext?.requestedFileIds ?? [];
-    if (requestedIds.length > 0) {
-      return requestedIds;
-    }
-    return (resourceViewerContext?.uploadedFiles ?? []).map((file) => file.file_id);
+    // Every context stamps requestedFileIds at the openUploadedFilesInViewer
+    // funnel; the ?? [] only covers the null (no viewer) context.
+    return resourceViewerContext?.requestedFileIds ?? [];
   }, [resourceViewerContext]);
   const initialNavRef = useRef<NavState>(
     typeof window === "undefined"
@@ -9768,13 +9764,34 @@ export function App() {
   // the pre-restore "chat" panel and would rewrite a deep link to the chat URL.
   const [navRestored, setNavRestored] = useState(false);
   const lastNavKeyRef = useRef<string | null>(null);
-  // Ids of the Lens open currently resolving, or null. While a Lens open is in flight
-  // the viewer panel may already be active with an empty (or stale) context; writing
-  // that intermediate state to the URL would push a bogus "?view=lens" entry. Cleared
-  // by the same open that set it, in the same tick as its final state write, so it
-  // can never outlive one navigation (unlike a sticky suppress flag).
-  const pendingLensOpenRef = useRef<string[] | null>(null);
-  const lensOpenGenerationRef = useRef(0);
+  // The Lens open currently resolving, or null. The token records the normalized
+  // ids being fetched and the panel the open started on. While a Lens open is in
+  // flight the viewer panel may already be active with an empty (or stale)
+  // context; writing that intermediate state to the URL would push a bogus
+  // "?view=lens" entry, so the URL sync skips while a token is armed. Token
+  // IDENTITY is the supersession check: a settle writes only while the ref still
+  // holds its own token — a newer open replaces the token and a cancel clears
+  // it, and either way the stale settle drops its results. The open that wins
+  // clears the ref in the same tick as its final state write, so a token can
+  // never outlive one navigation (unlike a sticky suppress flag).
+  const pendingLensOpenRef = useRef<{ ids: string[]; panelAtStart: ActivePanel } | null>(null);
+
+  // Cancel-on-navigate: while a token is armed, a panel change to anything other
+  // than the panel the open started on or the viewer it is heading for means the
+  // user navigated away mid-flight — clear the token so the settle cannot yank
+  // them back. Staying on the starting panel (a pill clicked from chat) keeps
+  // the open, and the panel turning into the viewer IS the open (restore paths
+  // flip the panel before the fetch lands).
+  useEffect(() => {
+    const pending = pendingLensOpenRef.current;
+    if (
+      pending !== null &&
+      activePanel !== pending.panelAtStart &&
+      activePanel !== "scientific-viewer"
+    ) {
+      pendingLensOpenRef.current = null;
+    }
+  }, [activePanel]);
 
   // The one way into Lens by file id — chat "Open in Lens" pills, the figure lightbox,
   // deep links, Back/Forward, and the viewer's own Retry all funnel here. Fetches each
@@ -9782,8 +9799,10 @@ export function App() {
   // enters Lens through openUploadedFilesInViewer with the full outcome attached, so
   // the URL sync sees exactly one final state per open. Per id: found -> opens;
   // 404/403/410 -> unavailable (missing OR not shared — the backend does not
-  // distinguish); anything else (5xx, network) -> failed, retryable. A 401 is a
-  // session problem, surfaced as a toast, and never masquerades as "this file is gone".
+  // distinguish); anything else (401, 5xx, network) -> failed, retryable. A 401 is
+  // additionally a session problem: the ids stay retryable after re-auth, so they
+  // land in failed while the expired session surfaces once as a toast, and a 401
+  // never masquerades as "this file is gone".
   const openLensByFileIds = useCallback(
     async (fileIds: string[]): Promise<void> => {
       // The same normalization the URL layer applies (trim, dedupe, cap), so the ids
@@ -9793,25 +9812,42 @@ export function App() {
       if (ids.length === 0) {
         return;
       }
-      if (ids.length === LENS_MAX_FILE_IDS && fileIds.length > ids.length) {
-        // Only ids the cap cut count as ignored; duplicates and blanks were never asks.
-        const ignored = Array.from(
-          new Set(fileIds.map((id) => id.trim()).filter((id) => id.length > 0 && !ids.includes(id)))
-        );
-        if (ignored.length > 0) {
+      if (fileIds.length > ids.length) {
+        // Duplicates and blanks were never asks; only ids the cap cut are worth a warning.
+        const requested = dedupeFileIds(fileIds).length;
+        if (requested > ids.length) {
           console.warn("Lens open capped", {
-            requested: ids.length + ignored.length,
+            requested,
             opened: ids.length,
             cap: LENS_MAX_FILE_IDS,
-            ignored,
           });
         }
       }
-      const generation = ++lensOpenGenerationRef.current;
-      pendingLensOpenRef.current = ids;
+      if (pendingLensOpenRef.current && sameIdList(pendingLensOpenRef.current.ids, ids)) {
+        // Exactly these ids are already resolving; that open's settle owns the viewer.
+        return;
+      }
+      if (
+        resourceViewerContext &&
+        sameIdList(resourceViewerContext.requestedFileIds ?? [], ids) &&
+        (resourceViewerContext.unavailableFileIds ?? []).length === 0 &&
+        (resourceViewerContext.failedFileIds ?? []).length === 0
+      ) {
+        // The context already holds a fully-successful open of these exact ids, and
+        // every flow that invalidates it nulls it — so Back/Forward and a repeated
+        // pill click restore the view in memory, matching the app's Back semantics.
+        // A recorded miss keeps the refetch, so returning to that view retries it.
+        rememberActiveConversationScrollPosition();
+        setActivePanel("scientific-viewer");
+        setViewerOpen(false);
+        return;
+      }
+      const token = { ids, panelAtStart: activePanel };
+      pendingLensOpenRef.current = token;
       const settled = await Promise.allSettled(ids.map((id) => apiClient.getResource(id)));
-      if (generation !== lensOpenGenerationRef.current) {
-        // A newer open superseded this one; its result owns the viewer now.
+      if (pendingLensOpenRef.current !== token) {
+        // Superseded by a newer open or cancelled by a navigation away; either
+        // way this settle no longer owns the viewer and writes nothing.
         return;
       }
       const found: ResourceRecord[] = [];
@@ -9831,6 +9867,7 @@ export function App() {
         if (reason instanceof ApiError) {
           if (reason.status === 401) {
             unauthorized = true;
+            failedFileIds.push(ids[index]);
             return;
           }
           if (LENS_UNAVAILABLE_STATUSES.has(reason.status)) {
@@ -9840,6 +9877,9 @@ export function App() {
         }
         failedFileIds.push(ids[index]);
       });
+      if (unauthorized) {
+        showErrorToast("Your session has expired. Sign in again to open this resource.");
+      }
       const outcome: LensOpenOutcome = { requestedFileIds: ids, unavailableFileIds, failedFileIds };
       if (found.length > 0) {
         const bisqueLinksByFileId: Record<string, BisqueViewerLink> = {};
@@ -9850,17 +9890,22 @@ export function App() {
           }
         }
         openUploadedFilesInViewer(found.map(resourceToUploadedFile), bisqueLinksByFileId, outcome);
-      } else if (unauthorized) {
-        showErrorToast("Your session has expired. Sign in again to open this resource.");
       } else {
-        // Nothing opened: enter Lens anyway so the viewer can say why (unavailable
-        // notice, or the failed notice with Retry), carrying the requested ids so
-        // the URL still points at them.
+        // Nothing opened: enter Lens anyway so the viewer can say why (the
+        // unavailable notice, or the failed notice with Retry — 401-failed ids
+        // land there too), carrying the requested ids so the URL still points
+        // at them.
         openUploadedFilesInViewer([], {}, outcome);
       }
       pendingLensOpenRef.current = null;
     },
-    [apiClient, openUploadedFilesInViewer]
+    [
+      activePanel,
+      apiClient,
+      openUploadedFilesInViewer,
+      rememberActiveConversationScrollPosition,
+      resourceViewerContext,
+    ]
   );
 
   // The viewer's Retry: ask for the same ids again. Reads the request off the
@@ -9882,25 +9927,17 @@ export function App() {
   }, []);
 
   // Chat "Open in Lens" pills and the figure lightbox live in module-level renderers
-  // that cannot take a React handler; both read the registered opener at click time.
+  // that cannot take a React handler; both read this one registered opener — the
+  // pills at click time, the lightbox at render time (to hide its button when no
+  // opener is registered).
   useEffect(() => {
     registerLensOpener((fileIds) => {
       void openLensByFileIds(fileIds);
     });
-    registerLightboxOpenInLens((fileId) => {
-      void openLensByFileIds([fileId]);
-    });
     return () => {
       registerLensOpener(null);
-      registerLightboxOpenInLens(null);
     };
   }, [openLensByFileIds]);
-
-  // Rebuild the Lens viewer context from resource file id(s) (deep link / Back / refresh).
-  const restoreViewerContextForFileIds = useCallback(
-    (fileIds: string[]): Promise<void> => openLensByFileIds(fileIds),
-    [openLensByFileIds]
-  );
 
   // One-time restore on load: apply a deep-linked panel + Lens resource once authenticated.
   useEffect(() => {
@@ -9929,13 +9966,13 @@ export function App() {
       setActivePanel(initial.panel);
     }
     if (initial.panel === "scientific-viewer" && initial.resourceFileIds.length > 0) {
-      void restoreViewerContextForFileIds(initial.resourceFileIds);
+      void openLensByFileIds(initial.resourceFileIds);
     }
     if (initial.panel === "resources" && initial.resourceCollectionId) {
       setActiveResourceCollectionId(initial.resourceCollectionId);
     }
     setNavRestored(true);
-  }, [authStatus, restoreViewerContextForFileIds]);
+  }, [authStatus, openLensByFileIds]);
 
   // State -> URL: push a history entry on each navigation (so Back reverses it) and
   // skip writes that originated from Back/Forward or a cold-load restore (both
@@ -9988,7 +10025,7 @@ export function App() {
       lastNavKeyRef.current = navStateKey(nav);
       setActivePanel(nav.panel);
       if (nav.panel === "scientific-viewer" && nav.resourceFileIds.length > 0) {
-        void restoreViewerContextForFileIds(nav.resourceFileIds);
+        void openLensByFileIds(nav.resourceFileIds);
       }
       if (nav.panel === "resources") {
         setActiveResourceCollectionId(nav.resourceCollectionId);
@@ -10006,7 +10043,7 @@ export function App() {
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
-  }, [ensureConversationHydrated, restoreViewerContextForFileIds]);
+  }, [ensureConversationHydrated, openLensByFileIds]);
 
   const stageResourcesForConversation = (
     conversationId: string,
@@ -10330,9 +10367,15 @@ export function App() {
       deletedFileIds.forEach((fileId) => {
         delete nextLinks[fileId];
       });
+      // The rebuilt view is a fully-successful open of the surviving files: the
+      // outcome stays total (the URL and Retry follow the deletion), and the
+      // deleted ids are no longer part of what this view asks for.
       return {
         uploadedFiles: nextFiles,
         bisqueLinksByFileId: nextLinks,
+        requestedFileIds: normalizeLensFileIds(nextFiles.map((file) => file.file_id)),
+        unavailableFileIds: [],
+        failedFileIds: [],
       };
     });
   };

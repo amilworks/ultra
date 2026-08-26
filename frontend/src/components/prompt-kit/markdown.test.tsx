@@ -92,7 +92,8 @@ describe("Markdown Lens links", () => {
     const opener = vi.fn();
     registerLensOpener(opener);
     render(<Markdown>{"[stack](/?view=lens&resource=a,b)"}</Markdown>);
-    const { primaryLink, pill } = expectLensPill("stack", "/?view=lens&resource=a,b");
+    // The raw-comma input resolves to the canonical (%2C) href the URL layer writes.
+    const { primaryLink, pill } = expectLensPill("stack", "/?view=lens&resource=a%2Cb");
 
     const primaryEvent = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
     primaryLink.dispatchEvent(primaryEvent);

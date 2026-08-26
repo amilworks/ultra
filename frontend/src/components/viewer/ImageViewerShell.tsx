@@ -42,6 +42,7 @@ import {
   sliceAxisCoordinates,
   sliceChannelSelection,
   supportsSliceChannelColor,
+  usesStrictScalarSliceContract,
 } from "@/lib/viewerSliceContract";
 import type { UploadViewerHistogramResponse, UploadViewerInfo } from "@/types";
 
@@ -78,6 +79,7 @@ import {
   type ScalarSliceAxis,
 } from "./scalarSlice";
 import { SliceStackVolumeCanvas } from "./SliceStackVolumeCanvas";
+import { VolumeVideoExportDialog } from "./VolumeVideoExportDialog";
 import {
   formatViewerSurfaceLabel,
   getPlaneCursor,
@@ -3410,6 +3412,31 @@ export function ImageViewerShell({
                   {volumeClipActive ? "Cutaway active" : "Full volume"}
                 </div>
                 <div className="viewer-volume-inspection-actions">
+                  {zAxisSize > 1 || tAxisSize > 1 ? (
+                    <VolumeVideoExportDialog
+                      apiClient={apiClient}
+                      fileId={viewerInfo.file_id}
+                      originalName={viewerInfo.original_name}
+                      zCount={zAxisSize}
+                      tCount={tAxisSize}
+                      currentZ={clampedIndices.z}
+                      currentT={resolvedScalarRendering?.time ?? resolvedScalarTime}
+                      channels={
+                        effectiveMaskMode && resolvedSliceChannel !== undefined
+                          ? [resolvedSliceChannel]
+                          : selectedChannelIndices
+                      }
+                      channelColors={channelColors}
+                      strictScalarSlice={usesStrictScalarSliceContract(viewerInfo)}
+                      enhancement={selectedDisplayState.enhancement}
+                      negative={selectedDisplayState.negative}
+                      scalarRenderMode={effectiveMaskMode ? "mask" : "intensity"}
+                      scalarThresholdValue={
+                        effectiveMaskMode ? serverMaskThresholdValue : undefined
+                      }
+                      portalContainer={shellPortalContainer}
+                    />
+                  ) : null}
                   <Button
                     type="button"
                     variant={volumeClipActive ? "secondary" : "outline"}

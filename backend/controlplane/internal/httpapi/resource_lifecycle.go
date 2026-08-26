@@ -943,6 +943,7 @@ func derivativeNameMatcher(resourceID string) (*regexp.Regexp, error) {
 	pyramidBase := regexp.QuoteMeta(resourceID + "__pyramid")
 	niftiBase := regexp.QuoteMeta(resourceID + "__nifti")
 	scene3dBase := regexp.QuoteMeta(resourceID + "__scene3d")
+	videoBase := regexp.QuoteMeta(resourceID + "__video")
 	// Match every published scene derivative generation. Old generations remain owned
 	// by the resource after a converter revision bump and must be reclaimed on purge.
 	scene3dRevision := `(?:\.v[1-9][0-9]*)?`
@@ -959,7 +960,10 @@ func derivativeNameMatcher(resourceID string) (*regexp.Regexp, error) {
 		`|\.` + niftiBase + `\.stage\.nii` +
 		`|` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `(?:\.failed)?` +
 		`|\.` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `\.tmp-` + token +
-		`|\.` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `\.failed\.` + token + `)$`
+		`|\.` + scene3dBase + scene3dRevision + `\.sha256-` + digest + `\.failed\.` + token +
+		`|` + videoBase + `\.` + digest + `\.(?:mp4|manifest\.json|queued\.json|progress\.json|failed\.json)` +
+		`|\.` + videoBase + `\.` + digest + `\.tmp-` + token + `\.mp4` +
+		`|\.` + videoBase + `\.` + digest + `\.(?:manifest|queued|progress|failed)\.json\.tmp-` + token + `)$`
 	return regexp.Compile(pattern)
 }
 
@@ -1227,7 +1231,7 @@ func scanOwnedDerivativeNamesForResources(root *os.Root, resourceIDs []string) (
 			}
 		entryCandidates:
 			for _, candidateName := range candidateNames {
-				for _, marker := range []string{"__pyramid", "__nifti", "__scene3d"} {
+				for _, marker := range []string{"__pyramid", "__nifti", "__scene3d", "__video"} {
 					searchFrom := 0
 					for searchFrom < len(candidateName) {
 						index := strings.Index(candidateName[searchFrom:], marker)

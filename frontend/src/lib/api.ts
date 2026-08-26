@@ -113,6 +113,36 @@ export type ApiClientOptions = {
   apiKey?: string;
 };
 
+export type UploadVideoExportRequest = {
+  mode: "z_sweep" | "time_series";
+  profile: "preview" | "complete";
+  fixed_z: number;
+  fixed_t: number;
+  channels: number[];
+  /** Colors in the same order as `channels`, not a source-indexed palette. */
+  channel_colors?: string[];
+  enhancement?: string;
+  negative?: boolean;
+  scalar_render_mode: "intensity" | "mask";
+  scalar_threshold_value?: number;
+  scalar_threshold_foreground?: "above";
+};
+
+export type UploadVideoExportResponse = {
+  render_id: string;
+  status: "queued" | "progress" | "ready" | "failed";
+  mode: "z_sweep" | "time_series";
+  profile: "preview" | "complete";
+  fps: number;
+  source_frame_count: number;
+  frames_total: number;
+  frames_completed: number;
+  sampled: boolean;
+  download_url?: string;
+  filename?: string;
+  error_code?: string;
+};
+
 export type StreamTokenEvent = {
   sequence?: number;
   eventId?: string;
@@ -4989,6 +5019,61 @@ export class ApiClient {
       params.cache_key = cacheKey;
     }
     return buildUrl(this.baseUrl, `/v2/uploads/${safeFileId}/slice`, params);
+  }
+
+  async createUploadVideoExport(
+    fileId: string,
+    request: UploadVideoExportRequest,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<UploadVideoExportResponse> {
+    const safeFileId = encodeURIComponent(fileId);
+    return this.fetchJson<UploadVideoExportResponse>(
+      `/v2/uploads/${safeFileId}/video-exports`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+        signal: options.signal,
+      }
+    );
+  }
+
+  async getUploadVideoExport(
+    fileId: string,
+    renderId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<UploadVideoExportResponse> {
+    const safeFileId = encodeURIComponent(fileId);
+    const safeRenderId = encodeURIComponent(renderId);
+    return this.fetchJson<UploadVideoExportResponse>(
+      `/v2/uploads/${safeFileId}/video-exports/${safeRenderId}`,
+      { method: "GET", signal: options.signal }
+    );
+  }
+
+  async downloadUploadVideoExport(
+    fileId: string,
+    renderId: string,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<Blob> {
+    const safeFileId = encodeURIComponent(fileId);
+    const safeRenderId = encodeURIComponent(renderId);
+    const response = await fetch(
+      buildUrl(
+        this.baseUrl,
+        `/v2/uploads/${safeFileId}/video-exports/${safeRenderId}/download`
+      ),
+      {
+        method: "GET",
+        headers: this.headers(),
+        credentials: "include",
+        signal: options.signal,
+      }
+    );
+    if (!response.ok) {
+      return parseError(response);
+    }
+    return response.blob();
   }
 
   async getUploadScalarVolume(

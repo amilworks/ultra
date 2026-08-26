@@ -1,4 +1,4 @@
-"""CLI entry for the image.derive_pyramid convert worker.
+"""CLI entry for the bounded scientific derivative worker.
 
 Run with::
 
@@ -14,7 +14,7 @@ import asyncio
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m ultra_deepagents.image_convert_worker",
-        description="Run the image.derive_pyramid convert worker (source -> tiled pyramid).",
+        description="Run the image/scene derivative worker (pyramids, 3D scenes, and slice video).",
     )
     parser.add_argument("--nats-url", default=None, help="NATS URL (default: env ULTRA_CONTROL_NATS_URL).")
     parser.add_argument("--subject", default=None, help="Jobs subject (default: env or ultra.image.jobs).")

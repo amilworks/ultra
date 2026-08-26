@@ -1139,6 +1139,11 @@ def async_subagent_context_payload(
     for field in _ASYNC_CONTEXT_NESTED_FIELDS:
         value = payload.get(field)
         payload[field] = _sanitize_async_context_mapping(value if isinstance(value, dict) else {})
+    # Notes authority is coordinator-only. Even sanitized note ids/revisions must
+    # not become usable context for an async run with a different lease.
+    selection_context = payload.get("selection_context")
+    if isinstance(selection_context, dict):
+        selection_context.pop("note_access", None)
     payload["selected_resource_uris"] = _sanitize_async_context_references(
         context.selected_resource_uris
     )

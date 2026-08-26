@@ -31,11 +31,27 @@ func TestVerifyPostgresSchemaAcceptsCurrentControlSchema(t *testing.T) {
 	t.Parallel()
 
 	err := VerifyPostgresSchema(context.Background(), fakeSchemaQuerier{
-		presentTables: requiredPostgresControlTables,
+		presentTables:        requiredPostgresControlTables,
+		checkpointRunCascade: true,
 	})
 
 	if err != nil {
 		t.Fatalf("VerifyPostgresSchema() error = %v, want nil", err)
+	}
+}
+
+func TestVerifyPostgresSchemaRejectsMissingCheckpointRunCascade(t *testing.T) {
+	t.Parallel()
+
+	err := VerifyPostgresSchema(context.Background(), fakeSchemaQuerier{
+		presentTables: requiredPostgresControlTables,
+	})
+	if err == nil {
+		t.Fatal("VerifyPostgresSchema() error = nil, want missing checkpoint cascade error")
+	}
+	if !strings.Contains(err.Error(), "deepagents_checkpoint_threads") ||
+		!strings.Contains(err.Error(), "ON DELETE CASCADE") {
+		t.Fatalf("VerifyPostgresSchema() error = %q, want checkpoint cascade guidance", err)
 	}
 }
 
@@ -55,25 +71,38 @@ func TestVerifyPostgresSchemaWrapsDatabaseErrors(t *testing.T) {
 }
 
 type fakeSchemaQuerier struct {
-	presentTables []string
-	err           error
+	presentTables        []string
+	checkpointRunCascade bool
+	err                  error
 }
 
-func (q fakeSchemaQuerier) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
+func (q fakeSchemaQuerier) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
 	return fakeSchemaRow{
-		presentTables: q.presentTables,
-		err:           q.err,
+		presentTables:        q.presentTables,
+		checkpointRunCascade: q.checkpointRunCascade,
+		checkpointQuery:      strings.Contains(query, "pg_constraint"),
+		err:                  q.err,
 	}
 }
 
 type fakeSchemaRow struct {
-	presentTables []string
-	err           error
+	presentTables        []string
+	checkpointRunCascade bool
+	checkpointQuery      bool
+	err                  error
 }
 
 func (r fakeSchemaRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
+	}
+	if r.checkpointQuery {
+		target, ok := dest[0].(*bool)
+		if !ok {
+			return errors.New("expected *bool destination")
+		}
+		*target = r.checkpointRunCascade
+		return nil
 	}
 	target, ok := dest[0].(*[]string)
 	if !ok {

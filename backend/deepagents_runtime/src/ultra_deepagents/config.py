@@ -276,6 +276,10 @@ class RuntimeSettings:
     # ack and were never resumed) older than this. Completed runs delete their row
     # on terminal ack, so this is only a backstop for stragglers. 0 disables.
     checkpoint_retention_seconds: int = 72 * 3600
+    # Long-lived workers sweep abandoned checkpoints periodically so the
+    # retention bound does not depend on a process restart. Environment parsing
+    # floors this at one minute; direct test construction may use a shorter value.
+    checkpoint_gc_interval_seconds: float = 3600.0
     workspace_root: str = "data/deepagents/workspaces"
     memory_root: str = "data/deepagents/memory"
     artifact_root: str = "data/artifacts"
@@ -620,6 +624,10 @@ class RuntimeSettings:
             checkpoint_retention_seconds=max(
                 0,
                 int(os.getenv("ULTRA_DEEPAGENTS_CHECKPOINT_RETENTION_SECONDS", str(72 * 3600))),
+            ),
+            checkpoint_gc_interval_seconds=max(
+                60.0,
+                float(os.getenv("ULTRA_DEEPAGENTS_CHECKPOINT_GC_INTERVAL_SECONDS", "3600")),
             ),
             control_status_timeout_seconds=float(
                 os.getenv("ULTRA_DEEPAGENTS_CONTROL_STATUS_TIMEOUT_SECONDS", "2")

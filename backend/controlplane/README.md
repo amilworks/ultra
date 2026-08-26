@@ -25,6 +25,12 @@ make control-integration
 
 The control plane also runs an enabled-by-default expired-lease recovery loop. Configure it with `ULTRA_CONTROL_RUN_RECOVERY_ENABLED`, `ULTRA_CONTROL_RUN_RECOVERY_INTERVAL_SECONDS`, and `ULTRA_CONTROL_RUN_RECOVERY_BATCH_LIMIT`. The loop only requeues non-terminal runs whose Go-owned worker lease has expired, so a browser refresh or worker crash does not strand an autonomous chat while active workers keep their lease.
 
+Notes rollout is deliberately fail-closed. All three gates default to `false` when absent: `ULTRA_CONTROL_NOTES_REQUIRE_EXPECTED_REVISION` makes browser PATCH require the revision it read, `ULTRA_CONTROL_MODEL_NOTES_READ_ENABLED` enables bounded run-scoped search/read, and `ULTRA_CONTROL_MODEL_NOTES_PROPOSALS_ENABLED` enables proposal review surfaces. Proposal creation and commit additionally require strict revision enforcement even if the proposal flag is accidentally enabled early. Values are read at control-plane startup and only explicit `true`, `1`, `on`, `yes`, or `enabled` turns a gate on.
+
+Both model gates are exposed read-only as `features.model_notes_read` and `features.model_notes_proposals` from `/v1/config/public` and `/v2/config/public`; proposal availability is reported only when strict revision enforcement is active. Creating a new run with `selection_context.note_access` returns `503` while model reads are disabled. A matching idempotent replay of an already-created Notes run remains available during rollback or a kill-switch event and is reconciled against its stored canonical Note revisions instead of rereading mutable or deleted Notes. Notes access is a dedicated private-context run mode and cannot currently be combined with selected files, resources, datasets, knowledge, workflows, or tools. `allow_append_proposal` only lets the model create a browser-review proposal; it is never write authority by itself.
+
+Use this production order: deploy the backend with all gates false (legacy browser PATCH is owner-scoped and still travels through atomic CAS), deploy the revision-aware frontend and refresh or age out old browser bundles, set `ULTRA_CONTROL_NOTES_REQUIRE_EXPECTED_REVISION=true`, load-test owner-scoped search against the production Notes corpus before enabling model reads, and finally enable model proposals. Docker Compose falls back to all three gates being true when those variables are unset for end-to-end local development; values in a local `.env` still override those fallbacks.
+
 ## Postgres Integration
 
 ```bash

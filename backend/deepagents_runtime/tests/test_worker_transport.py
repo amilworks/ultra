@@ -31,7 +31,7 @@ from ultra_deepagents.nats_worker import (
     post_control_plane_worker_heartbeat,
     try_acquire_run_lock,
 )
-from ultra_deepagents.runner import run_job
+from ultra_deepagents.runner import CheckpointReconciliationPendingError, run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
 _REAL_RUN_EVENTS_SNAPSHOT = NATSDeepAgentsWorker._run_events_snapshot
@@ -2951,6 +2951,138 @@ def test_run_job_includes_generated_conversation_title_in_completed_event(tmp_pa
     }
 
 
+def test_notes_run_title_generation_never_receives_note_derived_answer(tmp_path: Path):
+    sentinel = "NOTE_ONLY_SENTINEL_MUST_STAY_OUT_OF_TITLE"
+    title_prompts: list[str] = []
+
+    class NotesAnswerAgent:
+        async def astream_events(self, _payload, *, context=None, version=None, **_kwargs):
+            assert context.selection_context["note_access"]["mode"] == "selected"
+            assert version == "v3"
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": SimpleNamespace(content=sentinel)},
+                "metadata": {"langgraph_node": "coordinator"},
+            }
+
+    class CapturingTitleModel:
+        model_name = "deepseek_v4"
+
+        async def ainvoke(self, messages):
+            title_prompts.append(
+                "\n".join(str(message.get("content", "")) for message in messages)
+            )
+            return SimpleNamespace(content='{"title": "Data Analysis"}')
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            title_generation_enabled=True,
+        )
+        job = RunJobEnvelope(
+            run_id="run-notes-title",
+            thread_id="thread-notes-title",
+            user_id="researcher-1",
+            goal="Use my attached note as context.",
+            messages=[{"role": "user", "content": "Use my attached note as context."}],
+            selection_context={
+                "note_access": {
+                    "mode": "selected",
+                    "notes": [{"note_id": "note-private", "revision": 1}],
+                }
+            },
+        )
+        published: list[dict[str, Any]] = []
+
+        async def publish(event):
+            published.append(event)
+
+        response = await run_job(
+            job,
+            settings,
+            publish_event=publish,
+            agent_factory=lambda *_args, **_kwargs: NotesAnswerAgent(),
+            title_model_factory=lambda _settings: CapturingTitleModel(),
+        )
+        return response, published
+
+    response, events = asyncio.run(scenario())
+
+    assert response == sentinel
+    assert title_prompts
+    assert all(sentinel not in prompt for prompt in title_prompts)
+    completed = events[-1]
+    assert completed["event_kind"] == "run.completed"
+    assert completed["payload"]["response_text"] == sentinel
+    assert sentinel not in completed["payload"]["conversation_title"]
+    assert len(title_prompts) == 1
+
+
+def test_notes_run_failure_redacts_exception_and_workspace_lease(tmp_path: Path):
+    sentinel = "NOTE_SENTINEL_ECHOED_BY_PROVIDER_ERROR"
+
+    class FailingNotesAgent:
+        def astream_events(self, _payload, **_kwargs):
+            async def generate():
+                raise RuntimeError(sentinel)
+                yield
+
+            return generate()
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            workspace_root=str(tmp_path / "workspaces"),
+            artifact_root=str(tmp_path / "artifacts"),
+            title_generation_enabled=False,
+        )
+        job = RunJobEnvelope(
+            run_id="run-notes-failed",
+            thread_id="thread-notes-failed",
+            user_id="researcher-1",
+            goal="Use my attached note as context.",
+            messages=[{"role": "user", "content": "Use my attached note as context."}],
+            selection_context={
+                "note_access": {
+                    "mode": "selected",
+                    "notes": [{"note_id": "note-private", "revision": 1}],
+                }
+            },
+        )
+        published: list[dict[str, Any]] = []
+
+        async def publish(event):
+            published.append(event)
+
+        with pytest.raises(RuntimeError, match=sentinel):
+            await run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda *_args, **_kwargs: FailingNotesAgent(),
+            )
+        return settings, published
+
+    settings, events = asyncio.run(scenario())
+
+    failed = events[-1]
+    assert failed["event_kind"] == "run.failed"
+    assert failed["message"] == "Notes-enabled run failed."
+    assert failed["payload"] == {
+        "error": "Notes-enabled run failed.",
+        "error_type": "RuntimeError",
+        "redacted": True,
+    }
+    lease = Path(settings.workspace_root, "run-notes-failed", "lease.json").read_text()
+    assert "notes_run_failed" in lease
+    assert sentinel not in json.dumps(events)
+    assert sentinel not in lease
+
+
 def test_run_job_publishes_tool_lifecycle_without_polluting_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -4760,6 +4892,16 @@ class FakeNATSMessage:
         self.in_progress_calls += 1
 
 
+class FailingAckNATSMessage(FakeNATSMessage):
+    def __init__(self, payload: bytes):
+        super().__init__(payload)
+        self.ack_attempts = 0
+
+    async def ack(self):
+        self.ack_attempts += 1
+        raise RuntimeError("simulated acknowledgement loss")
+
+
 class CapturingJetStream:
     def __init__(self):
         self.published = []
@@ -4998,6 +5140,53 @@ def test_worker_acks_failed_job_without_crashing_loop():
             },
         }
     ]
+
+
+def test_worker_redacts_notes_failure_fallback_and_logs(caplog):
+    sentinel = "NOTE_SENTINEL_IN_WORKER_EXCEPTION"
+
+    async def failing_run_job(*_args, **_kwargs):
+        raise RuntimeError(sentinel)
+
+    async def scenario():
+        settings = RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+            worker_ack_progress_interval_seconds=30.0,
+        )
+        worker = NATSDeepAgentsWorker(settings, run_job_func=failing_run_job)
+        message = FakeNATSMessage(
+            json.dumps(
+                {
+                    "run_id": "run-notes-failed",
+                    "thread_id": "thread-notes-failed",
+                    "user_id": "user-1",
+                    "goal": "Use my attached note.",
+                    "selection_context": {
+                        "note_access": {
+                            "mode": "selected",
+                            "notes": [{"note_id": "note-private", "revision": 1}],
+                        }
+                    },
+                }
+            ).encode()
+        )
+        js = CapturingJetStream()
+        await worker._process_message(message, js)
+        return message, _published_events(js)
+
+    with caplog.at_level("ERROR"):
+        message, events = asyncio.run(scenario())
+
+    assert message.acked == 1
+    assert events[-1]["payload"] == {
+        "error": "Notes-enabled run failed.",
+        "error_type": "RuntimeError",
+        "stage": "worker",
+        "redacted": True,
+    }
+    assert sentinel not in json.dumps(events)
+    assert sentinel not in caplog.text
 
 
 def test_worker_does_not_publish_fallback_failure_after_terminal_event_then_cleanup_error():
@@ -5401,6 +5590,256 @@ def test_worker_clears_checkpoint_runtime_state_after_terminal_job(mode: str, tm
     else:
         assert run_job_calls == 1
         assert [event["event_kind"] for event in events] == ["run.completed"]
+
+
+def test_worker_retains_checkpoint_when_terminal_ack_fails_then_cleans_on_redelivery(
+    tmp_path: Path,
+):
+    calls: list[tuple[str, str]] = []
+    compute_calls = 0
+    terminal = False
+
+    class TrackingCheckpointer:
+        async def flush(self, run_id: str) -> bool:
+            calls.append(("flush", run_id))
+            return True
+
+        def clear_thread(self, run_id: str) -> None:
+            calls.append(("clear", run_id))
+
+        async def delete_thread(self, run_id: str) -> None:
+            calls.append(("delete", run_id))
+
+    checkpointer = TrackingCheckpointer()
+
+    async def run_job_func(*_args, **_kwargs):
+        nonlocal compute_calls, terminal
+        compute_calls += 1
+        terminal = True
+        return "ok"
+
+    async def run_status(_run_id, _settings):
+        return "succeeded" if terminal else None
+
+    async def run_lease(_run_id, _settings):
+        return None
+
+    async def worker_heartbeat(_settings, *, status, current_run_id=None, metadata=None):
+        return None
+
+    class TrackingWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            return checkpointer
+
+        async def _run_events_snapshot(self, run_id: str):
+            assert run_id == "run-ack-loss"
+            return 0, None
+
+    async def scenario():
+        worker = TrackingWorker(
+            RuntimeSettings(
+                openai_base_url="http://example.test/v1",
+                openai_model="deepseek_v4",
+                workspace_root=str(tmp_path / "workspaces"),
+                worker_ack_progress_interval_seconds=0,
+            ),
+            run_job_func=run_job_func,
+            run_status_func=run_status,
+            run_lease_func=run_lease,
+            worker_heartbeat_func=worker_heartbeat,
+        )
+        worker._checkpointer = checkpointer
+        payload = (
+            b'{"run_id":"run-ack-loss","thread_id":"thread-1",'
+            b'"user_id":"user-1","goal":"resume safely"}'
+        )
+        first = FailingAckNATSMessage(payload)
+        await worker._process_message(first, CapturingJetStream())
+        second = FakeNATSMessage(payload)
+        await worker._process_message(second, CapturingJetStream())
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert compute_calls == 1
+    assert first.ack_attempts == 1
+    assert first.acked == 0
+    assert second.acked == 1
+    assert calls == [
+        ("flush", "run-ack-loss"),
+        ("clear", "run-ack-loss"),
+        ("delete", "run-ack-loss"),
+    ]
+
+
+def test_completed_checkpoint_waits_for_terminal_ingest_without_restarting_graph(
+    tmp_path: Path,
+):
+    calls: list[tuple[str, str]] = []
+    run_job_calls = 0
+    control_status = "running"
+
+    class TrackingCheckpointer:
+        async def flush(self, run_id: str) -> bool:
+            calls.append(("flush", run_id))
+            return True
+
+        def clear_thread(self, run_id: str) -> None:
+            calls.append(("clear", run_id))
+
+        async def delete_thread(self, run_id: str) -> None:
+            calls.append(("delete", run_id))
+
+    checkpointer = TrackingCheckpointer()
+
+    async def completed_checkpoint_guard(*_args, **_kwargs):
+        nonlocal run_job_calls
+        run_job_calls += 1
+        # Let several enabled heartbeat intervals elapse before completed-state
+        # reconciliation returns. The runner has not signaled event authority,
+        # so no heartbeat may claim the terminal event's source sequence.
+        await asyncio.sleep(0.05)
+        raise CheckpointReconciliationPendingError(
+            "completed checkpoint is awaiting terminal reconciliation"
+        )
+
+    async def run_status(_run_id, _settings):
+        return control_status
+
+    async def worker_heartbeat(_settings, *, status, current_run_id=None, metadata=None):
+        return None
+
+    class ReconciliationWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            self._checkpointer = checkpointer
+            return checkpointer
+
+    async def scenario():
+        nonlocal control_status
+        worker = ReconciliationWorker(
+            RuntimeSettings(
+                openai_base_url="http://example.test/v1",
+                openai_model="deepseek_v4",
+                workspace_root=str(tmp_path / "workspaces-terminal-lag"),
+                worker_ack_wait_seconds=1.0,
+                worker_ack_progress_interval_seconds=0.01,
+            ),
+            run_job_func=completed_checkpoint_guard,
+            run_status_func=run_status,
+            worker_heartbeat_func=worker_heartbeat,
+        )
+        payload = (
+            b'{"run_id":"run-terminal-lag","thread_id":"thread-1",'
+            b'"user_id":"user-1","goal":"do not replay"}'
+        )
+        first = FakeNATSMessage(payload)
+        first_events = CapturingJetStream()
+        await worker._process_message(first, first_events)
+        control_status = "succeeded"
+        second = FakeNATSMessage(payload)
+        second_events = CapturingJetStream()
+        await worker._process_message(second, second_events)
+        return first, second, _published_events(first_events), _published_events(second_events)
+
+    first, second, first_events, second_events = asyncio.run(scenario())
+
+    assert run_job_calls == 1
+    assert first.acked == 0
+    assert first.naked == 1
+    assert first_events == []
+    assert second.acked == 1
+    assert second.naked == 0
+    assert [event["event_kind"] for event in second_events] == ["run.worker_skipped"]
+    assert calls == [
+        ("flush", "run-terminal-lag"),
+        ("clear", "run-terminal-lag"),
+        ("delete", "run-terminal-lag"),
+    ]
+
+
+def test_worker_periodically_reaps_abandoned_checkpoints():
+    class TrackingCheckpointer:
+        def __init__(self) -> None:
+            self.retentions: list[int] = []
+            self.reaped_twice = asyncio.Event()
+
+        async def gc(self, retention_seconds: int) -> int:
+            self.retentions.append(retention_seconds)
+            if len(self.retentions) >= 2:
+                self.reaped_twice.set()
+            return 1
+
+    checkpointer = TrackingCheckpointer()
+
+    class CheckpointGCWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            return checkpointer
+
+    async def scenario() -> list[int]:
+        worker = CheckpointGCWorker(
+            RuntimeSettings(
+                openai_base_url="http://example.test/v1",
+                openai_model="deepseek_v4",
+                checkpoint_retention_seconds=72 * 3600,
+                checkpoint_gc_interval_seconds=0.01,
+            )
+        )
+        task = asyncio.create_task(worker._checkpoint_gc_loop())
+        await asyncio.wait_for(checkpointer.reaped_twice.wait(), timeout=1.0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return checkpointer.retentions
+
+    assert asyncio.run(scenario())[:2] == [72 * 3600, 72 * 3600]
+
+
+def test_worker_flushes_then_clears_resumable_checkpoint_from_memory():
+    calls: list[tuple[str, str]] = []
+
+    class TrackingCheckpointer:
+        async def flush(self, run_id: str) -> bool:
+            calls.append(("flush", run_id))
+            return True
+
+        def clear_thread(self, run_id: str) -> None:
+            calls.append(("clear", run_id))
+
+    worker = NATSDeepAgentsWorker(
+        RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+        )
+    )
+    worker._checkpointer = TrackingCheckpointer()
+
+    asyncio.run(worker._release_checkpointer_thread("run-resumable"))
+
+    assert calls == [("flush", "run-resumable"), ("clear", "run-resumable")]
+
+
+def test_worker_retains_freshest_runtime_checkpoint_when_flush_fails():
+    calls: list[tuple[str, str]] = []
+
+    class FailingFlushCheckpointer:
+        async def flush(self, run_id: str) -> bool:
+            calls.append(("flush", run_id))
+            return False
+
+        def clear_thread(self, run_id: str) -> None:
+            calls.append(("clear", run_id))
+
+    worker = NATSDeepAgentsWorker(
+        RuntimeSettings(
+            openai_base_url="http://example.test/v1",
+            openai_model="deepseek_v4",
+        )
+    )
+    worker._checkpointer = FailingFlushCheckpointer()
+
+    asyncio.run(worker._release_checkpointer_thread("run-flush-failed"))
+
+    assert calls == [("flush", "run-flush-failed")]
 
 
 def test_worker_claims_and_releases_control_plane_run_lease_around_compute(tmp_path: Path):
@@ -6143,7 +6582,8 @@ def test_worker_publishes_run_heartbeat_during_silent_long_running_compute():
     async def scenario():
         js = HeartbeatCapturingJetStream()
 
-        async def long_running_run_job(*_args, **_kwargs):
+        async def long_running_run_job(*_args, **kwargs):
+            kwargs["on_event_emission_ready"]()
             await asyncio.wait_for(js.heartbeat_seen.wait(), timeout=1.0)
             return "finished after heartbeat"
 
@@ -6182,7 +6622,8 @@ def test_resumed_worker_heartbeat_id_uses_the_seeded_sequence_floor():
     async def scenario():
         js = HeartbeatCapturingJetStream()
 
-        async def long_running_run_job(*_args, **_kwargs):
+        async def long_running_run_job(*_args, **kwargs):
+            kwargs["on_event_emission_ready"]()
             await asyncio.wait_for(js.heartbeat_seen.wait(), timeout=1.0)
             return "finished after resumed heartbeat"
 
@@ -6880,6 +7321,7 @@ def test_worker_does_not_start_previously_canceled_run():
 
 def test_worker_acks_terminal_control_plane_run_without_starting_compute():
     calls = 0
+    deleted: list[str] = []
 
     async def run_job_should_not_start(*_args, **_kwargs):
         nonlocal calls
@@ -6888,13 +7330,17 @@ def test_worker_acks_terminal_control_plane_run_without_starting_compute():
     async def terminal_status(_run_id, _settings):
         return "canceled"
 
+    class CleanupWorker(NATSDeepAgentsWorker):
+        async def _delete_checkpointer_thread(self, run_id):
+            deleted.append(run_id)
+
     async def scenario():
         settings = RuntimeSettings(
             openai_base_url="http://example.test/v1",
             openai_model="deepseek_v4",
             worker_ack_progress_interval_seconds=0,
         )
-        worker = NATSDeepAgentsWorker(
+        worker = CleanupWorker(
             settings,
             run_job_func=run_job_should_not_start,
             run_status_func=terminal_status,
@@ -6911,6 +7357,7 @@ def test_worker_acks_terminal_control_plane_run_without_starting_compute():
     assert calls == 0
     assert message.acked == 1
     assert message.naked == 0
+    assert deleted == ["run-1"]
     assert len(events) == 1
     _assert_worker_skipped_event(
         events[0],
@@ -6919,6 +7366,54 @@ def test_worker_acks_terminal_control_plane_run_without_starting_compute():
         control_status="canceled",
         stage="initial_status_check",
     )
+
+
+def test_fresh_worker_initializes_checkpoint_store_after_terminal_ack_for_cleanup():
+    calls: list[tuple[str, str]] = []
+
+    async def terminal_status(_run_id, _settings):
+        return "succeeded"
+
+    async def run_job_should_not_start(*_args, **_kwargs):
+        raise AssertionError("terminal redelivery must not restart compute")
+
+    class CleanupCheckpointer:
+        async def delete_thread(self, run_id: str) -> None:
+            assert message.acked == 1, "checkpoint deletion must remain ACK-after-confirmation"
+            calls.append(("delete", run_id))
+
+    checkpointer = CleanupCheckpointer()
+
+    class FreshWorker(NATSDeepAgentsWorker):
+        async def _ensure_checkpointer(self):
+            assert self._checkpointer is None
+            calls.append(("initialize", "run-terminal-fresh"))
+            self._checkpointer = checkpointer
+            return checkpointer
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        worker_ack_progress_interval_seconds=0,
+    )
+    worker = FreshWorker(
+        settings,
+        run_job_func=run_job_should_not_start,
+        run_status_func=terminal_status,
+    )
+    message = FakeNATSMessage(
+        b'{"run_id":"run-terminal-fresh","thread_id":"thread-1",'
+        b'"user_id":"user-1","goal":"do not replay"}'
+    )
+
+    asyncio.run(worker._process_message(message, CapturingJetStream()))
+
+    assert message.acked == 1
+    assert message.naked == 0
+    assert calls == [
+        ("initialize", "run-terminal-fresh"),
+        ("delete", "run-terminal-fresh"),
+    ]
 
 
 def test_worker_rechecks_control_plane_status_after_acquiring_run_lock(tmp_path: Path):

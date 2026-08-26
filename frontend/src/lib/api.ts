@@ -106,7 +106,11 @@ import type {
 } from "../types";
 import type * as ViewerManifest from "./viewerManifest";
 import { reportClientError } from "./client-diagnostics";
-import { isEphemeralDeltaEventKind } from "@/features/chat/run-events";
+import {
+  isEphemeralDeltaEventKind,
+  isRedactedRunEvent,
+  sanitizeRunEventsForClient,
+} from "@/features/chat/run-events";
 
 export type ApiClientOptions = {
   baseUrl: string;
@@ -254,6 +258,10 @@ export type NoteRecord = {
   pinned: boolean;
   /** Sticky per-note editing surface; the body is markdown in either mode. */
   editor_mode: NoteEditorMode;
+  /** Monotonic concurrency token for every durable Note mutation. */
+  revision: number;
+  /** SHA-256 provenance for the current title/body revision. */
+  content_digest: string;
   created_at: string;
   updated_at: string;
 };
@@ -263,6 +271,7 @@ export type NoteListItem = {
   title: string;
   snippet: string;
   pinned: boolean;
+  revision: number;
   updated_at: string;
 };
 
@@ -276,7 +285,48 @@ export type NoteWritePayload = {
   body_markdown?: string;
   pinned?: boolean;
   editor_mode?: NoteEditorMode;
+  /** Required for PATCH; omitted when creating a new Note. */
+  expected_revision?: number;
 };
+
+export type NoteAppendOperationReceipt = {
+  operation_id: string;
+  proposal_id: string;
+  run_id?: string;
+  note_id: string;
+  note_title: string;
+  before_revision: number;
+  after_revision: number;
+  undo_revision?: number;
+  appended_bytes: number;
+  before_content_digest: string;
+  after_content_digest: string;
+  created_at: string;
+  undone_at?: string | null;
+};
+
+export type NoteAppendProposal = {
+  proposal_id: string;
+  note_id: string;
+  note_title: string;
+  /** Exact proposed text is returned only while the proposal is pending. */
+  body_markdown?: string;
+  expected_revision: number;
+  expires_at: string;
+  created_at: string;
+  status: "pending" | "committed" | "expired";
+  operation_id?: string;
+  /** Present for committed proposals when the server can hydrate the receipt. */
+  operation?: NoteAppendOperationReceipt | null;
+};
+
+export const isNoteRevisionConflict = (error: unknown): error is ApiError =>
+  error instanceof ApiError &&
+  error.status === 409 &&
+  (typeof error.detail !== "object" ||
+    error.detail === null ||
+    !("code" in error.detail) ||
+    (error.detail as { code?: string }).code === "note_revision_conflict");
 
 /** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
 export const isSteeringClosedError = (error: unknown): boolean =>
@@ -391,6 +441,7 @@ type V2RunStreamContext = {
   lastRunEventSequence: number;
   seenTokenDeliveryKeys: Set<string>;
   progressEvents: ProgressEvent[];
+  traceRedacted: boolean;
   streamedText: string;
   terminalEventSeen: boolean;
   terminalStatus: "succeeded" | "failed" | "canceled" | null;
@@ -1161,11 +1212,12 @@ const normalizeV2RunEvent = (event: Record<string, unknown>): RunEvent => {
   const payload = isRecord(event.payload) ? event.payload : {};
   const eventType = asTrimmedString(event.event_kind) || asTrimmedString(event.event_type) || "run_event";
   const sequence = asFiniteNumber(event.sequence, 0);
-  return {
+  const normalized: RunEvent = {
     event_type: eventType,
     level: asOptionalString(event.level) ?? undefined,
     payload: {
       ...payload,
+      ...(event.redacted === true || payload.redacted === true ? { redacted: true } : {}),
       event_id: event.event_id,
       sequence,
       event_kind: eventType,
@@ -1176,21 +1228,22 @@ const normalizeV2RunEvent = (event: Record<string, unknown>): RunEvent => {
       checkpoint_id: event.checkpoint_id,
       scope_id: event.scope_id,
       agent_role: event.agent_role,
-      message: event.message,
+      message: event.message ?? payload.message,
     },
     ts: asOptionalString(event.ts) ?? undefined,
   };
+  return sanitizeRunEventsForClient([normalized])[0] ?? normalized;
 };
 
 const progressEventFromV2RunEvent = (event: Record<string, unknown>): ProgressEvent => {
-  const payload = isRecord(event.payload) ? event.payload : {};
-  const eventType = asTrimmedString(event.event_kind) || asTrimmedString(event.event_type) || "run_event";
+  const normalized = normalizeV2RunEvent(event);
+  const payload = normalized.payload ?? {};
   return {
     ...payload,
-    event: eventType,
-    level: asOptionalString(event.level) ?? undefined,
-    message: asOptionalString(event.message) ?? asOptionalString(payload.message) ?? undefined,
-    ts: asOptionalString(event.ts) ?? undefined,
+    event: normalized.event_type,
+    level: normalized.level,
+    message: asOptionalString(payload.message) ?? undefined,
+    ts: normalized.ts,
   };
 };
 
@@ -2367,6 +2420,33 @@ export class ApiClient {
     });
   }
 
+  async getNoteAppendProposal(proposalId: string): Promise<NoteAppendProposal> {
+    return await this.fetchJson<NoteAppendProposal>(
+      `/v2/note-append-proposals/${encodeURIComponent(proposalId)}`
+    );
+  }
+
+  async commitNoteAppendProposal(
+    proposalId: string,
+    input: { body_markdown?: string } = {}
+  ): Promise<NoteAppendOperationReceipt> {
+    return await this.fetchJson<NoteAppendOperationReceipt>(
+      `/v2/note-append-proposals/${encodeURIComponent(proposalId)}/commit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      }
+    );
+  }
+
+  async undoNoteAppendOperation(operationId: string): Promise<NoteAppendOperationReceipt> {
+    return await this.fetchJson<NoteAppendOperationReceipt>(
+      `/v2/note-append-operations/${encodeURIComponent(operationId)}/undo`,
+      { method: "POST" }
+    );
+  }
+
   async cancelAdminRun(runId: string): Promise<AdminRunActionResponse> {
     const response = await fetch(
       buildUrl(this.baseUrl, `/v2/admin/runs/${encodeURIComponent(runId)}/cancel`),
@@ -2819,6 +2899,7 @@ export class ApiClient {
       lastRunEventSequence: Math.max(0, Math.floor(Number(options?.afterSequence ?? 0))),
       seenTokenDeliveryKeys: new Set<string>(),
       progressEvents: [],
+      traceRedacted: false,
       streamedText: "",
       terminalEventSeen: false,
       terminalStatus: null,
@@ -3030,11 +3111,19 @@ export class ApiClient {
       }
 
       const normalized = normalizeV2RunEvent(payload);
+      if (isRedactedRunEvent(normalized)) {
+        // A marker can arrive after ordinary progress already streamed. Clear
+        // that earlier copy immediately and keep the legacy progress array
+        // empty for the rest of this private turn; the sanitized runEvents
+        // timeline remains the sole activity surface.
+        ctx.traceRedacted = true;
+        ctx.progressEvents = [];
+      }
       // Reasoning deltas are cumulative live-thinking snapshots: onRunEvent coalesces
       // them into a single runEvents slot, and no progress-event consumer renders
       // them, so keeping them out of progressEvents stops the array (and every
       // persisted snapshot of it) growing by one entry per ~0.4s for the whole run.
-      if (eventKind !== "trace.reasoning.delta") {
+      if (eventKind !== "trace.reasoning.delta" && !ctx.traceRedacted) {
         ctx.progressEvents.push(progressEventFromV2RunEvent(payload));
       }
       options?.onRunEvent?.(normalized);
@@ -5778,7 +5867,7 @@ export class ApiClient {
     }
     return {
       run_id: resolvedRunId,
-      events,
+      events: sanitizeRunEventsForClient(events),
     };
   }
 

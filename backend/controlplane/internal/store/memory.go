@@ -18,6 +18,12 @@ import (
 var (
 	ErrNotFound                   = errors.New("not found")
 	ErrConflict                   = errors.New("already exists")
+	ErrNoteRevisionConflict       = errors.New("note revision conflict")
+	ErrNoteReadTokenInvalid       = errors.New("note read token is invalid or expired")
+	ErrNoteProposalExpired        = errors.New("note append proposal expired")
+	ErrNoteUndoConflict           = errors.New("note append can no longer be undone safely")
+	ErrNoteRetrievalBudget        = errors.New("note retrieval budget exhausted")
+	ErrNoteSearchTimeout          = errors.New("note search timed out")
 	errRunEventPayloadCycle       = errors.New("run event payload contains a cycle")
 	errRunEventPayloadUnsupported = errors.New("run event payload contains an unsupported mutable reference")
 )
@@ -71,6 +77,10 @@ type MemoryStore struct {
 	bisque                  map[string]domain.BisqueCredentialRecord
 	leases                  map[string]domain.RunLeaseRecord
 	notes                   map[string]domain.NoteRecord
+	noteReadGrants          map[string]domain.NoteReadGrantRecord
+	noteAppendProposals     map[string]domain.NoteAppendProposalRecord
+	noteAppendOperations    map[string]memoryNoteAppendOperation
+	noteRunUsage            map[string]memoryNoteRunUsage
 	steerMessages           map[string][]domain.RunSteerMessageRecord
 	steerBarriers           map[string]time.Time
 	workers                 map[string]domain.WorkerHeartbeatRecord
@@ -116,6 +126,10 @@ func NewMemoryStore() *MemoryStore {
 		bisque:                  map[string]domain.BisqueCredentialRecord{},
 		leases:                  map[string]domain.RunLeaseRecord{},
 		notes:                   map[string]domain.NoteRecord{},
+		noteReadGrants:          map[string]domain.NoteReadGrantRecord{},
+		noteAppendProposals:     map[string]domain.NoteAppendProposalRecord{},
+		noteAppendOperations:    map[string]memoryNoteAppendOperation{},
+		noteRunUsage:            map[string]memoryNoteRunUsage{},
 		steerMessages:           map[string][]domain.RunSteerMessageRecord{},
 		steerBarriers:           map[string]time.Time{},
 		workers:                 map[string]domain.WorkerHeartbeatRecord{},
@@ -882,6 +896,22 @@ func (s *MemoryStore) HardDeleteThreadForUser(ctx context.Context, threadID stri
 		delete(s.leases, runID)
 		delete(s.runTokenUsage, runID)
 		delete(s.runTokenUsageFinalized, runID)
+		delete(s.noteRunUsage, runID)
+	}
+	for tokenHash, grant := range s.noteReadGrants {
+		if _, derivedFromDeletedRun := runIDs[grant.RunID]; derivedFromDeletedRun {
+			delete(s.noteReadGrants, tokenHash)
+		}
+	}
+	for proposalID, proposal := range s.noteAppendProposals {
+		if _, derivedFromDeletedRun := runIDs[proposal.RunID]; derivedFromDeletedRun {
+			delete(s.noteAppendProposals, proposalID)
+		}
+	}
+	for operationID, operation := range s.noteAppendOperations {
+		if _, derivedFromDeletedRun := runIDs[operation.RunID]; derivedFromDeletedRun {
+			delete(s.noteAppendOperations, operationID)
+		}
 	}
 	delete(s.messages, threadID)
 	delete(s.threads, threadID)
@@ -1082,6 +1112,13 @@ func (s *MemoryStore) CreateRun(ctx context.Context, input domain.CreateRunInput
 	if mode == "" {
 		mode = "durable"
 	}
+	inheritedNotePrivacy := false
+	for _, existing := range s.runs {
+		if existing.ThreadID == input.ThreadID && domain.RunHasNotePrivacyLineage(existing) {
+			inheritedNotePrivacy = true
+			break
+		}
+	}
 	run := domain.RunRecord{
 		RunID:        domain.NewID("run"),
 		ThreadID:     input.ThreadID,
@@ -1092,7 +1129,7 @@ func (s *MemoryStore) CreateRun(ctx context.Context, input domain.CreateRunInput
 		Mode:         mode,
 		CreatedAt:    now,
 		UpdatedAt:    now,
-		Metadata:     mapOrEmpty(input.Metadata),
+		Metadata:     serverAuthoredNotePrivacyMetadata(input.Metadata, inheritedNotePrivacy),
 	}
 	s.runs[run.RunID] = run
 	if !input.Internal {
@@ -1173,6 +1210,11 @@ func (s *MemoryStore) ListRuns(ctx context.Context, threadID string, status stri
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	unscoped := strings.TrimSpace(threadID) == ""
+	privateThreadIDs := map[string]struct{}{}
+	if unscoped {
+		privateThreadIDs = notePrivacyThreadIDsFromMemoryRuns(s.runs)
+	}
 	runs := make([]domain.RunRecord, 0, len(s.runs))
 	for _, run := range s.runs {
 		if threadID != "" && run.ThreadID != threadID {
@@ -1180,6 +1222,9 @@ func (s *MemoryStore) ListRuns(ctx context.Context, threadID string, status stri
 		}
 		if status != "" && string(run.Status) != status {
 			continue
+		}
+		if _, private := privateThreadIDs[run.ThreadID]; unscoped && private {
+			run.ResponseText = ""
 		}
 		runs = append(runs, run)
 	}
@@ -1200,6 +1245,11 @@ func (s *MemoryStore) ListRunsForUser(ctx context.Context, userID string, thread
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	unscoped := strings.TrimSpace(threadID) == ""
+	privateThreadIDs := map[string]struct{}{}
+	if unscoped {
+		privateThreadIDs = notePrivacyThreadIDsFromMemoryRuns(s.runs)
+	}
 	if threadID != "" {
 		thread, ok := s.threads[threadID]
 		if !ok || thread.UserID != userID {
@@ -1216,6 +1266,12 @@ func (s *MemoryStore) ListRunsForUser(ctx context.Context, userID string, thread
 		}
 		if status != "" && string(run.Status) != status {
 			continue
+		}
+		// An unscoped run list crosses conversation boundaries. Keep the run
+		// visible for lifecycle/status clients, but do not copy a Note-derived
+		// final answer out of its source conversation.
+		if _, private := privateThreadIDs[run.ThreadID]; unscoped && private {
+			run.ResponseText = ""
 		}
 		runs = append(runs, run)
 	}
@@ -1248,9 +1304,17 @@ func (s *MemoryStore) SearchRunHistoryForUser(ctx context.Context, userID string
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	privateThreadIDs := notePrivacyThreadIDsFromMemoryRuns(s.runs)
 	hits := make([]domain.RunHistoryHit, 0)
 	for _, run := range s.runs {
 		if run.UserID != userID || string(run.Status) != string(domain.RunStatusSucceeded) {
+			continue
+		}
+		// Every answer in a Note-bearing thread remains part of its source
+		// conversation, but may not become an unscoped episodic-memory copy.
+		// Thread-wide classification also covers unmarked descendants written by
+		// an older replica during a rolling upgrade.
+		if _, private := privateThreadIDs[run.ThreadID]; private {
 			continue
 		}
 		if exclude != "" && run.RunID == exclude {

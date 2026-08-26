@@ -128,6 +128,14 @@ describe("plumbing", () => {
     }
   });
 
+  it("uses revision-aware writes so autosave cannot overwrite a newer browser", () => {
+    expect(apiSource).toContain("expected_revision?: number");
+    expect(pageSource).toContain("expected_revision: snapshot.revision");
+    expect(pageSource).toContain("isNoteRevisionConflict(error)");
+    expect(mockApi).toContain("payload.expected_revision !== note.revision");
+    expect(mockApi).toContain('code: "note_revision_conflict"');
+  });
+
   it("styles stay in tokens, and the page collapses to the editor on phones", () => {
     const chip = styles.match(/\.notes-row-title\s*\{[^}]*\}/s)?.[0];
     expect(chip).toContain("var(--sidebar-nav-foreground)");
@@ -137,6 +145,23 @@ describe("plumbing", () => {
   it("the harness serves notes so the page can be driven end to end", () => {
     expect(mockApi).toContain('url.pathname === "/v2/notes"');
     expect(mockApi).toContain("note_seed_protocol");
+  });
+
+  it("re-seals exact Note ids immediately before every run and fails before mutating the turn", () => {
+    const start = appSource.indexOf("const handleSubmit = async (");
+    const end = appSource.indexOf("const handleSubmitRef = useRef(handleSubmit)", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const submit = appSource.slice(start, end);
+    const reseal = submit.indexOf("await resealTurnNotes(");
+    const turnMutation = submit.indexOf("setViewerOpen(false)");
+    const createRun = submit.indexOf("apiClient.chatStream(chatRequest");
+    expect(reseal).toBeGreaterThan(-1);
+    expect(reseal).toBeLessThan(turnMutation);
+    expect(reseal).toBeLessThan(createRun);
+    expect(submit).toMatch(/if \(!selectedNotesForTurn\) \{\s*turnOverride\?\.onNoteScopeFailure\?\.\(\);\s*return;/);
+    expect(submit).toMatch(/noteAccessForTurn\(\s*text,\s*selectedNotesForTurn,\s*excludedNoteIntentTextForTurn/);
+    expect(submit).toMatch(/excludedNoteIntentText:\s*excludedNoteIntentTextForTurn\.length > 0/);
   });
 });
 

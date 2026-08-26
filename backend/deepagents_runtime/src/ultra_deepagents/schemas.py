@@ -9,6 +9,7 @@ from ultra_deepagents.evaluation_profiles import (
     evaluation_profile_policy,
     normalize_evaluation_profile,
 )
+from ultra_deepagents.notes.access import normalized_selection_context
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,11 @@ class RunJobEnvelope:
     response_contract: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "selection_context",
+            normalized_selection_context(self.selection_context),
+        )
         profile = normalize_evaluation_profile(self.evaluation_profile)
         object.__setattr__(self, "evaluation_profile", profile)
         policy = evaluation_profile_policy(profile)
@@ -73,7 +79,7 @@ class RunJobEnvelope:
             dataset_uris=_string_list(payload.get("dataset_uris")),
             selected_tool_names=_string_list(payload.get("selected_tool_names")),
             knowledge_context=_dict(payload.get("knowledge_context")),
-            selection_context=_dict(payload.get("selection_context")),
+            selection_context=normalized_selection_context(payload.get("selection_context")),
             workflow_hint=_dict(payload.get("workflow_hint")),
             budgets=_dict(payload.get("budgets")),
             benchmark=_dict(payload.get("benchmark")),

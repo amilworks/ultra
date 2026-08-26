@@ -156,9 +156,13 @@ type CreateRunRequest struct {
 	Budgets               domain.JSONMap
 	Benchmark             domain.JSONMap
 	ResourceDescriptors   []domain.JSONMap
-	IdempotencyKey        string
-	Metadata              domain.JSONMap
-	JobMetadata           domain.JSONMap
+	// ModelNotesProposalsEnabled is a server-resolved rollout capability. It is
+	// stamped into reserved metadata only for a valid Notes-scoped run; callers
+	// cannot mint the metadata key through Metadata or JobMetadata.
+	ModelNotesProposalsEnabled bool
+	IdempotencyKey             string
+	Metadata                   domain.JSONMap
+	JobMetadata                domain.JSONMap
 }
 
 type CancelRunRequest struct {
@@ -257,6 +261,23 @@ func (s *Service) CreateThread(ctx context.Context, req CreateThreadRequest) (do
 	})
 }
 
+// FindRunByIdempotencyKey is the intentionally narrow lookup used by the HTTP
+// create path before it validates mutable external context. It does not create,
+// reconcile, or redispatch the run; CreateRun remains the sole state-changing
+// idempotency authority.
+func (s *Service) FindRunByIdempotencyKey(
+	ctx context.Context,
+	threadID string,
+	userID string,
+	idempotencyKey string,
+) (domain.RunRecord, bool, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" {
+		return domain.RunRecord{}, false, nil
+	}
+	return s.store.FindRunByIdempotencyKey(ctx, threadID, userID, idempotencyKey)
+}
+
 func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.RunRecord, error) {
 	evaluationProfile, valid := domain.ParseEvaluationProfile(string(req.EvaluationProfile))
 	if !valid {
@@ -294,6 +315,9 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (domain.R
 				return domain.RunRecord{}, store.ErrConflict
 			}
 			if !storedRemoteMutationIntentsMatch(existing, req.RemoteMutationIntents) {
+				return domain.RunRecord{}, store.ErrConflict
+			}
+			if !storedNoteAccessMatches(existing, req.SelectionContext) {
 				return domain.RunRecord{}, store.ErrConflict
 			}
 			reconciled, err := s.reconcileStoredTerminalEvent(ctx, existing)
@@ -407,6 +431,9 @@ func (s *Service) recoverConflictingIdempotentRun(ctx context.Context, req Creat
 	if !storedRemoteMutationIntentsMatch(existing, req.RemoteMutationIntents) {
 		return domain.RunRecord{}, store.ErrConflict
 	}
+	if !storedNoteAccessMatches(existing, req.SelectionContext) {
+		return domain.RunRecord{}, store.ErrConflict
+	}
 	reconciled, err := s.reconcileStoredTerminalEvent(ctx, existing)
 	if err != nil {
 		return domain.RunRecord{}, err
@@ -494,7 +521,8 @@ func mergeJobMetadata(metadata domain.JSONMap, jobMetadata domain.JSONMap) domai
 	for key, value := range jobMetadata {
 		if key == "runtime_facts" || key == domain.EvaluationProfileMetadataKey ||
 			key == domain.RemoteMutationIntentsMetadataKey ||
-			key == domain.BisqueAccountBindingMetadataKey {
+			key == domain.BisqueAccountBindingMetadataKey ||
+			key == domain.ModelNotesProposalsEnabledMetadataKey {
 			continue
 		}
 		merged[key] = value
@@ -903,7 +931,8 @@ func (s *Service) RequeueRun(ctx context.Context, req RequeueRunRequest) (domain
 	metadata["requeue_dispatch_id"] = dispatchID
 	for key, value := range req.Metadata {
 		if key == domain.EvaluationProfileMetadataKey || key == domain.RemoteMutationIntentsMetadataKey ||
-			key == domain.BisqueAccountBindingMetadataKey {
+			key == domain.BisqueAccountBindingMetadataKey ||
+			key == domain.ModelNotesProposalsEnabledMetadataKey {
 			continue
 		}
 		metadata[key] = value
@@ -1966,6 +1995,7 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 	}
 	delete(metadata, domain.EvaluationProfileMetadataKey)
 	delete(metadata, domain.RemoteMutationIntentsMetadataKey)
+	delete(metadata, domain.ModelNotesProposalsEnabledMetadataKey)
 	if req.EvaluationProfile != "" {
 		metadata[domain.EvaluationProfileMetadataKey] = string(req.EvaluationProfile)
 	}
@@ -1993,6 +2023,9 @@ func buildRunMetadata(req CreateRunRequest) domain.JSONMap {
 	}
 	if len(req.SelectionContext) > 0 {
 		metadata["selection_context"] = cloneMap(req.SelectionContext)
+	}
+	if _, present, valid := domain.ParseNoteAccessScope(req.SelectionContext); present && valid {
+		metadata[domain.ModelNotesProposalsEnabledMetadataKey] = req.ModelNotesProposalsEnabled
 	}
 	if strings.TrimSpace(req.ReasoningMode) != "" {
 		metadata["reasoning_mode"] = strings.TrimSpace(req.ReasoningMode)

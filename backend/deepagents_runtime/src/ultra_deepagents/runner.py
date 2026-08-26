@@ -8,7 +8,7 @@ import logging
 import mimetypes
 import re
 import shutil
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +26,12 @@ from ultra_deepagents.agent import (
     request_classification_text,
     resolve_user_memory_root,
 )
-from ultra_deepagents.checkpointing import checkpoint_has_pending_work, run_graph_config
+from ultra_deepagents.checkpointing import (
+    CheckpointRunState,
+    CheckpointStateUnavailableError,
+    checkpoint_run_state,
+    run_graph_config,
+)
 from ultra_deepagents.code_execution.cleanup import cleanup_expired_code_workspaces
 from ultra_deepagents.code_execution.docker import resolve_docker_image_id
 from ultra_deepagents.code_execution.progress import (
@@ -67,6 +72,8 @@ from ultra_deepagents.model import (
     reset_thinking_fallback,
     thinking_fallback_armed,
 )
+from ultra_deepagents.notes.access import note_access_from_selection_context
+from ultra_deepagents.notes.tools import NOTE_TOOL_NAMES
 from ultra_deepagents.papers.tools import (
     ingest_arxiv_pdf,
     ingest_pdf_file,
@@ -164,6 +171,9 @@ class ExecuteProgressEventStreamer:
         self._sequencer = sequencer
         self._publish_event = publish_event
         self._loop = asyncio.get_running_loop()
+        self._redact_content = note_access_from_selection_context(
+            getattr(context, "selection_context", None)
+        ).enabled
         self._closed = False
         self._active_execute_payload: dict[str, Any] | None = None
 
@@ -205,7 +215,15 @@ class ExecuteProgressEventStreamer:
         active_payload = self._active_execute_payload
         if not active_payload:
             return
-        payload = _execute_progress_payload(progress)
+        payload = (
+            {
+                "redacted": True,
+                "progress_kind": "output",
+                "progress_index": int(progress.progress_index),
+            }
+            if self._redact_content
+            else _execute_progress_payload(progress)
+        )
         if active_payload.get("tool_call_id"):
             payload["tool_call_id"] = active_payload["tool_call_id"]
         event = normalize_tool_call_progress(self._context, payload)
@@ -263,6 +281,10 @@ class AgentAttemptResult:
     usage: dict[str, int] = field(default_factory=_empty_token_usage)
     model: str = ""
     delegation: dict[str, int] = field(default_factory=dict)
+
+
+class CheckpointReconciliationPendingError(RuntimeError):
+    """A restored run must wait for terminal/checkpoint authority to converge."""
 
 
 class AgentStreamIdleTimeoutError(TimeoutError):
@@ -630,6 +652,7 @@ async def run_job(
     prior_usage: dict[str, Any] | None = None,
     run_lease_worker_id: str = "",
     run_lease_token: str = "",
+    on_event_emission_ready: Callable[[], None] | None = None,
 ) -> str:
     workspace_root = Path(settings.workspace_root).expanduser()
     evaluation_policy = evaluation_profile_policy(job.evaluation_profile)
@@ -691,12 +714,12 @@ async def run_job(
         run_lease_worker_id=run_lease_worker_id,
         run_lease_token=run_lease_token,
     )
+    notes_content_boundary = note_access_from_selection_context(context.selection_context).enabled
     # Reuse the worker-owned sequencer when provided so worker lifecycle events
     # (heartbeats, terminal events) and streamed events share one counter; only
     # fall back to a local one when run_job is driven directly (e.g. tests).
     if sequencer is None:
         sequencer = RunEventSequencer(context.run_id, start=sequence_floor)
-    _write_workspace_lease(context, status="running")
     # Mirror the user's self-described profile into app-owned durable memory.
     # Best-effort: never fail a run because profile seeding could not write.
     if evaluation_policy is None:
@@ -705,73 +728,100 @@ async def run_job(
             user_profile,
         )
 
-    if evaluation_attestation is not None:
-        await publish_event(
-            sequencer.stamp(
-                RunEvent(
-                    run_id=context.run_id,
-                    thread_id=context.thread_id,
-                    event_kind=EVALUATION_PROFILE_EVENT_KIND,
-                    event_type="run",
-                    node_name="worker",
-                    agent_role="worker",
-                    level="info",
-                    message="Worker enforced the trusted evaluation profile.",
-                    payload=evaluation_attestation,
-                ).to_dict()
-            )
-        )
+    # A restored completed graph must be classified before publishing any new
+    # source-sequenced event. During terminal ingest lag the control plane's
+    # resume floor can still sit immediately below the original terminal
+    # event; emitting run.started first would reuse that terminal sequence.
+    title_task: asyncio.Task | None = None
+    run_prelude_published = False
+    event_emission_ready = False
 
-    if quarantined_history_message_count > 0:
+    def signal_event_emission_ready() -> None:
+        """Authorize worker lifecycle events exactly once for this attempt.
+
+        A durable completed checkpoint may own the next source sequence while
+        its terminal event is still awaiting control-plane ingest. Keep every
+        source-sequenced producer, including the worker heartbeat, behind the
+        same absent/pending classification boundary as the run prelude.
+        """
+
+        nonlocal event_emission_ready
+        if event_emission_ready:
+            return
+        event_emission_ready = True
+        if on_event_emission_ready is not None:
+            on_event_emission_ready()
+
+    async def publish_run_prelude() -> None:
+        nonlocal run_prelude_published
+        if run_prelude_published:
+            return
+        _write_workspace_lease(context, status="running")
+        if evaluation_attestation is not None:
+            await publish_event(
+                sequencer.stamp(
+                    RunEvent(
+                        run_id=context.run_id,
+                        thread_id=context.thread_id,
+                        event_kind=EVALUATION_PROFILE_EVENT_KIND,
+                        event_type="run",
+                        node_name="worker",
+                        agent_role="worker",
+                        level="info",
+                        message="Worker enforced the trusted evaluation profile.",
+                        payload=evaluation_attestation,
+                    ).to_dict()
+                )
+            )
+
+        if quarantined_history_message_count > 0:
+            await publish_event(
+                sequencer.stamp(
+                    RunEvent(
+                        run_id=context.run_id,
+                        thread_id=context.thread_id,
+                        event_kind="trace.history.quarantined",
+                        event_type="trace",
+                        node_name="model_input",
+                        agent_role="coordinator",
+                        level="warning",
+                        message="",
+                        payload={
+                            "reason": "model_protocol",
+                            "message_count": quarantined_history_message_count,
+                        },
+                    ).to_dict()
+                )
+            )
+
         await publish_event(
             sequencer.stamp(
                 RunEvent(
                     run_id=context.run_id,
                     thread_id=context.thread_id,
-                    event_kind="trace.history.quarantined",
-                    event_type="trace",
-                    node_name="model_input",
+                    event_kind="run.started",
+                    event_type="run",
+                    node_name="coordinator",
                     agent_role="coordinator",
-                    level="warning",
-                    message="",
+                    level="info",
+                    message="Deep Agents run started.",
                     payload={
-                        "reason": "model_protocol",
-                        "message_count": quarantined_history_message_count,
+                        "workspace_root": context.workspace_root,
+                        "artifact_root": context.artifact_root,
                     },
                 ).to_dict()
             )
         )
-
-    await publish_event(
-        sequencer.stamp(
-            RunEvent(
-                run_id=context.run_id,
-                thread_id=context.thread_id,
-                event_kind="run.started",
-                event_type="run",
-                node_name="coordinator",
-                agent_role="coordinator",
-                level="info",
-                message="Deep Agents run started.",
-                payload={
-                    "workspace_root": context.workspace_root,
-                    "artifact_root": context.artifact_root,
-                },
-            ).to_dict()
-        )
-    )
-
-    # The sidebar title depends only on the request, so its model call runs
-    # concurrently with the agent instead of extending the run; it is joined
-    # right before run.completed is published.
-    title_task = start_conversation_title_task(
-        settings=settings,
-        goal=job.goal,
-        messages=list(effective_messages),
-        model_factory=title_model_factory or build_chat_model,
-    )
+        run_prelude_published = True
 
     try:
+        # Preserve the established failure lifecycle when checkpointing is not
+        # configured: run.started still precedes setup/agent-construction
+        # failures. Durable runs defer this prelude until checkpoint state is
+        # known, because completed state may own the next sequence already.
+        if checkpointer is None:
+            signal_event_emission_ready()
+            await publish_run_prelude()
         messages = list(effective_messages)
         # Resolve once per worker/image reference (the helper is process-cached).
         # Agent construction uses the same immutable ID for `docker run`; the
@@ -796,6 +846,7 @@ async def run_job(
             )
         evaluation_surface: dict[str, str] = {}
         trace_surface: dict[str, Any] = {}
+        surface_attestation: dict[str, Any] | None = None
         # Mid-run steering: cleanroom evaluation profiles run with a sealed
         # surface, so they never grow a steering channel.
         steering_inbox = (
@@ -840,6 +891,53 @@ async def run_job(
                 profile_attestation=evaluation_attestation,
                 surface_attestation=surface_attestation,
             )
+        run_config = run_graph_config(
+            context.run_id, recursion_limit=settings.langgraph_recursion_limit
+        )
+        resume_from_checkpoint = False
+        if checkpointer is not None:
+            # Load any durable checkpoint for this run into the (fresh) worker's
+            # in-memory checkpointer before asking the graph whether work is
+            # pending; otherwise a restarted worker always sees empty state and
+            # restarts the run from scratch.
+            hydrate = getattr(checkpointer, "hydrate", None)
+            hydrated = False
+            if hydrate is not None:
+                try:
+                    hydrated = bool(await hydrate(context.run_id))
+                except CheckpointStateUnavailableError as exc:
+                    raise CheckpointReconciliationPendingError(
+                        "durable checkpoint hydration is unavailable"
+                    ) from exc
+                except Exception as exc:
+                    raise CheckpointReconciliationPendingError(
+                        "durable checkpoint hydration failed"
+                    ) from exc
+            try:
+                checkpoint_state = await checkpoint_run_state(
+                    agent,
+                    run_config,
+                    hydrated=hydrated,
+                )
+            except CheckpointStateUnavailableError as exc:
+                raise CheckpointReconciliationPendingError(
+                    "durable checkpoint state is unavailable"
+                ) from exc
+            if checkpoint_state is CheckpointRunState.COMPLETED:
+                raise CheckpointReconciliationPendingError(
+                    "completed checkpoint is awaiting terminal reconciliation"
+                )
+            resume_from_checkpoint = checkpoint_state is CheckpointRunState.PENDING
+
+        # Only a proven-absent or pending checkpoint may reach event emission.
+        # Keeping this block after classification prevents a completed graph's
+        # terminal sequence from being reused while control-plane ingest lags.
+        # It also leaves an existing terminal workspace lease untouched during
+        # that reconciliation window instead of regressing it back to running.
+        signal_event_emission_ready()
+        await publish_run_prelude()
+
+        if surface_attestation is not None:
             await publish_event(
                 sequencer.stamp(
                     RunEvent(
@@ -855,38 +953,33 @@ async def run_job(
                     ).to_dict()
                 )
             )
-        run_config = run_graph_config(
-            context.run_id, recursion_limit=settings.langgraph_recursion_limit
+
+        # The sidebar title depends only on the request, so its model call runs
+        # concurrently with the agent instead of extending the run; it is joined
+        # right before run.completed is published.
+        title_task = start_conversation_title_task(
+            settings=settings,
+            goal=job.goal,
+            messages=list(effective_messages),
+            model_factory=title_model_factory or build_chat_model,
         )
-        resume_from_checkpoint = False
-        if checkpointer is not None:
-            # Load any durable checkpoint for this run into the (fresh) worker's
-            # in-memory checkpointer before asking the graph whether work is
-            # pending; otherwise a restarted worker always sees empty state and
-            # restarts the run from scratch.
-            hydrate = getattr(checkpointer, "hydrate", None)
-            if hydrate is not None:
-                try:
-                    await hydrate(context.run_id)
-                except Exception:
-                    pass
-            resume_from_checkpoint = await checkpoint_has_pending_work(agent, run_config)
-            if resume_from_checkpoint:
-                await publish_event(
-                    sequencer.stamp(
-                        RunEvent(
-                            run_id=context.run_id,
-                            thread_id=context.thread_id,
-                            event_kind="run.resumed",
-                            event_type="run",
-                            node_name="coordinator",
-                            agent_role="coordinator",
-                            level="info",
-                            message="Resuming run from durable checkpoint.",
-                            payload={"resumed_from_checkpoint": True},
-                        ).to_dict()
-                    )
+
+        if resume_from_checkpoint:
+            await publish_event(
+                sequencer.stamp(
+                    RunEvent(
+                        run_id=context.run_id,
+                        thread_id=context.thread_id,
+                        event_kind="run.resumed",
+                        event_type="run",
+                        node_name="coordinator",
+                        agent_role="coordinator",
+                        level="info",
+                        message="Resuming run from durable checkpoint.",
+                        payload={"resumed_from_checkpoint": True},
+                    ).to_dict()
                 )
+            )
         artifact_events: list[dict[str, Any]] = []
         attempt_result = AgentAttemptResult(
             final_response_text="",
@@ -1356,14 +1449,33 @@ async def run_job(
             await publish_event(sequencer.stamp(artifact_event))
         if _requires_user_visible_response(job) and not response_text.strip():
             raise AgentEmptyResponseError()
+    except CheckpointReconciliationPendingError:
+        # The completed graph is authoritative even when its terminal event has
+        # not reached the control plane yet. Do not publish a replacement
+        # failure or mutate the workspace lease into a terminal state; the
+        # worker will retain the checkpoint and redeliver for reconciliation.
+        _cancel_title_task(title_task)
+        raise
     except asyncio.CancelledError:
         _cancel_title_task(title_task)
         _write_workspace_lease(context, status="canceled", error="canceled")
         raise
     except Exception as exc:
         _cancel_title_task(title_task)
-        _write_workspace_lease(context, status="failed", error=str(exc))
-        await publish_event(sequencer.stamp(normalize_run_failed(context, exc)))
+        _write_workspace_lease(
+            context,
+            status="failed",
+            error="notes_run_failed" if notes_content_boundary else str(exc),
+        )
+        await publish_event(
+            sequencer.stamp(
+                normalize_run_failed(
+                    context,
+                    exc,
+                    redact_details=notes_content_boundary,
+                )
+            )
+        )
         raise
 
     _write_workspace_lease(context, status="succeeded")
@@ -1372,8 +1484,11 @@ async def run_job(
         settings=settings,
         goal=job.goal,
         messages=list(effective_messages),
-        response_text=response_text,
-        artifact_events=artifact_events,
+        # A Note-derived answer belongs in the conversation body, not in a
+        # second model request or a sidebar title that outlives the source
+        # Note. Notes-enabled turns keep title generation request-only.
+        response_text="" if notes_content_boundary else response_text,
+        artifact_events=[] if notes_content_boundary else artifact_events,
         model_factory=title_model_factory or build_chat_model,
     )
     await publish_event(
@@ -1582,6 +1697,7 @@ async def _stream_agent_attempt(
     final_state: dict[str, Any] | None = None
     tool_names_by_call_id: dict[str, str] = {}
     config = run_config or {"recursion_limit": max(1, int(langgraph_recursion_limit))}
+    notes_content_boundary = note_access_from_selection_context(context.selection_context).enabled
     # Thinking deltas never reach the graph event stream (the content-block
     # translation drops them), so a callback handler taps the raw model chunks
     # and publishes coalesced trace.reasoning.delta events.
@@ -1589,6 +1705,7 @@ async def _stream_agent_attempt(
         context=context,
         sequencer=sequencer,
         publish_event=publish_event,
+        redact_content=notes_content_boundary,
     )
     # Run before the best-effort trace streamer so the chunk that crosses a
     # conservative malformed-generation threshold is never published as
@@ -1597,7 +1714,7 @@ async def _stream_agent_attempt(
     reasoning_quality_guard = ReasoningQualityGuard()
     visible_protocol_guard = _VisibleModelProtocolGuard()
     trace_input_callback: TraceLensInputCallback | None = None
-    if trace_lens_inputs_enabled:
+    if trace_lens_inputs_enabled and not notes_content_boundary:
         try:
             trace_input_callback = TraceLensInputCallback()
         except Exception:
@@ -3828,6 +3945,19 @@ def _tool_event_from_deepagents_tools_protocol(
         tool_names_by_call_id[tool_call_id] = tool_name
     if not tool_name:
         return None
+    if tool_name in NOTE_TOOL_NAMES:
+        return _normalize_stream_tool_call(
+            context,
+            tool_name=tool_name,
+            status=status,
+            payload=_notes_tool_event_payload(
+                tool_name,
+                status,
+                tool_call_id=tool_call_id,
+                tool_input=data.get("input"),
+                tool_output=data.get("output"),
+            ),
+        )
     payload: dict[str, Any] = {"tool_call_id": tool_call_id}
     tool_input = data.get("input")
     if isinstance(tool_input, dict):
@@ -3866,13 +3996,22 @@ def _tool_name_from_event(event: dict[str, Any]) -> str:
 
 
 def _tool_start_payload(event: dict[str, Any]) -> dict[str, Any]:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    raw_data = event.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     payload: dict[str, Any] = {
         "tool_call_id": _first_nonempty_string(
             event.get("run_id"), data.get("run_id"), data.get("id")
         ),
     }
     tool_input = data.get("input")
+    tool_name = _tool_name_from_event(event)
+    if tool_name in NOTE_TOOL_NAMES:
+        return _notes_tool_event_payload(
+            tool_name,
+            "started",
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            tool_input=tool_input,
+        )
     if isinstance(tool_input, dict):
         payload.update(_compact_payload_mapping(tool_input))
         payload["input"] = _compact_payload_value(tool_input)
@@ -3882,18 +4021,26 @@ def _tool_start_payload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    raw_data = event.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     output = data.get("output")
     payload: dict[str, Any] = {
         "tool_call_id": _first_nonempty_string(
             event.get("run_id"), data.get("run_id"), data.get("id")
         ),
     }
+    tool_name = _tool_name_from_event(event)
+    if tool_name in NOTE_TOOL_NAMES:
+        return _notes_tool_event_payload(
+            tool_name,
+            "completed",
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+            tool_output=output,
+        )
     if output is not None:
         output_text = _payload_preview_text(output)
         payload["output_preview"] = output_text
         payload["output_size_chars"] = len(str(output))
-        tool_name = _tool_name_from_event(event)
         if tool_name == "execute":
             exit_code = _execute_exit_code_from_output(output)
             if exit_code is not None:
@@ -3902,16 +4049,183 @@ def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_error_payload(event: dict[str, Any]) -> dict[str, Any]:
-    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    raw_data = event.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     error = data.get("error") or event.get("error")
     payload: dict[str, Any] = {
         "tool_call_id": _first_nonempty_string(
             event.get("run_id"), data.get("run_id"), data.get("id")
         ),
     }
+    tool_name = _tool_name_from_event(event)
+    if tool_name in NOTE_TOOL_NAMES:
+        return _notes_tool_event_payload(
+            tool_name,
+            "failed",
+            tool_call_id=str(payload.get("tool_call_id") or ""),
+        )
     if error is not None:
         payload["error"] = _payload_preview_text(error)
     return _drop_empty_payload_values(payload)
+
+
+def _notes_tool_event_payload(
+    tool_name: str,
+    status: str,
+    *,
+    tool_call_id: str = "",
+    tool_input: Any = None,
+    tool_output: Any = None,
+) -> dict[str, Any]:
+    """Project a Notes lifecycle event without retaining private note text.
+
+    This runs before generic payload compaction. Queries, titles, excerpts,
+    bodies, proposal Markdown, cursors, and read tokens therefore never enter a
+    durable event even transiently through ``input`` or ``output_preview``.
+    """
+
+    payload: dict[str, Any] = {}
+    normalized_call_id = str(tool_call_id or "").strip()
+    if normalized_call_id:
+        payload["tool_call_id"] = normalized_call_id[:256]
+
+    source: Mapping[str, Any] | None = None
+    if status == "started" and isinstance(tool_input, Mapping):
+        source = tool_input
+    elif status == "completed":
+        if isinstance(tool_output, Mapping):
+            source = tool_output
+        else:
+            output_text = _chunk_text(tool_output)
+            source = _json_object_from_text(output_text) if output_text else None
+
+    if source is not None:
+        payload.update(_safe_notes_trace_metadata(tool_name, status, source))
+    elif status in {"failed", "error"}:
+        payload["error"] = "notes_tool_failed"
+    return payload
+
+
+def _redact_notes_tool_payload(
+    tool_name: str,
+    status: str,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Defense-in-depth for every current and future Notes event protocol."""
+
+    safe: dict[str, Any] = {}
+    tool_call_id = str(payload.get("tool_call_id") or "").strip()
+    if tool_call_id:
+        safe["tool_call_id"] = tool_call_id[:256]
+    safe.update(_safe_notes_trace_metadata(tool_name, status, payload))
+    if status in {"failed", "error"} and "error" not in safe:
+        safe["error"] = "notes_tool_failed"
+    return safe
+
+
+def _safe_notes_trace_metadata(
+    tool_name: str,
+    status: str,
+    source: Mapping[str, Any],
+) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    if isinstance(source.get("ok"), bool):
+        safe["ok"] = source["ok"]
+    error = _safe_notes_trace_code(source.get("error"))
+    if error:
+        safe["error"] = error
+
+    if tool_name == "search_notes":
+        if status == "completed":
+            result_count = source.get("result_count")
+            if not isinstance(result_count, int) or isinstance(result_count, bool):
+                notes = source.get("notes")
+                result_count = len(notes) if isinstance(notes, list) else None
+            if isinstance(result_count, int) and 0 <= result_count <= 20:
+                safe["result_count"] = result_count
+            if isinstance(source.get("has_more"), bool):
+                safe["has_more"] = source["has_more"]
+        return safe
+
+    note_id = _safe_notes_trace_identifier(source.get("note_id"))
+    if note_id:
+        safe["note_id"] = note_id
+
+    if tool_name == "read_note":
+        if status == "completed":
+            revision = _safe_notes_trace_int(source.get("revision"))
+            if revision is not None:
+                safe["revision"] = revision
+            returned_bytes = _safe_notes_trace_int(
+                source.get("returned_bytes"),
+                allow_zero=True,
+                maximum=64_000,
+            )
+            if returned_bytes is not None:
+                safe["returned_bytes"] = returned_bytes
+            if isinstance(source.get("has_more"), bool):
+                safe["has_more"] = source["has_more"]
+        return safe
+
+    if tool_name == "propose_note_append":
+        revision = _safe_notes_trace_int(
+            source.get("expected_revision", source.get("base_revision"))
+        )
+        if revision is not None:
+            safe["expected_revision"] = revision
+        if status == "completed":
+            proposal_id = _safe_notes_trace_identifier(source.get("proposal_id"))
+            if proposal_id:
+                safe["proposal_id"] = proposal_id
+            expires_at = _safe_notes_trace_timestamp(source.get("expires_at"))
+            if expires_at:
+                safe["expires_at"] = expires_at
+            proposal_status = _safe_notes_trace_code(
+                source.get("proposal_status", source.get("status"))
+            )
+            if proposal_status:
+                safe["proposal_status"] = proposal_status
+        return safe
+    return safe
+
+
+def _safe_notes_trace_identifier(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if len(normalized) > 512:
+        return ""
+    return normalized if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", normalized) else ""
+
+
+def _safe_notes_trace_timestamp(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if len(normalized) > 80:
+        return ""
+    return normalized if re.fullmatch(r"[0-9T:.+Z-]+", normalized) else ""
+
+
+def _safe_notes_trace_code(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip().lower()
+    if len(normalized) > 64:
+        return ""
+    return normalized if re.fullmatch(r"[a-z][a-z0-9_]*", normalized) else ""
+
+
+def _safe_notes_trace_int(
+    value: Any,
+    *,
+    allow_zero: bool = False,
+    maximum: int = (1 << 63) - 1,
+) -> int | None:
+    minimum = 0 if allow_zero else 1
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
 
 
 def _normalize_stream_tool_call(
@@ -3921,11 +4235,32 @@ def _normalize_stream_tool_call(
     status: str,
     payload: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    normalized_payload = dict(payload or {})
+    if tool_name in NOTE_TOOL_NAMES:
+        normalized_payload = _redact_notes_tool_payload(
+            tool_name,
+            status,
+            normalized_payload,
+        )
+    elif note_access_from_selection_context(context.selection_context).enabled:
+        # A model can copy untrusted Note text into the arguments or result of
+        # any other tool. Keep only lifecycle identity even if a future change
+        # accidentally expands the deliberately narrow Notes agent surface.
+        tool_call_id = str(normalized_payload.get("tool_call_id") or "").strip()
+        normalized_payload = {"redacted": True}
+        if tool_call_id:
+            normalized_payload["tool_call_id"] = tool_call_id[:256]
+        return normalize_tool_call(
+            context,
+            tool_name=tool_name,
+            status=status,
+            payload=normalized_payload,
+        )
     return normalize_tool_call(
         context,
         tool_name=tool_name,
         status=status,
-        payload=_annotate_async_delegation_payload(tool_name, status, payload),
+        payload=_annotate_async_delegation_payload(tool_name, status, normalized_payload),
     )
 
 
@@ -4169,6 +4504,7 @@ def _subagent_message_event_from_stream_event(
         text=text,
         task_id=task_id or None,
         payload={"namespace": namespace} if namespace else None,
+        redacted=note_access_from_selection_context(context.selection_context).enabled,
     )
 
 

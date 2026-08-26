@@ -178,16 +178,27 @@ describe("edit means one thing", () => {
     expect(appSource).toMatch(/onEditUserMessage: handleEditUserMessage/);
     const start = appSource.indexOf("const handleEditUserMessage");
     expect(start).toBeGreaterThan(-1);
-    const handler = appSource.slice(start, start + 1600);
+    const handler = appSource.slice(start, start + 5000);
     expect(handler).toMatch(/handleDeleteUserMessage\(messageId\)/);
     expect(handler).toMatch(/setActivePromptValue\(content\)/);
     // Focusing is what makes the edit visible as an edit.
     expect(handler).toMatch(/focusComposerTextarea\(\)/);
+    expect(handler).toMatch(/messageToEdit\?\.noteReferences/);
+    expect(handler).toMatch(/messageToEdit\?\.excludedNoteIntentText/);
+    expect(handler).toMatch(/selectedNotes: noteReferences/);
+    expect(handler).toMatch(/activeSelectionContext: noteSelectionContextForChips/);
+    expect(handler).toMatch(/await resealTurnNotes\(conversationId, historicalReferences\)/);
+    expect(handler.indexOf("await resealTurnNotes")).toBeLessThan(
+      handler.indexOf("handleDeleteUserMessage(messageId)")
+    );
+    expect(handler).toMatch(
+      /setPastedComposerTextForConversation\([\s\S]*historicalExcludedNoteIntentText/
+    );
   });
 
   it("is undoable, and restores the draft it replaced", () => {
     const start = appSource.indexOf("const handleEditUserMessage");
-    const handler = appSource.slice(start, start + 1600);
+    const handler = appSource.slice(start, start + 5000);
     expect(handler).toMatch(/showUndoToast/);
     // Editing silently clobbered whatever was already typed, then persisted it.
     expect(handler).toMatch(/previousDraft/);

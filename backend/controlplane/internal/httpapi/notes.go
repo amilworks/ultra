@@ -23,6 +23,15 @@ type noteCapabilityStore interface {
 	UpdateNoteForUser(ctx context.Context, noteID string, userID string, input domain.NoteUpdateInput) (domain.NoteRecord, error)
 	DeleteNoteForUser(ctx context.Context, noteID string, userID string) error
 	ListNotesForUser(ctx context.Context, input domain.NoteListInput) (domain.NoteListPage, error)
+	SearchNotesForUser(ctx context.Context, input domain.NoteSearchInput) ([]domain.NoteSearchHit, error)
+	ConsumeNoteSearchBudget(ctx context.Context, runID string, userID string) error
+	ConsumeNoteReadBudget(ctx context.Context, runID string, userID string, returnedBytes int) error
+	CreateNoteReadGrant(ctx context.Context, grant domain.NoteReadGrantRecord) error
+	CreateNoteAppendProposal(ctx context.Context, input domain.CreateNoteAppendProposalInput) (domain.NoteAppendProposalRecord, error)
+	GetNoteAppendProposalForUser(ctx context.Context, proposalID string, userID string) (domain.NoteAppendProposalRecord, error)
+	GetNoteAppendOperationForUser(ctx context.Context, operationID string, userID string) (domain.NoteAppendOperationRecord, error)
+	CommitNoteAppendProposalForUser(ctx context.Context, input domain.CommitNoteAppendProposalInput) (domain.NoteAppendOperationRecord, error)
+	UndoNoteAppendOperationForUser(ctx context.Context, input domain.UndoNoteAppendOperationInput) (domain.NoteAppendOperationRecord, error)
 }
 
 const (
@@ -33,10 +42,11 @@ const (
 )
 
 type noteWriteRequest struct {
-	Title        *string `json:"title"`
-	BodyMarkdown *string `json:"body_markdown"`
-	Pinned       *bool   `json:"pinned"`
-	EditorMode   *string `json:"editor_mode"`
+	Title            *string `json:"title"`
+	BodyMarkdown     *string `json:"body_markdown"`
+	Pinned           *bool   `json:"pinned"`
+	EditorMode       *string `json:"editor_mode"`
+	ExpectedRevision *int64  `json:"expected_revision"`
 }
 
 func (deps ServerDeps) notesCapability(w http.ResponseWriter) (noteCapabilityStore, bool) {
@@ -169,20 +179,44 @@ func (deps ServerDeps) handleUpdateNote(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if req.ExpectedRevision != nil && *req.ExpectedRevision <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("expected_revision must be positive"))
+		return
+	}
 	principal := deps.principalFromRequest(r, "")
+	expectedRevision := int64(0)
+	if req.ExpectedRevision != nil {
+		expectedRevision = *req.ExpectedRevision
+	} else {
+		if deps.noteModelFeatures.requireExpectedRevision {
+			writeError(w, http.StatusBadRequest, errors.New("expected_revision is required"))
+			return
+		}
+		// Transitional rollout compatibility for already-open browser bundles.
+		// The owner lookup avoids inventing authority and the actual write still
+		// uses the exact same atomic CAS path. This mode is temporary last-write-
+		// wins behavior and must be disabled before model append proposals.
+		current, err := capability.GetNoteForUser(r.Context(), chi.URLParam(r, "note_id"), principal.UserID)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		expectedRevision = current.Revision
+	}
 	var title *string
 	if req.Title != nil {
 		trimmed := strings.TrimSpace(*req.Title)
 		title = &trimmed
 	}
 	record, err := capability.UpdateNoteForUser(r.Context(), chi.URLParam(r, "note_id"), principal.UserID, domain.NoteUpdateInput{
-		Title:        title,
-		BodyMarkdown: req.BodyMarkdown,
-		Pinned:       req.Pinned,
-		EditorMode:   req.EditorMode,
+		ExpectedRevision: expectedRevision,
+		Title:            title,
+		BodyMarkdown:     req.BodyMarkdown,
+		Pinned:           req.Pinned,
+		EditorMode:       req.EditorMode,
 	})
 	if err != nil {
-		writeStoreError(w, err)
+		writeNoteStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, record)

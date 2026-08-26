@@ -204,6 +204,474 @@ func TestPostgresStoreThreadRunEventArtifactFlow(t *testing.T) {
 	}
 }
 
+func TestPostgresNoteProposalCommitUndoAndHardDeleteCascade(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	store := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-note-user-" + suffix
+	thread, err := store.CreateThread(ctx, domain.CreateThreadInput{UserID: userID, Title: "note proposal"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	run, err := store.CreateRun(ctx, domain.CreateRunInput{ThreadID: thread.ThreadID, UserID: userID, Goal: "use note"})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	now := domain.Now()
+	note, err := store.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-" + suffix, UserID: userID, Title: "Protocol",
+		BodyMarkdown: "baseline", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+	hits, err := store.SearchNotesForUser(ctx, domain.NoteSearchInput{UserID: userID, Query: "Protocol", Limit: 10})
+	if err != nil || len(hits) != 1 || hits[0].NoteID != note.NoteID {
+		t.Fatalf("SearchNotesForUser = %+v err=%v", hits, err)
+	}
+	foreignMarker := "xeno-" + suffix
+	if _, err := store.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-foreign-" + suffix, UserID: "mallory-" + suffix, Title: foreignMarker,
+		BodyMarkdown: foreignMarker, EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("CreateNote foreign: %v", err)
+	}
+	if hits, err := store.SearchNotesForUser(ctx, domain.NoteSearchInput{UserID: userID, Query: foreignMarker, Limit: 10}); err != nil || len(hits) != 0 {
+		t.Fatalf("foreign owner search = %+v err=%v", hits, err)
+	}
+	readToken := "read-token-" + suffix
+	if err := store.CreateNoteReadGrant(ctx, domain.NoteReadGrantRecord{
+		TokenHash: domain.NoteBodySHA256(readToken), RunID: run.RunID, UserID: userID,
+		NoteID: note.NoteID, Revision: note.Revision, CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateNoteReadGrant: %v", err)
+	}
+	expiredReadToken := "expired-read-token-" + suffix
+	if err := store.CreateNoteReadGrant(ctx, domain.NoteReadGrantRecord{
+		TokenHash: domain.NoteBodySHA256(expiredReadToken), RunID: run.RunID, UserID: userID,
+		NoteID: note.NoteID, Revision: note.Revision, CreatedAt: now, ExpiresAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("CreateNoteReadGrant expired seed: %v", err)
+	}
+	for {
+		expired, err := store.ExpireNoteReadGrants(ctx, now, 200)
+		if err != nil {
+			t.Fatalf("ExpireNoteReadGrants: %v", err)
+		}
+		if expired < 200 {
+			break
+		}
+	}
+	var expiredGrantCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM control_note_read_grants WHERE token_hash = $1`, domain.NoteBodySHA256(expiredReadToken)).Scan(&expiredGrantCount); err != nil || expiredGrantCount != 0 {
+		t.Fatalf("expired read grant count = %d err=%v", expiredGrantCount, err)
+	}
+	expiredInput := domain.CreateNoteAppendProposalInput{
+		ProposalID: "pg-nprop-expired-" + suffix, RunID: run.RunID, UserID: userID,
+		NoteID: note.NoteID, ExpectedRevision: note.Revision, BodyMarkdown: "replace after expiry",
+		ReadTokenHash: domain.NoteBodySHA256(readToken), IdempotencyKey: "expired-tool-" + suffix,
+		RequestDigest: domain.ComputeNoteContentDigest(note.NoteID+":1", "replace after expiry"),
+		Now:           now, ExpiresAt: now.Add(-time.Minute),
+	}
+	if _, err := store.CreateNoteAppendProposal(ctx, expiredInput); err != nil {
+		t.Fatalf("CreateNoteAppendProposal expired seed: %v", err)
+	}
+	if count, err := store.ExpireNoteAppendProposals(ctx, now, 200); err != nil || count < 1 {
+		t.Fatalf("ExpireNoteAppendProposals = %d err=%v", count, err)
+	}
+	expired, err := store.GetNoteAppendProposalForUser(ctx, expiredInput.ProposalID, userID)
+	if err != nil || expired.Status != domain.NoteAppendProposalStatusExpired || expired.BodyMarkdown != "" {
+		t.Fatalf("expired proposal retained exact text: %+v err=%v", expired, err)
+	}
+	replacementInput := expiredInput
+	replacementInput.ProposalID = "pg-nprop-replacement-" + suffix
+	replacementInput.IdempotencyKey = "replacement-tool-" + suffix
+	replacementInput.ExpiresAt = now.Add(time.Minute)
+	replacement, err := store.CreateNoteAppendProposal(ctx, replacementInput)
+	if err != nil || replacement.ProposalID != replacementInput.ProposalID || replacement.Status != domain.NoteAppendProposalStatusPending {
+		t.Fatalf("replacement after expiry = %+v err=%v", replacement, err)
+	}
+	proposalInput := domain.CreateNoteAppendProposalInput{
+		ProposalID: "pg-nprop-" + suffix, RunID: run.RunID, UserID: userID,
+		NoteID: note.NoteID, ExpectedRevision: note.Revision, BodyMarkdown: "new fact",
+		ReadTokenHash: domain.NoteBodySHA256(readToken), IdempotencyKey: "tool-" + suffix,
+		RequestDigest: domain.ComputeNoteContentDigest(note.NoteID+":1", "new fact"),
+		Now:           now, ExpiresAt: now.Add(time.Minute),
+	}
+	proposal, err := store.CreateNoteAppendProposal(ctx, proposalInput)
+	if err != nil {
+		t.Fatalf("CreateNoteAppendProposal: %v", err)
+	}
+	replayed, err := store.CreateNoteAppendProposal(ctx, proposalInput)
+	if err != nil || replayed.ProposalID != proposal.ProposalID {
+		t.Fatalf("proposal replay = %+v err=%v", replayed, err)
+	}
+	semanticReplay := proposalInput
+	semanticReplay.ProposalID = "pg-nprop-semantic-replay-" + suffix
+	semanticReplay.IdempotencyKey = "semantic-tool-" + suffix
+	if replayed, err := store.CreateNoteAppendProposal(ctx, semanticReplay); err != nil || replayed.ProposalID != proposal.ProposalID {
+		t.Fatalf("semantic proposal replay = %+v err=%v", replayed, err)
+	}
+	conflictingReplay := proposalInput
+	conflictingReplay.ProposalID = "pg-nprop-conflict-" + suffix
+	conflictingReplay.BodyMarkdown = "different fact"
+	conflictingReplay.RequestDigest = domain.ComputeNoteContentDigest(note.NoteID+":1", conflictingReplay.BodyMarkdown)
+	if _, err := store.CreateNoteAppendProposal(ctx, conflictingReplay); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same key with different proposal err = %v, want conflict", err)
+	}
+	receipt, err := store.CommitNoteAppendProposalForUser(ctx, domain.CommitNoteAppendProposalInput{
+		ProposalID: proposal.ProposalID, OperationID: "pg-nop-" + suffix, UserID: userID, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("CommitNoteAppendProposalForUser: %v", err)
+	}
+	if receipt.AfterRevision != 2 || receipt.NoteTitle != "Protocol" {
+		t.Fatalf("receipt = %+v", receipt)
+	}
+	committedProposal, err := store.GetNoteAppendProposalForUser(ctx, proposal.ProposalID, userID)
+	if err != nil || committedProposal.Status != domain.NoteAppendProposalStatusCommitted ||
+		committedProposal.BodyMarkdown != "" || committedProposal.OperationID != receipt.OperationID {
+		t.Fatalf("committed proposal = %+v err=%v", committedProposal, err)
+	}
+	loadedReceipt, err := store.GetNoteAppendOperationForUser(ctx, receipt.OperationID, userID)
+	if err != nil || loadedReceipt.OperationID != receipt.OperationID || loadedReceipt.NoteTitle != note.Title {
+		t.Fatalf("loaded receipt = %+v err=%v", loadedReceipt, err)
+	}
+	committed, err := store.GetNoteForUser(ctx, note.NoteID, userID)
+	if err != nil || committed.BodyMarkdown != "baseline\n\nnew fact" || committed.Revision != 2 {
+		t.Fatalf("committed note = %+v err=%v", committed, err)
+	}
+	undone, err := store.UndoNoteAppendOperationForUser(ctx, domain.UndoNoteAppendOperationInput{
+		OperationID: receipt.OperationID, UserID: userID, Now: now.Add(time.Second),
+	})
+	if err != nil || undone.UndoRevision != 3 {
+		t.Fatalf("UndoNoteAppendOperationForUser = %+v err=%v", undone, err)
+	}
+	if err := store.DeleteNoteForUser(ctx, note.NoteID, userID); err != nil {
+		t.Fatalf("DeleteNoteForUser: %v", err)
+	}
+	for table, key := range map[string][2]string{
+		"control_note_read_grants":       {"note_id", note.NoteID},
+		"control_note_append_proposals":  {"note_id", note.NoteID},
+		"control_note_append_operations": {"operation_id", receipt.OperationID},
+	} {
+		var count int
+		if err := pool.QueryRow(ctx, "SELECT COUNT(*) FROM "+table+" WHERE "+key[0]+" = $1", key[1]).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s retained %d rows after hard delete", table, count)
+		}
+	}
+}
+
+func TestPostgresCheckpointRowsCascadeOnRunAndThreadHardDelete(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	control := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-checkpoint-user-" + suffix
+	thread, err := control.CreateThread(ctx, domain.CreateThreadInput{UserID: userID, Title: "checkpoint cascade"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	createRun := func(goal string) domain.RunRecord {
+		run, err := control.CreateRun(ctx, domain.CreateRunInput{
+			ThreadID: thread.ThreadID, UserID: userID, Goal: goal,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun(%q): %v", goal, err)
+		}
+		if _, err := pool.Exec(ctx, `
+INSERT INTO deepagents_checkpoint_threads (thread_id, state, updated_at)
+VALUES ($1, $2, now())`, run.RunID, []byte("temporary Note-bearing run context")); err != nil {
+			t.Fatalf("insert checkpoint for %s: %v", run.RunID, err)
+		}
+		return run
+	}
+	countCheckpoint := func(runID string) int {
+		var count int
+		if err := pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM deepagents_checkpoint_threads WHERE thread_id = $1`, runID).Scan(&count); err != nil {
+			t.Fatalf("count checkpoint for %s: %v", runID, err)
+		}
+		return count
+	}
+
+	directRun := createRun("direct run delete")
+	if _, err := pool.Exec(ctx, `DELETE FROM control_runs WHERE run_id = $1`, directRun.RunID); err != nil {
+		t.Fatalf("delete run: %v", err)
+	}
+	if count := countCheckpoint(directRun.RunID); count != 0 {
+		t.Fatalf("direct run hard delete retained %d checkpoint rows", count)
+	}
+
+	threadRun := createRun("thread delete")
+	if _, err := control.HardDeleteThreadForUser(ctx, thread.ThreadID, userID); err != nil {
+		t.Fatalf("HardDeleteThreadForUser: %v", err)
+	}
+	if count := countCheckpoint(threadRun.RunID); count != 0 {
+		t.Fatalf("thread hard delete retained %d checkpoint rows", count)
+	}
+	if _, err := pool.Exec(ctx, `
+INSERT INTO deepagents_checkpoint_threads (thread_id, state, updated_at)
+VALUES ($1, $2, now())`, threadRun.RunID, []byte("late worker write")); err == nil {
+		t.Fatal("late checkpoint write resurrected a hard-deleted run")
+	}
+}
+
+func TestPostgresNoteDerivedRunStaysInSourceButNotCrossConversationHistory(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	history := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-note-history-owner-" + suffix
+	createSucceededRun := func(title, goal, response string, metadata domain.JSONMap) domain.RunRecord {
+		thread, err := history.CreateThread(ctx, domain.CreateThreadInput{UserID: userID, Title: title})
+		if err != nil {
+			t.Fatalf("CreateThread(%q): %v", title, err)
+		}
+		run, err := history.CreateRun(ctx, domain.CreateRunInput{
+			ThreadID: thread.ThreadID, UserID: userID, Goal: goal, Metadata: metadata,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun(%q): %v", goal, err)
+		}
+		completed, err := history.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID, ResponseText: response})
+		if err != nil {
+			t.Fatalf("CompleteRun(%q): %v", goal, err)
+		}
+		return completed
+	}
+
+	noteSentinel := "pg-note-derived-history-" + suffix
+	noteRun := createSucceededRun("Private Note result", "Use my Note for "+noteSentinel, "Answer copied from "+noteSentinel,
+		domain.JSONMap{"selection_context": domain.JSONMap{
+			domain.NoteAccessSelectionKey: domain.JSONMap{"mode": "search", "notes": []any{}},
+		}})
+	ordinarySentinel := "pg-ordinary-history-" + suffix
+	ordinaryRun := createSucceededRun("Ordinary result", "Analyze "+ordinarySentinel, "Independent answer "+ordinarySentinel, nil)
+
+	hits, err := history.SearchRunHistoryForUser(ctx, userID, domain.RunHistorySearchOptions{Query: noteSentinel})
+	if err != nil {
+		t.Fatalf("SearchRunHistoryForUser(Note sentinel): %v", err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("Postgres episodic search returned Note-derived content: %+v", hits)
+	}
+	hits, err = history.SearchRunHistoryForUser(ctx, userID, domain.RunHistorySearchOptions{Query: ordinarySentinel})
+	if err != nil || len(hits) != 1 || hits[0].RunID != ordinaryRun.RunID {
+		t.Fatalf("ordinary Postgres episodic history = %+v err=%v", hits, err)
+	}
+	hits, err = history.SearchRunHistoryForUser(ctx, userID, domain.RunHistorySearchOptions{})
+	if err != nil || len(hits) != 1 || hits[0].RunID != ordinaryRun.RunID {
+		t.Fatalf("Postgres recency history = %+v err=%v, want only ordinary run", hits, err)
+	}
+
+	stored, err := history.GetRunForUser(ctx, noteRun.RunID, userID)
+	if err != nil || stored.ResponseText != "Answer copied from "+noteSentinel {
+		t.Fatalf("source Postgres Note run response = %q err=%v, want preserved", stored.ResponseText, err)
+	}
+	unscoped, err := history.ListRunsForUser(ctx, userID, "", "", 20, 0)
+	if err != nil {
+		t.Fatalf("ListRunsForUser unscoped: %v", err)
+	}
+	seenNote, seenOrdinary := false, false
+	for _, run := range unscoped {
+		if run.RunID == noteRun.RunID {
+			seenNote = true
+			if run.ResponseText != "" {
+				t.Fatalf("unscoped Postgres run list copied Note-derived response %q", run.ResponseText)
+			}
+		}
+		if run.RunID == ordinaryRun.RunID {
+			seenOrdinary = true
+			if run.ResponseText == "" {
+				t.Fatal("unscoped Postgres run list redacted ordinary response")
+			}
+		}
+	}
+	if !seenNote || !seenOrdinary {
+		t.Fatalf("unscoped Postgres run list omitted lifecycle records: note=%t ordinary=%t", seenNote, seenOrdinary)
+	}
+	scoped, err := history.ListRunsForUser(ctx, userID, noteRun.ThreadID, "", 20, 0)
+	if err != nil || len(scoped) != 1 || scoped[0].ResponseText != stored.ResponseText {
+		t.Fatalf("source-thread Postgres run list = %+v err=%v, want preserved response", scoped, err)
+	}
+	allRuns, err := history.ListRuns(ctx, "", "", 500, 0)
+	if err != nil {
+		t.Fatalf("ListRuns unscoped: %v", err)
+	}
+	seenNote = false
+	for _, run := range allRuns {
+		if run.RunID == noteRun.RunID {
+			seenNote = true
+			if run.ResponseText != "" {
+				t.Fatalf("unscoped internal run list copied Note-derived response %q", run.ResponseText)
+			}
+		}
+	}
+	if !seenNote {
+		t.Fatal("unscoped internal run list omitted Note run lifecycle record")
+	}
+}
+
+func TestPostgresNoteCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	notes := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-note-cas-user-" + suffix
+	note, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-cas-" + suffix, UserID: userID, Title: "CAS",
+		BodyMarkdown: "original", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: domain.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateNote: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, body := range []string{"writer one", "writer two"} {
+		body := body
+		go func() {
+			ready.Done()
+			<-start
+			_, err := notes.UpdateNoteForUser(ctx, note.NoteID, userID, domain.NoteUpdateInput{
+				ExpectedRevision: note.Revision,
+				BodyMarkdown:     &body,
+			})
+			results <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+	succeeded, conflicted := 0, 0
+	for index := 0; index < 2; index++ {
+		switch err := <-results; {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrNoteRevisionConflict):
+			conflicted++
+		default:
+			t.Fatalf("concurrent Note update returned %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent Note updates succeeded=%d conflicted=%d, want 1/1", succeeded, conflicted)
+	}
+	current, err := notes.GetNoteForUser(ctx, note.NoteID, userID)
+	if err != nil || current.Revision != note.Revision+1 || current.ContentDigest == note.ContentDigest {
+		t.Fatalf("current Note = %+v err=%v, want exactly one durable revision", current, err)
+	}
+}
+
+func TestPostgresNoteRetrievalBudgetIsDurableAndOwnerBound(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	notes := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-note-budget-user-" + suffix
+	thread, err := notes.CreateThread(ctx, domain.CreateThreadInput{UserID: userID, Title: "budget"})
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	newRun := func(goal string) domain.RunRecord {
+		run, err := notes.CreateRun(ctx, domain.CreateRunInput{ThreadID: thread.ThreadID, UserID: userID, Goal: goal})
+		if err != nil {
+			t.Fatalf("CreateRun(%s): %v", goal, err)
+		}
+		return run
+	}
+	searchRun := newRun("search budget")
+	for index := 0; index < maxNoteSearchCalls; index++ {
+		if err := notes.ConsumeNoteSearchBudget(ctx, searchRun.RunID, userID); err != nil {
+			t.Fatalf("search budget call %d: %v", index, err)
+		}
+	}
+	if err := notes.ConsumeNoteSearchBudget(ctx, searchRun.RunID, userID); !errors.Is(err, ErrNoteRetrievalBudget) {
+		t.Fatalf("search over budget err = %v", err)
+	}
+
+	readRun := newRun("read budget")
+	for returned := 0; returned < maxNoteReadBytes; returned += maxNoteReadCallBytes {
+		if err := notes.ConsumeNoteReadBudget(ctx, readRun.RunID, userID, maxNoteReadCallBytes); err != nil {
+			t.Fatalf("read budget at %d bytes: %v", returned, err)
+		}
+	}
+	if err := notes.ConsumeNoteReadBudget(ctx, readRun.RunID, userID, 1); !errors.Is(err, ErrNoteRetrievalBudget) {
+		t.Fatalf("cumulative read over budget err = %v", err)
+	}
+	ownerRun := newRun("owner budget")
+	if err := notes.ConsumeNoteSearchBudget(ctx, ownerRun.RunID, userID); err != nil {
+		t.Fatalf("owner search budget: %v", err)
+	}
+	if err := notes.ConsumeNoteSearchBudget(ctx, ownerRun.RunID, "mallory"); !errors.Is(err, ErrNoteRetrievalBudget) {
+		t.Fatalf("budget owner mismatch err = %v", err)
+	}
+	if err := notes.ConsumeNoteReadBudget(ctx, ownerRun.RunID, userID, maxNoteReadCallBytes+1); !errors.Is(err, ErrNoteRetrievalBudget) {
+		t.Fatalf("per-call read over budget err = %v", err)
+	}
+}
+
 func TestPostgresStoreUpdateUserProfile(t *testing.T) {
 	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
 	if dsn == "" {

@@ -41,10 +41,22 @@ describe("queueing", () => {
     expect(queue).toMatch(/current\.queuedFollowup\s*\?\s*`\$\{current\.queuedFollowup\}\\n\\n\$\{text\}`/);
   });
 
+  it("seals Note refs and pasted-reference provenance into that queued turn", () => {
+    const queue = blockFrom("const queueFollowup = useCallback", "setActivePromptValue(\"\");");
+    expect(queue).toMatch(/queuedFollowupNotes: queuedNotes/);
+    expect(queue).toMatch(/queuedFollowupExcludedNoteIntentText/);
+    expect(queue).toMatch(/selectedNotes: \[\]/);
+    expect(queue).toMatch(/withoutNoteAccess\(current\.activeSelectionContext\)/);
+  });
+
   it("honours the slash-menu and picker contracts the send path enforces", () => {
     const queue = blockFrom("const queueFollowup = useCallback", "setActivePromptValue(\"\");");
-    expect(queue).toMatch(/slashMenuOpen \|\| composerResourcePickerOpen/);
-    expect(appSource).toMatch(/activePrompt\.trim\(\) && !slashMenuOpen && !composerResourcePickerOpen \? \(/);
+    expect(queue).toMatch(
+      /slashMenuOpen\s+\|\|\s+composerResourcePickerOpen\s+\|\|\s+composerNotePickerOpen/
+    );
+    expect(appSource).toMatch(
+      /activePrompt\.trim\(\)\s+&&\s+!slashMenuOpen\s+&&\s+!composerResourcePickerOpen\s+&&\s+!composerNotePickerOpen\s+\? \(/
+    );
   });
 
   it("ArrowUp with a pending queue un-queues instead of recalling history", () => {
@@ -105,7 +117,9 @@ describe("dispatch — when spending a run is allowed", () => {
     // Clearing first and letting handleSubmit silently decline destroyed the
     // queued text (a "/"-prefixed draft hydrating alongside a queue sufficed).
     const effect = dispatch();
-    const defer = effect.indexOf("slashMenuOpen || composerResourcePickerOpen || conversation.selectionImportPending");
+    const defer = effect.search(
+      /slashMenuOpen\s+\|\|\s+composerResourcePickerOpen\s+\|\|\s+composerNotePickerOpen\s+\|\|\s+conversation\.selectionImportPending/
+    );
     const clear = effect.indexOf('queuedFollowup: "",');
     expect(defer).toBeGreaterThan(-1);
     expect(defer).toBeLessThan(clear);
@@ -118,13 +132,21 @@ describe("dispatch — when spending a run is allowed", () => {
   it("clears the queue BEFORE submitting so a double-fire is impossible", () => {
     const effect = dispatch();
     const clearAt = effect.indexOf('queuedFollowup: "",');
-    const submitAt = effect.indexOf("handleSubmitRef.current(queued)");
+    const submitAt = effect.indexOf("handleSubmitRef.current(queued,");
     expect(clearAt).toBeGreaterThan(-1);
     expect(submitAt).toBeGreaterThan(clearAt);
   });
 
   it("submits through the same stable handle as the retry path", () => {
-    expect(dispatch()).toMatch(/handleSubmitRef\.current\(queued\)/);
+    expect(dispatch()).toMatch(/handleSubmitRef\.current\(queued,/);
+  });
+
+  it("submits the sealed Notes snapshot, never mutable composer chips", () => {
+    const effect = dispatch();
+    expect(effect).toMatch(/selectedNotes: queuedNotes/);
+    expect(effect).toMatch(/excludedNoteIntentText: queuedExcludedNoteIntentText/);
+    expect(effect).toMatch(/preserveComposerScope: true/);
+    expect(effect).toMatch(/onNoteScopeFailure: restoreQueuedToDraft/);
   });
 });
 
@@ -132,12 +154,16 @@ describe("the queued thought is never destroyed", () => {
   it("cancel returns the text to the composer with the append rule", () => {
     const cancel = blockFrom("const cancelQueuedFollowup = useCallback", "focusComposerTextarea();");
     expect(cancel).toMatch(/queuedFollowup: "",/);
+    expect(cancel).toMatch(/queuedFollowupNotes: \[\]/);
+    expect(cancel).toMatch(/selectedNotes: restoredNotes/);
     expect(cancel).toMatch(/previous\.trim\(\) \? `\$\{previous\.replace\(\/\\s\+\$\/, ""\)\}\\n\\n\$\{queued\}` : queued/);
   });
 
   it("survives a reload — persisted with the snapshot and hydrated back", () => {
     expect(appSource).toMatch(/queuedFollowup: conversation\.queuedFollowup \?\? "",/);
     expect(appSource).toMatch(/typeof state\.queuedFollowup === "string" \? state\.queuedFollowup : ""/);
+    expect(appSource).toMatch(/queuedFollowupNotes: conversation\.queuedFollowupNotes \?\? \[\]/);
+    expect(appSource).toMatch(/toSelectedNoteChips\(state\.queuedFollowupNotes\)/);
   });
 });
 
@@ -145,6 +171,7 @@ describe("the queued bubble", () => {
   it("states the contract and offers a labelled cancel", () => {
     expect(appSource).toContain("Queued — sends when this run finishes");
     expect(appSource).toContain('aria-label="Cancel queued follow-up"');
+    expect(appSource).toContain('aria-label="Notes for queued message"');
   });
 
   it("renders outside ConversationTranscript's narrow memo", () => {

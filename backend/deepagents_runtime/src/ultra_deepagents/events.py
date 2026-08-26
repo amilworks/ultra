@@ -53,9 +53,17 @@ def normalize_reasoning_delta(
     *,
     status: str = "running",
     source: str = "coordinator",
+    redacted: bool = False,
+    reasoning_chars: int = 0,
 ) -> dict[str, Any]:
     """Coalesced model-thinking text, streamed so the UI can show progress
     during the otherwise-silent reasoning phase. Never part of the answer."""
+    payload: dict[str, Any] = {"source": source, "status": status}
+    if redacted:
+        payload["redacted"] = True
+        payload["reasoning_chars"] = max(0, int(reasoning_chars))
+    else:
+        payload["text"] = text
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,
@@ -64,8 +72,8 @@ def normalize_reasoning_delta(
         node_name="reasoning",
         agent_role="reasoning",
         level="debug",
-        message=text,
-        payload={"text": text, "source": source, "status": status},
+        message=None if redacted else text,
+        payload=payload,
     ).to_dict()
 
 
@@ -117,9 +125,14 @@ def normalize_subagent_message_delta(
     *,
     task_id: str | None = None,
     payload: dict[str, Any] | None = None,
+    redacted: bool = False,
 ) -> dict[str, Any]:
-    event_payload = {"text": text, "source": name}
-    event_payload.update(_json_safe_payload(payload))
+    event_payload: dict[str, Any] = {"source": name}
+    if redacted:
+        event_payload["redacted"] = True
+    else:
+        event_payload["text"] = text
+        event_payload.update(_json_safe_payload(payload))
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,
@@ -129,7 +142,7 @@ def normalize_subagent_message_delta(
         task_id=task_id,
         agent_role=name,
         level="info",
-        message=text,
+        message=None if redacted else text,
         payload=event_payload,
     ).to_dict()
 
@@ -219,9 +232,17 @@ def normalize_token_usage(
     ).to_dict()
 
 
-def normalize_run_failed(context: AgentRunContext, error: BaseException | str) -> dict[str, Any]:
-    message = str(error)
+def normalize_run_failed(
+    context: AgentRunContext,
+    error: BaseException | str,
+    *,
+    redact_details: bool = False,
+) -> dict[str, Any]:
+    message = "Notes-enabled run failed." if redact_details else str(error)
     error_type = type(error).__name__ if isinstance(error, BaseException) else "Error"
+    payload: dict[str, Any] = {"error": message, "error_type": error_type}
+    if redact_details:
+        payload["redacted"] = True
     return RunEvent(
         run_id=context.run_id,
         thread_id=context.thread_id,
@@ -231,7 +252,7 @@ def normalize_run_failed(context: AgentRunContext, error: BaseException | str) -
         agent_role="coordinator",
         level="error",
         message=message,
-        payload={"error": message, "error_type": error_type},
+        payload=payload,
     ).to_dict()
 
 

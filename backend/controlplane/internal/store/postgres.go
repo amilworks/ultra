@@ -1075,12 +1075,13 @@ SET title = COALESCE(NULLIF($3, ''), title),
 // Deleting the thread row now does most of the work:
 //
 //	control_threads
-//	  └─ control_thread_messages   (schema.sql:85)
-//	  └─ control_runs              (schema.sql:95)
-//	       └─ run event sequences  (schema.sql:127)
-//	       └─ control_run_events   (schema.sql:135)
-//	       └─ run leases           (schema.sql:170)
-//	       └─ control_artifacts    (schema.sql:193)
+//	  └─ control_thread_messages   (schema.sql:83)
+//	  └─ control_runs              (schema.sql:93)
+//	       └─ run event sequences  (schema.sql:205)
+//	       └─ control_run_events   (schema.sql:210)
+//	       └─ run leases           (schema.sql:248)
+//	       └─ control_artifacts    (schema.sql:414)
+//	       └─ worker checkpoints   (deepagents_checkpoint_threads)
 //
 // Two things the cascades cannot reach, and why they are handled explicitly:
 //
@@ -1097,9 +1098,11 @@ SET title = COALESCE(NULLIF($3, ''), title),
 // conversations by design (no thread FK) and have their own hard-delete path in
 // PurgeResource. Deleting a conversation must never delete the user's data.
 //
-// deepagents_checkpoint_threads is owned by the Python runtime, which already
-// deletes on terminal ack and GCs at 72h; it is not reachable from this pool's
-// schema and is left to that owner.
+// deepagents_checkpoint_threads is keyed to control_runs with ON DELETE
+// CASCADE, so deleting the thread reaches temporary worker checkpoints too.
+// The worker also deletes them on terminal acknowledgement and bounds abandoned
+// rows with retention GC; the FK is the final erasure and anti-resurrection
+// boundary for an explicitly hard-deleted conversation.
 func (s *PostgresStore) HardDeleteThreadForUser(ctx context.Context, threadID string, userID string) ([]string, error) {
 	threadID = strings.TrimSpace(threadID)
 	userID = strings.TrimSpace(userID)
@@ -1482,6 +1485,32 @@ func (s *PostgresStore) CreateRun(ctx context.Context, input domain.CreateRunInp
 	}
 	defer tx.Rollback(ctx)
 
+	// Serialize run creation within a thread so a follow-on run cannot race a
+	// Note-enabled predecessor and miss its privacy lineage. This is a narrow
+	// row lock; unrelated threads continue creating runs concurrently.
+	var lockedThreadID string
+	if err := tx.QueryRow(ctx, `
+SELECT thread_id
+FROM control_threads
+WHERE thread_id = $1
+FOR UPDATE`, input.ThreadID).Scan(&lockedThreadID); err != nil {
+		return domain.RunRecord{}, mapPgError(err)
+	}
+	var inheritedNotePrivacy bool
+	if err := tx.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1
+  FROM control_runs
+  WHERE thread_id = $1
+    AND (
+      COALESCE(metadata, '{}'::jsonb) ? $2
+      OR COALESCE(metadata->'selection_context', '{}'::jsonb) ? $3
+    )
+)`, input.ThreadID, domain.NotePrivacyLineageMetadataKey, domain.NoteAccessSelectionKey).Scan(&inheritedNotePrivacy); err != nil {
+		return domain.RunRecord{}, err
+	}
+	metadata := serverAuthoredNotePrivacyMetadata(input.Metadata, inheritedNotePrivacy)
+
 	q := s.queries.WithTx(tx)
 	now := domain.Now()
 	workflowKind := input.WorkflowKind
@@ -1502,7 +1531,7 @@ func (s *PostgresStore) CreateRun(ctx context.Context, input domain.CreateRunInp
 		Mode:         nullableText(mode),
 		CreatedAt:    timestamptz(now),
 		UpdatedAt:    timestamptz(now),
-		Metadata:     jsonBytes(input.Metadata),
+		Metadata:     jsonBytes(metadata),
 	})
 	if err != nil {
 		return domain.RunRecord{}, mapPgError(err)
@@ -1613,6 +1642,17 @@ func (s *PostgresStore) ListRuns(ctx context.Context, threadID string, status st
 	for _, row := range rows {
 		runs = append(runs, runFromRow(row))
 	}
+	if strings.TrimSpace(threadID) == "" {
+		privateThreadIDs, err := s.notePrivacyThreadIDs(ctx, runs)
+		if err != nil {
+			return nil, err
+		}
+		for index := range runs {
+			if _, private := privateThreadIDs[runs[index].ThreadID]; private {
+				runs[index].ResponseText = ""
+			}
+		}
+	}
 	return runs, nil
 }
 
@@ -1635,6 +1675,17 @@ func (s *PostgresStore) ListRunsForUser(ctx context.Context, userID string, thre
 	runs := make([]domain.RunRecord, 0, len(rows))
 	for _, row := range rows {
 		runs = append(runs, runFromRow(row))
+	}
+	if strings.TrimSpace(threadID) == "" {
+		privateThreadIDs, err := s.notePrivacyThreadIDs(ctx, runs)
+		if err != nil {
+			return nil, err
+		}
+		for index := range runs {
+			if _, private := privateThreadIDs[runs[index].ThreadID]; private {
+				runs[index].ResponseText = ""
+			}
+		}
 	}
 	return runs, nil
 }
@@ -1692,6 +1743,19 @@ FROM control_runs r
 LEFT JOIN control_threads t ON t.thread_id = r.thread_id
 WHERE r.user_id = $1
   AND r.status = 'succeeded'
+  -- Answers in a Note-bearing thread remain available in that source
+  -- conversation, but must never be copied into another conversation through
+  -- episodic memory. The correlated check also catches unmarked descendants
+  -- written before lineage propagation or by an older rolling-upgrade replica.
+  AND NOT EXISTS (
+    SELECT 1
+    FROM control_runs privacy_run
+    WHERE privacy_run.thread_id = r.thread_id
+      AND (
+        COALESCE(privacy_run.metadata, '{}'::jsonb) ? $7
+        OR COALESCE(privacy_run.metadata->'selection_context', '{}'::jsonb) ? $8
+      )
+  )
   -- This backs the agent's episodic-memory tool, so anything it returns the
   -- model may quote back at the user. Without this clause a deleted
   -- conversation could resurface in a later answer.
@@ -1710,7 +1774,8 @@ WHERE r.user_id = $1
   AND ($3::timestamptz IS NULL OR r.completed_at >= $3)
   AND ($4 = '' OR r.run_id <> $4)
 ORDER BY r.completed_at DESC NULLS LAST
-LIMIT $6`, userID, terms, since, strings.TrimSpace(opts.ExcludeRunID), runHistorySnippetChars, limit)
+LIMIT $6`, userID, terms, since, strings.TrimSpace(opts.ExcludeRunID), runHistorySnippetChars, limit,
+		domain.NotePrivacyLineageMetadataKey, domain.NoteAccessSelectionKey)
 	if err != nil {
 		return nil, err
 	}

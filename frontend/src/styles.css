@@ -5636,21 +5636,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   cursor: pointer;
 }
 
-.notes-list-foot {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-.notes-list-foot::before {
-  width: 0.42rem;
-  height: 0.42rem;
-  border-radius: 50%;
-  background: var(--text-muted);
-  content: "";
-  opacity: 0.7;
-}
-
 .notes-editor {
   position: relative;
   padding: 0;
@@ -5801,8 +5786,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   width: min(calc(100% - 64px), 46rem);
   margin: 46px auto 0;
   padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 1.72rem;
   line-height: 1.24;
+}
+
+.notes-title-input:focus {
+  text-overflow: clip;
 }
 
 .notes-document-context {
@@ -5813,11 +5805,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   margin: 8px auto 0;
   color: var(--text-muted);
   font-size: 0.74rem;
-}
-
-.notes-document-context span + span::before {
-  margin-right: 0.5rem;
-  content: "·";
 }
 
 .notes-document-context button {

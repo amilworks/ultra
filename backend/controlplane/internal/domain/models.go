@@ -93,7 +93,10 @@ type RunRecord struct {
 // RunHistorySearchOptions parameterizes an episodic-memory search over a single
 // user's past runs. Query is matched (case-insensitively) against run goal,
 // final response, and thread title; Since bounds recency; ExcludeRunID drops the
-// current run so the agent never "recalls" the conversation it is in.
+// current run so the agent never "recalls" the conversation it is in. Store
+// implementations also exclude every run from a thread carrying Note privacy
+// lineage so legacy unmarked descendants cannot become cross-conversation
+// memory during a rolling upgrade.
 type RunHistorySearchOptions struct {
 	Query        string
 	Since        *time.Time
@@ -1379,9 +1382,14 @@ type NoteRecord struct {
 	// EditorMode is the owner's editing surface for this note — "markdown"
 	// (rich, doc-style) or "plaintext" (raw mono). Sticky per note; purely a
 	// presentation preference. The body is plain markdown in either mode.
-	EditorMode string    `json:"editor_mode"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	EditorMode string `json:"editor_mode"`
+	// Revision is the monotonic compare-and-swap token for every mutation.
+	// ContentDigest identifies the title/body bytes used for model provenance;
+	// it is descriptive and must never be treated as mutation authority.
+	Revision      int64     `json:"revision"`
+	ContentDigest string    `json:"content_digest"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // NoteListItem is the list-pane projection: no full body, just enough to
@@ -1391,6 +1399,7 @@ type NoteListItem struct {
 	Title     string    `json:"title"`
 	Snippet   string    `json:"snippet"`
 	Pinned    bool      `json:"pinned"`
+	Revision  int64     `json:"revision"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -1408,10 +1417,11 @@ type NoteListPage struct {
 
 // NoteUpdateInput carries a partial update; nil fields are left untouched.
 type NoteUpdateInput struct {
-	Title        *string
-	BodyMarkdown *string
-	Pinned       *bool
-	EditorMode   *string
+	ExpectedRevision int64
+	Title            *string
+	BodyMarkdown     *string
+	Pinned           *bool
+	EditorMode       *string
 }
 
 type WorkerHeartbeatRecord struct {

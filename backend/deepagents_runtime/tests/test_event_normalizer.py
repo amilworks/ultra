@@ -69,6 +69,22 @@ def test_normalize_subagent_message_delta_keeps_specialist_text_separate():
     assert event["payload"]["namespace"] == ["literature-reviewer"]
 
 
+def test_normalize_subagent_message_delta_can_be_content_free():
+    sentinel = "NOTE_SENTINEL_IN_SUBAGENT_MESSAGE"
+    event = normalize_subagent_message_delta(
+        _context(),
+        name="general-purpose",
+        text=sentinel,
+        task_id="task-private",
+        payload={"namespace": ["general-purpose"], "preview": sentinel},
+        redacted=True,
+    )
+
+    assert event["message"] is None
+    assert event["payload"] == {"source": "general-purpose", "redacted": True}
+    assert sentinel not in str(event)
+
+
 def test_normalize_artifact_created_is_go_compatible():
     event = normalize_artifact_created(
         _context(),

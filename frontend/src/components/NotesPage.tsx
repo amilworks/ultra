@@ -22,6 +22,7 @@ import {
   Italic,
   Link as LinkIcon,
   Loader2,
+  MessageSquare,
   Minimize2,
   MoreHorizontal,
   Paperclip,
@@ -53,7 +54,13 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { FileUpload, useFileUploadContext } from "@/components/prompt-kit";
-import type { ApiClient, NoteEditorMode, NoteListItem, NoteRecord } from "@/lib/api";
+import {
+  isNoteRevisionConflict,
+  type ApiClient,
+  type NoteEditorMode,
+  type NoteListItem,
+  type NoteRecord,
+} from "@/lib/api";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import { markdownForUpload } from "@/lib/ultraResource";
 import type { ResourceRecord } from "@/types";
@@ -100,7 +107,7 @@ const AUTOSAVE_DEBOUNCE_MS = 700;
 const LOCAL_DRAFT_ID = "__ultra_local_note_draft__";
 const COMPACT_NOTES_MEDIA = "(max-width: 960px)";
 
-type SaveState = "idle" | "draft" | "dirty" | "saving" | "saved" | "error";
+type SaveState = "idle" | "draft" | "dirty" | "saving" | "saved" | "conflict" | "error";
 
 type SlashBlock = {
   id: string;
@@ -188,6 +195,7 @@ type NoteDraft = {
   body: string;
   pinned: boolean;
   editorMode: NoteEditorMode;
+  revision: number;
 };
 
 type SavedDraft = Omit<NoteDraft, "noteId">;
@@ -271,6 +279,8 @@ const noteRecordForLocalDraft = (): NoteRecord => {
     body_markdown: "",
     pinned: false,
     editor_mode: "markdown",
+    revision: 0,
+    content_digest: "",
     created_at: now,
     updated_at: now,
   };
@@ -365,9 +375,21 @@ const resourceKindLabel = (kind: string): string => {
 
 export type NotesPageProps = {
   apiClient: ApiClient;
+  initialNoteId?: string | null;
+  refreshVersion?: number;
+  listRequestVersion?: number;
+  onActiveNoteChange?: (noteId: string | null) => void;
+  onUseInChat?: (note: { note_id: string; title: string; revision: number }) => void;
 };
 
-export function NotesPage({ apiClient }: NotesPageProps) {
+export function NotesPage({
+  apiClient,
+  initialNoteId = null,
+  refreshVersion = 0,
+  listRequestVersion = 0,
+  onActiveNoteChange,
+  onUseInChat,
+}: NotesPageProps) {
   const [items, setItems] = useState<NoteListItem[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
@@ -380,6 +402,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   const [noteLoading, setNoteLoading] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [conflictRecord, setConflictRecord] = useState<NoteRecord | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [slashQuery, setSlashQuery] = useState("");
@@ -411,6 +434,10 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const saveQueuedRef = useRef(false);
+  // State drives the banner; this synchronous guard drives the write channel.
+  // It prevents blur/unmount flushes from retrying a known-stale revision
+  // before the writer has explicitly chosen which version to keep.
+  const saveBlockedByConflictRef = useRef(false);
   const draftRef = useRef<NoteDraft | null>(null);
   const savedRef = useRef<SavedDraft | null>(null);
   const searchGenerationRef = useRef(0);
@@ -420,6 +447,8 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   const editorApiRef = useRef<NotesEditorHandle | null>(null);
   const editorActiveRef = useRef<NotesActiveStates>(EDITOR_IDLE);
   const pendingBodyFocusRef = useRef(false);
+  const refreshVersionRef = useRef(refreshVersion);
+  const listRequestVersionRef = useRef(listRequestVersion);
 
   const refreshList = useCallback(
     async (query: string) => {
@@ -505,6 +534,9 @@ export function NotesPage({ apiClient }: NotesPageProps) {
   }, [apiClient, resourcePickerOpen, resourceQuery, resourceRefreshKey]);
 
   const flushSave = useCallback(async (): Promise<boolean> => {
+    if (saveBlockedByConflictRef.current) {
+      return false;
+    }
     if (saveInFlightRef.current) {
       saveQueuedRef.current = true;
       return await saveInFlightRef.current;
@@ -541,15 +573,21 @@ export function NotesPage({ apiClient }: NotesPageProps) {
             if (!latest || latest.noteId !== LOCAL_DRAFT_ID) {
               return true;
             }
-            const persistedLatest: NoteDraft = { ...latest, noteId: record.note_id };
+            const persistedLatest: NoteDraft = {
+              ...latest,
+              noteId: record.note_id,
+              revision: record.revision,
+            };
             draftRef.current = persistedLatest;
             savedRef.current = {
               title: record.title,
               body: record.body_markdown,
               pinned: record.pinned,
               editorMode: record.editor_mode,
+              revision: record.revision,
             };
             setActiveNoteId(record.note_id);
+            onActiveNoteChange?.(record.note_id);
             setActiveNote((current) =>
               current && current.note_id === LOCAL_DRAFT_ID
                 ? {
@@ -567,6 +605,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                 title: persistedLatest.title,
                 snippet: persistedLatest.body.slice(0, 300),
                 pinned: persistedLatest.pinned,
+                revision: record.revision,
                 updated_at: record.updated_at,
               },
               ...current.filter((item) => item.note_id !== record.note_id),
@@ -580,14 +619,18 @@ export function NotesPage({ apiClient }: NotesPageProps) {
               body_markdown: snapshot.body,
               pinned: snapshot.pinned,
               editor_mode: snapshot.editorMode,
+              expected_revision: snapshot.revision,
             });
             const latest = draftRef.current;
             if (latest && latest.noteId === record.note_id) {
+              const revisedLatest = { ...latest, revision: record.revision };
+              draftRef.current = revisedLatest;
               savedRef.current = {
                 title: record.title,
                 body: record.body_markdown,
                 pinned: record.pinned,
                 editorMode: record.editor_mode,
+                revision: record.revision,
               };
               setItems((current) => {
                 const existing = current.find((item) => item.note_id === record.note_id);
@@ -599,21 +642,46 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                   title: latest.title,
                   snippet: latest.body.slice(0, 300),
                   pinned: latest.pinned,
+                  revision: record.revision,
                   updated_at: record.updated_at,
                 };
                 return [updated, ...current.filter((item) => item.note_id !== record.note_id)];
               });
               setActiveNote((current) =>
                 current && current.note_id === record.note_id
-                  ? { ...current, updated_at: record.updated_at }
+                  ? {
+                      ...current,
+                      revision: record.revision,
+                      content_digest: record.content_digest,
+                      updated_at: record.updated_at,
+                    }
                   : current
               );
-              if (!draftMatchesSaved(latest, savedRef.current)) {
+              if (!draftMatchesSaved(revisedLatest, savedRef.current)) {
                 saveQueuedRef.current = true;
               }
             }
           }
         } catch (error) {
+          if (snapshot.noteId !== LOCAL_DRAFT_ID && isNoteRevisionConflict(error)) {
+            saveBlockedByConflictRef.current = true;
+            try {
+              const latestRecord = await apiClient.getNote(snapshot.noteId);
+              if (draftRef.current?.noteId === snapshot.noteId) {
+                setConflictRecord(latestRecord);
+                setSaveState("conflict");
+                setSaveError(
+                  "This note changed elsewhere. Your version is still open and has not been overwritten."
+                );
+              }
+            } catch {
+              setSaveState("conflict");
+              setSaveError(
+                "This note changed elsewhere. Your version is still open; reload the note before saving again."
+              );
+            }
+            return false;
+          }
           setSaveState("error");
           setSaveError(error instanceof Error ? error.message : "Ultra could not save this note.");
           return false;
@@ -634,9 +702,13 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         saveInFlightRef.current = null;
       }
     }
-  }, [apiClient]);
+  }, [apiClient, onActiveNoteChange]);
 
   const scheduleSave = useCallback(() => {
+    if (saveBlockedByConflictRef.current) {
+      setSaveState("conflict");
+      return;
+    }
     setSaveState(draftRef.current?.noteId === LOCAL_DRAFT_ID ? "draft" : "dirty");
     setSaveError(null);
     if (saveTimerRef.current !== null) {
@@ -676,6 +748,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       draftRef.current = null;
       savedRef.current = null;
       setActiveNoteId(noteId);
+      onActiveNoteChange?.(noteId);
       setActiveNote(null);
       setNoteLoading(true);
       setSlashOpen(false);
@@ -700,18 +773,22 @@ export function NotesPage({ apiClient }: NotesPageProps) {
           body: record.body_markdown,
           pinned: record.pinned,
           editorMode: record.editor_mode === "plaintext" ? "plaintext" : "markdown",
+          revision: record.revision,
         };
         savedRef.current = {
           title: record.title,
           body: record.body_markdown,
           pinned: record.pinned,
           editorMode: draftRef.current.editorMode,
+          revision: record.revision,
         };
         setActiveNote(record);
         setTitleEditing(false);
         setEditorSessionKey((current) => current + 1);
         setSaveState("idle");
         setSaveError(null);
+        saveBlockedByConflictRef.current = false;
+        setConflictRecord(null);
       } catch (error) {
         if (generation !== noteGenerationRef.current) {
           return;
@@ -724,7 +801,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         }
       }
     },
-    [apiClient, flushSave]
+    [apiClient, flushSave, onActiveNoteChange]
   );
 
   const startNewNote = useCallback(async () => {
@@ -742,16 +819,20 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       body: "",
       pinned: false,
       editorMode: "markdown",
+      revision: 0,
     };
     savedRef.current = null;
     pendingBodyFocusRef.current = true;
     setActiveNoteId(LOCAL_DRAFT_ID);
+    onActiveNoteChange?.(null);
     setActiveNote(record);
     setTitleEditing(false);
     setEditorSessionKey((value) => value + 1);
     setNoteLoading(false);
     setSaveState("draft");
     setSaveError(null);
+    saveBlockedByConflictRef.current = false;
+    setConflictRecord(null);
     setEditorError(null);
     setSlashOpen(false);
     setSlashQuery("");
@@ -765,7 +846,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
     setSearchQuery("");
     setMobileListOpen(false);
     window.requestAnimationFrame(() => editorApiRef.current?.focus());
-  }, [flushSave]);
+  }, [flushSave, onActiveNoteChange]);
 
   // Desktop opens the most recent note. Phones stay on the list until the
   // user chooses a note, so navigation is never hidden behind an arbitrary
@@ -777,12 +858,28 @@ export function NotesPage({ apiClient }: NotesPageProps) {
     initialOpenHandledRef.current = true;
     const compact =
       typeof window.matchMedia === "function" && window.matchMedia(COMPACT_NOTES_MEDIA).matches;
-    if (compact) {
+    if (initialNoteId?.trim()) {
+      void openNote(initialNoteId.trim());
+    } else if (compact) {
       setMobileListOpen(true);
     } else if (!activeNoteId && items.length > 0) {
       void openNote(items[0].note_id);
     }
-  }, [listLoading, activeNoteId, items, openNote]);
+  }, [listLoading, activeNoteId, initialNoteId, items, openNote]);
+
+  useEffect(() => {
+    const requestedNoteId = initialNoteId?.trim();
+    if (!requestedNoteId || listLoading) {
+      return;
+    }
+    if (requestedNoteId === activeNoteId) {
+      // Forward navigation may target the Note that remains warm behind the
+      // mobile list. Reopen the pane without refetching or remounting it.
+      setMobileListOpen(false);
+      return;
+    }
+    void openNote(requestedNoteId);
+  }, [activeNoteId, initialNoteId, listLoading, openNote]);
 
   const updateDraft = useCallback(
     (patch: Partial<Omit<NoteDraft, "noteId">>) => {
@@ -863,8 +960,11 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       setActiveNote(null);
       setSaveState("idle");
       setSaveError(null);
+      saveBlockedByConflictRef.current = false;
+      setConflictRecord(null);
       setEditorError(null);
       setMobileListOpen(true);
+      onActiveNoteChange?.(null);
       return;
     }
     try {
@@ -876,16 +976,153 @@ export function NotesPage({ apiClient }: NotesPageProps) {
       setActiveNote(null);
       setSaveState("idle");
       setSaveError(null);
+      saveBlockedByConflictRef.current = false;
+      setConflictRecord(null);
       setEditorError(null);
       setItems((current) => current.filter((item) => item.note_id !== noteId));
       setMobileListOpen(true);
+      onActiveNoteChange?.(null);
     } catch (error) {
       setDeleteDialogOpen(false);
       setEditorError(
         error instanceof Error ? `Couldn’t delete this note — ${error.message}` : "Couldn’t delete this note."
       );
     }
-  }, [activeNoteId, apiClient]);
+  }, [activeNoteId, apiClient, onActiveNoteChange]);
+
+  const adoptNoteRecord = useCallback((record: NoteRecord) => {
+    const editorMode = record.editor_mode === "plaintext" ? "plaintext" : "markdown";
+    draftRef.current = {
+      noteId: record.note_id,
+      title: record.title,
+      body: record.body_markdown,
+      pinned: record.pinned,
+      editorMode,
+      revision: record.revision,
+    };
+    savedRef.current = {
+      title: record.title,
+      body: record.body_markdown,
+      pinned: record.pinned,
+      editorMode,
+      revision: record.revision,
+    };
+    setActiveNote(record);
+    setItems((current) =>
+      current.map((item) =>
+        item.note_id === record.note_id
+          ? {
+              ...item,
+              title: record.title,
+              snippet: record.body_markdown.slice(0, 300),
+              pinned: record.pinned,
+              revision: record.revision,
+              updated_at: record.updated_at,
+            }
+          : item
+      )
+    );
+    setEditorSessionKey((current) => current + 1);
+    saveBlockedByConflictRef.current = false;
+    setConflictRecord(null);
+    setSaveError(null);
+    setSaveState("saved");
+  }, []);
+
+  const useLatestConflictVersion = useCallback(() => {
+    const record = conflictRecord;
+    if (!record || draftRef.current?.noteId !== record.note_id) {
+      return;
+    }
+    adoptNoteRecord(record);
+  }, [adoptNoteRecord, conflictRecord]);
+
+  const saveConflictVersion = useCallback(async () => {
+    const record = conflictRecord;
+    const draft = draftRef.current;
+    if (!record || !draft || draft.noteId !== record.note_id) {
+      return;
+    }
+    draftRef.current = { ...draft, revision: record.revision };
+    setActiveNote((current) =>
+      current?.note_id === record.note_id ? { ...current, revision: record.revision } : current
+    );
+    saveBlockedByConflictRef.current = false;
+    setConflictRecord(null);
+    setSaveState("dirty");
+    setSaveError(null);
+    await flushSave();
+  }, [conflictRecord, flushSave]);
+
+  const retryConflictLoad = useCallback(async () => {
+    const noteId = draftRef.current?.noteId;
+    if (!noteId || noteId === LOCAL_DRAFT_ID) {
+      return;
+    }
+    setSaveError(null);
+    try {
+      const latest = await apiClient.getNote(noteId);
+      if (draftRef.current?.noteId === noteId) {
+        setConflictRecord(latest);
+      }
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? `Couldn’t load the latest version — ${error.message}`
+          : "Couldn’t load the latest version."
+      );
+    }
+  }, [apiClient]);
+
+  const sendActiveNoteToChat = useCallback(async () => {
+    if (!onUseInChat || !(await flushSave())) {
+      return;
+    }
+    const draft = draftRef.current;
+    if (!draft || draft.noteId === LOCAL_DRAFT_ID || draft.revision < 1) {
+      return;
+    }
+    onUseInChat({
+      note_id: draft.noteId,
+      title: draft.title.trim() || titleFromBody(draft.body) || "Untitled",
+      revision: draft.revision,
+    });
+  }, [flushSave, onUseInChat]);
+
+  // A committed proposal or Undo may update the Note while this page remains
+  // mounted. Refresh only a clean editor; a local draft must never disappear
+  // because another surface changed the same Note.
+  useEffect(() => {
+    if (refreshVersionRef.current === refreshVersion) {
+      return;
+    }
+    refreshVersionRef.current = refreshVersion;
+    const draft = draftRef.current;
+    if (
+      !draft ||
+      draft.noteId === LOCAL_DRAFT_ID ||
+      !draftMatchesSaved(draft, savedRef.current) ||
+      saveBlockedByConflictRef.current ||
+      conflictRecord
+    ) {
+      return;
+    }
+    let cancelled = false;
+    void apiClient
+      .getNote(draft.noteId)
+      .then((record) => {
+        if (!cancelled && draftRef.current?.noteId === record.note_id) {
+          adoptNoteRecord(record);
+        }
+      })
+      .catch(() => {
+        // The normal open/save paths surface actionable errors. A background
+        // freshness check stays silent so it cannot interrupt writing.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [adoptNoteRecord, apiClient, conflictRecord, refreshVersion]);
 
   const insertSlashBlock = useCallback(
     (block: SlashBlock) => {
@@ -1286,7 +1523,23 @@ export function NotesPage({ apiClient }: NotesPageProps) {
     setLinkAnchor(null);
     setResourcePickerOpen(false);
     setMobileListOpen(true);
-  }, [flushSave]);
+    onActiveNoteChange?.(null);
+  }, [flushSave, onActiveNoteChange]);
+
+  // App-level Back/Forward owns the URL, while this component owns the mobile
+  // split-pane state. A monotonic request bridges “?view=notes” back to the
+  // list without remounting (and therefore without dropping an unsaved draft).
+  useEffect(() => {
+    if (listRequestVersionRef.current === listRequestVersion) {
+      return;
+    }
+    listRequestVersionRef.current = listRequestVersion;
+    const compact =
+      typeof window.matchMedia === "function" && window.matchMedia(COMPACT_NOTES_MEDIA).matches;
+    if (compact) {
+      void returnToList();
+    }
+  }, [listRequestVersion, returnToList]);
 
   const closeResourcePicker = useCallback(
     (restoreMention: boolean) => {
@@ -1446,6 +1699,8 @@ export function NotesPage({ apiClient }: NotesPageProps) {
         ? "Draft · Not saved yet"
       : saveState === "dirty"
         ? "Saving soon…"
+        : saveState === "conflict"
+          ? "Review changes"
         : saveState === "error"
           ? "Couldn’t sync"
           : activeNote
@@ -1526,7 +1781,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
           </div>
         )}
         <div className="notes-list-foot">
-          Notes are private to you.
+          Scoped to your account. Ultra reads Notes only when you attach one or ask it to search.
         </div>
       </aside>
 
@@ -1559,7 +1814,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                     >
                       {uploadingCount > 0 || saveState === "saving" ? (
                         <Loader2 className="animate-spin" aria-hidden="true" />
-                      ) : saveState === "error" ? (
+                      ) : saveState === "error" || saveState === "conflict" ? (
                         <AlertCircle aria-hidden="true" />
                       ) : saveState === "saved" || saveState === "idle" ? (
                         <Check aria-hidden="true" />
@@ -1572,7 +1827,12 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="start" className="notes-save-menu">
-                    {saveState === "error" ? (
+                    {saveState === "conflict" ? (
+                      <div className="notes-save-detail" role="alert">
+                        <strong>This note changed elsewhere.</strong>
+                        <span>Your edits are still open. Choose which version to keep in the editor.</span>
+                      </div>
+                    ) : saveState === "error" ? (
                       <>
                         <div className="notes-save-detail" role="alert">
                           <strong>Ultra couldn’t sync this note.</strong>
@@ -1670,6 +1930,14 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                     >
                       <Upload aria-hidden="true" /> Upload a file
                     </DropdownMenuItem>
+                    {onUseInChat ? (
+                      <DropdownMenuItem
+                        disabled={activeNote.note_id === LOCAL_DRAFT_ID && !localDraftHasContent}
+                        onSelect={() => void sendActiveNoteToChat()}
+                      >
+                        <MessageSquare aria-hidden="true" /> Use in chat
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem className="notes-delete-menu-item" onSelect={() => setDeleteDialogOpen(true)}>
                       <Trash aria-hidden="true" />
@@ -1687,6 +1955,38 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                 <button type="button" aria-label="Dismiss error" onClick={() => setEditorError(null)}>
                   <X aria-hidden="true" />
                 </button>
+              </div>
+            ) : null}
+
+            {saveState === "conflict" ? (
+              <div
+                className="mx-5 mt-3 flex flex-col gap-3 rounded-xl border border-border bg-muted/45 px-4 py-3 text-sm sm:mx-8 sm:flex-row sm:items-center sm:justify-between"
+                role="alert"
+              >
+                <div className="min-w-0">
+                  <strong className="block font-medium">This note changed elsewhere.</strong>
+                  <span className="text-muted-foreground">
+                    {conflictRecord
+                      ? "Your edits are safe in this editor. Keep the latest saved note or save your version over it."
+                      : saveError || "Your edits are safe. Load the latest saved note before choosing a version."}
+                  </span>
+                </div>
+                <div className="flex shrink-0 flex-wrap gap-2">
+                  {conflictRecord ? (
+                    <>
+                      <Button type="button" variant="outline" size="sm" onClick={useLatestConflictVersion}>
+                        Use latest
+                      </Button>
+                      <Button type="button" size="sm" onClick={() => void saveConflictVersion()}>
+                        Save my version
+                      </Button>
+                    </>
+                  ) : (
+                    <Button type="button" variant="outline" size="sm" onClick={() => void retryConflictLoad()}>
+                      Load latest
+                    </Button>
+                  )}
+                </div>
               </div>
             ) : null}
 
@@ -1722,7 +2022,6 @@ export function NotesPage({ apiClient }: NotesPageProps) {
             ) : null}
 
             <div className="notes-document-context">
-              <span>Personal note</span>
               <span>
                 {activeNote.note_id === LOCAL_DRAFT_ID
                   ? "Created when you start writing"
@@ -2102,7 +2401,7 @@ export function NotesPage({ apiClient }: NotesPageProps) {
                 variant="outline"
                 size="sm"
                 className="notes-load-back"
-                onClick={() => setMobileListOpen(true)}
+                onClick={() => void returnToList()}
               >
                 <ChevronLeft data-icon="inline-start" aria-hidden="true" /> Back to notes
               </Button>

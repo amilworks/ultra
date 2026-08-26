@@ -21,6 +21,7 @@ from deepagents import (
 )
 from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
 from deepagents.middleware._utils import append_to_system_message
+from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest
 from langchain.agents.middleware.types import AgentMiddleware, ModelResponse
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -65,6 +66,13 @@ from ultra_deepagents.model import build_chat_model, build_vision_chat_model
 from ultra_deepagents.multimodal import (
     BoundedImageMultimodalMiddleware,
     TextOnlyMultimodalMiddleware,
+)
+from ultra_deepagents.notes.access import note_access_from_selection_context
+from ultra_deepagents.notes.tools import (
+    NOTE_TOOL_NAMES,
+    NOTES_PROMPT_GUIDANCE,
+    build_notes_tools,
+    notes_tools_authorized,
 )
 from ultra_deepagents.papers.tools import build_paper_tools
 from ultra_deepagents.progress_guard import read_attempt_ledger_digest
@@ -416,6 +424,15 @@ available before choosing a workflow."""
 _CLEANROOM_TOOL_SYSTEM_GUIDANCE = """For complex autonomous work, call tool_capability_manifest when you need to confirm
 which sandbox, filesystem, paper, or domain tools are available. Prior-session, prior-artifact,
 linked-account, and user-catalog context is intentionally unavailable for this run."""
+
+_NOTES_CONTEXT_BOUNDARY_GUIDANCE = """## Private Notes boundary
+
+This turn has an intentionally narrow tool surface. Note content may inform only your final answer
+to the user or an append proposal the user explicitly requested and will review in the browser.
+Do not persist, delegate, execute, upload, stage, externally query, or copy Note content into any
+memory, workspace, output, artifact, file, task, program, or non-Notes tool. Treat missing tools as
+an intentional privacy boundary, not as a reason to invent a workaround. Internal reasoning and
+tool activity are shown only as content-free lifecycle metadata for this turn."""
 
 
 _GROUNDING_SYSTEM_GUIDANCE = """Ground every factual claim in a tool result or an attached resource, never in assumption.
@@ -1849,6 +1866,19 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     ]
     if context.goal.strip():
         lines.append(f"- goal: {context.goal.strip()}")
+    note_scope = note_access_from_selection_context(context.selection_context)
+    if note_scope.enabled:
+        lines.append(f"- Notes access for this run: {note_scope.mode}")
+        if note_scope.notes:
+            references = ", ".join(
+                (
+                    f"{reference.note_id}@revision-{reference.revision}"
+                    if reference.revision is not None
+                    else reference.note_id
+                )
+                for reference in note_scope.notes
+            )
+            lines.append(f"- selected Notes: {references} | use read_note to access content")
     if context.runtime_facts:
         lines.append("Runtime facts:")
         for key in (
@@ -1956,6 +1986,65 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     return "\n".join(lines)
 
 
+def build_notes_run_context_brief(context: AgentRunContext) -> str:
+    """Build the request suffix for the deliberately Notes-only agent.
+
+    A Notes run cannot inherit filesystem, resource, BisQue, paper, memory, or
+    delegation tools. Reusing the general brief would advertise those absent
+    capabilities whenever a legacy or malformed mixed-context job reached the
+    worker. The control plane rejects new mixed requests; this narrow suffix is
+    the worker-side fail-safe and keeps the model instructions truthful.
+    """
+
+    lines = [
+        "Active run context:",
+        f"- run_id: {context.run_id}",
+        f"- thread_id: {context.thread_id}",
+    ]
+    if context.goal.strip():
+        lines.append(f"- goal: {context.goal.strip()}")
+    note_scope = note_access_from_selection_context(context.selection_context)
+    if note_scope.enabled:
+        lines.append(f"- Notes access for this run: {note_scope.mode}")
+        if note_scope.notes:
+            references = ", ".join(
+                (
+                    f"{reference.note_id}@revision-{reference.revision}"
+                    if reference.revision is not None
+                    else reference.note_id
+                )
+                for reference in note_scope.notes
+            )
+            lines.append(f"- selected Notes: {references} | use read_note to access content")
+    if context.runtime_facts:
+        lines.append("Runtime facts:")
+        for key in (
+            "current_datetime_utc",
+            "current_date_utc",
+            "user_timezone",
+            "local_datetime",
+            "run_started_at",
+            "product_name",
+            "app_name",
+            "app_version",
+            "deployment_environment",
+            "public_url",
+        ):
+            value = str(context.runtime_facts.get(key) or "").strip()
+            if value:
+                lines.append(f"- {key}: {value}")
+        lines.append(
+            "- Use these runtime facts for today, tomorrow, yesterday, current time, "
+            "timezone, product/deployment identity, and public URL. Do not infer "
+            "current dates from model knowledge."
+        )
+    runtime_budget_lines = _run_context_runtime_budget_lines(context)
+    if runtime_budget_lines:
+        lines.append("Runtime budgets:")
+        lines.extend(runtime_budget_lines)
+    return "\n".join(lines)
+
+
 def _run_context_runtime_budget_lines(context: AgentRunContext) -> list[str]:
     lines: list[str] = []
     for prefix, data in (("budget", context.budget), ("benchmark", context.benchmark)):
@@ -2051,6 +2140,22 @@ class UltraRunContextPromptMiddleware(AgentMiddleware[Any, Any, Any]):
         return await handler(
             request.override(system_message=append_to_system_message(request.system_message, brief))
         )
+
+
+class UltraNotesRunContextPromptMiddleware(UltraRunContextPromptMiddleware):
+    """Append only context that the Notes-only tool surface can actually use."""
+
+    def _brief(self, request: ModelRequest) -> str:
+        runtime_context = getattr(request.runtime, "context", None)
+        context = runtime_context if isinstance(runtime_context, AgentRunContext) else None
+        if context is None:
+            return ""
+        sections = [build_notes_run_context_brief(context)]
+        elapsed_seconds = time.monotonic() - self._started_monotonic
+        if elapsed_seconds >= 0:
+            minutes, seconds = divmod(int(elapsed_seconds), 60)
+            sections.append(f"Elapsed wall-clock for this run so far: {minutes}m{seconds:02d}s.")
+        return "\n\n".join(section for section in sections if section)
 
 
 def build_runtime_prompt_middleware() -> Any:
@@ -2357,6 +2462,100 @@ def build_agent_backend(
     )
 
 
+def _build_notes_context_agent(
+    settings: RuntimeSettings,
+    *,
+    model: BaseChatModel | None,
+    tools: Sequence[BaseTool | Any] | None,
+    context: AgentRunContext,
+    checkpointer: Any | None,
+    surface_attestation_sink: Callable[[dict[str, str]], None] | None,
+    trace_surface_sink: Callable[[dict[str, Any]], None] | None,
+    steering_inbox: Any | None,
+) -> Any:
+    """Build the deliberately narrow agent used by every Notes-enabled run.
+
+    ``create_deep_agent`` always adds filesystem, execute, and delegation tools.
+    Those are valuable for ordinary research runs, but they create durable and
+    external copy paths for untrusted private Note text. A standard LangChain
+    agent gives this run exactly the leased Notes tools and nothing else. Caller
+    tools are intentionally ignored; a future expansion must be audited as a
+    new privacy boundary, not inherited accidentally.
+    """
+
+    del tools
+    note_tools = (
+        build_notes_tools(settings, context=context)
+        if _should_register_notes_tools(context, settings)
+        else []
+    )
+    prompt_sections = [
+        "You are Ultra Research Agent, a careful scientific collaborator for expert users.",
+        _GROUNDING_SYSTEM_GUIDANCE.strip(),
+        PRODUCT_IDENTITY_GUIDANCE.strip(),
+        WRITING_GUIDANCE.strip(),
+        MATH_FORMATTING_GUIDANCE.strip(),
+        _NOTES_CONTEXT_BOUNDARY_GUIDANCE.strip(),
+    ]
+    if note_tools:
+        prompt_sections.append(NOTES_PROMPT_GUIDANCE.strip())
+    system_prompt = "\n\n".join(prompt_sections) + "\n"
+
+    resolved_model = model or build_chat_model(settings)
+    middleware: list[Any] = [UltraNotesRunContextPromptMiddleware()]
+    if steering_inbox is not None:
+        middleware.append(
+            SteeringInboxMiddleware(
+                steering_inbox,
+                context=context,
+                upload_roots=settings.rarespot_upload_roots,
+            )
+        )
+    if not settings.model_supports_multimodal:
+        middleware.append(TextOnlyMultimodalMiddleware())
+
+    manifest = build_tool_capability_manifest(
+        note_tools,
+        available_subagents=[],
+        available_async_subagents=[],
+        compute_resources={},
+    )
+    if surface_attestation_sink is not None:
+        surface_attestation_sink(
+            {
+                "surface_source": "build_notes_context_agent",
+                "domain_tool_manifest_sha256": _agent_surface_sha256(manifest),
+                "full_tool_manifest_sha256": _agent_surface_sha256(manifest),
+                "system_prompt_sha256": hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
+            }
+        )
+    if trace_surface_sink is not None:
+        with suppress(Exception):
+            trace_surface_sink(
+                build_agent_configuration(
+                    model_id=settings.openai_model,
+                    provider_id=settings.model_provider_id,
+                    registered_tools=note_tools,
+                    subagents=[],
+                    async_subagent_count=0,
+                    builder_enabled=False,
+                    declared_memory_count=0,
+                    declared_policy_count=0,
+                    declared_skill_count=0,
+                )
+            )
+
+    return create_agent(
+        name="ultra-research-agent",
+        model=resolved_model,
+        tools=note_tools,
+        system_prompt=system_prompt,
+        context_schema=AgentRunContext,
+        middleware=middleware,
+        checkpointer=checkpointer,
+    )
+
+
 def build_research_agent(
     settings: RuntimeSettings,
     *,
@@ -2372,6 +2571,22 @@ def build_research_agent(
     steering_inbox: Any | None = None,
 ) -> Any:
     ensure_ultra_harness_profile()
+    note_scope = (
+        note_access_from_selection_context(context.selection_context)
+        if context is not None
+        else None
+    )
+    if context is not None and note_scope is not None and note_scope.enabled:
+        return _build_notes_context_agent(
+            settings,
+            model=model,
+            tools=tools,
+            context=context,
+            checkpointer=checkpointer,
+            surface_attestation_sink=surface_attestation_sink,
+            trace_surface_sink=trace_surface_sink,
+            steering_inbox=steering_inbox,
+        )
     cleanroom = bool(
         context is not None and is_cleanroom_evaluation_profile(context.evaluation_profile)
     )
@@ -2458,6 +2673,11 @@ def build_research_agent(
         if _should_register_resource_tools(context)
         else []
     )
+    note_tools = (
+        build_notes_tools(settings, context=context)
+        if context is not None and _should_register_notes_tools(context, settings)
+        else []
+    )
     git_tools = (
         build_git_tools(git_staging_config(settings))
         if _should_register_git_tools(context, settings)
@@ -2522,6 +2742,14 @@ def build_research_agent(
                     if settings.tool_program_enabled
                     else ()
                 ),
+            ),
+            HarnessPlugin(
+                name="notes",
+                order=55,
+                tools=tuple(note_tools),
+                # Notes are coordinator-only and therefore deliberately have no
+                # tool-program policy.
+                prompt_sections=(NOTES_PROMPT_GUIDANCE,) if note_tools else (),
             ),
             HarnessPlugin(
                 name="git",
@@ -2589,9 +2817,14 @@ def build_research_agent(
     # block, build_builder_subagent, BUILDER_DELEGATION_GUIDANCE, and the builder_*
     # settings are removable if the Builder stays off. Returns None when disabled, so
     # this is a no-op wire today; kept behind the flag for a future A/B.
+    builder_tools = [
+        tool
+        for tool in resolved_tools
+        if str(getattr(tool, "name", "") or "").strip() not in NOTE_TOOL_NAMES
+    ]
     builder_subagent = build_builder_subagent(
         settings,
-        tools=resolved_tools,
+        tools=builder_tools,
         backend=resolved_backend,
         vision_tools=vision_tools,
         # The Builder is a pre-compiled CompiledSubAgent, so deepagents does NOT inherit
@@ -2857,3 +3090,14 @@ def _should_register_resource_tools(context: AgentRunContext | None) -> bool:
     if is_cleanroom_evaluation_profile(context.evaluation_profile):
         return False
     return bool(str(context.user_id or "").strip())
+
+
+def _should_register_notes_tools(
+    context: AgentRunContext | None,
+    settings: RuntimeSettings,
+) -> bool:
+    """Notes are explicit, leased, coordinator-only private context."""
+
+    if context is None or is_cleanroom_evaluation_profile(context.evaluation_profile):
+        return False
+    return notes_tools_authorized(settings, context)

@@ -48,13 +48,21 @@ describe("entering a steer", () => {
   });
 
   it("falls back to queueing when the run id has not streamed back yet", () => {
-    const steer = blockFrom("const steerFollowup = useCallback", "queueFollowup();\n      return;");
+    const steer = blockFrom("const steerFollowup = useCallback", "uploadPendingFiles,\n  ]);");
     expect(steer).toMatch(/if \(!runId\)/);
   });
 
   it("honours the same refusal states as the send and queue paths", () => {
     const steer = blockFrom("const steerFollowup = useCallback", "makeId()");
-    expect(steer).toMatch(/slashMenuOpen \|\| composerResourcePickerOpen/);
+    expect(steer).toMatch(/slashMenuOpen\s+\|\|\s+composerResourcePickerOpen\s+\|\|\s+composerNotePickerOpen/);
+  });
+
+  it("queues Note-bearing follow-ups as a newly scoped run", () => {
+    const steer = blockFrom("const steerFollowup = useCallback", "makeId()");
+    expect(steer).toMatch(
+      /conversation\.selectedNotes\.length > 0 \|\|\s*notesSearchRequested\(text, excludedNoteIntentText\)/
+    );
+    expect(steer).toMatch(/queueFollowup\(\);\s*return;/);
   });
 });
 
@@ -74,7 +82,7 @@ describe("the optimistic steering message", () => {
   it("is removed on failure — and the text is never destroyed", () => {
     const steer = blockFrom(
       "const steerFollowup = useCallback",
-      "composerResourcePickerOpen,\n    queueFollowup,"
+      "uploadPendingFiles,\n  ]);"
     );
     const catchAt = steer.indexOf(".catch(async (error: unknown) => {");
     expect(catchAt).toBeGreaterThan(-1);
@@ -107,9 +115,22 @@ describe("steer lifecycle events", () => {
   });
 
   it("Retry/Edit resolves the ORIGINATING prompt, never the steer, and folds the turn's steers in", () => {
-    const retry = blockFrom("const retryAssistantResponse = useCallback", "pendingRetryRef.current = { conversationId, prompt };");
+    const retry = blockFrom(
+      "const retryAssistantResponse = useCallback",
+      "})().finally(() => noteTurnResealInFlightRef.current.delete(resealKey));"
+    );
     expect(retry).toMatch(/if \(candidate\.steering\) \{\s*turnSteerTexts\.unshift\(candidate\.content\);/);
     expect(retry).toMatch(/\[originatingUserMessage\.content, \.\.\.turnSteerTexts\]/);
+    expect(retry).toMatch(/originatingUserMessage\.noteReferences/);
+    expect(retry).toMatch(/originatingUserMessage\.excludedNoteIntentText/);
+    expect(retry).toMatch(/candidate\.excludedNoteIntentText/);
+    expect(retry).toMatch(/selectedNotes: noteReferences/);
+    expect(retry).toMatch(/excludedNoteIntentText: historicalExcludedNoteIntentText/);
+    expect(retry).toMatch(/activeSelectionContext: noteSelectionContextForChips/);
+    expect(retry).toMatch(/await resealTurnNotes\(conversationId, historicalReferences\)/);
+    expect(retry.indexOf("await resealTurnNotes")).toBeLessThan(
+      retry.indexOf("removeMessageWithPairedResponse")
+    );
     // The removal takes the turn's steering bubbles with it — no orphans.
     expect(appSource).toMatch(/candidate\.role === "user" && candidate\.steering/);
   });
@@ -137,6 +158,12 @@ describe("durability and hydration", () => {
   it("persists steering identity in the snapshot round-trip", () => {
     expect(appSource).toMatch(/steering: message\.steering,\s*steerId: message\.steerId,/);
     expect(appSource).toMatch(/row\.steering === "pending" \|\|\s*row\.steering === "applied"/);
+  });
+
+  it("persists pasted-reference provenance so retry cannot mint Notes authority", () => {
+    expect(appSource).toMatch(/excludedNoteIntentText: message\.excludedNoteIntentText \?\? \[\]/);
+    expect(appSource).toMatch(/excludedNoteIntentText: Array\.isArray\(row\.excludedNoteIntentText\)/);
+    expect(appSource).toMatch(/excludedNoteIntentText:\s*excludedNoteIntentText\.length > 0/);
   });
 
   it("hydrates control-plane steering rows as historic steering messages", () => {

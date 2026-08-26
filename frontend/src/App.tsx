@@ -2164,7 +2164,7 @@ const ConversationMessageRow = memo(
             <div className="text-muted-foreground flex flex-wrap items-center gap-2 text-xs leading-5">
               {tokenUsage || elapsedLabel ? (
                 <span
-                  className="tabular-nums"
+                  className="proportional-nums"
                   title={
                     tokenUsage
                       ? `${tokenUsage.input_tokens.toLocaleString()} input · ${tokenUsage.output_tokens.toLocaleString()} output${

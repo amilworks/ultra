@@ -278,6 +278,9 @@ describe("response reading typography", () => {
     // Ultra Sans Regular at 16px keeps long-form answers lighter than the
     // custom family's compact UI design point at 430 / opsz 15.
     expect(lightRoot).toMatch(/--font-weight-reading-body:\s*400;/);
+    expect(stylesSource).toMatch(
+      /\.pk-message-content-plain\s*\{[^}]*font-weight:\s*var\(--font-weight-reading-body\);/s
+    );
   });
 
   it("keeps the New Chat invitation lighter than the reading voice", () => {

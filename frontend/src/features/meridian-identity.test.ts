@@ -163,6 +163,12 @@ describe("the symbol set", () => {
     expect(read("src/components/icons/MeridianIcons.tsx")).toMatch(/pathLength=\{1\}/);
     expect(stylesSource).toMatch(/\.thinking-bar-trace path\s*\{[^}]*stroke-dasharray:\s*1;/s);
   });
+
+  it("keeps conversation-menu icons in the calm small-control register", () => {
+    expect(stylesSource).toMatch(
+      /\.conversation-history-menu-icon\s*\{[^}]*width:\s*1rem;[^}]*height:\s*1rem;[^}]*flex:\s*0 0 1rem;[^}]*stroke-width:\s*1\.6;/s
+    );
+  });
 });
 
 describe("de-boxed chrome — depth by value, edges only where real", () => {

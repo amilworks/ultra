@@ -2456,6 +2456,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
 }
 
+/* Context actions are labels with quiet wayfinding marks, not an icon tray.
+   Keep the glyphs in the same small, hairline register as Meridian and leave
+   row spacing to the shared menu primitive. */
+.conversation-history-menu-icon {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 1rem;
+  stroke-width: 1.6;
+}
+
 .app-history-rename-shell {
   display: flex;
   align-items: center;
@@ -2497,14 +2507,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-history-rename-button:hover {
   background: var(--sidebar-item-hover-bg);
   color: var(--text-main);
-}
-
-.app-history-action-button {
-  transition:
-    background-color 160ms var(--motion-ease),
-    color 160ms var(--motion-ease),
-    border-color 160ms var(--motion-ease),
-    transform 160ms var(--motion-ease);
 }
 
 .chat-width-frame {
@@ -14280,12 +14282,6 @@ details {
   .app-sidebar[data-mobile="true"] .app-history-rename-input {
     height: 2.7rem;
     font-size: 1rem;
-  }
-
-  .app-sidebar[data-mobile="true"] .app-history-action-button {
-    width: 2.25rem;
-    height: 2.25rem;
-    border-radius: 0.8rem;
   }
 
   .app-composer-shell {

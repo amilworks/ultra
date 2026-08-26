@@ -299,6 +299,7 @@ export type RunDocumentKind = "report" | "code" | "data" | "document";
 // renders inside a sandboxed iframe. Both are the same "report" kind to every
 // other consumer (cards, hydration gates, download chips).
 export type RunReportFormat = "markdown" | "html";
+export type RunDocumentPreviewFormat = RunReportFormat | "source" | "pdf";
 
 const REPORT_DOCUMENT_EXTENSIONS = [".md", ".markdown", ".mdx"];
 const HTML_REPORT_EXTENSIONS = [".html", ".htm"];
@@ -342,6 +343,18 @@ const DATA_DOCUMENT_EXTENSIONS = [
   ".nc",
 ];
 const PLAIN_DOCUMENT_EXTENSIONS = [".txt", ".text", ".log", ".tex", ".bib", ".rst", ".pdf"];
+const SOURCE_DATA_DOCUMENT_EXTENSIONS = [
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
+  ".ndjson",
+  ".geojson",
+  ".yaml",
+  ".yml",
+  ".xml",
+];
+const SOURCE_PLAIN_DOCUMENT_EXTENSIONS = [".txt", ".text", ".log", ".tex", ".bib", ".rst"];
 
 const pathHasExtension = (path: string, extensions: string[]): boolean => {
   const lower = String(path || "").trim().toLowerCase();
@@ -404,6 +417,106 @@ export const runReportDocumentFormat = (
     return "markdown";
   }
   return null;
+};
+
+// The canvas may only decode formats whose bytes have an explicit readable
+// representation. Binary scientific containers still open the canvas, but
+// land on a metadata/download state instead of being coerced through
+// Response.text() and rendered as plausible-looking replacement characters.
+export const runDocumentPreviewFormat = (
+  path: string,
+  mimeType?: string | null
+): RunDocumentPreviewFormat | null => {
+  const reportFormat = runReportDocumentFormat(path, mimeType);
+  if (reportFormat) {
+    return reportFormat;
+  }
+  const mime = String(mimeType ?? "").trim().toLowerCase();
+  if (pathHasExtension(path, [".pdf"]) || mime === "application/pdf") {
+    return "pdf";
+  }
+  if (
+    pathHasExtension(path, [
+      ...CODE_DOCUMENT_EXTENSIONS,
+      ...SOURCE_DATA_DOCUMENT_EXTENSIONS,
+      ...SOURCE_PLAIN_DOCUMENT_EXTENSIONS,
+    ]) ||
+    mime.startsWith("text/") ||
+    mime === "application/json" ||
+    mime.endsWith("+json") ||
+    mime === "application/javascript" ||
+    mime === "application/x-javascript" ||
+    mime === "application/x-yaml" ||
+    mime === "application/yaml" ||
+    mime === "application/xml" ||
+    mime.endsWith("+xml")
+  ) {
+    return "source";
+  }
+  return null;
+};
+
+const SOURCE_LANGUAGE_BY_EXTENSION: Record<string, string> = {
+  bash: "bash",
+  bib: "bibtex",
+  c: "c",
+  cpp: "cpp",
+  csv: "csv",
+  geojson: "json",
+  go: "go",
+  h: "c",
+  hpp: "cpp",
+  ipynb: "json",
+  java: "java",
+  jl: "julia",
+  js: "javascript",
+  json: "json",
+  jsonl: "json",
+  jsx: "jsx",
+  log: "text",
+  m: "matlab",
+  ndjson: "json",
+  py: "python",
+  r: "r",
+  rs: "rust",
+  rst: "rst",
+  sh: "bash",
+  sql: "sql",
+  text: "text",
+  tex: "latex",
+  ts: "typescript",
+  tsv: "csv",
+  tsx: "tsx",
+  txt: "text",
+  xml: "xml",
+  yaml: "yaml",
+  yml: "yaml",
+};
+
+export const runDocumentCodeLanguage = (
+  path: string,
+  mimeType?: string | null
+): string => {
+  const normalizedPath = String(path || "").trim().toLowerCase().split(/[?#]/, 1)[0] ?? "";
+  const filename = normalizedPath.split("/").pop() ?? normalizedPath;
+  const extension = filename.includes(".") ? filename.split(".").pop() ?? "" : "";
+  if (SOURCE_LANGUAGE_BY_EXTENSION[extension]) {
+    return SOURCE_LANGUAGE_BY_EXTENSION[extension];
+  }
+  const mime = String(mimeType ?? "").trim().toLowerCase();
+  if (mime === "application/json" || mime.endsWith("+json")) {
+    return "json";
+  }
+  if (mime === "application/xml" || mime.endsWith("+xml")) {
+    return "xml";
+  }
+  if (mime.includes("yaml")) {
+    return "yaml";
+  }
+  if (mime.includes("javascript")) {
+    return "javascript";
+  }
+  return "text";
 };
 
 export const classifyRunDocumentKind = (

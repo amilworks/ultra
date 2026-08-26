@@ -7797,10 +7797,11 @@ export function App() {
 
   const activeMessages = activeConversation?.messages ?? EMPTY_UI_MESSAGES;
 
-  /* One version chain per report path across the conversation: re-registering
-     outputs/report.html on a later run appends a version behind the same card
-     instead of minting a second identity. Order follows the transcript, so
-     the last entry is always the latest registration. */
+  /* One version chain per artifact path across the conversation: re-registering
+     outputs/report.html or analysis.py on a later run appends a version behind
+     the same preview identity. Order follows the transcript, so the last entry
+     is always the latest registration. Report auto-open remains separately
+     gated below; supporting artifacts open only when the reader asks. */
   const reportCanvasVersionsByKey = useMemo(() => {
     const byKey = new Map<string, ReportCanvasVersion[]>();
     for (const message of activeMessages) {
@@ -7808,9 +7809,6 @@ export function App() {
         continue;
       }
       for (const document of message.runDocuments ?? EMPTY_RUN_DOCUMENTS) {
-        if (document.kind !== "report") {
-          continue;
-        }
         const pathKey = runReportPathKey(document.path);
         if (!pathKey) {
           continue;

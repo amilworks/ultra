@@ -84,13 +84,35 @@ describe("ChatRunDocuments", () => {
     expect(fallback).toHaveAttribute("download");
   });
 
-  it("renders non-report outputs as download chips, untouched by the canvas", () => {
+  it("opens non-report outputs in the canvas and keeps download as a separate action", () => {
     const onOpenReport = vi.fn();
     render(<ChatRunDocuments documents={[codeDoc]} onOpenReport={onOpenReport} />);
 
-    const chip = screen.getByText("toeplitz_plots.py").closest("a");
-    expect(chip).toHaveAttribute("href", "/v2/artifacts/code-1/download");
-    expect(chip).toHaveAttribute("download");
-    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    const preview = screen.getByRole("button", { name: "Preview toeplitz_plots.py" });
+    expect(preview).toHaveAttribute("aria-expanded", "false");
+    expect(preview).toHaveAttribute("aria-controls", "report-canvas");
+
+    const download = screen.getByRole("link", { name: "Download toeplitz_plots.py" });
+    expect(download).toHaveAttribute("href", "/v2/artifacts/code-1/download");
+    expect(download).toHaveAttribute("download");
+
+    fireEvent.click(preview);
+    expect(onOpenReport).toHaveBeenCalledWith(codeDoc);
+  });
+
+  it("marks a non-report chip as open without turning its download into the trigger", () => {
+    render(
+      <ChatRunDocuments
+        documents={[codeDoc]}
+        onOpenReport={vi.fn()}
+        openReportPathKey={runReportPathKey(codeDoc.path)}
+      />
+    );
+
+    expect(screen.getByRole("button", { name: "Preview toeplitz_plots.py" })).toHaveAttribute(
+      "aria-expanded",
+      "true"
+    );
+    expect(screen.getByText(/Code · 20.3 KB · open in canvas/)).toBeInTheDocument();
   });
 });

@@ -1,12 +1,28 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   MAX_INLINE_REPORT_BYTES,
+  MAX_INLINE_SOURCE_BYTES,
   ReportCanvas,
   prepareHtmlReportDocument,
   type ReportCanvasVersion,
 } from "./ReportCanvas";
+
+beforeAll(() => {
+  if (!window.matchMedia) {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+  }
+});
 
 const markdownVersion: ReportCanvasVersion = {
   messageId: "m1",
@@ -15,6 +31,7 @@ const markdownVersion: ReportCanvasVersion = {
     path: "outputs/report.md",
     title: "report.md",
     downloadUrl: "/v2/runs/run_9f3c2a/artifacts/download?path=outputs%2Freport.md",
+    kind: "report",
     mimeType: "text/markdown",
     sizeBytes: 4200,
   },
@@ -28,8 +45,51 @@ const htmlVersion: ReportCanvasVersion = {
     path: "outputs/benchmark.html",
     title: "benchmark.html",
     downloadUrl: "/v2/runs/run_b71d44/artifacts/download?path=outputs%2Fbenchmark.html",
+    kind: "report",
     mimeType: "text/html",
     sizeBytes: 128000,
+  },
+  imageArtifacts: [],
+};
+
+const codeVersion: ReportCanvasVersion = {
+  messageId: "m3",
+  runId: "run_code1",
+  document: {
+    path: "stratified_treatment_analysis.py",
+    title: "Stratified Treatment Analysis",
+    downloadUrl: "/v2/runs/run_code1/artifacts/download?path=stratified_treatment_analysis.py",
+    kind: "code",
+    mimeType: "text/x-python",
+    sizeBytes: 3584,
+  },
+  imageArtifacts: [],
+};
+
+const binaryDataVersion: ReportCanvasVersion = {
+  messageId: "m4",
+  runId: "run_data1",
+  document: {
+    path: "model_weights.h5",
+    title: "model_weights.h5",
+    downloadUrl: "/v2/runs/run_data1/artifacts/download?path=model_weights.h5",
+    kind: "data",
+    mimeType: "application/x-hdf5",
+    sizeBytes: 8192,
+  },
+  imageArtifacts: [],
+};
+
+const pdfVersion: ReportCanvasVersion = {
+  messageId: "m5",
+  runId: "run_pdf1",
+  document: {
+    path: "paper.pdf",
+    title: "Methods paper",
+    downloadUrl: "/v2/runs/run_pdf1/artifacts/download?path=paper.pdf",
+    kind: "document",
+    mimeType: "application/pdf",
+    sizeBytes: 64000,
   },
   imageArtifacts: [],
 };
@@ -141,6 +201,69 @@ describe("ReportCanvas", () => {
     expect(frame?.getAttribute("referrerpolicy")).toBe("no-referrer");
   });
 
+  it("renders a bounded source preview for code artifacts", async () => {
+    const loadDocumentText = vi
+      .fn()
+      .mockResolvedValue("def treatment_effect(x, y):\n    return x / y\n");
+
+    const { container } = render(
+      <ReportCanvas
+        versions={[codeVersion]}
+        mode="split"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+      />
+    );
+
+    await waitFor(() =>
+      expect(container.querySelector(".report-canvas-source")).toHaveTextContent(
+        "def treatment_effect"
+      )
+    );
+    expect(loadDocumentText).toHaveBeenCalledWith(codeVersion.document.downloadUrl);
+    expect(screen.getByText(/Code · run_code1/)).toBeInTheDocument();
+    expect(screen.getByRole("complementary")).toHaveAccessibleName(
+      "Preview: Stratified Treatment Analysis"
+    );
+  });
+
+  it("does not decode unsupported binary artifacts as text", () => {
+    const loadDocumentText = vi.fn();
+    render(
+      <ReportCanvas
+        versions={[binaryDataVersion]}
+        mode="split"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+      />
+    );
+
+    expect(screen.getByText(/Preview is not available for this data format yet/)).toBeInTheDocument();
+    expect(screen.getByText("download it")).toHaveAttribute(
+      "href",
+      binaryDataVersion.document.downloadUrl
+    );
+    expect(loadDocumentText).not.toHaveBeenCalled();
+  });
+
+  it("embeds PDF artifacts without passing their bytes through the text loader", () => {
+    const loadDocumentText = vi.fn();
+    const { container } = render(
+      <ReportCanvas
+        versions={[pdfVersion]}
+        mode="split"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+      />
+    );
+
+    const frame = container.querySelector(".report-canvas-pdf-frame");
+    expect(frame).toHaveAttribute("src", pdfVersion.document.downloadUrl);
+    expect(frame).toHaveAttribute("title", "PDF preview: Methods paper");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(loadDocumentText).not.toHaveBeenCalled();
+  });
+
   it("closes from the header and offers the artifact download", async () => {
     const onClose = vi.fn();
     const loadDocumentText = vi.fn().mockResolvedValue("# T\n\nbody");
@@ -157,7 +280,7 @@ describe("ReportCanvas", () => {
     expect(download).toHaveAttribute("href", markdownVersion.document.downloadUrl);
     expect(download).toHaveAttribute("download");
 
-    fireEvent.click(screen.getByLabelText("Close report canvas"));
+    fireEvent.click(screen.getByLabelText("Close artifact preview"));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -216,6 +339,29 @@ describe("ReportCanvas", () => {
     expect(loadDocumentText).not.toHaveBeenCalled();
   });
 
+  it("uses the smaller source-preview boundary for code and data", () => {
+    const loadDocumentText = vi.fn();
+    render(
+      <ReportCanvas
+        versions={[
+          {
+            ...codeVersion,
+            document: {
+              ...codeVersion.document,
+              sizeBytes: MAX_INLINE_SOURCE_BYTES + 1,
+            },
+          },
+        ]}
+        mode="split"
+        onClose={vi.fn()}
+        loadDocumentText={loadDocumentText}
+      />
+    );
+
+    expect(screen.getByText(/too large to render inline/)).toBeInTheDocument();
+    expect(loadDocumentText).not.toHaveBeenCalled();
+  });
+
   it("becomes a full-screen sheet on the phone regime with a back affordance", async () => {
     const onClose = vi.fn();
     const loadDocumentText = vi.fn().mockResolvedValue("# T\n\nbody");
@@ -231,7 +377,7 @@ describe("ReportCanvas", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     fireEvent.click(screen.getByLabelText("Back to chat"));
     expect(onClose).toHaveBeenCalledTimes(1);
-    expect(screen.queryByLabelText("Close report canvas")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Close artifact preview")).not.toBeInTheDocument();
   });
 });
 
@@ -254,7 +400,7 @@ describe("ReportCanvas split resize", () => {
       />
     );
 
-    const separator = screen.getByRole("separator", { name: "Resize report panel" });
+    const separator = screen.getByRole("separator", { name: "Resize artifact preview" });
     expect(separator).toHaveAttribute("aria-valuenow", "648");
     /* The panel hangs on the right, so ArrowLeft grows it; bounds clamp. */
     fireEvent.keyDown(separator, { key: "ArrowLeft" });

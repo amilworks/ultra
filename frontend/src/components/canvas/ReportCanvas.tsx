@@ -19,9 +19,12 @@ import { Markdown } from "@/components/prompt-kit/markdown";
 import { formatBytes } from "@/lib/format";
 import {
   resolveRunOutputArtifactUrl,
+  runDocumentCodeLanguage,
+  runDocumentPreviewFormat,
   rewriteArtifactMarkdownImageUrls,
-  runReportDocumentFormat,
+  type RunDocumentKind,
 } from "@/features/chat/run-artifact-hydration";
+import { CodeBlockCode } from "@/components/prompt-kit/code-block";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,6 +42,7 @@ export type ReportCanvasVersion = {
     path: string;
     title: string;
     downloadUrl: string;
+    kind: RunDocumentKind;
     mimeType?: string;
     sizeBytes?: number;
   };
@@ -72,7 +76,7 @@ export type ReportCanvasProps = {
 const DEFAULT_SPLIT_BOUNDS: ReportCanvasSplitBounds = { min: 320, max: 896 };
 const SPLIT_KEYBOARD_STEP = 16;
 
-type CanvasBodyStatus = "loading" | "ready" | "error" | "oversize";
+type CanvasBodyStatus = "loading" | "ready" | "error" | "oversize" | "unsupported";
 
 // The sandbox is the security boundary for model-generated HTML: an opaque
 // origin (NO allow-same-origin, ever — it would hand the report the user's
@@ -127,6 +131,18 @@ const FRAGMENT_NAV_SHIM =
 // offers the download instead. Generous on purpose — a self-contained
 // benchmark page with embedded figures runs single-digit MB.
 export const MAX_INLINE_REPORT_BYTES = 25 * 1024 * 1024;
+// Source artifacts favor fast inspection over exhaustive loading. This is the
+// same desktop head budget as the Resources text viewer; larger outputs keep
+// their download path without making a click allocate an entire generated log
+// or table in the chat process.
+export const MAX_INLINE_SOURCE_BYTES = 2 * 1024 * 1024;
+
+const DOCUMENT_KIND_LABEL: Record<RunDocumentKind, string> = {
+  report: "Report",
+  code: "Code",
+  data: "Data",
+  document: "Document",
+};
 
 const stripMarkdownInline = (value: string): string =>
   value
@@ -230,18 +246,21 @@ function CanvasStatus({
   status,
   error,
   downloadUrl,
+  kindLabel,
   sizeBytes,
 }: {
   status: CanvasBodyStatus;
   error: string;
   downloadUrl: string;
+  kindLabel: string;
   sizeBytes?: number;
 }) {
+  const noun = kindLabel.toLowerCase();
   if (status === "loading") {
     return (
       <div className="report-canvas-status" role="status">
         <Loader2 className="size-4 animate-spin" aria-hidden="true" />
-        <span>Loading report…</span>
+        <span>Loading {noun}…</span>
       </div>
     );
   }
@@ -250,11 +269,24 @@ function CanvasStatus({
     return (
       <div className="report-canvas-status">
         <span>
-          This report is {formatBytes(sizeBytes ?? 0)} — too large to render inline.{" "}
+          This {noun} is {formatBytes(sizeBytes ?? 0)} — too large to render inline.{" "}
           <a href={downloadUrl} download className="report-canvas-inline-link">
             Download it
           </a>{" "}
           to read locally.
+        </span>
+      </div>
+    );
+  }
+  if (status === "unsupported") {
+    return (
+      <div className="report-canvas-status">
+        <span>
+          Preview is not available for this {noun} format yet —{" "}
+          <a href={downloadUrl} download className="report-canvas-inline-link">
+            download it
+          </a>{" "}
+          to inspect locally.
         </span>
       </div>
     );
@@ -341,9 +373,14 @@ export function ReportCanvas({
       ? pinnedVersionIndex
       : latestIndex;
   const active = versions[activeIndex];
+  const activeKind = active?.document.kind ?? "document";
+  const kindLabel = DOCUMENT_KIND_LABEL[activeKind];
   const format = active
-    ? runReportDocumentFormat(active.document.path, active.document.mimeType)
+    ? runDocumentPreviewFormat(active.document.path, active.document.mimeType)
     : null;
+  const sourceLanguage = active
+    ? runDocumentCodeLanguage(active.document.path, active.document.mimeType)
+    : "text";
 
   /* Loaded content carries the key of the registration it belongs to; a key
      mismatch at render time IS the loading state. No synchronous setState in
@@ -351,6 +388,7 @@ export function ReportCanvas({
   type LoadedReport =
     | { key: string; state: "markdown"; text: string }
     | { key: string; state: "html"; report: PreparedHtmlReport }
+    | { key: string; state: "source"; text: string }
     | { key: string; state: "error"; message: string };
   const [loadedReport, setLoadedReport] = useState<LoadedReport | null>(null);
 
@@ -364,22 +402,28 @@ export function ReportCanvas({
   const activeImageArtifacts = active?.imageArtifacts;
   const imageArtifactsFingerprint = useMemo(
     () =>
-      (activeImageArtifacts ?? [])
-        .map((artifact) => `${artifact.path}|${artifact.url ?? artifact.downloadUrl ?? ""}`)
-        .join("\n"),
-    [activeImageArtifacts]
+      format === "html" || format === "markdown"
+        ? (activeImageArtifacts ?? [])
+            .map((artifact) => `${artifact.path}|${artifact.url ?? artifact.downloadUrl ?? ""}`)
+            .join("\n")
+        : "",
+    [activeImageArtifacts, format]
   );
   const imageArtifactsRef = useRef(activeImageArtifacts ?? []);
   useEffect(() => {
     imageArtifactsRef.current = activeImageArtifacts ?? [];
   }, [activeImageArtifacts]);
-  const contentKey = `${activeDownloadUrl} ${imageArtifactsFingerprint}`;
-  /* Derived at render, guarded in the effect: an oversized report is never
-     pulled into memory, and the status below states the boundary quietly. */
+  const contentKey = `${activeDownloadUrl} ${format ?? "unsupported"} ${imageArtifactsFingerprint}`;
+  const textByteLimit = activeKind === "report"
+    ? MAX_INLINE_REPORT_BYTES
+    : MAX_INLINE_SOURCE_BYTES;
+  const loadsText = format === "html" || format === "markdown" || format === "source";
+  /* Derived at render, guarded in the effect: an oversized readable artifact
+     is never pulled into memory, and binary/PDF formats never enter this path. */
   const activeOversized =
-    (active?.document.sizeBytes ?? 0) > MAX_INLINE_REPORT_BYTES;
+    loadsText && (active?.document.sizeBytes ?? 0) > textByteLimit;
   useEffect(() => {
-    if (!activeDownloadUrl || activeOversized) {
+    if (!activeDownloadUrl || activeOversized || !loadsText) {
       return undefined;
     }
     let cancelled = false;
@@ -399,15 +443,17 @@ export function ReportCanvas({
             return;
           }
           setLoadedReport({ key: contentKey, state: "html", report: prepared });
-        } else {
+        } else if (format === "markdown") {
           setLoadedReport({ key: contentKey, state: "markdown", text });
+        } else {
+          setLoadedReport({ key: contentKey, state: "source", text });
         }
       } catch (cause: unknown) {
         if (!cancelled) {
           setLoadedReport({
             key: contentKey,
             state: "error",
-            message: cause instanceof Error ? cause.message : "Unable to load the report",
+            message: cause instanceof Error ? cause.message : "Unable to load the artifact",
           });
         }
       }
@@ -418,18 +464,23 @@ export function ReportCanvas({
     };
     /* contentKey already embeds activeDownloadUrl, so the extra dep can never
        fire alone — it is here to keep exhaustive-deps literal. */
-  }, [activeDownloadUrl, activeOversized, contentKey, format, loadDocumentText]);
+  }, [activeDownloadUrl, activeOversized, contentKey, format, loadDocumentText, loadsText]);
 
   const current = loadedReport && loadedReport.key === contentKey ? loadedReport : null;
-  const status: CanvasBodyStatus = activeOversized
-    ? "oversize"
-    : current === null
-      ? "loading"
-      : current.state === "error"
-        ? "error"
-        : "ready";
+  const status: CanvasBodyStatus = format === null
+    ? "unsupported"
+    : format === "pdf"
+      ? "ready"
+      : activeOversized
+        ? "oversize"
+        : current === null
+          ? "loading"
+          : current.state === "error"
+            ? "error"
+            : "ready";
   const errorMessage = current?.state === "error" ? current.message : "";
   const markdownContent = current?.state === "markdown" ? current.text : "";
+  const sourceContent = current?.state === "source" ? current.text : "";
   const htmlReport = current?.state === "html" ? current.report : null;
 
   const renderedMarkdown = useMemo(
@@ -445,10 +496,10 @@ export function ReportCanvas({
       return htmlReport.title;
     }
     if (format === "markdown" && markdownContent) {
-      return markdownHeadingTitle(markdownContent) ?? active?.document.title ?? "Report";
+      return markdownHeadingTitle(markdownContent) ?? active?.document.title ?? kindLabel;
     }
-    return active?.document.title ?? "Report";
-  }, [format, htmlReport, markdownContent, active]);
+    return active?.document.title ?? kindLabel;
+  }, [format, htmlReport, markdownContent, active, kindLabel]);
 
   if (!active) {
     return null;
@@ -456,7 +507,7 @@ export function ReportCanvas({
 
   const versionNumber = activeIndex + 1;
   const provenance = [
-    "Report",
+    kindLabel,
     active.runId ? active.runId : null,
     versions.length > 1 || versionNumber > 1 ? `v${versionNumber}` : null,
     activeIndex !== latestIndex ? "superseded" : null,
@@ -473,14 +524,14 @@ export function ReportCanvas({
       data-closing={closing ? "true" : undefined}
       role={mode === "sheet" ? "dialog" : "complementary"}
       aria-modal={mode === "sheet" ? true : undefined}
-      aria-label={`Report: ${displayTitle}`}
+      aria-label={`Preview: ${displayTitle}`}
     >
       {mode === "split" ? (
         <div
           className="report-canvas-resize"
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize report panel"
+          aria-label="Resize artifact preview"
           aria-valuemin={splitBounds.min}
           aria-valuemax={splitBounds.max}
           aria-valuenow={resolvedSplitWidth}
@@ -619,7 +670,7 @@ export function ReportCanvas({
                   type="button"
                   className="report-canvas-button"
                   onClick={onClose}
-                  aria-label="Close report canvas"
+                  aria-label="Close artifact preview"
                   title="Close"
                 >
                   <X className="size-4" aria-hidden="true" />
@@ -634,16 +685,35 @@ export function ReportCanvas({
               status={status}
               error={errorMessage}
               downloadUrl={active.document.downloadUrl}
+              kindLabel={kindLabel}
               sizeBytes={active.document.sizeBytes}
             />
           ) : format === "html" && htmlReport ? (
             <iframe
               className="report-canvas-html-frame"
-              title={`Report: ${displayTitle}`}
+              title={`Preview: ${displayTitle}`}
               sandbox={REPORT_FRAME_SANDBOX}
               referrerPolicy="no-referrer"
               srcDoc={htmlReport.srcdoc}
             />
+          ) : format === "pdf" ? (
+            <iframe
+              className="report-canvas-pdf-frame"
+              title={`PDF preview: ${displayTitle}`}
+              src={active.document.downloadUrl}
+              referrerPolicy="no-referrer"
+            />
+          ) : format === "source" ? (
+            <div className="report-canvas-source">
+              <CodeBlockCode
+                code={sourceContent}
+                language={sourceLanguage}
+                showToolbar={false}
+                showLanguage={false}
+                showCopyButton={false}
+                className="report-canvas-source-code"
+              />
+            </div>
           ) : (
             <article className="report-canvas-article">
               <Markdown className="report-canvas-markdown">{renderedMarkdown}</Markdown>

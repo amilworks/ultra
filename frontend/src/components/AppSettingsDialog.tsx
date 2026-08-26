@@ -300,7 +300,7 @@ export function AppSettingsDialog({
 
   const submitProfile = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!saveProfile) {
+    if (!saveProfile || profileSaving) {
       return;
     }
     setProfileSaving(true);
@@ -579,7 +579,11 @@ export function AppSettingsDialog({
                       </SystemMessage>
                     ) : null}
                     <div className="app-settings-action-row">
-                      <Button type="submit" disabled={profileSaving}>
+                      <Button
+                        type="submit"
+                        aria-disabled={profileSaving || undefined}
+                        className="aria-disabled:pointer-events-none aria-disabled:opacity-50"
+                      >
                         {profileSaving ? (
                           <Loader2
                             data-icon="inline-start"

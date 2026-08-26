@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   classifyTextResource,
   extensionOf,
+  fileTypeLabel,
   formatBytes,
   formatChipLabel,
   isGzipName,
+  isSourceCodeName,
 } from "./textFormat";
 
 describe("classifyTextResource", () => {
@@ -19,6 +21,27 @@ describe("classifyTextResource", () => {
     expect(classifyTextResource({ original_name: "README.md" })).toBe("markdown");
     expect(classifyTextResource({ original_name: "run.log" })).toBe("text");
     expect(classifyTextResource({ original_name: "notes.tsv" })).toBe("csv");
+  });
+
+  it("classifies source code and notebooks from filenames even when uploads use octet-stream", () => {
+    for (const original_name of [
+      "compute_xrd.py",
+      "viewer.tsx",
+      "analysis.R",
+      "query.sql",
+      "worker.go",
+      "pipeline.sh",
+    ]) {
+      expect(
+        classifyTextResource({ original_name, content_type: "application/octet-stream" })
+      ).toBe("text");
+    }
+    expect(
+      classifyTextResource({
+        original_name: "experiment.ipynb",
+        content_type: "application/octet-stream",
+      })
+    ).toBe("json");
   });
 
   it("looks past a trailing .gz", () => {
@@ -49,6 +72,12 @@ describe("classifyTextResource", () => {
     expect(classifyTextResource({ original_name: "model.h5" })).toBeNull();
     expect(classifyTextResource(null)).toBeNull();
   });
+
+  it("lets an explicit image or video kind win over a misleading text extension", () => {
+    expect(classifyTextResource({ original_name: "plot.json", resource_kind: "image" })).toBeNull();
+    expect(classifyTextResource({ original_name: "capture.py", resource_kind: "video" })).toBeNull();
+    expect(classifyTextResource({ original_name: "plot.json", content_type: "image/png" })).toBeNull();
+  });
 });
 
 describe("extensionOf / isGzipName", () => {
@@ -64,11 +93,32 @@ describe("extensionOf / isGzipName", () => {
 });
 
 describe("formatChipLabel", () => {
-  it("uppercases the format and distinguishes TSV", () => {
+  it("uses compact filename-aware labels for source and data previews", () => {
     expect(formatChipLabel("json")).toBe("JSON");
     expect(formatChipLabel("markdown")).toBe("MD");
     expect(formatChipLabel("csv", "data.tsv")).toBe("TSV");
     expect(formatChipLabel("csv", "data.csv")).toBe("CSV");
+    expect(formatChipLabel("text", "compute_xrd.py")).toBe("PY");
+    expect(formatChipLabel("text", "pipeline.sh")).toBe("SH");
+    expect(formatChipLabel("json", "analysis.ipynb")).toBe("IPYNB");
+  });
+});
+
+describe("file identity labels", () => {
+  it("names source formats in plain language and scientific binaries precisely", () => {
+    expect(isSourceCodeName("compute_xrd.py")).toBe(true);
+    expect(isSourceCodeName("NPH_shunt_002_70yo.nii.gz")).toBe(false);
+    expect(fileTypeLabel("compute_xrd.py")).toBe("Python");
+    expect(fileTypeLabel("viewer.tsx")).toBe("TypeScript");
+    expect(fileTypeLabel("experiment.ipynb")).toBe("Jupyter notebook");
+    expect(fileTypeLabel("NPH_shunt_002_70yo.nii.gz")).toBe("NIfTI");
+    expect(fileTypeLabel("volume.h5")).toBe("HDF5");
+  });
+
+  it("falls back to a short uppercase extension without inventing a file type", () => {
+    expect(fileTypeLabel("mesh.ply")).toBe("PLY");
+    expect(fileTypeLabel("archive.unknownformat")).toBeNull();
+    expect(fileTypeLabel("README")).toBeNull();
   });
 });
 

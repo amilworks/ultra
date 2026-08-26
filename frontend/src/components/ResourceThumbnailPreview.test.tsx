@@ -91,4 +91,31 @@ describe("ResourceThumbnailPreview", () => {
     );
     await waitFor(() => expect(screen.getByText("Survey pipeline")).toBeInTheDocument());
   });
+
+  it("renders Python as a bounded source preview with a PY identity chip", async () => {
+    const python = "from pathlib import Path\n\ndef compute_xrd(sample):\n    return sample.peaks\n";
+    const fetchHead = vi.fn().mockResolvedValue(head(python, "text"));
+    render(
+      <ResourceThumbnailPreview
+        resource={resource({
+          file_id: "tpy",
+          original_name: "compute_xrd.py",
+          content_type: "application/octet-stream",
+          resource_kind: "file",
+        })}
+        kind="text"
+        fetchHead={fetchHead}
+        fallbackIcon={FileText}
+        fallbackLabel="Python"
+      />
+    );
+
+    await waitFor(() => {
+      expect(document.querySelector(".resource-thumb-snippet")?.textContent).toContain(
+        "compute_xrd"
+      );
+    });
+    expect(document.querySelector(".resource-thumb-chip")).toHaveTextContent("PY");
+    expect(fetchHead).toHaveBeenCalledWith("tpy", expect.any(Number));
+  });
 });

@@ -11,6 +11,8 @@
 //  - buildNavUrl PRESERVES every other param (notably conversation), so this layer and
 //    the conversation-URL layer never clobber each other — each only owns its own keys.
 
+import { parseUltraResourceRef } from "./ultraResource";
+
 // Mirrors App.tsx's ActivePanel union (kept local to avoid importing the 14.8k-line App).
 export type NavPanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 
@@ -45,6 +47,41 @@ const VIEW_PARAM = "view";
 const RESOURCE_PARAM = "resource";
 const COLLECTION_PARAM = "collection";
 
+// The most file ids one Lens view opens. A chat turn can cite many files; Lens
+// opens the first few and ignores the rest rather than firing an unbounded
+// fan-out of catalog lookups from one click or one URL.
+export const LENS_MAX_FILE_IDS = 24;
+
+// The ONE id-list hygiene pass, shared by the Lens layer and App-wide file-id
+// lists: each entry is coerced to a trimmed string (runtime junk — null, a
+// number, an object — must never throw here), empties are dropped, and
+// duplicates dedupe with the first occurrence keeping its position. Uncapped:
+// conversation state may legitimately track more files than one Lens view opens.
+export function dedupeFileIds(ids: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of ids) {
+    const id = String(raw ?? "").trim();
+    if (id.length === 0 || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+// The ONE normalization every Lens id list goes through: dedupeFileIds plus the
+// LENS_MAX_FILE_IDS cap. Parsing a URL, building a URL, building a deep link,
+// keying a nav state for the write-dedupe, and the opener in App.tsx all apply
+// this same function, so a URL and the state it restores always agree on which
+// ids they mean. If they could disagree (a duplicate, a 25th id), restoring a
+// URL would produce a "different" state, which would push a new history entry,
+// and Back would land on the same URL again — forever.
+export function normalizeLensFileIds(ids: readonly string[]): string[] {
+  return dedupeFileIds(ids).slice(0, LENS_MAX_FILE_IDS);
+}
+
 // Build the relative URL (pathname + search + hash) for a nav state, preserving all
 // other query params present on `current`.
 export const buildNavUrl = (
@@ -58,7 +95,7 @@ export const buildNavUrl = (
   } else {
     params.delete(VIEW_PARAM);
   }
-  const fileIds = nav.panel === "scientific-viewer" ? nav.resourceFileIds.filter((id) => id.trim().length > 0) : [];
+  const fileIds = nav.panel === "scientific-viewer" ? normalizeLensFileIds(nav.resourceFileIds) : [];
   if (fileIds.length > 0) {
     params.set(RESOURCE_PARAM, fileIds.join(","));
   } else {
@@ -81,25 +118,119 @@ export const parseNavFromSearch = (search: string): NavState => {
   const panel = VIEW_TO_PANEL[view] ?? "chat";
   const resourceRaw = (params.get(RESOURCE_PARAM) ?? "").trim();
   const resourceFileIds =
-    panel === "scientific-viewer" && resourceRaw
-      ? resourceRaw
-          .split(",")
-          .map((id) => id.trim())
-          .filter((id) => id.length > 0)
-      : [];
+    panel === "scientific-viewer" && resourceRaw ? normalizeLensFileIds(resourceRaw.split(",")) : [];
   const collectionRaw = (params.get(COLLECTION_PARAM) ?? "").trim();
   const resourceCollectionId = panel === "resources" && collectionRaw ? collectionRaw : null;
   return { panel, resourceFileIds, resourceCollectionId };
 };
 
 // A stable identity for a nav state, for deduping URL writes (the resource list only
-// matters in Lens).
+// matters in Lens). Normalizes the ids itself so the key of ANY caller's state agrees
+// with the key of the URL buildNavUrl writes for it — a caller passing an
+// un-normalized list can never make key and URL disagree.
 export const navStateKey = (nav: NavState): string => {
   if (nav.panel === "scientific-viewer") {
-    return `scientific-viewer|${[...nav.resourceFileIds].join(",")}`;
+    return `scientific-viewer|${normalizeLensFileIds(nav.resourceFileIds).join(",")}`;
   }
   if (nav.panel === "resources") {
     return `resources|${nav.resourceCollectionId ?? ""}`;
   }
   return nav.panel;
 };
+
+// --- Lens deep links ---------------------------------------------------------
+// The chat agent cites Ultra resources with a link that must open OUR Lens for
+// that exact file. The wire shape is shared with the Go control plane
+// (runResourceHit.lens_url) and the Python tools: "/?view=lens&resource=<id>",
+// ids comma-joined in one param, optionally prefixed by the public origin.
+
+// A catalog file id: opaque, URL-safe, bounded. Anything else is not a file id
+// and is never turned into a navigation target.
+const LENS_FILE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const ULTRA_RESOURCE_SCHEME = "ultra://resource/";
+
+// lensDeepLinkFor builds the relative Lens deep link for one or more file ids
+// by delegating to buildNavUrl at the app root, so a deep link is byte-identical
+// to the URL the state sync writes for the same view. That is the canonical
+// URLSearchParams encoding — a multi-id list becomes resource=a%2Cb — and
+// parseNavFromSearch accepts the encoded and raw-comma forms alike.
+export function lensDeepLinkFor(fileIds: string | readonly string[]): string {
+  return buildNavUrl(
+    { pathname: "/", search: "", hash: "" },
+    {
+      panel: "scientific-viewer",
+      resourceFileIds: typeof fileIds === "string" ? [fileIds] : [...fileIds],
+      resourceCollectionId: null,
+    }
+  );
+}
+
+export type ResolvedLensLink = { fileIds: string[]; href: string };
+
+const resolveFromIds = (candidates: string[]): ResolvedLensLink | null => {
+  const fileIds = normalizeLensFileIds(candidates);
+  if (fileIds.length === 0 || !fileIds.every((id) => LENS_FILE_ID_PATTERN.test(id))) {
+    return null;
+  }
+  return { fileIds, href: lensDeepLinkFor(fileIds) };
+};
+
+const parseLensHrefAsUrl = (href: string, origin: string): URL | null => {
+  if (href.startsWith("/") || href.startsWith("?")) {
+    // A relative form: "/?view=lens&resource=…" or "?view=lens&resource=…".
+    // Protocol-relative "//host/…" is a foreign origin in disguise.
+    if (href.startsWith("//")) {
+      return null;
+    }
+    try {
+      return new URL(href, origin);
+    } catch {
+      return null;
+    }
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(href);
+  } catch {
+    return null;
+  }
+  // `origin` comes from window.location.origin, which is already the canonical
+  // scheme://host[:port] string URL.origin produces — compare directly.
+  return parsed.origin === origin ? parsed : null;
+};
+
+// resolveLensLink decides whether a markdown href is a link into our Lens and,
+// if so, which file ids it opens. Accepts the relative form, the same-origin
+// absolute form, and the portable "ultra://resource/<id>[/<name>]" reference.
+// Returns null for anything else — foreign origins, other paths (which is what
+// rules out BisQue viewer/data/image URLs: none live at the app root), missing
+// or malformed ids — so those hrefs keep their ordinary rendering.
+export function resolveLensLink(href: string, origin: string): ResolvedLensLink | null {
+  const candidate = href.trim();
+  if (!candidate) {
+    return null;
+  }
+  // Every Lens href carries the ultra:// scheme or a view= query param. Chat
+  // markdown routes every anchor through here on each render, so ordinary
+  // links must bail before any URL construction.
+  if (!candidate.startsWith("ultra://") && !candidate.includes("view=")) {
+    return null;
+  }
+  if (candidate.startsWith(ULTRA_RESOURCE_SCHEME)) {
+    const ref = parseUltraResourceRef(candidate);
+    return ref ? resolveFromIds([ref.fileId]) : null;
+  }
+  const url = parseLensHrefAsUrl(candidate, origin);
+  if (!url) {
+    return null;
+  }
+  // The deep link lives at the app root; any other path is not a Lens link.
+  if (url.pathname !== "/" && url.pathname !== "") {
+    return null;
+  }
+  const nav = parseNavFromSearch(url.search);
+  if (nav.panel !== "scientific-viewer" || nav.resourceFileIds.length === 0) {
+    return null;
+  }
+  return resolveFromIds(nav.resourceFileIds);
+}

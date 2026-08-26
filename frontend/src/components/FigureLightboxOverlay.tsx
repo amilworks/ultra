@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { Dialog as DialogPrimitive } from "radix-ui";
 import { ChevronLeft, ChevronRight, Columns2, Download, Layers, Minus, Plus, X } from "lucide-react";
 
-import { getLightboxOpenInLens, type LightboxFigure } from "@/lib/figureLightbox";
+import { type LightboxFigure } from "@/lib/figureLightbox";
+import { getLensOpener } from "@/lib/lensNavigation";
 
 const MIN_SCALE = 1;
 const MAX_SCALE = 8;
@@ -36,7 +37,9 @@ export function FigureLightboxOverlay({ figures, initialIndex, onClose }: Props)
   const total = figures.length;
   const active = figures[index];
   const pinned = figures[pinIndex] ?? figures[(index + 1) % total];
-  const openInLens = getLightboxOpenInLens();
+  // Read at render time so the button only exists while App has an opener
+  // registered — never a dead control (the same registry the chat pills use).
+  const openInLens = getLensOpener();
 
   // Reset the zoom/pan whenever the focused figure or the mode changes (done in
   // the handlers below rather than an effect, to avoid a cascading-render reset).
@@ -222,7 +225,7 @@ export function FigureLightboxOverlay({ figures, initialIndex, onClose }: Props)
                 aria-label="Open in Lens"
                 title="Open in Lens"
                 onClick={() => {
-                  openInLens(active.fileId as string);
+                  openInLens([active.fileId as string]);
                   onClose();
                 }}
               >

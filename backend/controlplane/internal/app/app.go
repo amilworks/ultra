@@ -301,6 +301,7 @@ func New(cfg config.Config) (*App, error) {
 		BisqueCredentials:   bisqueCredentialStore,
 		WorkOS:              workOSAuth,
 		WorkerToken:         cfg.WorkerToken,
+		PublicURL:           explicitPublicURL(cfg),
 		DatabaseDiagnostics: databaseDiagnostics,
 	})
 	return &App{
@@ -564,6 +565,26 @@ func configuredPublicURL(cfg config.Config) string {
 		return publicURL
 	}
 	parsed, err := url.Parse(strings.TrimSpace(cfg.WorkOSPostLoginRedirectURI))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+// explicitPublicURL is the origin used to make agent-facing LINKS absolute
+// (Lens deep links on resource hits). Unlike configuredPublicURL it never
+// infers an origin from the WorkOS redirect URI: an inferred origin is a guess
+// about the host the browser is on, and a guess that is wrong (127.0.0.1 vs
+// localhost, a proxy alias, a second hostname) yields foreign-origin links the
+// SPA correctly refuses to treat as in-app navigation. A relative link is
+// right on every host; an absolute one is only right when the operator has
+// asserted the public origin via ULTRA_CONTROL_PUBLIC_URL. The configured
+// value is normalized to a bare scheme://host origin: the SPA's deep-link
+// parser requires pathname "/", so a path (or query/fragment) left on the
+// value would silently defeat it, and a value that does not parse as an
+// absolute URL yields no origin at all — no link beats a broken absolute one.
+func explicitPublicURL(cfg config.Config) string {
+	parsed, err := url.Parse(strings.TrimSpace(cfg.PublicURL))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return ""
 	}

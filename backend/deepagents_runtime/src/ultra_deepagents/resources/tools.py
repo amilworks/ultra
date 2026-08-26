@@ -15,15 +15,81 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 from langchain.tools import ToolRuntime, tool
 
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
-from ultra_deepagents.context_tools import _public_stage_result, stage_catalog_resources
+from ultra_deepagents.context_tools import (
+    _public_stage_result,
+    _safe_upload_file_id,
+    stage_catalog_resources,
+)
 
 _RESOURCE_TIMEOUT_SECONDS = 30.0
 _MAX_RESULTS = 100
+# Machine-readable errors the model sees when the control-plane catalog gave no
+# usable answer. Neither ever means "the user owns nothing" — the prompt says so.
+# catalog_unavailable: the catalog could not be reached or failed transiently
+# (network error, 5xx) — a retry is reasonable.
+CATALOG_UNAVAILABLE = "catalog_unavailable"
+# catalog_refused: the catalog answered and refused this run (4xx, or 501 for an
+# endpoint it does not serve) — configuration or permissions, so a retry within
+# the same run cannot change the answer.
+CATALOG_REFUSED = "catalog_refused"
+
+
+def lens_deep_link(resource_id: str) -> str:
+    """Relative in-app Lens deep link for one catalog resource.
+
+    Mirrors the Go control plane's relative form (``/?view=lens&resource=<id>``) and
+    the frontend parser in ``frontend/src/lib/navUrl.ts``; the id is percent-encoded
+    so a stray ``&`` or ``#`` can never split the query. Callers must validate the
+    id first — this function only formats.
+    """
+    return f"/?view=lens&resource={quote(resource_id, safe='')}"
+
+
+def with_lens_url(hit: dict[str, Any]) -> dict[str, Any]:
+    """Return ``hit`` with a usable ``lens_url``, or unchanged when none can be trusted.
+
+    The control plane's ``lens_url`` (absolute when a public URL is configured) wins
+    verbatim. Older control planes omit it; then the relative link is synthesized,
+    but only for ids that pass the worker's safe-id charset — the same validator the
+    staging path applies before any filesystem glob — so a hostile id never becomes
+    a link. ``lens_url`` is presentation-only and is never used to locate bytes.
+    """
+    lens_url = hit.get("lens_url")
+    if isinstance(lens_url, str) and lens_url.strip():
+        return hit
+    normalized = {key: value for key, value in hit.items() if key != "lens_url"}
+    resource_id = hit.get("resource_id")
+    if isinstance(resource_id, str):
+        candidate = resource_id.strip()
+        if candidate and _safe_upload_file_id(candidate):
+            normalized["lens_url"] = lens_deep_link(candidate)
+    return normalized
+
+
+def normalize_resource_hits(resources: Any) -> list[dict[str, Any]]:
+    """Keep only dict hits and stamp each with a trustworthy ``lens_url``."""
+    if not isinstance(resources, list):
+        return []
+    return [with_lens_url(hit) for hit in resources if isinstance(hit, dict)]
+
+
+def _catalog_failure(exc: BaseException) -> dict[str, Any]:
+    import httpx
+
+    # The exception text can carry the control-plane URL and host details, which are
+    # operator facts, not model-visible data; only the HTTP status or the exception
+    # class survives.
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        error = CATALOG_REFUSED if status < 500 or status == 501 else CATALOG_UNAVAILABLE
+        return {"ok": False, "error": error, "reason": f"http_{status}"}
+    return {"ok": False, "error": CATALOG_UNAVAILABLE, "reason": type(exc).__name__}
 
 
 def _resource_headers(context: AgentRunContext | None, settings: RuntimeSettings) -> dict[str, str]:
@@ -77,13 +143,13 @@ def search_resources_catalog(
             response.raise_for_status()
             data = response.json()
     except Exception as exc:  # noqa: BLE001 - best-effort; never fail the run on discovery
-        return {"ok": False, "error": str(exc), "resources": []}
+        return {**_catalog_failure(exc), "resources": []}
     resources = data.get("resources") if isinstance(data, dict) else None
     total = data.get("total_count") if isinstance(data, dict) else None
     return {
         "ok": True,
-        "resources": resources if isinstance(resources, list) else [],
-        "total_count": int(total) if isinstance(total, int) else 0,
+        "resources": normalize_resource_hits(resources),
+        "total_count": int(total) if isinstance(total, int) and not isinstance(total, bool) else 0,
     }
 
 
@@ -111,12 +177,12 @@ def resolve_catalog_resources(
             response.raise_for_status()
             data = response.json()
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc), "resources": [], "missing": list(resource_ids)}
+        return {**_catalog_failure(exc), "resources": [], "missing": list(resource_ids)}
     resources = data.get("resources") if isinstance(data, dict) else None
     missing = data.get("missing") if isinstance(data, dict) else None
     return {
         "ok": True,
-        "resources": resources if isinstance(resources, list) else [],
+        "resources": normalize_resource_hits(resources),
         "missing": missing if isinstance(missing, list) else [],
     }
 
@@ -141,7 +207,9 @@ def _parse_resource_ids(resource_ids: list[str] | str | None) -> list[str]:
     return [str(item).strip() for item in resource_ids if str(item).strip()]
 
 
-def build_resource_tools(settings: RuntimeSettings, *, upload_roots: tuple[str, ...] = ()) -> list[Any]:
+def build_resource_tools(
+    settings: RuntimeSettings, *, upload_roots: tuple[str, ...] = ()
+) -> list[Any]:
     """Discover + stage tools over the run owner's Resources catalog."""
     resolved_upload_roots = tuple(upload_roots)
 
@@ -153,7 +221,7 @@ def build_resource_tools(settings: RuntimeSettings, *, upload_roots: tuple[str, 
         source: str = "",
         limit: int = 50,
     ) -> str:
-        """Search YOUR Resources library — the user's uploaded datasets, images, and prior results — by keyword. Use this to find data to analyze that was NOT attached to this chat, e.g. "the CT scans with 'norm' in the name", "the NPM1 image we looked at before", "my segmentation outputs". query matches resource names; kind filters by type (image, dataset, document, table, model); source filters origin (upload, bisque_import). Returns each match's resource_id, original_name, kind, size, and metadata. Then call stage_resource_for_analysis with the resource_id(s) to pull the file(s) into /workspace and analyze them with execute()."""
+        """Search YOUR Resources library (the Resources tab) — the user's uploaded datasets, images, and prior results — by keyword. Use this to find data to analyze that was NOT attached to this chat, e.g. "the CT scans with 'norm' in the name", "the NPM1 image we looked at before", "my segmentation outputs". query matches resource names; kind filters by type (image, dataset, document, table, model); source filters origin (upload, bisque_import). Returns each match's resource_id, original_name, kind, size, metadata, and lens_url — the in-app link that opens that file in the Lens viewer; cite it verbatim as the file name's markdown link. ok=false never means the user owns nothing: error "catalog_unavailable" means the catalog could not be reached (transient — a retry is reasonable), while "catalog_refused" means the catalog answered but refused this run (configuration or permissions — do not retry; tell the user what happened). Then call stage_resource_for_analysis with the resource_id(s) to pull the file(s) into /workspace and analyze them with execute()."""
         result = search_resources_catalog(
             settings,
             context=runtime.context,
@@ -175,11 +243,12 @@ def build_resource_tools(settings: RuntimeSettings, *, upload_roots: tuple[str, 
             return json.dumps({"ok": False, "error": "no_resource_ids"}, indent=2, sort_keys=True)
         resolved = resolve_catalog_resources(settings, context=runtime.context, resource_ids=ids)
         if not resolved.get("ok"):
-            return json.dumps(
-                {"ok": False, "error": resolved.get("error", "resolve_failed")},
-                indent=2,
-                sort_keys=True,
-            )
+            # Forward the resolve failure's error AND reason so the model can tell a
+            # transient outage (retry) from a refusal (don't) without a second call.
+            failure: dict[str, Any] = {"ok": False, "error": resolved.get("error", "resolve_failed")}
+            if resolved.get("reason"):
+                failure["reason"] = resolved["reason"]
+            return json.dumps(failure, indent=2, sort_keys=True)
         result = stage_catalog_resources(
             runtime.context,
             upload_roots=resolved_upload_roots,
@@ -189,6 +258,20 @@ def build_resource_tools(settings: RuntimeSettings, *, upload_roots: tuple[str, 
         # are owned but have no locally stageable file.
         public = _public_stage_result(result)
         public["missing"] = list(resolved.get("missing", []))
+        # Carry each hit's viewer link onto its staged record so the model can cite
+        # the file it is analysing without a second search. The staged record's
+        # sandbox_path is for compute; lens_url is for the answer, never for I/O.
+        lens_urls = {
+            str(hit.get("resource_id")): hit["lens_url"]
+            for hit in resolved.get("resources", [])
+            if isinstance(hit, dict) and isinstance(hit.get("lens_url"), str)
+        }
+        for staged in public.get("staged_resources", []):
+            if not isinstance(staged, dict):
+                continue
+            lens_url = lens_urls.get(str(staged.get("resource_id") or ""))
+            if lens_url:
+                staged["lens_url"] = lens_url
         return json.dumps(public, indent=2, sort_keys=True, default=str)
 
     return [search_resources, stage_resource_for_analysis]

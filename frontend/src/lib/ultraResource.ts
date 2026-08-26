@@ -12,12 +12,26 @@ export const ultraResourceRef = (fileId: string, name: string): string =>
 
 export type UltraResourceRef = { fileId: string; name: string };
 
+/* Refs now reach this parser from model-authored chat markdown, not only from
+ * app-minted notes. micromark leaves a '%' followed by two alphanumerics
+ * untouched ('5%wt_Ni.tif'), and decodeURIComponent throws on it — which,
+ * inside a markdown link renderer, would take down the whole message. The name
+ * is presentational; navigation only needs the id, so fall back to the raw
+ * segment instead of throwing. */
+const decodeNameSegment = (segment: string): string => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+};
+
 export const parseUltraResourceRef = (value: string): UltraResourceRef | null => {
   const match = ULTRA_RESOURCE_PATTERN.exec(value);
   if (!match) {
     return null;
   }
-  return { fileId: match[1], name: decodeURIComponent(match[2] ?? "") };
+  return { fileId: match[1], name: decodeNameSegment(match[2] ?? "") };
 };
 
 export const markdownForUpload = (record: {

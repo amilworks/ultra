@@ -3033,3 +3033,94 @@ def test_build_research_agent_with_real_sandbox_backend_builds_with_and_without_
     without_skills.mkdir()
     assert _build_real_research_agent(tmp_path / "with", with_skills) is not None
     assert _build_real_research_agent(tmp_path / "without", without_skills) is not None
+
+
+def test_ultra_resource_guidance_is_gated_like_the_catalog_tools(monkeypatch):
+    """The Lens-link contract rides with search_resources: present for an
+    authenticated, non-cleanroom run; absent for anonymous runs (no catalog to
+    search, so no phantom tool) and for cleanroom runs (no catalog at all)."""
+    import ultra_deepagents.agent as agent_module
+
+    settings = _settings_factory()
+
+    def context_for(user_id: str, *, profile: str = "") -> AgentRunContext:
+        return AgentRunContext(
+            assistant_id="a",
+            org_id="o",
+            user_id=user_id,
+            project_id="p",
+            thread_id="t",
+            run_id="r-resources",
+            goal="list my files",
+            evaluation_profile=profile,
+        )
+
+    prompt = build_system_prompt(settings, context_for("researcher-1")).lower()
+    for phrase in ("search_resources", "lens_url", "copy it verbatim", "the resources tab"):
+        assert phrase in prompt, phrase
+    # Routing + presentation rules the model must carry.
+    assert "my uploads" in prompt
+    assert "source=bisque_import" in prompt
+    assert "labelled groups" in prompt
+    assert "catalog_unavailable" in prompt
+    assert "open in lens" in prompt
+    assert "/workspace path" in prompt
+    # The table-typography exemption for linked names is stated once, next to the
+    # backtick rule it amends.
+    assert "backticks inside link text suppress the viewer link" in prompt
+    # No host detail or absolute origin is baked into the guidance.
+    assert "http://" not in agent_module.ULTRA_RESOURCE_GUIDANCE
+    assert "https://" not in agent_module.ULTRA_RESOURCE_GUIDANCE
+
+    anonymous = build_system_prompt(settings, context_for("")).lower()
+    assert "copy it verbatim" not in anonymous
+    assert "lens_url" not in anonymous
+
+    # No cleanroom profile is registered in this tree, so the gate is exercised
+    # through the same predicate build_system_prompt consults.
+    monkeypatch.setattr(
+        agent_module,
+        "is_cleanroom_evaluation_profile",
+        lambda value: value == "cleanroom-test",
+    )
+    cleanroom = build_system_prompt(
+        settings, context_for("researcher-1", profile="cleanroom-test")
+    ).lower()
+    assert "copy it verbatim" not in cleanroom
+    assert "lens_url" not in cleanroom
+    # A None context (static prefix build) still advertises the catalog contract,
+    # matching how BISQUE_GUIDANCE and PAPER_REVIEW_GUIDANCE treat None.
+    assert "copy it verbatim" in build_system_prompt(settings, None).lower()
+
+
+def test_run_context_brief_advertises_ultra_resources_only_when_tools_register():
+    authed = AgentRunContext(
+        assistant_id="a",
+        org_id="o",
+        user_id="researcher-1",
+        project_id="p",
+        thread_id="t",
+        run_id="r-brief",
+        goal="what files do I have?",
+    )
+    brief = build_run_context_brief(authed)
+    assert "Ultra Resources library (the Resources tab)" in brief
+    assert "search_resources" in brief
+    assert "lens_url" in brief
+    assert brief.count("Active run context:") == 1
+    # The BisQue line no longer claims scope='owner' covers ALL of the user's
+    # resources — only their BisQue ones.
+    assert "the user's own resources" not in brief
+
+    anonymous = AgentRunContext(
+        assistant_id="a",
+        org_id="o",
+        user_id="",
+        project_id="p",
+        thread_id="t",
+        run_id="r-brief-anon",
+        goal="what files do I have?",
+    )
+    anon_brief = build_run_context_brief(anonymous)
+    assert "search_resources" not in anon_brief
+    assert "lens_url" not in anon_brief

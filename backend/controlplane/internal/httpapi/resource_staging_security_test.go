@@ -303,7 +303,7 @@ func TestSelectedAndResolvedResourceProjectionsCarryOnlyCatalogBoundTreeIdentity
 		sensor["authority"] != "control_resource_catalog" {
 		t.Fatalf("selected sensor format=%T %#v", descriptors[0]["sensor_format"], descriptors[0])
 	}
-	resolved := runResourceHitFromRecord(resource)
+	resolved := runResourceHitFromRecord(resource, "")
 	if resolved.TreeIdentity["tree_manifest_sha256"] != digest {
 		t.Fatalf("resolved tree identity=%#v", resolved.TreeIdentity)
 	}
@@ -509,7 +509,7 @@ func TestRunResourceMetadataProjectionRedactsSecretsAndDeniesUnknownKeys(t *test
 			},
 			"vendor_private_terms": "forbidden vendor terms",
 		},
-	})
+	}, "")
 
 	if hit.Metadata["source"] != "upload_store" || hit.Metadata["caption"] != "assessed measurements" {
 		t.Fatalf("safe generic metadata missing: %#v", hit.Metadata)
@@ -550,7 +550,7 @@ func TestRunResourceMetadataProjectionRejectsUnsafeOwnerDeclarations(t *testing.
 		hit := runResourceHitFromRecord(domain.ResourceRecord{
 			ResourceID: "file-decl",
 			Metadata:   domain.JSONMap{"source": unsafe},
-		})
+		}, "")
 		if got, exists := hit.Metadata["source"]; exists {
 			t.Fatalf("unsafe owner declaration %q projected as %#v", unsafe, got)
 		}
@@ -558,7 +558,7 @@ func TestRunResourceMetadataProjectionRejectsUnsafeOwnerDeclarations(t *testing.
 	safe := runResourceHitFromRecord(domain.ResourceRecord{
 		ResourceID: "file-decl-safe",
 		Metadata:   domain.JSONMap{"source": "https://example.org/public/dataset"},
-	})
+	}, "")
 	if safe.Metadata["source"] != "https://example.org/public/dataset" {
 		t.Fatalf("safe owner declaration dropped: %#v", safe.Metadata)
 	}

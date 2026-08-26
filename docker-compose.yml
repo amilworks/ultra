@@ -240,6 +240,12 @@ services:
       ULTRA_CONTROL_WORKOS_POST_LOGIN_REDIRECT_URI: ${ULTRA_WORKOS_POST_LOGIN_REDIRECT_URI:-http://localhost:${FRONTEND_PORT:-5174}/}
       ULTRA_CONTROL_WORKOS_LOGOUT_REDIRECT_URI: ${ULTRA_WORKOS_LOGOUT_REDIRECT_URI:-http://localhost:${FRONTEND_PORT:-5174}/}
       ULTRA_CONTROL_WORKOS_COOKIE_SECURE: ${ULTRA_WORKOS_COOKIE_SECURE:-false}
+      # Browser-facing origin (scheme://host, no path) the control plane uses to
+      # make agent-facing links absolute — today the Lens deep links on
+      # resource-search / resource-resolve hits. Leave it empty unless the stack
+      # is served from one known public origin: empty keeps the links RELATIVE,
+      # which is correct on every host the SPA is reached through.
+      ULTRA_CONTROL_PUBLIC_URL: ${ULTRA_CONTROL_PUBLIC_URL:-}
     volumes:
       - ultra-uploads:/data/uploads
       - ${ULTRA_DATA_DIR:-/tmp/ultra-data}:${ULTRA_DATA_DIR:-/tmp/ultra-data}

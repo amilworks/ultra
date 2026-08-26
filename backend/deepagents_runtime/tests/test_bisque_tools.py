@@ -232,6 +232,11 @@ def test_run_context_brief_mentions_linked_bisque_account_without_session_id():
     assert "bisque_download_resource" in brief
     assert "bisque_upload_files" in brief
     assert "bisque_session_secret" not in brief
+    # scope='owner' is scoped to the user's BisQue resources; "my files" routes to
+    # the Ultra catalog, which the brief advertises on its own line.
+    assert "the user's own BisQue resources" in brief
+    assert "the user's own resources" not in brief
+    assert "search_resources; every hit carries a lens_url" in brief
 
 
 def test_bisque_search_calls_control_plane_without_credentials(monkeypatch):

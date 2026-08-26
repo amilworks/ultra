@@ -1648,7 +1648,7 @@ const reportCanvasMessages = [
     role: "assistant",
     run_id: reportCanvasRunId,
     content:
-      "Checkpoint B clears A on every metric that matters for the survey: mAP@0.5 rises 0.79 → 0.86 and recall improves six points at the shipping threshold. The full evaluation is in the report, alongside the per-colony counts table.",
+      "Checkpoint B clears A on every metric that matters for the survey: mAP@0.5 rises 0.79 → 0.86 and recall improves six points at the shipping threshold. The full evaluation is in the report, alongside the per-colony counts table.\n\nInputs from your Resources library:\n\n| Resource | Type |\n| --- | --- |\n| [subject-b-nph-under70.nii.gz](/?view=lens&resource=file_query_dataset_b) | NIfTI |\n| [missing-scan.nii.gz](/?view=lens&resource=file_gone_404) | NIfTI |",
     created_at: "2026-07-31T18:01:40.000Z",
   },
 ];

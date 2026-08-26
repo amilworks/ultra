@@ -16292,6 +16292,7 @@ func TestV2RunResourceSearchAndResolveAreRunAnchoredAndUserScoped(t *testing.T) 
 		ResourceKind string `json:"resource_kind"`
 		StorageURI   string `json:"storage_uri"`
 		StoragePath  string `json:"storage_path"`
+		LensURL      string `json:"lens_url"`
 	}
 	type searchResp struct {
 		Resources  []hit `json:"resources"`
@@ -16309,6 +16310,10 @@ func TestV2RunResourceSearchAndResolveAreRunAnchoredAndUserScoped(t *testing.T) 
 	}
 	if len(sr.Resources) != 1 || sr.Resources[0].ResourceID != "file_norm_ct" {
 		t.Fatalf("norm query = %+v, want only file_norm_ct", sr.Resources)
+	}
+	// Without a public URL the Lens link is the relative in-app deep link.
+	if sr.Resources[0].LensURL != "/?view=lens&resource=file_norm_ct" {
+		t.Fatalf("resource-search lens_url = %q, want relative Lens deep link", sr.Resources[0].LensURL)
 	}
 	// Host paths must never leak to the agent.
 	if sr.Resources[0].StorageURI != "" || sr.Resources[0].StoragePath != "" {
@@ -16354,6 +16359,116 @@ func TestV2RunResourceSearchAndResolveAreRunAnchoredAndUserScoped(t *testing.T) 
 	if rr.Resources[0].StoragePath != "" || strings.Contains(rec.Body.String(), "/srv/secret") {
 		t.Fatalf("host path leaked in resource-resolve response: %s", rec.Body.String())
 	}
+	if rr.Resources[0].LensURL != "/?view=lens&resource=file_npm1" {
+		t.Fatalf("resource-resolve lens_url = %q, want relative Lens deep link", rr.Resources[0].LensURL)
+	}
+}
+
+// TestV2RunResourceHitsCarryAbsoluteLensURLWithPublicURL pins the agent-facing
+// link contract: with ULTRA_CONTROL_PUBLIC_URL configured both resource-search
+// and resource-resolve hits carry an absolute Lens deep link for the exact
+// resource id, with the id query-escaped and the resource_id itself untouched.
+func TestV2RunResourceHitsCarryAbsoluteLensURLWithPublicURL(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	mem := store.NewMemoryStore()
+	service := runcontrol.NewService(mem, eventbus.NewMemoryBus())
+	router := NewRouter(ServerDeps{
+		Version:     "test-version",
+		Runs:        service,
+		Store:       mem,
+		UploadRoot:  t.TempDir(),
+		WorkerToken: "trace-worker-secret",
+		WorkOS:      testWorkOSAuth(t, WorkOSAuthConfig{}),
+		PublicURL:   "https://ultra.example.com",
+	})
+
+	now := domain.Now()
+	// Canonical ids admit ':' which QueryEscape still encodes, so the escaping
+	// contract is exercised through a record the catalog actually accepts.
+	const oddID = "file:odd.id-1"
+	for i, resourceID := range []string{"file_plain", oddID} {
+		if _, err := mem.UpsertResource(ctx, domain.UpsertResourceInput{
+			ResourceID:   resourceID,
+			OriginalName: "scan.tiff",
+			ContentType:  "image/tiff",
+			ResourceKind: "image",
+			SourceType:   "upload",
+			SizeBytes:    1024,
+			SHA256:       fmt.Sprintf("digest-%d", i),
+			StorageURI:   "file:///srv/secret/" + resourceID,
+			StoragePath:  "/srv/secret/" + resourceID,
+			OwnerUserID:  "user-a",
+			Status:       "active",
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}); err != nil {
+			t.Fatalf("UpsertResource(%s): %v", resourceID, err)
+		}
+	}
+	thread, _ := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "lens"})
+	run, _ := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: thread.ThreadID, UserID: "user-a", Goal: "open my scan",
+		Metadata: domain.JSONMap{"org_id": "org-a"},
+	})
+
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("X-Ultra-Worker-Token", "trace-worker-secret")
+		req.Header.Set("X-Ultra-Org-Id", "org-a")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	type hit struct {
+		ResourceID string `json:"resource_id"`
+		LensURL    string `json:"lens_url"`
+	}
+	want := map[string]string{
+		"file_plain": "https://ultra.example.com/?view=lens&resource=file_plain",
+		oddID:        "https://ultra.example.com/?view=lens&resource=file%3Aodd.id-1",
+	}
+	check := func(endpoint string, hits []hit) {
+		t.Helper()
+		if len(hits) != len(want) {
+			t.Fatalf("%s returned %d hits, want %d: %+v", endpoint, len(hits), len(want), hits)
+		}
+		for _, h := range hits {
+			if h.LensURL != want[h.ResourceID] {
+				t.Fatalf("%s lens_url for %q = %q, want %q", endpoint, h.ResourceID, h.LensURL, want[h.ResourceID])
+			}
+		}
+	}
+
+	rec := post("/v2/runs/"+run.RunID+"/resource-search", `{"query":"","limit":50}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resource-search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var sr struct {
+		Resources []hit `json:"resources"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sr); err != nil {
+		t.Fatalf("decode search: %v body=%s", err, rec.Body.String())
+	}
+	check("resource-search", sr.Resources)
+
+	rec = post("/v2/runs/"+run.RunID+"/resource-resolve", `{"resource_ids":["file_plain","file:odd.id-1"]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resource-resolve status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var rr struct {
+		Resources []hit    `json:"resources"`
+		Missing   []string `json:"missing"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &rr); err != nil {
+		t.Fatalf("decode resolve: %v body=%s", err, rec.Body.String())
+	}
+	if len(rr.Missing) != 0 {
+		t.Fatalf("resource-resolve missing = %+v, want none", rr.Missing)
+	}
+	check("resource-resolve", rr.Resources)
 }
 
 func TestV2RunResourceSearchHonorsShareGrants(t *testing.T) {

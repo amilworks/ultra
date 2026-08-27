@@ -3,6 +3,7 @@ import type * as Sonner from "sonner";
 export type SonnerModule = typeof Sonner;
 export type ToastSuccessOptions = Parameters<SonnerModule["toast"]["success"]>[1];
 export type ToastErrorOptions = Parameters<SonnerModule["toast"]["error"]>[1];
+export type ToastOptions = Parameters<SonnerModule["toast"]>[1];
 
 let sonnerModulePromise: Promise<SonnerModule> | null = null;
 
@@ -30,6 +31,21 @@ export const showErrorToast = (
   void loadSonnerModule().then(({ toast }) => {
     toast.error(message, options);
   });
+};
+
+export const showActionToast = (message: string, options?: ToastOptions): void => {
+  void loadSonnerModule().then(({ toast }) => {
+    toast(message, options);
+  });
+};
+
+export const dismissToast = (id: string | number | undefined): void => {
+  if (id === undefined) return;
+  void loadSonnerModule().then(({ toast }) => toast.dismiss(id));
+};
+
+export const dismissAllToasts = (): void => {
+  void loadSonnerModule().then(({ toast }) => toast.dismiss());
 };
 
 /**

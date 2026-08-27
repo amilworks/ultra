@@ -157,6 +157,45 @@ describe("Note append proposal card", () => {
     expect(screen.getByRole("button", { name: "Add to note" })).toBeDisabled();
   });
 
+  it("keeps the exact reviewed text retryable when a commit receipt is incomplete", async () => {
+    const commit = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new Error(
+          "Ultra received an incomplete Note append receipt. The result is uncertain; retry the exact request before continuing."
+        )
+      )
+      .mockResolvedValueOnce(receipt());
+    const apiClient = {
+      getNoteAppendProposal: vi.fn().mockResolvedValue(pendingProposal),
+      commitNoteAppendProposal: commit,
+    } as unknown as ApiClient;
+
+    render(
+      <NoteRunContext
+        runEvents={[proposalEvent]}
+        apiClient={apiClient}
+        onOpenNote={vi.fn()}
+        onNoteChanged={vi.fn()}
+      />
+    );
+
+    const editor = await screen.findByLabelText("Text to add to note");
+    fireEvent.change(editor, { target: { value: "Keep this exact reviewed text" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add to note" }));
+
+    expect(await screen.findByText(/result is uncertain/i)).toBeInTheDocument();
+    expect(editor).toHaveValue("Keep this exact reviewed text");
+    expect(screen.getByRole("button", { name: "Add to note" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add to note" }));
+    expect(await screen.findByText("Added to Field protocol")).toBeInTheDocument();
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect(commit).toHaveBeenLastCalledWith("proposal_1", {
+      body_markdown: "Keep this exact reviewed text",
+    });
+  });
+
   it("stops retrying an Undo that newer note writing made permanently unsafe", async () => {
     const undo = vi.fn().mockRejectedValue(
       new ApiError("conflict", 409, { code: "note_undo_conflict" })

@@ -60,7 +60,7 @@ describe("entering a steer", () => {
   it("queues Note-bearing follow-ups as a newly scoped run", () => {
     const steer = blockFrom("const steerFollowup = useCallback", "makeId()");
     expect(steer).toMatch(
-      /conversation\.selectedNotes\.length > 0 \|\|\s*notesSearchRequested\(text, excludedNoteIntentText\)/
+      /conversation\.selectedNotes\.length > 0 \|\|\s*notesSearchScopeState\(\s*text,\s*excludedNoteIntentText,\s*conversation\.noteSearchScopeOverride\s*\)\.active/
     );
     expect(steer).toMatch(/queueFollowup\(\);\s*return;/);
   });

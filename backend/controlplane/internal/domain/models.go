@@ -1386,29 +1386,39 @@ type NoteRecord struct {
 	// Revision is the monotonic compare-and-swap token for every mutation.
 	// ContentDigest identifies the title/body bytes used for model provenance;
 	// it is descriptive and must never be treated as mutation authority.
-	Revision      int64     `json:"revision"`
-	ContentDigest string    `json:"content_digest"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Revision         int64     `json:"revision"`
+	ContentDigest    string    `json:"content_digest"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	ContentUpdatedAt time.Time `json:"content_updated_at"`
 }
 
 // NoteListItem is the list-pane projection: no full body, just enough to
 // render a row (the snippet is computed server-side from the body head).
 type NoteListItem struct {
-	NoteID    string    `json:"note_id"`
-	Title     string    `json:"title"`
-	Snippet   string    `json:"snippet"`
-	Pinned    bool      `json:"pinned"`
-	Revision  int64     `json:"revision"`
-	UpdatedAt time.Time `json:"updated_at"`
+	NoteID           string    `json:"note_id"`
+	Title            string    `json:"title"`
+	Snippet          string    `json:"snippet"`
+	Pinned           bool      `json:"pinned"`
+	Revision         int64     `json:"revision"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	ContentUpdatedAt time.Time `json:"content_updated_at"`
 }
 
 type NoteListInput struct {
 	UserID string
 	Query  string
+	Sort   NoteListSort
 	Limit  int
 	Offset int
 }
+
+type NoteListSort string
+
+const (
+	NoteListSortBrowse NoteListSort = "browse"
+	NoteListSortRecent NoteListSort = "recent"
+)
 
 type NoteListPage struct {
 	Notes      []NoteListItem

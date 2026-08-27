@@ -65,4 +65,45 @@ describe("WorkOS hosted auth redirect", () => {
     expect(urlEffect).toContain(": null");
     expect(urlEffect).toContain("pushConversationIdInLocation(");
   });
+
+  it("replaces a stale requested chat URL before activating a live fallback", () => {
+    const source = readSource("src/App.tsx");
+    const bootstrapStart = source.indexOf("let missingRequestedConversationId");
+    const bootstrapEnd = source.indexOf("// A failed bootstrap", bootstrapStart);
+    const bootstrap = source.slice(bootstrapStart, bootstrapEnd);
+    const fallbackStart = bootstrap.indexOf("const missingConversationFallback");
+    const fallbackEnd = bootstrap.indexOf("setActiveConversationId", fallbackStart);
+    const fallbackBlock = bootstrap.slice(fallbackStart, fallbackEnd);
+
+    expect(fallbackBlock).toContain("replaceConversationIdInLocation(");
+    expect(fallbackBlock).not.toContain("pushConversationIdInLocation(");
+    expect(bootstrap).toContain("return missingConversationFallback.id");
+  });
+
+  it("uses accurate stale-chat recovery copy for existing and new fallbacks", () => {
+    const source = readSource("src/App.tsx");
+    const hydrateStart = source.indexOf("const ensureConversationHydrated");
+    const hydrateEnd = source.indexOf("const loadMoreConversations", hydrateStart);
+    const hydrate = source.slice(hydrateStart, hydrateEnd);
+
+    expect(hydrate).toContain("existingFallbackConversation");
+    expect(hydrate).toContain("MISSING_REQUESTED_CONVERSATION_MESSAGE");
+    expect(hydrate).toContain("MISSING_REQUESTED_CONVERSATION_NEW_MESSAGE");
+  });
+
+  it("clears authenticated state only after logout or unlink succeeds", () => {
+    const source = readSource("src/App.tsx");
+    const start = source.indexOf("const leaveAuthenticatedAccount");
+    const end = source.indexOf("const logoutBisque", start);
+    const departure = source.slice(start, end);
+    const request = departure.indexOf("requestAuthenticatedAccountDeparture");
+    const failureReturn = departure.indexOf("return;", request);
+    const clear = departure.indexOf("clearAuthViewState();", request);
+
+    expect(departure).toContain("enableNoteDraftRecoveryScope(logoutScope)");
+    expect(departure).toContain("You’re still signed in; try again.");
+    expect(request).toBeGreaterThan(-1);
+    expect(failureReturn).toBeGreaterThan(request);
+    expect(clear).toBeGreaterThan(failureReturn);
+  });
 });

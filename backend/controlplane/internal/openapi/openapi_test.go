@@ -53,6 +53,11 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 		"/v2/bisque/upload:",
 		"/v2/bisque/unlink:",
 		"/v2/resources:",
+		"/v2/notes:",
+		"/v2/notes/{note_id}:",
+		"/v2/notes/{note_id}/append:",
+		"/v2/note-direct-append-operations/{operation_id}/undo:",
+		"/v2/runs/{run_id}/note-search:",
 		"/v2/resource-events:",
 		"/v2/resources/{file_id}:",
 		"/v2/resources/{file_id}/download:",
@@ -138,6 +143,10 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 		"V2ResourceEventListResponse:",
 		"V2ResourceEventsResponse:",
 		"V2ResourcePatchRequest:",
+		"V2ModelNoteSearchRequest:",
+		"V2ModelNoteSearchResponse:",
+		"V2NoteDirectAppendRequest:",
+		"V2NoteDirectAppendOperation:",
 		"V2ResourceCollectionRecord:",
 		"V2ResourceCollectionCreateRequest:",
 		"V2ResourceCollectionShareGrantsCreateResponse:",
@@ -175,6 +184,85 @@ func TestOpenAPIIncludesFrontendV2Routes(t *testing.T) {
 	for _, needle := range required {
 		if !strings.Contains(doc, needle) {
 			t.Fatalf("openapi.yaml missing %s", needle)
+		}
+	}
+}
+
+func TestNotesOpenAPIIncludesCreateReplayAndKeysetContracts(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatalf("read openapi.yaml: %v", err)
+	}
+	doc := string(data)
+	notesStart := strings.Index(doc, "  /v2/notes:\n")
+	notesEnd := strings.Index(doc, "  /v2/notes/{note_id}:\n")
+	if notesStart < 0 || notesEnd <= notesStart {
+		t.Fatal("could not isolate Notes collection contract")
+	}
+	createContract := doc[notesStart:notesEnd]
+	for _, marker := range []string{
+		"name: Idempotency-Key",
+		"required: false",
+		`"201":`,
+		`"200":`,
+		`"400":`,
+		`"409":`,
+		`"410":`,
+		`"413":`,
+		"note_create_idempotency_conflict",
+		"note_create_not_committed",
+		"note_create_replay_deleted",
+	} {
+		if !strings.Contains(createContract, marker) {
+			t.Fatalf("Notes create OpenAPI missing %q", marker)
+		}
+	}
+	if strings.Contains(createContract, `"422":`) {
+		t.Fatal("Notes create OpenAPI must not advertise a synthetic 422 response")
+	}
+	directStart := strings.Index(doc, "  /v2/notes/{note_id}/append:\n")
+	directEnd := strings.Index(doc, "  /v2/runs/{run_id}/note-search:\n")
+	if directStart < 0 || directEnd <= directStart {
+		t.Fatal("could not isolate direct Note append contract")
+	}
+	directContract := doc[directStart:directEnd]
+	for _, marker := range []string{
+		"name: Idempotency-Key",
+		"required: true",
+		`"200":`,
+		`"201":`,
+		`"400":`,
+		`"404":`,
+		`"409":`,
+		`"413":`,
+		"note_append_not_committed",
+		"note_append_target_unavailable",
+	} {
+		if !strings.Contains(directContract, marker) {
+			t.Fatalf("direct Note append OpenAPI missing %q", marker)
+		}
+	}
+	if strings.Contains(directContract, `"422":`) {
+		t.Fatal("direct Note append OpenAPI must not advertise a synthetic 422 response")
+	}
+	errorSchemaStart := strings.Index(doc, "    V2APIErrorResponse:\n")
+	errorSchemaEnd := strings.Index(doc, "    V2BisqueNotConfiguredResponse:\n")
+	if errorSchemaStart < 0 || errorSchemaEnd <= errorSchemaStart {
+		t.Fatal("could not isolate API error response schema")
+	}
+	if !strings.Contains(doc[errorSchemaStart:errorSchemaEnd], "code: { type: string, nullable: true }") {
+		t.Fatal("API error response schema must expose the Notes machine code")
+	}
+	searchSchemaStart := strings.Index(doc, "    V2ModelNoteSearchRequest:\n")
+	searchSchemaEnd := strings.Index(doc, "    V2ModelNoteSearchHit:\n")
+	if searchSchemaStart < 0 || searchSchemaEnd <= searchSchemaStart {
+		t.Fatal("could not isolate model Note search request contract")
+	}
+	searchContract := doc[searchSchemaStart:searchSchemaEnd]
+	for _, marker := range []string{"default: 8", "Opaque v2 cursor", "snapshot-bounded keyset"} {
+		if !strings.Contains(searchContract, marker) {
+			t.Fatalf("model Note search OpenAPI missing %q", marker)
 		}
 	}
 }

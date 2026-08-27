@@ -159,17 +159,18 @@ type ControlDatasetSnapshotShareGrant struct {
 }
 
 type ControlNote struct {
-	NoteID        string             `json:"note_id"`
-	UserID        string             `json:"user_id"`
-	OrgID         pgtype.Text        `json:"org_id"`
-	Title         string             `json:"title"`
-	BodyMarkdown  string             `json:"body_markdown"`
-	Pinned        bool               `json:"pinned"`
-	EditorMode    string             `json:"editor_mode"`
-	Revision      int64              `json:"revision"`
-	ContentDigest string             `json:"content_digest"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	NoteID           string             `json:"note_id"`
+	UserID           string             `json:"user_id"`
+	OrgID            pgtype.Text        `json:"org_id"`
+	Title            string             `json:"title"`
+	BodyMarkdown     string             `json:"body_markdown"`
+	Pinned           bool               `json:"pinned"`
+	EditorMode       string             `json:"editor_mode"`
+	Revision         int64              `json:"revision"`
+	ContentDigest    string             `json:"content_digest"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	ContentUpdatedAt pgtype.Timestamptz `json:"content_updated_at"`
 }
 
 type ControlNoteAppendOperation struct {
@@ -206,6 +207,32 @@ type ControlNoteAppendProposal struct {
 	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlNoteCreateReceipt struct {
+	UserID         string             `json:"user_id"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	RequestDigest  pgtype.Text        `json:"request_digest"`
+	NoteID         pgtype.Text        `json:"note_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlNoteDirectAppendOperation struct {
+	OperationID         string             `json:"operation_id"`
+	UserID              string             `json:"user_id"`
+	NoteID              string             `json:"note_id"`
+	IdempotencyKey      string             `json:"idempotency_key"`
+	RequestDigest       string             `json:"request_digest"`
+	BeforeRevision      int64              `json:"before_revision"`
+	AfterRevision       int64              `json:"after_revision"`
+	UndoRevision        pgtype.Int8        `json:"undo_revision"`
+	AppendStartByte     int32              `json:"append_start_byte"`
+	AppendedBytes       int32              `json:"appended_bytes"`
+	AppendSha256        string             `json:"append_sha256"`
+	BeforeContentDigest string             `json:"before_content_digest"`
+	AfterContentDigest  string             `json:"after_content_digest"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UndoneAt            pgtype.Timestamptz `json:"undone_at"`
 }
 
 type ControlNoteReadGrant struct {

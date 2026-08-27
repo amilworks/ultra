@@ -46,11 +46,10 @@ describe("one file, progressively disclosed source mode", () => {
     expect(pageSource).not.toContain("Toggle preview");
   });
 
-  it("⌘⇧E flips the mode; ⌘E belongs to inline code now", () => {
-    expect(pageSource).toMatch(
+  it("keeps raw source in the explicit menu and leaves the shell Resources shortcut alone", () => {
+    expect(pageSource).not.toMatch(
       /event\.shiftKey && event\.key\.toLowerCase\(\) === "e"[\s\S]{0,240}switchEditorMode/
     );
-    // The old page-level plain-⌘E preview handler is gone.
     expect(pageSource).not.toMatch(/!event\.shiftKey && event\.key\.toLowerCase\(\) === "e"/);
     expect(pageSource).toContain('aria-label="Inline code"');
   });
@@ -121,6 +120,12 @@ describe("contextual writing controls", () => {
     // (Docs/Word basic), and nests list items — one chained binding.
     expect(editorSource).toMatch(
       /goToNextTableCellCommand\.key\) \|\|[\s\S]{0,300}addRowAfterCommand\.key\)[\s\S]{0,200}sinkListItemCommand\.key\)/
+    );
+  });
+
+  it("wires the advertised highlight shortcut on the formatted surface", () => {
+    expect(pageSource).toMatch(
+      /event\.shiftKey &&[\s\S]{0,80}event\.key\.toLowerCase\(\) === "h"[\s\S]{0,180}exec\("highlight"\)/
     );
   });
 
@@ -195,11 +200,19 @@ describe("editor polish — tables, exits, checkboxes, code chip (user findings)
     expect(styles).toContain(".notes-md-prose .ProseMirror-gapcursor");
   });
 
-  it("task checkboxes toggle on click and draw with crisp borders, not glyphs", () => {
+  it("task checkboxes are semantic, keyboard-operable, and draw with crisp borders", () => {
     expect(editorSource).toContain("handleClick");
+    expect(editorSource).toContain("handleKeyDown");
     expect(editorSource).toContain("checked: !item.attrs.checked");
+    expect(editorSource).toContain('role: "checkbox"');
+    expect(editorSource).toContain('"aria-checked"');
+    expect(editorSource).toContain('tabindex: "0"');
+    expect(editorSource).toMatch(/event\.key !== " " && event\.key !== "Enter"/);
     // Gutter clicks resolve BETWEEN items — the clicked item is nodeAfter.
     expect(editorSource).toContain("$pos.nodeAfter");
+    expect(styles).toContain(
+      '.notes-md-prose li[data-item-type="task"][role="checkbox"]:focus-visible'
+    );
     const tick = styles.match(/data-checked="true"\]::after\s*\{[^}]*\}/s)?.[0];
     expect(tick).toContain("border-right");
     expect(tick).toContain("rotate(");
@@ -237,7 +250,8 @@ describe("mobile is first-class", () => {
 
   it("keeps visible mobile actions finger-sized without restoring a permanent ribbon", () => {
     const mobile = styles.slice(styles.indexOf('.notes-page { grid-template-columns: 1fr; }'));
-    expect(mobile).toMatch(/\.notes-icon-button \{[^}]*width: 40px;[^}]*height: 40px;/s);
+    expect(mobile).toMatch(/\.notes-icon-button \{[^}]*width: 44px;[^}]*height: 44px;/s);
+    expect(mobile).toMatch(/\.notes-mobile-back \{[^}]*min-height: 44px;/s);
     expect(styles).not.toContain(".notes-ribbon");
   });
 

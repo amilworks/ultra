@@ -74,10 +74,10 @@ describe("frictionless editing", () => {
 
   it("title Enter/Tab drops straight into the body — whichever surface is active", () => {
     expect(pageSource).toMatch(
-      /event\.key === "Enter" \|\| event\.key === "Tab"[\s\S]{0,320}bodyRef\.current\?\.focus\(\)/
+      /event\.key === "Enter" \|\| \(event\.key === "Tab" && !event\.shiftKey\)[\s\S]{0,320}bodyRef\.current\?\.focus\(\)/
     );
     expect(pageSource).toMatch(
-      /event\.key === "Enter" \|\| event\.key === "Tab"[\s\S]{0,320}editorApiRef\.current\?\.focus\(\)/
+      /event\.key === "Enter" \|\| \(event\.key === "Tab" && !event\.shiftKey\)[\s\S]{0,320}editorApiRef\.current\?\.focus\(\)/
     );
   });
 
@@ -89,7 +89,9 @@ describe("frictionless editing", () => {
       /draftRef\.current\.noteId !== noteId[\s\S]{0,260}await flushSave\(\)/
     );
     // Unmount: the cleanup effect flushes.
-    expect(pageSource).toMatch(/return \(\) => \{[\s\S]{0,200}void flushSave\(\);\s*\};\s*\}, \[flushSave\]\);/);
+    expect(pageSource).toMatch(
+      /return \(\) => \{[\s\S]{0,120}flushRecoveryNow\(\);[\s\S]{0,80}void flushSave\(\);\s*\};\s*\}, \[flushRecoveryNow, flushSave\]\);/
+    );
   });
 
   it("has no explicit save button — autosave IS the save", () => {
@@ -116,8 +118,16 @@ describe("frictionless editing", () => {
 
   it("confirms permanent deletion with an accessible alert dialog", () => {
     expect(pageSource).toContain("<AlertDialog");
-    expect(pageSource).toContain("Deletion is permanent");
+    expect(pageSource).toContain("This permanently deletes this Note and cannot be undone.");
     expect(pageSource).not.toContain("window.confirm");
+  });
+
+  it("uses calm user-facing Notes language and one durable paused-add surface", () => {
+    expect(appSource).toContain('title="Opening Notes…"');
+    expect(appSource).not.toContain("stay out of the main bundle");
+    expect(pageSource).toContain("Using Notes in chat is currently unavailable.");
+    expect(appSource).toContain("is paused. Your exact selection is protected.");
+    expect(appSource).not.toContain('showActionToast("Add to note paused"');
   });
 });
 
@@ -145,6 +155,11 @@ describe("plumbing", () => {
   it("the harness serves notes so the page can be driven end to end", () => {
     expect(mockApi).toContain('url.pathname === "/v2/notes"');
     expect(mockApi).toContain("note_seed_protocol");
+    expect(mockApi).toContain("note.content_updated_at = note.updated_at");
+    expect(mockApi).toContain('sortedMockNotes(sort)');
+    expect(mockApi).toContain('if (sort === "recent")');
+    expect(mockApi).toContain("return a.note_id.localeCompare(b.note_id)");
+    expect(mockApi).toContain("if (contentChanged) note.content_updated_at = note.updated_at");
   });
 
   it("re-seals exact Note ids immediately before every run and fails before mutating the turn", () => {
@@ -222,8 +237,10 @@ describe("plaintext mode is the raw source — and the type says so", () => {
     expect(editorSource).toContain('class: "pk-message-content pk-markdown notes-md-prose"');
   });
 
-  it("Tab indents inside the body instead of escaping the editor", () => {
+  it("Tab indents while Escape then Tab restores normal focus traversal", () => {
     expect(pageSource).toMatch(/event\.key === "Tab" && !event\.shiftKey[\s\S]{0,600}setSelectionRange\(start \+ 2/);
+    expect(pageSource).toMatch(/event\.key === "Escape"[\s\S]{0,120}plaintextTabExitArmedRef\.current = true/);
+    expect(pageSource).toMatch(/event\.key === "Tab" && plaintextTabExitArmedRef\.current/);
   });
 
   it("text pastes pass straight through — only FILE pastes are intercepted", () => {

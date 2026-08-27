@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,7 +23,7 @@ import (
 
 const (
 	maxModelNoteQueryRunes      = 512
-	defaultModelNoteSearchLimit = 10
+	defaultModelNoteSearchLimit = 8
 	maxModelNoteSearchLimit     = 20
 	defaultModelNoteReadChars   = 8000
 	maxModelNoteReadChars       = 16000
@@ -127,8 +129,21 @@ func (deps ServerDeps) authorizeNoteWorkerRequest(w http.ResponseWriter, r *http
 }
 
 type modelNoteSearchRequest struct {
-	Query string `json:"query"`
-	Limit int    `json:"limit"`
+	Query  string `json:"query"`
+	Sort   string `json:"sort"`
+	Limit  int    `json:"limit"`
+	Cursor string `json:"cursor"`
+}
+
+type modelNoteSearchCursor struct {
+	Version          int       `json:"v"`
+	RunDigest        string    `json:"r"`
+	QueryDigest      string    `json:"q"`
+	Sort             string    `json:"s"`
+	SnapshotAt       time.Time `json:"a"`
+	Rank             int       `json:"k"`
+	ContentUpdatedAt time.Time `json:"t"`
+	NoteID           string    `json:"n"`
 }
 
 func (deps ServerDeps) handleModelNoteSearch(w http.ResponseWriter, r *http.Request) {
@@ -152,8 +167,17 @@ func (deps ServerDeps) handleModelNoteSearch(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	req.Query = strings.TrimSpace(req.Query)
-	if req.Query == "" || utf8.RuneCountInString(req.Query) > maxModelNoteQueryRunes {
-		writeError(w, http.StatusBadRequest, errors.New("query must contain between 1 and 512 characters"))
+	req.Sort = strings.TrimSpace(req.Sort)
+	if req.Sort == "" {
+		req.Sort = string(domain.NoteSearchSortRelevance)
+	}
+	if req.Sort != string(domain.NoteSearchSortRelevance) && req.Sort != string(domain.NoteSearchSortRecent) {
+		writeError(w, http.StatusBadRequest, errors.New(`sort must be "relevance" or "recent"`))
+		return
+	}
+	if utf8.RuneCountInString(req.Query) > maxModelNoteQueryRunes ||
+		(req.Query == "" && req.Sort != string(domain.NoteSearchSortRecent)) {
+		writeError(w, http.StatusBadRequest, errors.New("query must contain between 1 and 512 characters unless sort is recent"))
 		return
 	}
 	limit := req.Limit
@@ -163,6 +187,21 @@ func (deps ServerDeps) handleModelNoteSearch(w http.ResponseWriter, r *http.Requ
 	if limit > maxModelNoteSearchLimit {
 		limit = maxModelNoteSearchLimit
 	}
+	var snapshotAt time.Time
+	var after *domain.NoteSearchPageAnchor
+	if strings.TrimSpace(req.Cursor) != "" {
+		cursor, err := decodeModelNoteSearchCursor(req.Cursor)
+		if err != nil || cursor.Sort != req.Sort ||
+			subtle.ConstantTimeCompare([]byte(cursor.RunDigest), []byte(domain.NoteBodySHA256(authority.Run.RunID))) != 1 ||
+			subtle.ConstantTimeCompare([]byte(cursor.QueryDigest), []byte(domain.ComputeNoteContentDigest(req.Sort, req.Query))) != 1 {
+			writeError(w, http.StatusBadRequest, errors.New("invalid or mismatched note search cursor"))
+			return
+		}
+		snapshotAt = cursor.SnapshotAt
+		after = &domain.NoteSearchPageAnchor{
+			Rank: cursor.Rank, ContentUpdatedAt: cursor.ContentUpdatedAt, NoteID: cursor.NoteID,
+		}
+	}
 	capability, ok := deps.notesCapability(w)
 	if !ok {
 		return
@@ -171,18 +210,67 @@ func (deps ServerDeps) handleModelNoteSearch(w http.ResponseWriter, r *http.Requ
 		writeNoteStoreError(w, err)
 		return
 	}
-	hits, err := capability.SearchNotesForUser(r.Context(), domain.NoteSearchInput{
-		UserID: authority.Run.UserID, Query: req.Query, Limit: limit + 1,
+	page, err := capability.SearchNotesForUser(r.Context(), domain.NoteSearchInput{
+		UserID: authority.Run.UserID, Query: req.Query,
+		Sort: domain.NoteSearchSort(req.Sort), Limit: limit + 1,
+		SnapshotAt: snapshotAt, After: after,
 	})
 	if err != nil {
 		writeNoteStoreError(w, err)
 		return
 	}
+	hits := page.Notes
 	hasMore := len(hits) > limit
 	if hasMore {
 		hits = hits[:limit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notes": hits, "has_more": hasMore})
+	nextCursor := ""
+	if hasMore {
+		nextCursor = encodeModelNoteSearchCursor(
+			authority.Run.RunID, req.Query, req.Sort, page.SnapshotAt, hits[len(hits)-1],
+		)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"notes": hits, "has_more": hasMore, "next_cursor": nextCursor,
+	})
+}
+
+func encodeModelNoteSearchCursor(runID string, query string, sortMode string, snapshotAt time.Time, last domain.NoteSearchHit) string {
+	payload, _ := json.Marshal(modelNoteSearchCursor{
+		Version: 2, RunDigest: domain.NoteBodySHA256(runID),
+		QueryDigest: domain.ComputeNoteContentDigest(sortMode, query),
+		Sort:        sortMode, SnapshotAt: snapshotAt, Rank: last.SortRank,
+		ContentUpdatedAt: last.ContentUpdatedAt, NoteID: last.NoteID,
+	})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeModelNoteSearchCursor(value string) (modelNoteSearchCursor, error) {
+	if len(value) > 2048 {
+		return modelNoteSearchCursor{}, errors.New("cursor is too long")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return modelNoteSearchCursor{}, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var cursor modelNoteSearchCursor
+	if err := decoder.Decode(&cursor); err != nil {
+		return modelNoteSearchCursor{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return modelNoteSearchCursor{}, errors.New("cursor has trailing data")
+	}
+	if cursor.Version != 2 || len(cursor.RunDigest) != 64 || len(cursor.QueryDigest) != 64 ||
+		(cursor.Sort != string(domain.NoteSearchSortRelevance) && cursor.Sort != string(domain.NoteSearchSortRecent)) ||
+		cursor.SnapshotAt.IsZero() || cursor.ContentUpdatedAt.IsZero() || cursor.ContentUpdatedAt.After(cursor.SnapshotAt) ||
+		cursor.NoteID == "" || len(cursor.NoteID) > 256 ||
+		cursor.Rank < 0 || cursor.Rank > 2 ||
+		(cursor.Sort == string(domain.NoteSearchSortRecent) && cursor.Rank != 0) {
+		return modelNoteSearchCursor{}, errors.New("invalid cursor fields")
+	}
+	return cursor, nil
 }
 
 type modelNoteReadRequest struct {
@@ -512,6 +600,14 @@ func writeNoteStoreError(w http.ResponseWriter, err error) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "run Notes retrieval budget exhausted", "code": "note_retrieval_budget_exhausted"})
 	case errors.Is(err, store.ErrNoteSearchTimeout):
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "note search timed out", "code": "note_search_timeout"})
+	case errors.Is(err, store.ErrNoteAppendIdempotencyConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "Idempotency-Key is already bound to a different Note append request", "code": "note_append_idempotency_conflict"})
+	case errors.Is(err, store.ErrNoteAppendNotCommitted):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error(), "code": noteAppendNotCommittedCode})
+	case errors.Is(err, store.ErrNoteCreateIdempotencyConflict):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "Idempotency-Key is already bound to a different Note create request", "code": "note_create_idempotency_conflict"})
+	case errors.Is(err, store.ErrNoteCreateReplayDeleted):
+		writeJSON(w, http.StatusGone, map[string]any{"error": "the idempotent Note create no longer has a live result", "code": noteCreateReplayDeletedCode})
 	default:
 		writeStoreError(w, err)
 	}

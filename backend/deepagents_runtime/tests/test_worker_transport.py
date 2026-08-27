@@ -61,6 +61,7 @@ def _make_worker_transport_tests_independent_of_control_plane(monkeypatch, reque
             no_control_plane_lease,
         )
 
+
 def test_run_job_envelope_preserves_control_plane_context(tmp_path: Path):
     job = RunJobEnvelope.from_dict(
         {
@@ -2969,9 +2970,7 @@ def test_notes_run_title_generation_never_receives_note_derived_answer(tmp_path:
         model_name = "deepseek_v4"
 
         async def ainvoke(self, messages):
-            title_prompts.append(
-                "\n".join(str(message.get("content", "")) for message in messages)
-            )
+            title_prompts.append("\n".join(str(message.get("content", "")) for message in messages))
             return SimpleNamespace(content='{"title": "Data Analysis"}')
 
     async def scenario():
@@ -3019,6 +3018,107 @@ def test_notes_run_title_generation_never_receives_note_derived_answer(tmp_path:
     assert completed["payload"]["response_text"] == sentinel
     assert sentinel not in completed["payload"]["conversation_title"]
     assert len(title_prompts) == 1
+
+
+def test_notes_run_ignores_checkpoint_and_steering_while_general_run_retains_them(
+    tmp_path: Path,
+    monkeypatch,
+):
+    factory_kwargs: dict[str, dict[str, Any]] = {}
+    hydrated_runs: list[str] = []
+    steering_inbox_runs: list[str] = []
+
+    class TrackingCheckpointer:
+        async def hydrate(self, run_id: str) -> bool:
+            hydrated_runs.append(run_id)
+            return False
+
+    class EmptySteeringInbox:
+        async def reopen_barrier(self) -> None:
+            return None
+
+        async def close_barrier(self) -> list[dict[str, Any]]:
+            return []
+
+    class AnswerAgent:
+        async def astream_events(self, _payload, *, version=None, **_kwargs):
+            assert version == "v3"
+            yield {
+                "event": "on_chat_model_stream",
+                "data": {"chunk": SimpleNamespace(content="done")},
+                "metadata": {"langgraph_node": "coordinator"},
+            }
+
+    def build_inbox(_settings, *, run_id: str):
+        steering_inbox_runs.append(run_id)
+        return EmptySteeringInbox()
+
+    def agent_factory(_settings, **kwargs):
+        context = kwargs["context"]
+        factory_kwargs[context.run_id] = kwargs
+        return AnswerAgent()
+
+    monkeypatch.setattr("ultra_deepagents.runner.build_steering_inbox", build_inbox)
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "workspaces"),
+        artifact_root=str(tmp_path / "artifacts"),
+        memory_root=str(tmp_path / "memory"),
+        title_generation_enabled=False,
+    )
+    notes_job = RunJobEnvelope(
+        run_id="run-notes-private-state",
+        thread_id="thread-notes-private-state",
+        user_id="researcher-1",
+        goal="Use my Note.",
+        messages=[{"role": "user", "content": "Use my Note."}],
+        selection_context={
+            "note_access": {
+                "mode": "selected",
+                "notes": [{"note_id": "note-private", "revision": 1}],
+            }
+        },
+    )
+    general_job = RunJobEnvelope(
+        run_id="run-general-durable-state",
+        thread_id="thread-general-durable-state",
+        user_id="researcher-1",
+        goal="Analyze this.",
+        messages=[{"role": "user", "content": "Analyze this."}],
+    )
+    checkpointer = TrackingCheckpointer()
+
+    async def scenario() -> None:
+        async def publish(_event):
+            return None
+
+        await run_job(
+            notes_job,
+            settings,
+            publish_event=publish,
+            agent_factory=agent_factory,
+            checkpointer=checkpointer,
+        )
+        await run_job(
+            general_job,
+            settings,
+            publish_event=publish,
+            agent_factory=agent_factory,
+            checkpointer=checkpointer,
+        )
+
+    asyncio.run(scenario())
+
+    assert factory_kwargs[notes_job.run_id].get("checkpointer") is None
+    assert factory_kwargs[notes_job.run_id].get("steering_inbox") is None
+    assert notes_job.run_id not in hydrated_runs
+    assert notes_job.run_id not in steering_inbox_runs
+
+    assert factory_kwargs[general_job.run_id]["checkpointer"] is checkpointer
+    assert factory_kwargs[general_job.run_id]["steering_inbox"] is not None
+    assert hydrated_runs == [general_job.run_id]
+    assert steering_inbox_runs == [general_job.run_id]
 
 
 def test_notes_run_failure_redacts_exception_and_workspace_lease(tmp_path: Path):
@@ -9212,7 +9312,9 @@ def test_degeneration_recovery_arms_thinking_fallback_run_scoped(tmp_path: Path)
             published.append(event)
 
         result = await run_job(
-            job, settings, publish_event=publish,
+            job,
+            settings,
+            publish_event=publish,
             agent_factory=lambda *_args, **_kwargs: fake_agent,
         )
 
@@ -9226,7 +9328,9 @@ def test_degeneration_recovery_arms_thinking_fallback_run_scoped(tmp_path: Path)
             messages=[{"role": "user", "content": prompt}],
         )
         await run_job(
-            fresh_job, settings, publish_event=publish,
+            fresh_job,
+            settings,
+            publish_event=publish,
             agent_factory=lambda *_args, **_kwargs: fresh_agent,
         )
         return result, published, fake_agent, fresh_agent
@@ -9237,7 +9341,8 @@ def test_degeneration_recovery_arms_thinking_fallback_run_scoped(tmp_path: Path)
     assert fake_agent.fallback_state_per_call == [False, True]
     assert fresh_agent.fallback_state_per_call[0] is False
     recovery = next(
-        event for event in events
+        event
+        for event in events
         if event.get("payload", {}).get("reason") == "reasoning_degeneration"
     )
     assert recovery["payload"]["thinking_fallback_armed"] is True
@@ -9268,7 +9373,9 @@ def test_degeneration_recovery_respects_disabled_fallback(tmp_path: Path):
             published.append(event)
 
         await run_job(
-            job, settings, publish_event=publish,
+            job,
+            settings,
+            publish_event=publish,
             agent_factory=lambda *_args, **_kwargs: fake_agent,
         )
         return published, fake_agent
@@ -9277,7 +9384,8 @@ def test_degeneration_recovery_respects_disabled_fallback(tmp_path: Path):
 
     assert fake_agent.fallback_state_per_call == [False, False]
     recovery = next(
-        event for event in events
+        event
+        for event in events
         if event.get("payload", {}).get("reason") == "reasoning_degeneration"
     )
     assert recovery["payload"]["thinking_fallback_armed"] is False
@@ -9355,7 +9463,9 @@ def test_run_job_recovers_from_mid_stream_connection_drop(tmp_path: Path):
             published.append(event)
 
         result = await run_job(
-            job, settings, publish_event=publish,
+            job,
+            settings,
+            publish_event=publish,
             agent_factory=lambda *_args, **_kwargs: fake_agent,
         )
         return result, published, fake_agent
@@ -9363,13 +9473,17 @@ def test_run_job_recovers_from_mid_stream_connection_drop(tmp_path: Path):
     result, events, fake_agent = asyncio.run(scenario())
 
     assert fake_agent.calls == 2
-    assert result == "Resumed after the connection drop: the eigenvalues are [-2.14, -0.87, 0.13, 1.02, 2.55, 3.31]."
+    assert (
+        result
+        == "Resumed after the connection drop: the eigenvalues are [-2.14, -0.87, 0.13, 1.02, 2.55, 3.31]."
+    )
     assert "transient provider connection drop" in fake_agent.recovery_prompt
     assert "do NOT re-run a step whose output already exists" in fake_agent.recovery_prompt
     stalled = next(event for event in events if event["event_kind"] == "trace.model.stalled")
     assert stalled["payload"]["idle_scope"] == "model_disconnect"
     recovery = next(
-        event for event in events
+        event
+        for event in events
         if event.get("payload", {}).get("reason") == "model_stream_disconnect"
     )
     assert recovery["payload"]["recovery_index"] == 1
@@ -9416,7 +9530,9 @@ def test_run_job_fails_after_exhausting_disconnect_recoveries(tmp_path: Path):
 
         with pytest.raises(Exception):
             await run_job(
-                job, settings, publish_event=publish,
+                job,
+                settings,
+                publish_event=publish,
                 agent_factory=lambda *_args, **_kwargs: fake_agent,
             )
         return fake_agent

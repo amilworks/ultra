@@ -383,7 +383,9 @@ CREATE TABLE IF NOT EXISTS control_notes (
   revision bigint NOT NULL DEFAULT 1,
   content_digest text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL,
-  updated_at timestamptz NOT NULL
+  updated_at timestamptz NOT NULL,
+  -- Content recency excludes presentation-only pin/editor-mode changes.
+  content_updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
@@ -392,6 +394,67 @@ CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
 ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS editor_mode text NOT NULL DEFAULT 'markdown';
 ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
 ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS content_digest text NOT NULL DEFAULT '';
+
+-- Rolling upgrades add a nullable fast-default column without rewriting the
+-- deployed Notes table. Readers use COALESCE(content_updated_at, updated_at),
+-- and the trigger below fills legacy NULLs lazily on the next mutation. Fresh
+-- databases use the stricter NOT NULL declaration above.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'control_notes'
+      AND column_name = 'content_updated_at'
+  ) THEN
+    ALTER TABLE control_notes ADD COLUMN content_updated_at timestamptz;
+    ALTER TABLE control_notes ALTER COLUMN content_updated_at SET DEFAULT now();
+  ELSIF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'control_notes'
+      AND column_name = 'content_updated_at'
+      AND column_default IS NOT NULL
+  ) THEN
+    ALTER TABLE control_notes ALTER COLUMN content_updated_at SET DEFAULT now();
+  END IF;
+END $$;
+
+-- Keep rolling old binaries semantically correct: their INSERT omits the new
+-- column and uses its DEFAULT, while their UPDATE still advances content
+-- recency exactly when title/body bytes change. The trigger also makes the
+-- distinction durable for any future writer that bypasses the Go helper.
+DO $$
+BEGIN
+  IF to_regprocedure('public.ultra_control_note_content_recency()') IS NULL THEN
+    EXECUTE $function$
+      CREATE FUNCTION ultra_control_note_content_recency()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $body$
+      BEGIN
+        IF NEW.title IS DISTINCT FROM OLD.title
+           OR NEW.body_markdown IS DISTINCT FROM OLD.body_markdown THEN
+          NEW.content_updated_at := now();
+        ELSE
+          NEW.content_updated_at := COALESCE(OLD.content_updated_at, OLD.updated_at);
+        END IF;
+        RETURN NEW;
+      END;
+      $body$
+    $function$;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'control_notes'::regclass
+      AND tgname = 'control_notes_content_recency'
+      AND NOT tgisinternal
+  ) THEN
+    EXECUTE 'CREATE TRIGGER control_notes_content_recency
+      BEFORE UPDATE ON control_notes
+      FOR EACH ROW EXECUTE FUNCTION ultra_control_note_content_recency()';
+  END IF;
+END $$;
 
 -- Short-lived opaque grants prove that a leased run read a particular note
 -- revision before it may propose an append. Only the SHA-256 token digest is
@@ -478,6 +541,91 @@ CREATE TABLE IF NOT EXISTS control_note_append_operations (
 
 CREATE INDEX IF NOT EXISTS idx_control_note_append_operations_user_created
   ON control_note_append_operations(user_id, created_at DESC);
+
+-- Content-free retry receipt for browser Note creation. The nullable FK is a
+-- deliberate tombstone: hard deletion clears note_id and the request digest
+-- while preserving only owner/key, so a delayed retry cannot resurrect the
+-- Note or confirm deleted low-entropy content.
+CREATE TABLE IF NOT EXISTS control_note_create_receipts (
+  user_id text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_digest text,
+  note_id text REFERENCES control_notes(note_id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (user_id, idempotency_key)
+);
+
+DO $$
+BEGIN
+  IF to_regclass('public.idx_control_note_create_receipts_note') IS NULL THEN
+    EXECUTE 'CREATE INDEX idx_control_note_create_receipts_note
+      ON control_note_create_receipts(note_id) WHERE note_id IS NOT NULL';
+  END IF;
+END $$;
+
+-- Erase the content-derived request digest before a hard-deleted Note becomes
+-- a retry tombstone. Only the owner and their random opaque key survive.
+DO $$
+BEGIN
+  IF to_regprocedure('public.ultra_control_note_create_receipt_tombstone()') IS NULL THEN
+    EXECUTE $function$
+      CREATE FUNCTION ultra_control_note_create_receipt_tombstone()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $body$
+      BEGIN
+        UPDATE control_note_create_receipts
+        SET note_id = NULL, request_digest = NULL
+        WHERE note_id = OLD.note_id;
+        RETURN OLD;
+      END;
+      $body$
+    $function$;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger
+    WHERE tgrelid = 'control_notes'::regclass
+      AND tgname = 'control_notes_create_receipt_tombstone'
+      AND NOT tgisinternal
+  ) THEN
+    EXECUTE 'CREATE TRIGGER control_notes_create_receipt_tombstone
+      BEFORE DELETE ON control_notes
+      FOR EACH ROW EXECUTE FUNCTION ultra_control_note_create_receipt_tombstone()';
+  END IF;
+END $$;
+
+-- Browser exact-capture appends use an isolated content-free receipt. Keeping
+-- this separate from model proposal operations preserves the proposal/run FK
+-- invariants while still supporting retry-safe atomic append and undo.
+CREATE TABLE IF NOT EXISTS control_note_direct_append_operations (
+  operation_id text PRIMARY KEY,
+  user_id text NOT NULL,
+  note_id text NOT NULL REFERENCES control_notes(note_id) ON DELETE CASCADE,
+  idempotency_key text NOT NULL,
+  request_digest text NOT NULL,
+  before_revision bigint NOT NULL,
+  after_revision bigint NOT NULL,
+  undo_revision bigint,
+  append_start_byte integer NOT NULL,
+  appended_bytes integer NOT NULL,
+  append_sha256 text NOT NULL,
+  before_content_digest text NOT NULL,
+  after_content_digest text NOT NULL,
+  created_at timestamptz NOT NULL,
+  undone_at timestamptz
+);
+
+DO $$
+BEGIN
+  IF to_regclass('public.idx_control_note_direct_append_owner_key') IS NULL THEN
+    EXECUTE 'CREATE UNIQUE INDEX idx_control_note_direct_append_owner_key
+      ON control_note_direct_append_operations(user_id, idempotency_key)';
+  END IF;
+  IF to_regclass('public.idx_control_note_direct_append_owner_created') IS NULL THEN
+    EXECUTE 'CREATE INDEX idx_control_note_direct_append_owner_created
+      ON control_note_direct_append_operations(user_id, created_at DESC)';
+  END IF;
+END $$;
 
 -- Mid-run steering (Phase 1). One row per accepted steering message. The
 -- message_id references the steer's control_thread_messages row AND doubles as

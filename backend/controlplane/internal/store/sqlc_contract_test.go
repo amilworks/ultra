@@ -156,6 +156,97 @@ func TestModelNotesSchemaIsMirroredAndPrivacyBounded(t *testing.T) {
 	}
 }
 
+func TestNoteRecencyAndDirectAppendSchemaIsMirrored(t *testing.T) {
+	t.Parallel()
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000015_note_recency_direct_append.up.sql")
+	if err != nil {
+		t.Fatalf("read Note recency migration: %v", err)
+	}
+	for _, marker := range []string{
+		"content_updated_at timestamptz",
+		"ultra_control_note_content_recency",
+		"control_notes_content_recency",
+		"COALESCE(OLD.content_updated_at, OLD.updated_at)",
+		"CREATE TABLE IF NOT EXISTS control_note_create_receipts",
+		"note_id text REFERENCES control_notes(note_id) ON DELETE SET NULL",
+		"ultra_control_note_create_receipt_tombstone",
+		"SET note_id = NULL, request_digest = NULL",
+		"idx_control_note_create_receipts_note",
+		"CREATE TABLE IF NOT EXISTS control_note_direct_append_operations",
+		"idx_control_note_direct_append_owner_key",
+		"REFERENCES control_notes(note_id) ON DELETE CASCADE",
+	} {
+		if !strings.Contains(string(schema), marker) {
+			t.Fatalf("schema.sql missing %q", marker)
+		}
+		if !strings.Contains(string(migration), marker) {
+			t.Fatalf("migration missing %q", marker)
+		}
+	}
+	if !strings.Contains(string(schema), "content_updated_at timestamptz NOT NULL DEFAULT now()") {
+		t.Fatal("fresh schema does not keep content_updated_at strict with a rolling-writer default")
+	}
+	for _, marker := range []string{
+		"ALTER TABLE control_notes ADD COLUMN content_updated_at timestamptz;",
+		"ALTER TABLE control_notes ALTER COLUMN content_updated_at SET DEFAULT now()",
+	} {
+		if !strings.Contains(string(schema), marker) || !strings.Contains(string(migration), marker) {
+			t.Fatalf("lazy Notes upgrade missing phased marker %q", marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"UPDATE control_notes SET content_updated_at = updated_at",
+		"ALTER TABLE control_notes ALTER COLUMN content_updated_at SET NOT NULL",
+		"idx_control_notes_user_content_updated",
+		"idx_control_notes_user_browse_order",
+	} {
+		if strings.Contains(string(schema), forbidden) || strings.Contains(string(migration), forbidden) {
+			t.Fatalf("lazy Notes upgrade contains blocking/rewrite marker %q", forbidden)
+		}
+	}
+	operationStart := strings.Index(string(schema), "CREATE TABLE IF NOT EXISTS control_note_direct_append_operations")
+	if operationStart < 0 {
+		t.Fatal("could not isolate direct append receipt schema")
+	}
+	operationEnd := strings.Index(string(schema)[operationStart:], ");")
+	if operationEnd < 0 {
+		t.Fatal("could not isolate direct append receipt schema")
+	}
+	operationDDL := string(schema)[operationStart : operationStart+operationEnd]
+	if strings.Contains(operationDDL, "note_title") || strings.Contains(operationDDL, "body_markdown") {
+		t.Fatalf("direct append receipt retains Note content: %s", operationDDL)
+	}
+	createStart := strings.Index(string(schema), "CREATE TABLE IF NOT EXISTS control_note_create_receipts")
+	if createStart < 0 {
+		t.Fatal("could not isolate create receipt schema")
+	}
+	createEnd := strings.Index(string(schema)[createStart:], ");")
+	if createEnd < 0 {
+		t.Fatal("could not isolate create receipt schema")
+	}
+	createDDL := string(schema)[createStart : createStart+createEnd]
+	if strings.Contains(createDDL, "title") || strings.Contains(createDDL, "body_markdown") ||
+		strings.Contains(createDDL, "request_digest text NOT NULL") {
+		t.Fatalf("create receipt cannot become a deletion-surviving content verifier: %s", createDDL)
+	}
+	for _, indexName := range []string{
+		"idx_control_note_create_receipts_note",
+		"idx_control_note_direct_append_owner_key",
+		"idx_control_note_direct_append_owner_created",
+	} {
+		unconditional := "CREATE INDEX IF NOT EXISTS " + indexName
+		unconditionalUnique := "CREATE UNIQUE INDEX IF NOT EXISTS " + indexName
+		if strings.Contains(string(schema), unconditional) || strings.Contains(string(schema), unconditionalUnique) ||
+			strings.Contains(string(migration), unconditional) || strings.Contains(string(migration), unconditionalUnique) {
+			t.Fatalf("new index %s is unconditionally reconciled on schema replay", indexName)
+		}
+	}
+}
+
 func TestDeepagentsCheckpointRunCascadeIsMirrored(t *testing.T) {
 	t.Parallel()
 	schema, err := os.ReadFile("schema.sql")

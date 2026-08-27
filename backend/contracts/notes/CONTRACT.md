@@ -70,6 +70,16 @@ draft and disables implicit Notes search and append-proposal authority until the
 draft is cleared; it is never evicted to make room for later fragments. These
 fail-closed states do not prevent sending the ordinary chat message.
 
+Notes-scoped runs do not accept live steering. Their Note access and append-
+proposal consent are immutable for the turn, so a later steer cannot be applied
+without creating conflicting authority. `POST /v2/runs/{run_id}/steer` returns
+the existing typed `409 steering_closed`, and the browser preserves the text and
+paste provenance as a queued follow-up turn. Notes-only workers construct no
+steering inbox or finalization barrier, so a steer accepted by an older control
+plane during a rolling deploy cannot enter the model; existing missed-steer
+recovery remains responsible for the queued follow-up. Ordinary runs retain live
+steering.
+
 ## Worker authority
 
 Every worker request uses the existing worker credential plus all three
@@ -99,14 +109,38 @@ a privacy-boundary change requiring a new audit.
 `POST /v2/runs/{run_id}/note-search`
 
 ```json
-{ "query": "microscopy calibration", "limit": 8 }
+{ "query": "microscopy calibration", "sort": "relevance", "limit": 8 }
 ```
 
-The query is non-empty and bounded to 512 characters. The limit is capped at
-20. Results are owner-scoped, lexically matched, relevance ordered, and contain
-only bounded metadata: note ID, title, match-centered snippet, pin state,
-revision, and update time. The response uses `limit + 1` for `has_more`; it
-does not run a separate exact-count query for the worker.
+The tool defaults are `query = ""`, `sort = "relevance"`, and `limit = 8`.
+`sort` is either `relevance` or `recent`. Relevance requires a non-blank query;
+recent permits an empty query for requests such as “my most recent Note.” A
+non-empty recent query still applies the lexical filter, but ordering remains
+strict content recency. Queries are bounded to 512 characters and the limit is
+capped at 20.
+
+Relevance order is exact title, title substring, `content_updated_at DESC`,
+then `note_id ASC`. Recent order is `content_updated_at DESC`, then
+`note_id ASC`; it never considers pin state or title rank. Pin and editor-mode
+changes advance the Note revision and general `updated_at`, but do not advance
+`content_updated_at`; title/body writes, appends, and undo do. This same
+relevance order is used by an active browser Notes query. The ordinary blank-
+query browser list defaults to pin, content recency, and Note ID, while
+`GET /v2/notes?sort=recent` omits pin rank for chooser surfaces.
+
+Results contain only bounded metadata: note ID, title, match-centered snippet,
+pin state, revision, general update time, and content update time. The response
+uses `limit + 1` for `has_more`, returns `next_cursor`, and does not run a
+separate exact-count query for the worker. A continuation request sends the
+same normalized query and sort plus that opaque cursor. The cursor is bounded
+and bound to the leased run, query, sort, a store-authoritative search-start
+snapshot, and the last `(rank, content_updated_at, note_id)` sort key (rank is
+omitted semantically for recent order). Every page filters to
+`content_updated_at <= snapshot` and uses exclusive keyset traversal. A
+title/body mutation advances content recency and therefore leaves that in-flight
+snapshot instead of duplicating or reordering a row; pin/editor-only mutations
+do not affect search order. Malformed, legacy offset, cross-run, or mismatched
+cursors are rejected instead of silently restarting or changing the result set.
 
 ### `read_note`
 
@@ -145,7 +179,8 @@ provide or see it.
 The control plane requires a valid read token for the same run, owner, note, and
 revision. It stores an expiring exact-text proposal but does not mutate the
 Note. Same key and request returns the original proposal; the same key with a
-different request conflicts. Identical run/note/revision/body proposals are
+different request returns `note_append_idempotency_conflict`. Identical
+run/note/revision/body proposals are
 deduplicated while pending or committed. An expired proposal does not prevent a
 new explicit request from creating a fresh proposal.
 
@@ -170,6 +205,89 @@ usage contains no Note identity or content and is deleted with the run.
 
 The model has no direct create, rename, replace, prepend, pin, delete, or commit
 operation.
+
+## Browser create retry safety
+
+`POST /v2/notes` remains compatible with legacy callers that omit an
+idempotency key. The new local-draft flow sends an optional `Idempotency-Key`
+header containing a stable opaque key of at most 256 bytes. The first committed
+create returns `201`; a same-key retry of the same normalized title, body, pin,
+and editor mode returns the original Note with `200`, even though the server may
+have generated a different candidate Note ID for the retry. The same key with a
+different normalized request returns `409` with
+`note_create_idempotency_conflict`. There is no title/body similarity or
+heuristic deduplication.
+
+For an authenticated request with exactly one valid key and a decodable body,
+the owner/key/request-digest receipt lookup happens before mutable title, body
+size, or editor-mode validation. A live exact historical replay therefore still
+returns `200` if validation rules tighten after its original commit; a live
+same-key/different-request conflict still wins before validation. Only after a
+confirmed receipt miss does application validation run. Such a rejection is
+`400` with `note_create_not_committed`, explicitly proving that this request did
+not commit. Header/decode failures and proxy-generated `400`/`413` responses do
+not carry that code and remain ambiguous. This route does not use `422`.
+
+The durable create receipt is owner-scoped and content-free: while its Note is
+live it stores only the random client key, private request digest, Note ID, and
+timestamp. Hard Note deletion clears both the Note ID and content-derived
+request digest but deliberately preserves the owner/key tombstone. Every later
+same-key replay—whether its body matches or differs—returns the same
+owner-scoped `410` with `note_create_replay_deleted`; it never confirms deleted
+text or Note identity and never resurrects the Note. This terminal code lets a
+browser stop retrying an effect that no longer survives without weakening the
+privacy tombstone.
+
+## Browser exact-capture append
+
+A human selection saved to a new Note first opens a body-first local draft; it
+does not persist an untitled Note or mint model Notes authority. When the user
+chooses an existing target Note, the authenticated browser may use the direct
+capture endpoint without involving a model:
+
+`POST /v2/notes/{note_id}/append`
+
+- Header: `Idempotency-Key`, a stable opaque client key of at most 256 bytes.
+- Body: `{ "body_markdown": "exact captured text", "expected_revision": 4 }`.
+- First success is `201`; an exact retry is `200` with the original receipt.
+
+The control plane binds the key to owner, Note ID, expected revision, and exact
+body digest before mutation. The same key with another request returns `409`
+with `note_append_idempotency_conflict`; a stale Note returns `409` with
+`note_revision_conflict`. A replay lookup precedes revision/liveness checks, so
+a transport retry remains stable after the successful append. The transaction
+row-locks the owner Note and applies the revision CAS once. If the Note body is
+blank, the captured bytes become the exact body. Otherwise the server inserts
+only the required blank-line separator before the exact captured bytes. The
+final body remains subject to the 2 MiB Note limit.
+
+The live owner/key/request-digest receipt lookup also precedes mutable append
+validation. An exact historical replay returns `200` even if today's validation
+would reject a new equivalent request, while a mismatched digest still returns
+`note_append_idempotency_conflict`. After a confirmed receipt miss, application
+validation—including the transactional combined Note-size bound—rejects with
+`400` and `note_append_not_committed`. Generic
+header/decode/proxy `400` or `413` responses remain ambiguous, and the route does
+not use `422`. If hard deletion has removed both the target Note and its cascaded
+direct-append receipt, retry returns the owner-scoped terminal `404`
+`note_append_target_unavailable`: no owner-visible append effect survives.
+
+For historical-retry cleanup, the only definitive release codes are
+`note_create_not_committed`, `note_append_not_committed`,
+`note_create_replay_deleted`, and `note_append_target_unavailable`. HTTP status
+alone is never proof that a response-loss request did not previously commit.
+
+The durable direct-append operation stores no title or body, only owner/Note
+identity, the private retry/request digests, suffix byte range/hash, revisions,
+content digests, and timestamps. The browser response joins the current title
+transiently and otherwise remains content-free. Hard Note deletion cascades the
+receipt.
+
+`POST /v2/note-direct-append-operations/{operation_id}/undo` is owner-scoped
+and idempotent. It removes the append only when the Note is still at the exact
+post-append revision and still ends with the exact stored suffix; any newer
+content or metadata mutation returns `note_undo_conflict` and is never
+overwritten.
 
 ## Durable trace policy
 
@@ -205,23 +323,29 @@ turn-wide boundary applies defensively to every internal stream once
   the complete thread dynamically so unmarked descendants written before or
   during a rolling upgrade remain protected.
 
-Note content used by the model necessarily becomes part of that run's model
-context and can be reflected in the conversation. While a run is resumable, its
-ordinary durable LangGraph checkpoint may temporarily contain the tool result.
-For a terminal outcome, the worker first confirms the JetStream acknowledgement
-(`ack_sync` when supported) and only then deletes the durable checkpoint. If
-acknowledgement fails, it flushes and retains the checkpoint so redelivery can
-finish safely without recomputing the run. Restored checkpoint state is
-classified explicitly: absent starts, pending resumes, and completed waits for
-the original terminal event to become control-plane authority via delayed
-redelivery; a completed graph never receives the original prompt again. A
-failed boundary flush is not treated as durable and keeps the freshest
-worker-local slice instead of clearing it. A redelivery that finds the run
-already terminal likewise acknowledges before initializing cleanup and deleting
-the durable row, including on a fresh worker. An hourly worker sweep
-removes failed-cleanup checkpoint rows after the configured 72-hour retention
-window only when the parent run is terminal; queued, running, and waiting runs
-are never deleted merely because of age. A worker also flushes and clears its
-process-local slice whenever it relinquishes a non-terminal delivery. The UI
-must not promise that deleting a source Note rewrites an active model context or
-an existing conversation.
+Note content used by the model necessarily becomes part of that run's in-memory
+model context and can be reflected in the conversation. The Notes-only runner
+does not hydrate, wire, or write the ordinary durable LangGraph checkpointer, so
+body chunks and opaque read tokens never enter checkpoint storage. A delivery
+failure restarts the Notes graph from the sealed job envelope; owner/run budgets,
+read grants, revision checks, and proposal idempotency remain server-authoritative
+across attempts. Ordinary non-Notes runs retain durable resume behavior. During a
+rolling worker deploy, any legacy Notes checkpoint is ignored by the new runner
+and cannot restore an accepted steer or Note tool output; terminal ACK cleanup
+removes the legacy row. The UI must not promise that deleting a source Note
+rewrites an active in-memory model context or an existing conversation.
+
+## Production rollout order
+
+Roll out schema and the compatible Go control plane first. This closes live
+steering for Notes runs before any worker changes and makes clients queue the
+text through the established `steering_closed` path. The deployed
+upgrade adds `content_updated_at` as nullable, sets the default for old-writer
+inserts, avoids a table-wide backfill and new ordinary recency indexes, and
+reads legacy rows through `COALESCE(content_updated_at, updated_at)`; fresh
+databases remain `NOT NULL`. Deploy Python workers next so Notes runs omit both
+steering and durable checkpoints and their strict Note search response parser
+understands `pinned`, `content_updated_at`, `sort`, and v2 cursors. Deploy the
+revision/idempotency-aware frontend last. Only after the
+frontend compatibility window should strict expected-revision enforcement be
+enabled, followed by model Notes read and then proposal creation gates.

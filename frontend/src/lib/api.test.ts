@@ -3,7 +3,13 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiClient, UploadPausedError } from "./api";
+import {
+  ApiClient,
+  ApiError,
+  isDefinitiveNoteWriteReplayRejection,
+  isNoteRevisionConflict,
+  UploadPausedError,
+} from "./api";
 import type { RunEvent } from "@/types";
 
 const scalarIdentityHeaders = (
@@ -6279,6 +6285,179 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
+  it("repairs a missing cached thread before hydrating a conversation deep link", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({ "conversation-local-123": "thread_stale" })
+    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads/thread_stale") {
+        return new Response("not found", { status: 404 });
+      }
+      if (url === "https://ultra.example.org/v2/threads?limit=1000&offset=0") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            threads: [
+              {
+                thread_id: "thread_fresh",
+                title: "Recovered chat",
+                status: "active",
+                created_at: "2026-08-20T10:00:00Z",
+                updated_at: "2026-08-20T10:01:00Z",
+                metadata: {
+                  conversation_id: "conversation-local-123",
+                  frontend_state: {
+                    sending: false,
+                    messages: [{ role: "user", content: "Recovered prompt" }],
+                  },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.getConversation("conversation-local-123");
+
+    expect(response.conversation_id).toBe("conversation-local-123");
+    expect(response.title).toBe("Recovered chat");
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads/thread_stale",
+      "https://ultra.example.org/v2/threads?limit=1000&offset=0",
+    ]);
+    expect(JSON.parse(browserStorage().getItem("bisque-ultra:v2-chat-thread-map") ?? "{}")).toEqual({
+      "conversation-local-123": "thread_fresh",
+    });
+  });
+
+  it("finds a valid conversation deep link on the second clamped owner page", async () => {
+    const firstPage = Array.from({ length: 500 }, (_, index) => ({
+      thread_id: `thread_${index}`,
+      title: `Other ${index}`,
+      status: "active",
+      metadata: {
+        conversation_id: `conversation-other-${index}`,
+        frontend_state: { sending: false, messages: [] },
+      },
+    }));
+    const target = {
+      thread_id: "thread_target",
+      title: "Older requested chat",
+      status: "active",
+      metadata: {
+        conversation_id: "conversation-target",
+        frontend_state: {
+          sending: false,
+          messages: [{ role: "user", content: "Found on page two" }],
+        },
+      },
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads?limit=1000&offset=0") {
+        return new Response(
+          JSON.stringify({
+            count: 500,
+            total_count: 501,
+            has_more: true,
+            threads: firstPage,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads?limit=1000&offset=500") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            total_count: 501,
+            has_more: false,
+            threads: [target],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.getConversation("conversation-target");
+
+    expect(response.title).toBe("Older requested chat");
+    expect((response.state.messages as Array<{ content?: string }>)[0]?.content).toBe(
+      "Found on page two"
+    );
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads?limit=1000&offset=0",
+      "https://ultra.example.org/v2/threads?limit=1000&offset=500",
+    ]);
+  });
+
+  it("rejects a valid cached thread that belongs to a different conversation", async () => {
+    browserStorage().setItem(
+      "bisque-ultra:v2-chat-thread-map",
+      JSON.stringify({ "conversation-local-123": "thread_wrong" })
+    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/threads/thread_wrong") {
+        return new Response(
+          JSON.stringify({
+            thread_id: "thread_wrong",
+            title: "Someone else’s chat",
+            status: "active",
+            metadata: {
+              conversation_id: "conversation-other-456",
+              frontend_state: { sending: false, messages: [] },
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url === "https://ultra.example.org/v2/threads?limit=1000&offset=0") {
+        return new Response(
+          JSON.stringify({
+            count: 1,
+            threads: [
+              {
+                thread_id: "thread_right",
+                title: "Requested chat",
+                status: "active",
+                metadata: {
+                  conversation_id: "conversation-local-123",
+                  frontend_state: { sending: false, messages: [] },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.getConversation("conversation-local-123");
+
+    expect(response.title).toBe("Requested chat");
+    expect(response.conversation_id).toBe("conversation-local-123");
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://ultra.example.org/v2/threads/thread_wrong",
+      "https://ultra.example.org/v2/threads?limit=1000&offset=0",
+    ]);
+    expect(JSON.parse(browserStorage().getItem("bisque-ultra:v2-chat-thread-map") ?? "{}")).toEqual({
+      "conversation-local-123": "thread_right",
+    });
+  });
+
   it("hydrates a V2-only conversation from thread messages and latest run without probing legacy routes", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
@@ -7582,5 +7761,396 @@ describe("ApiClient viewer request timeouts", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
     await expect(client.getUploadHistogram("file_x")).resolves.toMatchObject({ bins: 256 });
+  });
+});
+
+describe("ApiClient Notes capture contract", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("accepts only endpoint-specific terminal proof for a historical replay", () => {
+    expect(
+      isDefinitiveNoteWriteReplayRejection(
+        new ApiError("not committed", 400, { code: "note_create_not_committed" }),
+        "create"
+      )
+    ).toBe(true);
+    expect(
+      isDefinitiveNoteWriteReplayRejection(
+        new ApiError("deleted", 410, { code: "note_create_replay_deleted" }),
+        "create"
+      )
+    ).toBe(true);
+    expect(
+      isDefinitiveNoteWriteReplayRejection(
+        new ApiError("not committed", 400, { code: "note_append_not_committed" }),
+        "append"
+      )
+    ).toBe(true);
+    expect(
+      isDefinitiveNoteWriteReplayRejection(
+        new ApiError("target unavailable", 404, {
+          code: "note_append_target_unavailable",
+        }),
+        "append"
+      )
+    ).toBe(true);
+
+    for (const error of [
+      new ApiError("generic validation", 400, { error: "validation" }),
+      new ApiError("proxy too large", 413, { error: "too large" }),
+      new ApiError("auth changed", 401, { error: "unauthorized" }),
+      new ApiError("conflict", 409, { code: "note_append_idempotency_conflict" }),
+      new ApiError("rate limited", 429, { error: "rate limited" }),
+    ]) {
+      expect(isDefinitiveNoteWriteReplayRejection(error, "create")).toBe(false);
+      expect(isDefinitiveNoteWriteReplayRejection(error, "append")).toBe(false);
+    }
+
+    for (const [error, operation] of [
+      [new ApiError("wrong status", 409, { code: "note_create_not_committed" }), "create"],
+      [new ApiError("wrong status", 400, { code: "note_create_replay_deleted" }), "create"],
+      [new ApiError("wrong status", 404, { code: "note_append_not_committed" }), "append"],
+      [new ApiError("wrong status", 400, { code: "note_append_target_unavailable" }), "append"],
+    ] as const) {
+      expect(isDefinitiveNoteWriteReplayRejection(error, operation)).toBe(false);
+    }
+  });
+
+  it("serializes recent pagination and leaves active-query ordering to the server", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return new Response(JSON.stringify({ notes: [], total_count: 0 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.listNotes({ sort: "recent", limit: 20, offset: 20 });
+    await client.listNotes({ query: "  field protocol  ", limit: 20 });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://ultra.example.org/v2/notes?sort=recent&limit=20&offset=20"
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "https://ultra.example.org/v2/notes?query=field+protocol&limit=20"
+    );
+  });
+
+  it("sends exact append input with its stable idempotency key and uses the direct undo route", async () => {
+    const receipt = {
+      operation_id: "operation_1",
+      note_id: "note / 1",
+      note_title: "Protocol",
+      before_revision: 3,
+      after_revision: 4,
+      appended_bytes: 17,
+      before_content_digest: "a".repeat(64),
+      after_content_digest: "b".repeat(64),
+      created_at: "2026-08-27T00:00:00Z",
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return new Response(JSON.stringify(receipt), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.appendToNote(
+      "note / 1",
+      { body_markdown: "Exact\nselection", expected_revision: 3 },
+      "capture-key-1"
+    );
+    await client.undoDirectNoteAppendOperation("operation / 1");
+
+    const appendInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://ultra.example.org/v2/notes/note%20%2F%201/append"
+    );
+    expect(appendInit.method).toBe("POST");
+    expect(new Headers(appendInit.headers).get("Idempotency-Key")).toBe("capture-key-1");
+    expect(JSON.parse(String(appendInit.body))).toEqual({
+      body_markdown: "Exact\nselection",
+      expected_revision: 3,
+    });
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "https://ultra.example.org/v2/note-direct-append-operations/operation%20%2F%201/undo"
+    );
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("sends a stable create idempotency key without changing the normalized payload", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void input;
+      void init;
+      return new Response(
+        JSON.stringify({
+          note_id: "note_1",
+          title: "Protocol",
+          body_markdown: "Draft",
+          pinned: false,
+          editor_mode: "markdown",
+          revision: 1,
+          content_digest: "c".repeat(64),
+          created_at: "2026-08-27T00:00:00Z",
+          content_updated_at: "2026-08-27T00:00:00Z",
+          updated_at: "2026-08-27T00:00:00Z",
+        }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await client.createNote(
+      {
+        title: "Protocol",
+        body_markdown: "Draft",
+        pinned: false,
+        editor_mode: "markdown",
+      },
+      "note-create-key-1"
+    );
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://ultra.example.org/v2/notes");
+    expect(new Headers(init.headers).get("Idempotency-Key")).toBe("note-create-key-1");
+    expect(JSON.parse(String(init.body))).toEqual({
+      title: "Protocol",
+      body_markdown: "Draft",
+      pinned: false,
+      editor_mode: "markdown",
+    });
+  });
+
+  it("does not misclassify an idempotency conflict as a revision conflict", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: "note_append_idempotency_conflict" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ code: "note_revision_conflict" }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const first = await client
+      .appendToNote("note_1", { body_markdown: "Text", expected_revision: 1 }, "key")
+      .catch((error: unknown) => error);
+    const second = await client
+      .appendToNote("note_1", { body_markdown: "Text", expected_revision: 1 }, "key")
+      .catch((error: unknown) => error);
+
+    expect(isNoteRevisionConflict(first)).toBe(false);
+    expect(isNoteRevisionConflict(second)).toBe(true);
+  });
+
+  it("validates proposal reads and model append mutation receipts", async () => {
+    const operation = {
+      operation_id: "operation_1",
+      proposal_id: "proposal_1",
+      run_id: "run_1",
+      note_id: "note_1",
+      note_title: "Protocol",
+      before_revision: 3,
+      after_revision: 4,
+      appended_bytes: 17,
+      before_content_digest: "a".repeat(64),
+      after_content_digest: "b".repeat(64),
+      created_at: "2026-08-27T00:00:00Z",
+    };
+    const proposal = {
+      proposal_id: "proposal_1",
+      note_id: "note_1",
+      note_title: "Protocol",
+      body_markdown: "Exact proposal",
+      expected_revision: 3,
+      status: "pending",
+      expires_at: "2026-08-27T00:15:00Z",
+      created_at: "2026-08-27T00:00:00Z",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(proposal), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(operation), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ...operation,
+            undo_revision: 5,
+            undone_at: "2026-08-27T00:05:00Z",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    await expect(client.getNoteAppendProposal("proposal / 1")).resolves.toEqual(proposal);
+    await expect(
+      client.commitNoteAppendProposal("proposal / 1", { body_markdown: "Reviewed proposal" })
+    ).resolves.toEqual(operation);
+    await expect(client.undoNoteAppendOperation("operation / 1")).resolves.toMatchObject({
+      operation_id: "operation_1",
+      undo_revision: 5,
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "https://ultra.example.org/v2/note-append-proposals/proposal%20%2F%201"
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "https://ultra.example.org/v2/note-append-proposals/proposal%20%2F%201/commit"
+    );
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe(
+      "https://ultra.example.org/v2/note-append-operations/operation%20%2F%201/undo"
+    );
+  });
+
+  it("rejects malformed proposal reads calmly and keeps malformed proposal writes uncertain", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const readError = await client
+      .getNoteAppendProposal("proposal_1")
+      .catch((caught: unknown) => caught);
+    expect(readError).toBeInstanceOf(Error);
+    expect(readError).not.toBeInstanceOf(ApiError);
+    expect((readError as Error).message).toContain("incomplete Notes response");
+    expect((readError as Error).message).not.toContain("result is uncertain");
+
+    for (const request of [
+      () => client.commitNoteAppendProposal("proposal_1", { body_markdown: "Exact text" }),
+      () => client.undoNoteAppendOperation("operation_1"),
+    ]) {
+      const error = await request().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(ApiError);
+      expect((error as Error).message).toContain("result is uncertain");
+    }
+  });
+
+  it("rejects committed proposals without Undo identity and half-formed Undo receipts", async () => {
+    const directReceipt = {
+      operation_id: "direct_operation_1",
+      note_id: "note_1",
+      note_title: "Protocol",
+      before_revision: 3,
+      after_revision: 4,
+      appended_bytes: 17,
+      before_content_digest: "a".repeat(64),
+      after_content_digest: "b".repeat(64),
+      created_at: "2026-08-27T00:00:00Z",
+      undo_revision: 5,
+    };
+    const proposalReceipt = {
+      ...directReceipt,
+      operation_id: "proposal_operation_1",
+      proposal_id: "proposal_1",
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            proposal_id: "proposal_1",
+            note_id: "note_1",
+            note_title: "Protocol",
+            expected_revision: 3,
+            status: "committed",
+            expires_at: "2026-08-27T00:15:00Z",
+            created_at: "2026-08-27T00:00:00Z",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(directReceipt), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(proposalReceipt), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    const proposalError = await client
+      .getNoteAppendProposal("proposal_1")
+      .catch((caught: unknown) => caught);
+    expect((proposalError as Error).message).toContain("incomplete Notes response");
+
+    for (const request of [
+      () => client.undoDirectNoteAppendOperation("direct_operation_1"),
+      () => client.undoNoteAppendOperation("proposal_operation_1"),
+    ]) {
+      const error = await request().catch((caught: unknown) => caught);
+      expect(error).not.toBeInstanceOf(ApiError);
+      expect((error as Error).message).toContain("result is uncertain");
+    }
+  });
+
+  it("treats malformed successful Note write receipts as uncertain", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+
+    for (const request of [
+      () => client.createNote({ body_markdown: "Exact draft" }, "create-key"),
+      () => client.updateNote("note_1", { body_markdown: "Exact edit", expected_revision: 1 }),
+      () => client.deleteNote("note_1"),
+      () =>
+        client.appendToNote(
+          "note_1",
+          { body_markdown: "Exact selection", expected_revision: 1 },
+          "append-key"
+        ),
+      () => client.undoDirectNoteAppendOperation("operation_1"),
+    ]) {
+      const error = await request().catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(ApiError);
+      expect((error as Error).message).toContain("result is uncertain");
+    }
   });
 });

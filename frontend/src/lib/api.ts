@@ -263,6 +263,8 @@ export type NoteRecord = {
   /** SHA-256 provenance for the current title/body revision. */
   content_digest: string;
   created_at: string;
+  /** Last title/body edit; pin-only changes do not advance content recency. */
+  content_updated_at?: string;
   updated_at: string;
 };
 
@@ -272,6 +274,7 @@ export type NoteListItem = {
   snippet: string;
   pinned: boolean;
   revision: number;
+  content_updated_at?: string;
   updated_at: string;
 };
 
@@ -320,6 +323,258 @@ export type NoteAppendProposal = {
   operation?: NoteAppendOperationReceipt | null;
 };
 
+export type NoteDirectAppendReceipt = {
+  operation_id: string;
+  note_id: string;
+  note_title: string;
+  before_revision: number;
+  after_revision: number;
+  undo_revision?: number;
+  appended_bytes: number;
+  before_content_digest: string;
+  after_content_digest: string;
+  created_at: string;
+  undone_at?: string | null;
+};
+
+const isPositiveSafeInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+
+const isDateTimeString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0 && Number.isFinite(Date.parse(value));
+
+const isSha256Digest = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);
+
+const malformedNotesResponse = (kind: string, uncertainWrite = false): Error =>
+  new Error(
+    uncertainWrite
+      ? `Ultra received an incomplete ${kind} receipt. The result is uncertain; retry the exact request before continuing.`
+      : "Ultra received an incomplete Notes response. Try again."
+  );
+
+const decodeNoteRecord = (value: unknown, uncertainWrite = false): NoteRecord => {
+  if (!isRecord(value)) throw malformedNotesResponse("Note", uncertainWrite);
+  const editorMode = value.editor_mode;
+  if (
+    typeof value.note_id !== "string" ||
+    !value.note_id.trim() ||
+    typeof value.title !== "string" ||
+    typeof value.body_markdown !== "string" ||
+    typeof value.pinned !== "boolean" ||
+    (editorMode !== "markdown" && editorMode !== "plaintext") ||
+    !isPositiveSafeInteger(value.revision) ||
+    !isSha256Digest(value.content_digest) ||
+    !isDateTimeString(value.created_at) ||
+    !isDateTimeString(value.updated_at) ||
+    !isDateTimeString(value.content_updated_at)
+  ) {
+    throw malformedNotesResponse("Note", uncertainWrite);
+  }
+  return {
+    note_id: value.note_id,
+    title: value.title,
+    body_markdown: value.body_markdown,
+    pinned: value.pinned,
+    editor_mode: editorMode,
+    revision: value.revision,
+    content_digest: value.content_digest,
+    created_at: value.created_at,
+    content_updated_at: value.content_updated_at,
+    updated_at: value.updated_at,
+  };
+};
+
+const decodeNoteListItem = (value: unknown): NoteListItem => {
+  if (
+    !isRecord(value) ||
+    typeof value.note_id !== "string" ||
+    !value.note_id.trim() ||
+    typeof value.title !== "string" ||
+    typeof value.snippet !== "string" ||
+    typeof value.pinned !== "boolean" ||
+    !isPositiveSafeInteger(value.revision) ||
+    !isDateTimeString(value.updated_at) ||
+    !isDateTimeString(value.content_updated_at)
+  ) {
+    throw malformedNotesResponse("Note list");
+  }
+  return {
+    note_id: value.note_id,
+    title: value.title,
+    snippet: value.snippet,
+    pinned: value.pinned,
+    revision: value.revision,
+    content_updated_at: value.content_updated_at,
+    updated_at: value.updated_at,
+  };
+};
+
+const decodeNoteListResponse = (value: unknown): NoteListResponse => {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.notes) ||
+    typeof value.total_count !== "number" ||
+    !Number.isSafeInteger(value.total_count) ||
+    value.total_count < 0
+  ) {
+    throw malformedNotesResponse("Note list");
+  }
+  const notes = value.notes.map(decodeNoteListItem);
+  if (value.total_count < notes.length) throw malformedNotesResponse("Note list");
+  return { notes, total_count: value.total_count };
+};
+
+const decodeNoteDirectAppendReceipt = (value: unknown): NoteDirectAppendReceipt => {
+  if (!isRecord(value)) throw malformedNotesResponse("Note append", true);
+  const undoRevision = value.undo_revision;
+  const undoneAt = value.undone_at;
+  const hasUndoRevision = isPositiveSafeInteger(undoRevision);
+  const hasUndoneAt = isDateTimeString(undoneAt);
+  if (
+    typeof value.operation_id !== "string" ||
+    !value.operation_id.trim() ||
+    typeof value.note_id !== "string" ||
+    !value.note_id.trim() ||
+    typeof value.note_title !== "string" ||
+    !isPositiveSafeInteger(value.before_revision) ||
+    !isPositiveSafeInteger(value.after_revision) ||
+    value.after_revision <= value.before_revision ||
+    !isPositiveSafeInteger(value.appended_bytes) ||
+    !isSha256Digest(value.before_content_digest) ||
+    !isSha256Digest(value.after_content_digest) ||
+    !isDateTimeString(value.created_at) ||
+    (undoRevision !== undefined && undoRevision !== null && !isPositiveSafeInteger(undoRevision)) ||
+    (undoneAt !== undefined && undoneAt !== null && !isDateTimeString(undoneAt)) ||
+    hasUndoRevision !== hasUndoneAt
+  ) {
+    throw malformedNotesResponse("Note append", true);
+  }
+  return {
+    operation_id: value.operation_id,
+    note_id: value.note_id,
+    note_title: value.note_title,
+    before_revision: value.before_revision,
+    after_revision: value.after_revision,
+    ...(hasUndoRevision ? { undo_revision: undoRevision } : {}),
+    appended_bytes: value.appended_bytes,
+    before_content_digest: value.before_content_digest,
+    after_content_digest: value.after_content_digest,
+    created_at: value.created_at,
+    ...(undoneAt === null || isDateTimeString(undoneAt) ? { undone_at: undoneAt } : {}),
+  };
+};
+
+const decodeNoteAppendOperationReceipt = (
+  value: unknown,
+  uncertainWrite = true
+): NoteAppendOperationReceipt => {
+  if (!isRecord(value)) throw malformedNotesResponse("Note append", uncertainWrite);
+  const runId = value.run_id;
+  const undoRevision = value.undo_revision;
+  const undoneAt = value.undone_at;
+  const hasUndoRevision = isPositiveSafeInteger(undoRevision);
+  const hasUndoneAt = isDateTimeString(undoneAt);
+  if (
+    typeof value.operation_id !== "string" ||
+    !value.operation_id.trim() ||
+    typeof value.proposal_id !== "string" ||
+    !value.proposal_id.trim() ||
+    (runId !== undefined && runId !== null &&
+      (typeof runId !== "string" || !runId.trim())) ||
+    typeof value.note_id !== "string" ||
+    !value.note_id.trim() ||
+    typeof value.note_title !== "string" ||
+    !isPositiveSafeInteger(value.before_revision) ||
+    !isPositiveSafeInteger(value.after_revision) ||
+    value.after_revision <= value.before_revision ||
+    !isPositiveSafeInteger(value.appended_bytes) ||
+    !isSha256Digest(value.before_content_digest) ||
+    !isSha256Digest(value.after_content_digest) ||
+    !isDateTimeString(value.created_at) ||
+    (undoRevision !== undefined && undoRevision !== null && !isPositiveSafeInteger(undoRevision)) ||
+    (undoneAt !== undefined && undoneAt !== null && !isDateTimeString(undoneAt)) ||
+    hasUndoRevision !== hasUndoneAt
+  ) {
+    throw malformedNotesResponse("Note append", uncertainWrite);
+  }
+  return {
+    operation_id: value.operation_id,
+    proposal_id: value.proposal_id,
+    ...(typeof runId === "string" ? { run_id: runId } : {}),
+    note_id: value.note_id,
+    note_title: value.note_title,
+    before_revision: value.before_revision,
+    after_revision: value.after_revision,
+    ...(hasUndoRevision ? { undo_revision: undoRevision } : {}),
+    appended_bytes: value.appended_bytes,
+    before_content_digest: value.before_content_digest,
+    after_content_digest: value.after_content_digest,
+    created_at: value.created_at,
+    ...(undoneAt === null || isDateTimeString(undoneAt) ? { undone_at: undoneAt } : {}),
+  };
+};
+
+const decodeNoteAppendProposal = (value: unknown): NoteAppendProposal => {
+  if (!isRecord(value)) throw malformedNotesResponse("Note proposal");
+  const bodyMarkdown = value.body_markdown;
+  const operationId = value.operation_id;
+  const status = value.status;
+  if (
+    typeof value.proposal_id !== "string" ||
+    !value.proposal_id.trim() ||
+    typeof value.note_id !== "string" ||
+    !value.note_id.trim() ||
+    typeof value.note_title !== "string" ||
+    !isPositiveSafeInteger(value.expected_revision) ||
+    (bodyMarkdown !== undefined && bodyMarkdown !== null && typeof bodyMarkdown !== "string") ||
+    (status !== "pending" && status !== "committed" && status !== "expired") ||
+    (status === "pending" &&
+      (typeof bodyMarkdown !== "string" || !bodyMarkdown.trim())) ||
+    (status === "committed" &&
+      (typeof operationId !== "string" || !operationId.trim())) ||
+    (operationId !== undefined && operationId !== null &&
+      (typeof operationId !== "string" || !operationId.trim())) ||
+    !isDateTimeString(value.expires_at) ||
+    !isDateTimeString(value.created_at)
+  ) {
+    throw malformedNotesResponse("Note proposal");
+  }
+
+  let operation: NoteAppendOperationReceipt | null | undefined;
+  if (value.operation === null) {
+    operation = null;
+  } else if (value.operation !== undefined) {
+    operation = decodeNoteAppendOperationReceipt(value.operation, false);
+    if (
+      operation.proposal_id !== value.proposal_id ||
+      operation.note_id !== value.note_id ||
+      (typeof operationId === "string" && operation.operation_id !== operationId)
+    ) {
+      throw malformedNotesResponse("Note proposal");
+    }
+  }
+
+  return {
+    proposal_id: value.proposal_id,
+    note_id: value.note_id,
+    note_title: value.note_title,
+    ...(typeof bodyMarkdown === "string" ? { body_markdown: bodyMarkdown } : {}),
+    expected_revision: value.expected_revision,
+    expires_at: value.expires_at,
+    created_at: value.created_at,
+    status,
+    ...(typeof operationId === "string" ? { operation_id: operationId } : {}),
+    ...(operation !== undefined ? { operation } : {}),
+  };
+};
+
+const decodeNoteDeleteResponse = (value: unknown): void => {
+  if (!isRecord(value) || value.status !== "deleted") {
+    throw malformedNotesResponse("Note delete", true);
+  }
+};
+
 export const isNoteRevisionConflict = (error: unknown): error is ApiError =>
   error instanceof ApiError &&
   error.status === 409 &&
@@ -327,6 +582,40 @@ export const isNoteRevisionConflict = (error: unknown): error is ApiError =>
     error.detail === null ||
     !("code" in error.detail) ||
     (error.detail as { code?: string }).code === "note_revision_conflict");
+
+/** A typed browser response that proves a Notes write did not commit. */
+export const isDeterministicNoteWriteRejection = (error: unknown): error is ApiError =>
+  error instanceof ApiError &&
+  error.status >= 400 &&
+  error.status < 500 &&
+  // An intermediary timeout does not prove whether the request reached the
+  // control plane, so it must stay on the idempotent reconciliation path.
+  error.status !== 408;
+
+/**
+ * The control plane's receipt-first terminal proof for an exact replay after
+ * an earlier response was lost. Generic status codes are insufficient across
+ * proxies and rolling changes; only these endpoint-specific codes prove no
+ * live receipt exists. Every auth, policy, conflict, rate-limit, network,
+ * malformed-success, and untyped validation failure remains ambiguous.
+ */
+export const isDefinitiveNoteWriteReplayRejection = (
+  error: unknown,
+  operation: "create" | "append"
+): error is ApiError =>
+  error instanceof ApiError &&
+  typeof error.detail === "object" &&
+  error.detail !== null &&
+  "code" in error.detail &&
+  (operation === "create"
+    ? (error.status === 400 &&
+        (error.detail as { code?: string }).code === "note_create_not_committed") ||
+      (error.status === 410 &&
+        (error.detail as { code?: string }).code === "note_create_replay_deleted")
+    : (error.status === 400 &&
+        (error.detail as { code?: string }).code === "note_append_not_committed") ||
+      (error.status === 404 &&
+        (error.detail as { code?: string }).code === "note_append_target_unavailable"));
 
 /** The steer 409 that means "run terminal or finalizing" — fall back to Phase 0 queueing. */
 export const isSteeringClosedError = (error: unknown): boolean =>
@@ -1563,28 +1852,66 @@ export class ApiClient {
       normalizedConversationId.startsWith("thread_") ? normalizedConversationId : ""
     );
     if (candidateThreadId) {
-      const thread = await this.fetchJson<Record<string, unknown>>(
-        `/v2/threads/${encodeURIComponent(candidateThreadId)}`,
-        { method: "GET" }
-      );
-      const record = v2ThreadToConversationRecord(thread, true);
-      this.rememberV2Thread(record.conversation_id, asTrimmedString(thread.thread_id));
-      return this.hydrateV2ConversationRecord(thread, record);
+      let thread: Record<string, unknown> | null = null;
+      try {
+        thread = await this.fetchJson<Record<string, unknown>>(
+          `/v2/threads/${encodeURIComponent(candidateThreadId)}`,
+          { method: "GET" }
+        );
+      } catch (error) {
+        if (!(error instanceof ApiError) || (error.status !== 400 && error.status !== 404)) {
+          throw error;
+        }
+        // Browser storage is only a lookup cache. A deleted/replaced thread
+        // must not leave a durable local conversation id pointing at a 404.
+        if (knownThreadId) {
+          this.forgetV2Thread(normalizedConversationId);
+        }
+      }
+      if (thread) {
+        const record = v2ThreadToConversationRecord(thread, true);
+        const resolvedConversationId = asTrimmedString(record.conversation_id);
+        if (!knownThreadId || resolvedConversationId === normalizedConversationId) {
+          this.rememberV2Thread(record.conversation_id, asTrimmedString(thread.thread_id));
+          return this.hydrateV2ConversationRecord(thread, record);
+        }
+        // A stale cache can also point at a valid *different* thread. Returning
+        // it would make the URL and transcript disagree, which is worse than a
+        // visible not-found state. Forget it and resolve by durable metadata.
+        this.forgetV2Thread(normalizedConversationId);
+      }
     }
 
-    const payload = await this.fetchJson<Record<string, unknown>>(
-      "/v2/threads",
-      { method: "GET" },
-      {
-        limit: "1000",
-        offset: "0",
-      }
-    );
-    const foundThread = Array.isArray(payload.threads)
-      ? payload.threads.filter(isRecord).find(
+    // The API clamps a page to 500 even when older clients ask for 1000.
+    // Walk bounded owner-scoped pages so a valid deep link beyond page one is
+    // not rewritten as missing. Offset advances by rows actually consumed.
+    let foundThread: Record<string, unknown> | null = null;
+    let lookupOffset = 0;
+    for (let page = 0; page < 200 && !foundThread; page += 1) {
+      const payload = await this.fetchJson<Record<string, unknown>>(
+        "/v2/threads",
+        { method: "GET" },
+        {
+          limit: "1000",
+          offset: String(lookupOffset),
+        }
+      );
+      const rows = Array.isArray(payload.threads) ? payload.threads.filter(isRecord) : [];
+      foundThread =
+        rows.find(
           (thread) => v2ThreadConversationId(thread) === normalizedConversationId
-        )
-      : null;
+        ) ?? null;
+      if (foundThread) break;
+      const totalCount = asFiniteNumber(payload.total_count, Number.NaN);
+      const hasMore =
+        typeof payload.has_more === "boolean"
+          ? payload.has_more
+          : Number.isFinite(totalCount)
+            ? lookupOffset + rows.length < totalCount
+            : rows.length >= 500;
+      if (!hasMore || rows.length === 0) break;
+      lookupOffset += rows.length;
+    }
     if (!foundThread) {
       throw new ApiError("Conversation was not found", 404, null);
     }
@@ -2382,47 +2709,92 @@ export class ApiClient {
 
   /* Notes — the personal layer. Markdown is the source of truth; every call
      is owner-scoped by the session. */
-  async listNotes(options?: { query?: string; limit?: number; offset?: number }): Promise<NoteListResponse> {
+  async listNotes(options?: {
+    query?: string;
+    sort?: "browse" | "recent";
+    limit?: number;
+    offset?: number;
+  }): Promise<NoteListResponse> {
     const params = new URLSearchParams();
     if (options?.query?.trim()) params.set("query", options.query.trim());
+    if (options?.sort) params.set("sort", options.sort);
     if (options?.limit) params.set("limit", String(options.limit));
     if (options?.offset) params.set("offset", String(options.offset));
     // Plain concatenation on purpose: the openapi route-documentation test
     // scans string literals, and `/v2/notes${…}` reads as an undocumented
     // route pattern instead of /v2/notes plus a query string.
     const suffix = params.size > 0 ? `?${params.toString()}` : "";
-    return await this.fetchJson<NoteListResponse>("/v2/notes" + suffix);
+    return decodeNoteListResponse(await this.fetchJson<unknown>("/v2/notes" + suffix));
   }
 
-  async createNote(payload: NoteWritePayload = {}): Promise<NoteRecord> {
-    return await this.fetchJson<NoteRecord>(`/v2/notes`, {
+  async createNote(
+    payload: NoteWritePayload = {},
+    idempotencyKey?: string
+  ): Promise<NoteRecord> {
+    return decodeNoteRecord(await this.fetchJson<unknown>(`/v2/notes`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
       body: JSON.stringify(payload),
-    });
+    }), true);
   }
 
   async getNote(noteId: string): Promise<NoteRecord> {
-    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`);
+    return decodeNoteRecord(
+      await this.fetchJson<unknown>(`/v2/notes/${encodeURIComponent(noteId)}`)
+    );
   }
 
   async updateNote(noteId: string, payload: NoteWritePayload): Promise<NoteRecord> {
-    return await this.fetchJson<NoteRecord>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+    return decodeNoteRecord(await this.fetchJson<unknown>(`/v2/notes/${encodeURIComponent(noteId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    });
+    }), true);
   }
 
   async deleteNote(noteId: string): Promise<void> {
-    await this.fetchJson<{ status: string }>(`/v2/notes/${encodeURIComponent(noteId)}`, {
-      method: "DELETE",
-    });
+    decodeNoteDeleteResponse(
+      await this.fetchJson<unknown>(`/v2/notes/${encodeURIComponent(noteId)}`, {
+        method: "DELETE",
+      })
+    );
+  }
+
+  async appendToNote(
+    noteId: string,
+    input: { body_markdown: string; expected_revision: number },
+    idempotencyKey: string
+  ): Promise<NoteDirectAppendReceipt> {
+    return decodeNoteDirectAppendReceipt(await this.fetchJson<unknown>(
+      `/v2/notes/${encodeURIComponent(noteId)}/append`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idempotencyKey,
+        },
+        body: JSON.stringify(input),
+      }
+    ));
+  }
+
+  async undoDirectNoteAppendOperation(
+    operationId: string
+  ): Promise<NoteDirectAppendReceipt> {
+    return decodeNoteDirectAppendReceipt(await this.fetchJson<unknown>(
+      `/v2/note-direct-append-operations/${encodeURIComponent(operationId)}/undo`,
+      { method: "POST" }
+    ));
   }
 
   async getNoteAppendProposal(proposalId: string): Promise<NoteAppendProposal> {
-    return await this.fetchJson<NoteAppendProposal>(
-      `/v2/note-append-proposals/${encodeURIComponent(proposalId)}`
+    return decodeNoteAppendProposal(
+      await this.fetchJson<unknown>(
+        `/v2/note-append-proposals/${encodeURIComponent(proposalId)}`
+      )
     );
   }
 
@@ -2430,20 +2802,24 @@ export class ApiClient {
     proposalId: string,
     input: { body_markdown?: string } = {}
   ): Promise<NoteAppendOperationReceipt> {
-    return await this.fetchJson<NoteAppendOperationReceipt>(
-      `/v2/note-append-proposals/${encodeURIComponent(proposalId)}/commit`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input),
-      }
+    return decodeNoteAppendOperationReceipt(
+      await this.fetchJson<unknown>(
+        `/v2/note-append-proposals/${encodeURIComponent(proposalId)}/commit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }
+      )
     );
   }
 
   async undoNoteAppendOperation(operationId: string): Promise<NoteAppendOperationReceipt> {
-    return await this.fetchJson<NoteAppendOperationReceipt>(
-      `/v2/note-append-operations/${encodeURIComponent(operationId)}/undo`,
-      { method: "POST" }
+    return decodeNoteAppendOperationReceipt(
+      await this.fetchJson<unknown>(
+        `/v2/note-append-operations/${encodeURIComponent(operationId)}/undo`,
+        { method: "POST" }
+      )
     );
   }
 

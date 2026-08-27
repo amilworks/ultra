@@ -10,6 +10,8 @@ const budgets = [
   { label: "auth-screen", pattern: /^AuthScreen-.*\.js$/, maxBytes: 25_000 },
   { label: "composer-slash-menu", pattern: /^ComposerSlashMenu-.*\.js$/, maxBytes: 20_000 },
   { label: "composer-workflows", pattern: /^composer-workflows-.*\.js$/, maxBytes: 20_000 },
+  { label: "notes-access", pattern: /^notes-access-.*\.js$/, maxBytes: 18_000 },
+  { label: "notes-recovery", pattern: /^notes-recovery-.*\.js$/, maxBytes: 18_000 },
   { label: "chat-run-steps", pattern: /^ChatRunSteps-.*\.js$/, maxBytes: 15_000 },
   {
     label: "inline-data-quick-preview",

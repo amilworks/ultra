@@ -39,6 +39,7 @@ from ultra_deepagents.multimodal import (
     BoundedImageMultimodalMiddleware,
     TextOnlyMultimodalMiddleware,
 )
+from ultra_deepagents.steering import SteeringInboxMiddleware
 
 
 @pytest.fixture(autouse=True)
@@ -191,6 +192,85 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert any(isinstance(item, TextOnlyMultimodalMiddleware) for item in captured["middleware"])
 
     assert captured["subagents"] == []
+
+
+def test_notes_agent_omits_checkpoint_and_steering_while_general_agent_retains_them(
+    monkeypatch,
+):
+    notes_captured = {}
+    general_captured = {}
+
+    def fake_create_agent(**kwargs):
+        notes_captured.update(kwargs)
+        return "notes-agent"
+
+    def fake_create_deep_agent(**kwargs):
+        general_captured.update(kwargs)
+        return "general-agent"
+
+    monkeypatch.setattr("ultra_deepagents.agent.create_agent", fake_create_agent)
+    monkeypatch.setattr("ultra_deepagents.agent.create_deep_agent", fake_create_deep_agent)
+    monkeypatch.setattr("ultra_deepagents.agent.build_notes_tools", lambda *_args, **_kwargs: [])
+
+    settings = RuntimeSettings(
+        openai_base_url="http://127.0.0.1:8003/v1",
+        openai_model="deepseek_v4",
+    )
+    durable_checkpointer = object()
+    steering_inbox = object()
+    notes_context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-notes",
+        run_id="run-notes",
+        goal="Use my Note.",
+        selection_context={
+            "note_access": {
+                "mode": "selected",
+                "notes": [{"note_id": "note-private", "revision": 1}],
+            }
+        },
+    )
+    general_context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-general",
+        run_id="run-general",
+        goal="Analyze this request.",
+    )
+
+    assert (
+        build_research_agent(
+            settings,
+            model=object(),
+            context=notes_context,
+            checkpointer=durable_checkpointer,
+            steering_inbox=steering_inbox,
+        )
+        == "notes-agent"
+    )
+    assert notes_captured["checkpointer"] is None
+    assert not any(
+        isinstance(item, SteeringInboxMiddleware) for item in notes_captured["middleware"]
+    )
+
+    assert (
+        build_research_agent(
+            settings,
+            model=object(),
+            backend=object(),
+            context=general_context,
+            checkpointer=durable_checkpointer,
+            steering_inbox=steering_inbox,
+        )
+        == "general-agent"
+    )
+    assert general_captured["checkpointer"] is durable_checkpointer
+    assert any(isinstance(item, SteeringInboxMiddleware) for item in general_captured["middleware"])
 
 
 def test_coordinator_restores_todos_and_restricts_filesystem_middleware(monkeypatch):

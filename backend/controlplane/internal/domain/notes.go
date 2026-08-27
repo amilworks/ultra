@@ -35,18 +35,47 @@ type NoteAccessScope struct {
 }
 
 type NoteSearchInput struct {
-	UserID string
-	Query  string
-	Limit  int
+	UserID     string
+	Query      string
+	Sort       NoteSearchSort
+	Limit      int
+	SnapshotAt time.Time
+	After      *NoteSearchPageAnchor
 }
 
+// NoteSearchPageAnchor is the exclusive lower bound for model Note search
+// pagination. Search ordering is mutable, so every paged search also carries a
+// SnapshotAt boundary: title/body mutations advance content_updated_at beyond
+// that boundary and leave the result set instead of drifting between pages.
+type NoteSearchPageAnchor struct {
+	Rank             int
+	ContentUpdatedAt time.Time
+	NoteID           string
+}
+
+type NoteSearchSort string
+
+const (
+	NoteSearchSortRelevance NoteSearchSort = "relevance"
+	NoteSearchSortRecent    NoteSearchSort = "recent"
+)
+
 type NoteSearchHit struct {
-	NoteID    string    `json:"note_id"`
-	Title     string    `json:"title"`
-	Snippet   string    `json:"snippet"`
-	Pinned    bool      `json:"pinned"`
-	Revision  int64     `json:"revision"`
-	UpdatedAt time.Time `json:"updated_at"`
+	NoteID           string    `json:"note_id"`
+	Title            string    `json:"title"`
+	Snippet          string    `json:"snippet"`
+	Pinned           bool      `json:"pinned"`
+	Revision         int64     `json:"revision"`
+	UpdatedAt        time.Time `json:"updated_at"`
+	ContentUpdatedAt time.Time `json:"content_updated_at"`
+	// SortRank is the store-computed relevance bucket used only to construct
+	// the next keyset cursor. It must never enter model-visible JSON.
+	SortRank int `json:"-"`
+}
+
+type NoteSearchPage struct {
+	Notes      []NoteSearchHit
+	SnapshotAt time.Time
 }
 
 type NoteReadGrantRecord struct {
@@ -129,18 +158,89 @@ type NoteAppendOperationRecord struct {
 	UndoneAt            *time.Time `json:"undone_at,omitempty"`
 }
 
+// NoteDirectAppendOperationRecord is a permanent, content-free receipt for an
+// owner-authenticated browser append. Idempotency and suffix-integrity fields
+// remain store-private; only the revision/digest receipt crosses the API.
+type NoteDirectAppendOperationRecord struct {
+	OperationID         string     `json:"operation_id"`
+	NoteID              string     `json:"note_id"`
+	NoteTitle           string     `json:"note_title"`
+	UserID              string     `json:"-"`
+	IdempotencyKey      string     `json:"-"`
+	RequestDigest       string     `json:"-"`
+	BeforeRevision      int64      `json:"before_revision"`
+	AfterRevision       int64      `json:"after_revision"`
+	UndoRevision        int64      `json:"undo_revision,omitempty"`
+	AppendedBytes       int        `json:"appended_bytes"`
+	BeforeContentDigest string     `json:"before_content_digest"`
+	AfterContentDigest  string     `json:"after_content_digest"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UndoneAt            *time.Time `json:"undone_at,omitempty"`
+}
+
+type DirectNoteAppendInput struct {
+	OperationID      string
+	UserID           string
+	NoteID           string
+	ExpectedRevision int64
+	BodyMarkdown     string
+	IdempotencyKey   string
+	RequestDigest    string
+	Now              time.Time
+}
+
+type UndoDirectNoteAppendInput struct {
+	OperationID string
+	UserID      string
+	Now         time.Time
+}
+
+// CreateNoteIdempotentInput binds a browser retry key to the normalized Note
+// create request. The receipt is content-free and survives Note deletion as a
+// tombstone, preventing a delayed retry from resurrecting a hard-deleted Note.
+type CreateNoteIdempotentInput struct {
+	Record         NoteRecord
+	IdempotencyKey string
+	RequestDigest  string
+}
+
 // ComputeNoteContentDigest hashes an unambiguous length-prefixed title/body
 // encoding. PostgreSQL extensions are deliberately not required for this
 // provenance value; the revision remains the sole CAS authority.
 func ComputeNoteContentDigest(title string, body string) string {
+	return computeLengthPrefixedNoteDigest([]byte(title), []byte(body))
+}
+
+// ComputeNoteDirectAppendRequestDigest binds a retry key's request to its
+// owner, Note, CAS revision, and exact captured bytes. The digest is durable
+// idempotency metadata and is never returned to the browser.
+func ComputeNoteDirectAppendRequestDigest(userID string, noteID string, expectedRevision int64, body string) string {
+	var revision [8]byte
+	binary.BigEndian.PutUint64(revision[:], uint64(expectedRevision))
+	return computeLengthPrefixedNoteDigest([]byte(userID), []byte(noteID), revision[:], []byte(body))
+}
+
+// ComputeNoteCreateRequestDigest binds a retry key to every normalized create
+// field that can affect the resulting Note. It is durable store metadata and
+// is never returned to the browser.
+func ComputeNoteCreateRequestDigest(userID string, orgID string, title string, body string, pinned bool, editorMode string) string {
+	pinnedByte := byte(0)
+	if pinned {
+		pinnedByte = 1
+	}
+	return computeLengthPrefixedNoteDigest(
+		[]byte(userID), []byte(orgID), []byte(title), []byte(body), []byte{pinnedByte}, []byte(editorMode),
+	)
+}
+
+func computeLengthPrefixedNoteDigest(fields ...[]byte) string {
 	hash := sha256.New()
 	var size [8]byte
-	binary.BigEndian.PutUint64(size[:], uint64(len(title)))
-	_, _ = hash.Write(size[:])
-	_, _ = hash.Write([]byte(title))
-	binary.BigEndian.PutUint64(size[:], uint64(len(body)))
-	_, _ = hash.Write(size[:])
-	_, _ = hash.Write([]byte(body))
+	for _, field := range fields {
+		binary.BigEndian.PutUint64(size[:], uint64(len(field)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write(field)
+	}
 	return hex.EncodeToString(hash.Sum(nil))
 }
 

@@ -303,7 +303,8 @@ import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
 import {
-  composeComposerWorkflowPromptForModel,
+  composerWorkflowPresetAfterSubmit,
+  composerWorkflowTurnContract,
   slashWorkflowSearchQuery,
   visiblePromptAfterComposerWorkflowSelection,
 } from "./components/chat/composer-workflow-prompt";
@@ -1341,6 +1342,11 @@ const coerceComposerWorkflowPresetState = (
   }
   const record = value as Record<string, unknown>;
   const id = String(record.id ?? "").trim() as ComposerWorkflowId;
+  if (id === "pro_mode") {
+    // Pro Mode is a fixed, persistent UI choice. Never hydrate a stored
+    // scaffold or tool list into its runtime contract.
+    return toComposerWorkflowPresetState(PRO_MODE_COMPOSER_WORKFLOW_PRESET);
+  }
   const label = String(record.label ?? "").trim();
   if (!id || !label) {
     return null;
@@ -7203,7 +7209,7 @@ export function App() {
         pendingFileCount: activeConversation.pendingFiles.length,
         activeUploadCount: activeConversation.stagedUploadFileIds.length,
         selectionContext: activeConversation.activeSelectionContext,
-        workflowSelected: Boolean(activeConversation.composerWorkflowPreset),
+        workflowId: activeConversation.composerWorkflowPreset?.id ?? null,
         selectedToolNames: activeConversation.composerWorkflowPreset?.selectedToolNames ?? [],
       });
       if (unsupportedContext) {
@@ -13245,7 +13251,7 @@ export function App() {
         pendingFileCount: conversation.pendingFiles.length,
         activeUploadCount: conversation.stagedUploadFileIds.length,
         selectionContext: conversation.activeSelectionContext,
-        workflowSelected: Boolean(composerWorkflowPreset),
+        workflowId: composerWorkflowPreset?.id ?? null,
         selectedToolNames: composerWorkflowPreset?.selectedToolNames ?? [],
         externalResourceCount: bisqueUrls.length,
       })
@@ -13536,6 +13542,7 @@ export function App() {
           )
         : null
     );
+    const sealedNoteAccess = selectionContextForTurn?.note_access ?? null;
 
     const userMessage: UiMessage = {
       id: makeId(),
@@ -13567,9 +13574,9 @@ export function App() {
       prompt: turnOverride?.preserveComposerScope ? current.prompt : "",
       // One-shot slash workflows clear after submit, but session-like modes
       // such as Pro Mode stay active until the user explicitly turns them off.
-      composerWorkflowPreset: current.composerWorkflowPreset?.persistsAcrossTurns
-        ? current.composerWorkflowPreset
-        : null,
+      composerWorkflowPreset: composerWorkflowPresetAfterSubmit(
+        current.composerWorkflowPreset
+      ),
       messages: nextMessages,
       selectedNotes: turnOverride?.preserveComposerScope ? current.selectedNotes : [],
       noteSearchScopeOverride: turnOverride?.preserveComposerScope
@@ -13605,12 +13612,13 @@ export function App() {
       allUploadsForTurn = uploadResult.allUploadedFiles;
       const uploadById = new Map(allUploadsForTurn.map((file) => [file.file_id, file] as const));
       const activeSelectionFileIds = selectionContextForTurn?.focused_file_ids ?? [];
-      const effectiveSelectedToolNamesForTurn = Array.from(
-        new Set([
-          ...(composerWorkflowPreset?.selectedToolNames ?? []),
-          ...selectedToolNamesForTurn,
-        ])
+      const workflowTurnContract = composerWorkflowTurnContract(
+        composerWorkflowPreset,
+        promptForModel,
+        Boolean(sealedNoteAccess),
+        selectedToolNamesForTurn
       );
+      const effectiveSelectedToolNamesForTurn = workflowTurnContract.selectedToolNames;
       let currentUploadFileIds = uniqueFileIds([
         ...conversation.stagedUploadFileIds,
         ...activeSelectionFileIds,
@@ -13638,10 +13646,7 @@ export function App() {
         return;
       }
 
-      const modelPromptForTurn = composeComposerWorkflowPromptForModel(
-        composerWorkflowPreset,
-        promptForModel
-      );
+      const modelPromptForTurn = workflowTurnContract.modelPrompt;
       const chatMessages = toChatWire(nextMessages);
       if (modelPromptForTurn !== text) {
         for (let idx = chatMessages.length - 1; idx >= 0; idx -= 1) {
@@ -13686,9 +13691,14 @@ export function App() {
         conversation_id: conversationId,
         goal: modelPromptForTurn,
         selected_tool_names: effectiveSelectedToolNamesForTurn,
-        remote_mutation_intents: remoteMutationIntentsForUserText(text),
+        remote_mutation_intents: sealedNoteAccess
+          ? []
+          : remoteMutationIntentsForUserText(text),
         selection_context: selectionContextForTurn,
-        workflow_hint: composerWorkflowPreset?.workflowHint ?? null,
+        // Notes runs always use the sealed Notes-only agent surface. Pro Mode
+        // may remain selected in the composer, but it must not change this
+        // turn's runtime contract or appear in its durable metadata.
+        workflow_hint: workflowTurnContract.workflowHint,
         reasoning_mode: "deep" as const,
         idempotency_key: runIdempotencyKey,
       };

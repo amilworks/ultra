@@ -9,9 +9,16 @@ import {
 } from "./composer-workflows";
 import {
   composeComposerWorkflowPromptForModel,
+  composerWorkflowPresetAfterSubmit,
+  composerWorkflowTurnContract,
   slashWorkflowSearchQuery,
   visiblePromptAfterComposerWorkflowSelection,
 } from "./composer-workflow-prompt";
+import {
+  noteAccessForTurn,
+  notesTurnHasUnsupportedAnalysisContext,
+  withNoteAccess,
+} from "@/lib/notesAccess";
 
 // The only tool pack the BisQue backend actually gates on is the literal "bisque"
 // (see _should_register_bisque_tools in agent.py). Per-action names like
@@ -120,5 +127,52 @@ describe("composer workflow prompt handling", () => {
 
     expect(prompt).toContain("Run a focused quantitative analysis");
     expect(prompt).toContain("analyze the cell count distribution");
+  });
+
+  it("seals the complete Pro + Notes turn contract and retains Pro for the next turn", () => {
+    const proMode = getComposerWorkflowById("pro_mode");
+    expect(proMode).toBeTruthy();
+    const defensivePreset = {
+      ...proMode!,
+      prompt: "Persisted workflow scaffold that must not reach a Notes run",
+      selectedToolNames: ["unexpected_tool"],
+    };
+    const prompt = "What about my notes on NPH?";
+    const noteAccess = noteAccessForTurn(prompt, []);
+    const selectionContext = withNoteAccess(null, noteAccess);
+
+    expect(selectionContext).toEqual({
+      note_access: {
+        mode: "search",
+        notes: [],
+        allow_append_proposal: false,
+      },
+    });
+    expect(
+      notesTurnHasUnsupportedAnalysisContext({
+        workflowId: "pro_mode",
+        selectedToolNames: [],
+      })
+    ).toBe(false);
+    expect(
+      notesTurnHasUnsupportedAnalysisContext({
+        workflowId: "pro_mode",
+        pendingFileCount: 1,
+      })
+    ).toBe(true);
+
+    const contract = composerWorkflowTurnContract(
+      defensivePreset,
+      prompt,
+      Boolean(selectionContext?.note_access),
+      ["inferred_tool"]
+    );
+
+    expect(contract).toEqual({
+      modelPrompt: prompt,
+      selectedToolNames: [],
+      workflowHint: null,
+    });
+    expect(composerWorkflowPresetAfterSubmit(proMode)).toBe(proMode);
   });
 });

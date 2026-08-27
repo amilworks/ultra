@@ -96,6 +96,114 @@ _NEGATED_REQUEST_CLAUSE_RE = re.compile(
     r"numerical\s+experiments?|simulations?|experiments?|metrics?|statistics?)\b[^.?!;\n]*",
     re.IGNORECASE,
 )
+
+_PRODUCT_NOTES_GOAL_TARGET_RE = re.compile(
+    r"\b(?:ultra\s+notes?|my\s+(?:notes?|notebook|lab\s+(?:notes?|log|notebook))|"
+    r"my\s+(?:[\w.+#'’/-]+\s+){1,6}notes?|"
+    r"(?:(?:the|a|my)\s+)?note\s+i\s+(?:wrote|saved|made|created)|"
+    r"(?:(?:the|a|my)\s+)?(?:[\w.+#'’/-]+\s+){1,6}notes?\s+i\s+"
+    r"(?:wrote|saved|made|created))\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_DIRECT_RE = re.compile(
+    r"^(?:(?:please|kindly)\s+)?(?:access|search|find|read|look\s+(?:at|in|through|up|for)|"
+    r"check|scan|use|review|open|show|list|summari[sz]e)\b|"
+    r"^(?:can|could|would|will)\s+you(?:\s+please)?\s+"
+    r"(?:access|search|find|read|look\s+(?:at|in|through|up|for)|check|scan|use|review|"
+    r"open|show|list|summari[sz]e)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_SOFT_DIRECT_RE = re.compile(
+    r"^(?:(?:please|kindly)\s+)?(?:explain|compare|answer|tell)\b|"
+    r"^(?:can|could|would|will)\s+you(?:\s+please)?\s+(?:explain|compare|answer|tell)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_CONTENT_PREDICATE_RE = re.compile(
+    r"\b(?:about|using|from)\b|\bwhat\b[^.?!;]{0,80}\bnotes?\b[^.?!;]{0,30}"
+    r"\b(?:say|says|said|mention|mentions|contain|contains|include|includes)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_BARE_SEARCH_RE = re.compile(
+    r"^(?:(?:please|kindly)\s+)?search\s+notes?\b|"
+    r"^(?:can|could|would|will)\s+you(?:\s+please)?\s+search\s+notes?\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_RECALL_RE = re.compile(
+    r"^(?:(?:what|where|when)\s+did\s+i\s+"
+    r"(?:write|note|jot|save|add|append|update|record)(?:\s+down)?\b|"
+    r"(?:did|didn['’]t)\s+i(?:\s+(?:not|never))?\s+"
+    r"(?:write|note|jot|save|add|append|update|record)\b|"
+    r"(?:have|had)\s+i\s+(?:written|noted|jotted|saved|added|appended|updated|recorded)\b|"
+    r"do\s+i\s+have\s+(?:a|any)\s+notes?\b|"
+    r"(?:what\s+(?:do|does)|do)\s+my\s+notes?\s+"
+    r"(?:say|says|mention|mentions|contain|contains|include|includes)\b|"
+    r"what(?:['’]s|\s+is)\s+in\s+my\s+notes?\b|"
+    r"(?:what|which)\s+(?:is|was)\s+my\s+"
+    r"(?:(?:most\s+)?recent|latest|last|newest)\s+notes?\b)",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_ELLIPTICAL_FRAME_RE = re.compile(
+    r"^(?:(?:and|also|then|okay|ok)\s*,?\s*)*(?:what|how)\s+about\s+|"
+    r"^(?:and|also|then)\s*,?\s+",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_ELLIPTICAL_TARGET_RE = re.compile(
+    r"^(?:my\s+(?:notes?|notebook|lab\s+(?:notes?|log|notebook))\s+"
+    r"(?:about|on|regarding|concerning)\s+.+|"
+    r"(?:the\s+)?(?:[\w.+#'’/-]+\s+){1,8}(?:in|from)\s+my\s+"
+    r"(?:notes?|notebook|lab\s+(?:notes?|log|notebook))|"
+    r"my\s+(?:[\w.+#'’/-]+\s+){1,6}notes?|"
+    r"(?:the\s+)?(?:[\w.+#'’/-]+\s+){1,6}notes?\s+i\s+"
+    r"(?:wrote|saved|made|created)|"
+    r"(?:(?:the|a|my)\s+)?note\s+i\s+(?:wrote|saved|made|created)\s+"
+    r"(?:about|on|regarding|concerning)\s+.+)$",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_CONTEXTUAL_RE = re.compile(
+    r"\bnotes?\s+(?:below|above|here|attached|provided|included)\b|"
+    r"\bnotes?\b[^.?!;]{0,100}\b(?:in|on|from|inside|within)\s+"
+    r"(?:(?:(?:this|that|my|our|uploaded|attached|selected|the|a|an)\s+){0,3}"
+    r"(?:pdf|attachment|document|file|email|message|section|slide|page|upload|report)\b|"
+    r"[\w.-]+\.(?:pdf|docx?|txt|md)\b)|"
+    r"\bmy\s+(?:meeting|document|pdf|slide|section|email|attachment|file|page)\s+notes?\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_META_RE = re.compile(
+    r"^how\s+(?:do|can|could|would|should)\b|"
+    r"\b(?:explain|show|tell)\s+(?:me\s+)?how\s+to\b|"
+    r"^(?:can|could|would|will)\s+(?:(?:the\s+)?(?:model|assistant)|ultra)\b|"
+    r"^are\s+you\s+able\s+to\b|^tell\s+me\s+whether\b|"
+    r"^what\s+happens\s+if\b|^would\s+it\s+help\b|^should\s+(?:i|we|ultra)\b|"
+    r"^(?:did\s+you|why\s+did\s+(?:you|ultra|the\s+(?:model|assistant)))\b|"
+    r"^(?:(?:the\s+)?(?:assistant|model|system|prompt|instruction|example|command|source|"
+    r"author|paper|email)\b[^.?!;]{0,100}\b(?:said|says|stated|states|asked|asks|"
+    r"instructed|suggests?|suggested|recommends?|recommended|was|is)\b)|"
+    r"^(?:review|explain|summari[sz]e|compare)\s+(?:this|the|an?)\s+"
+    r"(?:question|prompt|command|instruction|example|sentence|request|phrase|wording|text)\b",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_UI_RE = re.compile(
+    r"^(?:(?:and|also|then|okay|ok)\s*,?\s*)*(?:what|how)\s+about\s+"
+    r"(?:(?:my\s+)?ultra\s+notes?|my\s+notes?\s+"
+    r"(?:app|page|library|privacy|settings|permissions|security|search|access))\s*[?.!]*$",
+    re.IGNORECASE,
+)
+_PRODUCT_NOTES_GOAL_DENIAL_RE = re.compile(
+    r"(?:^|[.?!;]\s*(?:(?:but|actually|then)\s*,?\s*)?|"
+    r"\b(?:but|actually|then)\s*,?\s+)(?:please\s+)?"
+    r"(?:do\s+not|don['’]t|dont|never)\s+"
+    r"(?:access|search|find|read|look|check|scan|use|review|open|show|list|summari[sz]e|"
+    r"add|append|save|update|write|record|jot)\b|"
+    r"\bwithout\b[^.?!;]{0,80}\b(?:accessing|searching|finding|reading|looking|checking|"
+    r"scanning|using|reviewing|opening|showing|listing|summari[sz]ing)\b|"
+    r"\bstop\s+(?:accessing|searching|finding|reading|looking|checking|scanning|using|"
+    r"reviewing|opening|showing|listing|summari[sz]ing)\b|"
+    r"\b(?:not|except|excluding|but\s+not)\b[^.?!;]{0,60}\b(?:my\s+(?:notes?|notebook)|"
+    r"ultra\s+notes?)\b|"
+    r"(?:^|[.?!;]\s*)(?:(?:actually\s+)?no|never\s*mind|scratch\s+that|"
+    r"cancel(?:\s+that)?|forget\s+(?:it|that))\s*[?.!]*$",
+    re.IGNORECASE,
+)
 _DYNAMICAL_RIGOR_CLAUSE_SPLIT_RE = re.compile(r"[?!;\n]+|\.(?!\d)")
 _DYNAMICAL_RIGOR_TASK_TRANSITION_RE = re.compile(
     r"\b(?:and\s+instead|instead|rather)\b",
@@ -416,8 +524,10 @@ Ultra Notes is the user's separate, user-authored Notes library. Files under `/m
 `/workspace`, and `/outputs`, research-context memory, prior artifacts, and resource-catalog results
 are not Ultra Notes and must never be described as the user's Note or Notes library. Only say that
 you searched, read, used, or updated an Ultra Note when this run exposes the corresponding Notes
-tool and that tool succeeds. If Notes tools are unavailable, say that Ultra Notes were not shared
-for this message; do not substitute workspace or research memory and imply it came from Notes."""
+tool and that tool succeeds. If the user asks about their Notes but Notes tools are unavailable,
+lead with "I can't access Ultra Notes in this message." Do not enumerate or summarize
+workspace, research memory, prior artifacts, or resource results as a substitute answer. Offer to
+use a clearly named, non-Notes source only as a separate follow-up."""
 
 _DURABLE_CATALOG_SYSTEM_GUIDANCE = """When the user refers to data that is not attached to this chat — a dataset, image, or
 prior result named or described (e.g. "the CT scans with norm in the name", "the NPM1
@@ -442,6 +552,12 @@ Do not persist, delegate, execute, upload, stage, externally query, or copy Note
 memory, workspace, output, artifact, file, task, program, or non-Notes tool. Treat missing tools as
 an intentional privacy boundary, not as a reason to invent a workaround. Internal reasoning and
 tool activity are shown only as content-free lifecycle metadata for this turn."""
+
+_NOTES_UNAVAILABLE_SYSTEM_GUIDANCE = """## Ultra Notes unavailable
+
+Ultra Notes tools are unavailable for this message. Start by saying, "I can't access Ultra Notes
+in this message." Do not claim that you searched, read, or used a Note, and do not answer from
+memory, Resources, artifacts, files, or model knowledge as a substitute for the user's Notes."""
 
 
 _GROUNDING_SYSTEM_GUIDANCE = """Ground every factual claim in a tool result or an attached resource, never in assumption.
@@ -1890,6 +2006,13 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
                 for reference in note_scope.notes
             )
             lines.append(f"- selected Notes: {references} | use read_note to access content")
+    else:
+        lines.append(
+            "- Ultra Notes tools are unavailable for this message. If the user asks about "
+            "their Notes, say 'I can't access Ultra Notes in this message' before anything else; "
+            "do not count, list, quote, or summarize "
+            "memory files, research context, resources, or artifacts as Ultra Notes."
+        )
     if context.runtime_facts:
         lines.append("Runtime facts:")
         for key in (
@@ -1997,7 +2120,11 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
     return "\n".join(lines)
 
 
-def build_notes_run_context_brief(context: AgentRunContext) -> str:
+def build_notes_run_context_brief(
+    context: AgentRunContext,
+    *,
+    notes_tools_available: bool = True,
+) -> str:
     """Build the request suffix for the deliberately Notes-only agent.
 
     A Notes run cannot inherit filesystem, resource, BisQue, paper, memory, or
@@ -2015,7 +2142,7 @@ def build_notes_run_context_brief(context: AgentRunContext) -> str:
     if context.goal.strip():
         lines.append(f"- goal: {context.goal.strip()}")
     note_scope = note_access_from_selection_context(context.selection_context)
-    if note_scope.enabled:
+    if note_scope.enabled and notes_tools_available:
         lines.append(f"- Notes access for this run: {note_scope.mode}")
         if note_scope.notes:
             references = ", ".join(
@@ -2027,6 +2154,12 @@ def build_notes_run_context_brief(context: AgentRunContext) -> str:
                 for reference in note_scope.notes
             )
             lines.append(f"- selected Notes: {references} | use read_note to access content")
+    else:
+        lines.append(
+            "- Ultra Notes tools are unavailable for this message. Say 'I can't access Ultra "
+            "Notes in this message' before anything else; do not claim to have searched or read "
+            "Notes and do not substitute memory, Resources, artifacts, files, or model knowledge."
+        )
     if context.runtime_facts:
         lines.append("Runtime facts:")
         for key in (
@@ -2156,12 +2289,21 @@ class UltraRunContextPromptMiddleware(AgentMiddleware[Any, Any, Any]):
 class UltraNotesRunContextPromptMiddleware(UltraRunContextPromptMiddleware):
     """Append only context that the Notes-only tool surface can actually use."""
 
+    def __init__(self, *, notes_tools_available: bool) -> None:
+        super().__init__()
+        self._notes_tools_available = notes_tools_available
+
     def _brief(self, request: ModelRequest) -> str:
         runtime_context = getattr(request.runtime, "context", None)
         context = runtime_context if isinstance(runtime_context, AgentRunContext) else None
         if context is None:
             return ""
-        sections = [build_notes_run_context_brief(context)]
+        sections = [
+            build_notes_run_context_brief(
+                context,
+                notes_tools_available=self._notes_tools_available,
+            )
+        ]
         elapsed_seconds = time.monotonic() - self._started_monotonic
         if elapsed_seconds >= 0:
             minutes, seconds = divmod(int(elapsed_seconds), 60)
@@ -2516,10 +2658,14 @@ def _build_notes_context_agent(
     ]
     if note_tools:
         prompt_sections.append(NOTES_PROMPT_GUIDANCE.strip())
+    else:
+        prompt_sections.append(_NOTES_UNAVAILABLE_SYSTEM_GUIDANCE.strip())
     system_prompt = "\n\n".join(prompt_sections) + "\n"
 
     resolved_model = model or build_chat_model(settings)
-    middleware: list[Any] = [UltraNotesRunContextPromptMiddleware()]
+    middleware: list[Any] = [
+        UltraNotesRunContextPromptMiddleware(notes_tools_available=bool(note_tools))
+    ]
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 
@@ -2565,6 +2711,63 @@ def _build_notes_context_agent(
     )
 
 
+def _goal_requests_product_notes_access(goal: str) -> bool:
+    """Fail closed when a client asks for Notes but omitted typed Notes scope.
+
+    This classifier never grants Notes authority. It only removes the ordinary
+    agent's memory, filesystem, resource, and delegation surfaces so an older or
+    non-browser client cannot receive a plausible answer from the wrong corpus.
+    Keep this deliberately narrower than the browser's authority parser: an
+    ambiguous request can safely remain on the ordinary surface because that
+    surface is independently forbidden from substituting memory for Ultra Notes.
+    """
+
+    normalized = re.sub(r"\s+", " ", str(goal or "")).strip()
+    if not normalized:
+        return False
+    if normalized.startswith(("`", ">", '"', "'", "“", "‘")):
+        return False
+    if (
+        _PRODUCT_NOTES_GOAL_CONTEXTUAL_RE.search(normalized)
+        or _PRODUCT_NOTES_GOAL_META_RE.search(normalized)
+        or _PRODUCT_NOTES_GOAL_UI_RE.search(normalized)
+        or _PRODUCT_NOTES_GOAL_DENIAL_RE.search(normalized)
+    ):
+        return False
+    if re.match(r"^(?:review|explain|summari[sz]e|compare)\b", normalized, re.IGNORECASE) and (
+        re.search(r"[`\"'“”‘’]", normalized)
+        or re.search(
+            r"\b(?:question|prompt|command|instruction|example|sentence|request|phrase|"
+            r"wording|quoted\s+text)\b",
+            normalized,
+            re.IGNORECASE,
+        )
+    ):
+        return False
+
+    elliptical_frame = _PRODUCT_NOTES_GOAL_ELLIPTICAL_FRAME_RE.match(normalized)
+    if elliptical_frame is not None:
+        elliptical_target = normalized[elliptical_frame.end() :].strip().rstrip("?.!").strip()
+        if _PRODUCT_NOTES_GOAL_ELLIPTICAL_TARGET_RE.fullmatch(elliptical_target):
+            return True
+
+    target = _PRODUCT_NOTES_GOAL_TARGET_RE.search(normalized)
+    if target is not None and _PRODUCT_NOTES_GOAL_RECALL_RE.search(normalized):
+        return True
+
+    first_clause = re.split(r"[.?!;\n]", normalized, maxsplit=1)[0].strip()
+    if _PRODUCT_NOTES_GOAL_BARE_SEARCH_RE.search(first_clause):
+        return True
+    if _PRODUCT_NOTES_GOAL_TARGET_RE.search(first_clause) is None:
+        return False
+    if _PRODUCT_NOTES_GOAL_DIRECT_RE.search(first_clause):
+        return True
+    return bool(
+        _PRODUCT_NOTES_GOAL_SOFT_DIRECT_RE.search(first_clause)
+        and _PRODUCT_NOTES_GOAL_CONTENT_PREDICATE_RE.search(first_clause)
+    )
+
+
 def build_research_agent(
     settings: RuntimeSettings,
     *,
@@ -2585,7 +2788,13 @@ def build_research_agent(
         if context is not None
         else None
     )
-    if context is not None and note_scope is not None and note_scope.enabled:
+    notes_scope_requested = bool(note_scope is not None and note_scope.enabled)
+    notes_scope_missing_for_request = bool(
+        context is not None
+        and not notes_scope_requested
+        and _goal_requests_product_notes_access(context.goal)
+    )
+    if context is not None and (notes_scope_requested or notes_scope_missing_for_request):
         return _build_notes_context_agent(
             settings,
             model=model,

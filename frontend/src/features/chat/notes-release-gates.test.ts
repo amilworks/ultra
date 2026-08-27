@@ -74,7 +74,21 @@ describe("model Notes release gates", () => {
     expect(submit).toContain("pendingFileCount: conversation.pendingFiles.length");
     expect(submit).toContain("activeUploadCount: conversation.stagedUploadFileIds.length");
     expect(submit).toContain("selectionContext: conversation.activeSelectionContext");
-    expect(submit).toContain("workflowSelected: Boolean(composerWorkflowPreset)");
+    expect(submit).toContain("workflowId: composerWorkflowPreset?.id ?? null");
+    expect(appSource).toMatch(
+      /if \(id === "pro_mode"\) \{[\s\S]{0,240}toComposerWorkflowPresetState\(PRO_MODE_COMPOSER_WORKFLOW_PRESET\)/
+    );
+    expect(submit).toContain("const workflowTurnContract = composerWorkflowTurnContract(");
+    expect(submit).toMatch(
+      /composerWorkflowTurnContract\(\s*composerWorkflowPreset,\s*promptForModel,\s*Boolean\(sealedNoteAccess\),\s*selectedToolNamesForTurn\s*\)/
+    );
+    expect(submit).toContain(
+      "const effectiveSelectedToolNamesForTurn = workflowTurnContract.selectedToolNames"
+    );
+    expect(submit).toContain("workflow_hint: workflowTurnContract.workflowHint");
+    expect(submit).toMatch(
+      /remote_mutation_intents: sealedNoteAccess\s*\? \[\]\s*:\s*remoteMutationIntentsForUserText\(text\)/
+    );
     expect(submit).toContain("externalResourceCount: bisqueUrls.length");
     expect(preflight).toBeLessThan(submit.indexOf("await resealTurnNotes"));
     expect(preflight).toBeLessThan(submit.indexOf("apiClient.importBisqueResources"));

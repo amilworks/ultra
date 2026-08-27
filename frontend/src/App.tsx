@@ -74,6 +74,7 @@ import {
   ApiError,
   isSteeringClosedError,
   UploadPausedError,
+  type NoteDirectAppendReceipt,
   type StreamTokenEvent,
   type UploadProgressEvent,
 } from "./lib/api";
@@ -88,6 +89,20 @@ import {
 } from "./lib/navUrl";
 import { registerLensOpener } from "./lib/lensNavigation";
 import { resealNoteReferences } from "./lib/noteReferences";
+import { reconcileAndUndoNoteSelectionAppend } from "./lib/noteDirectAppend";
+import {
+  enableNoteDraftRecoveryScope,
+  purgeAndDisableNoteDraftRecovery,
+  resolveBrowserLocalStorage,
+} from "./lib/noteDraftRecovery";
+import { noteRecoveryScopeFromSession } from "./lib/noteRecoveryScope";
+import {
+  clearNoteSelectionCaptureRecovery,
+  clearNoteSelectionCaptureRecoveryIfMatches,
+  persistNoteSelectionCaptureRecovery,
+  readNoteSelectionCaptureRecovery,
+  resolveBrowserSessionStorage,
+} from "./lib/noteSelectionCaptureRecovery";
 import {
   parseComposerDraftStorage,
   serializeComposerDraftStorage,
@@ -110,7 +125,10 @@ import {
 } from "./lib/transcript-find";
 import { textFromSelection } from "./lib/selection-capture";
 import { TranscriptFindBar } from "./components/chat/TranscriptFindBar";
-import type { SelectedNoteChip } from "./components/chat/NoteContextPicker";
+import type {
+  NoteSelectionCapture,
+  SelectedNoteChip,
+} from "./components/chat/NoteContextPicker";
 // Type-only: erased at compile time, so react-virtuoso itself stays lazy.
 import type { VirtuosoHandle } from "react-virtuoso";
 import {
@@ -132,8 +150,9 @@ import {
   boundedNoteIntentExclusions,
   noteAccessForTurn,
   NOTES_TEXT_ONLY_GUIDANCE,
-  notesSearchRequested,
+  notesSearchScopeState,
   notesTurnHasUnsupportedAnalysisContext,
+  shouldResetNotesSearchScope,
   uniqueSelectedNotes,
   withNoteAccess,
   withoutNoteAccess,
@@ -149,6 +168,7 @@ import {
   inferBisqueRootFromUrl,
   type BisqueNavLinks,
 } from "./features/auth/bisqueNavigation";
+import { requestAuthenticatedAccountDeparture } from "./features/auth/accountDeparture";
 import {
   createAdminOrganization,
   createAdminUser,
@@ -346,13 +366,17 @@ import {
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { toNumber, toRecord } from "./lib/coerce";
 import { queueEffectUpdate } from "./lib/queueEffectUpdate";
-import { showErrorToast, showSuccessToast, showUndoToast } from "./lib/toast";
+import { dismissAllToasts, dismissToast, showActionToast, showErrorToast, showSuccessToast, showUndoToast } from "./lib/toast";
 import { useThemePreference } from "./lib/useThemePreference";
 import {
+  appShellBannerVariant,
   MISSING_REQUESTED_CONVERSATION_MESSAGE,
+  MISSING_REQUESTED_CONVERSATION_NEW_MESSAGE,
+  selectLatestAvailableConversation,
   shouldShowAppShellBanner,
 } from "./features/app-shell-banner";
 import { dedupeBisqueResourceRows } from "./features/chat/bisque-resource-rows";
+import { mergeQueuedNoteSearchScopeOverride } from "./features/chat/queued-followup";
 import {
   HISTORY_PERIOD_ORDER,
   type HistoryItem,
@@ -384,6 +408,24 @@ type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
 type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
+type OwnedNoteSelectionCapture = NoteSelectionCapture & {
+  ownerScope: string | null;
+};
+const ownedNoteSelectionCaptureMatches = (
+  current: OwnedNoteSelectionCapture | null,
+  snapshot: OwnedNoteSelectionCapture
+): boolean => {
+  const currentAttempt = current?.attempt;
+  const snapshotAttempt = snapshot.attempt;
+  return (
+    current?.ownerScope === snapshot.ownerScope &&
+    current.idempotencyKey === snapshot.idempotencyKey &&
+    current.text === snapshot.text &&
+    currentAttempt?.note_id === snapshotAttempt?.note_id &&
+    currentAttempt?.expected_revision === snapshotAttempt?.expected_revision &&
+    currentAttempt?.idempotency_key === snapshotAttempt?.idempotency_key
+  );
+};
 type ActivePanel = "chat" | "resources" | "notes" | "admin" | "training" | "scientific-viewer";
 type ComposerIntelligenceMode = "high" | "pro";
 type BisqueResourceCounts = {
@@ -577,6 +619,10 @@ const LazyNoteContextPicker = lazyNamed(
   loadNoteContextPickerModule,
   "NoteContextPicker"
 );
+const LazyAddSelectionToNoteDialog = lazyNamed(
+  loadNoteContextPickerModule,
+  "AddSelectionToNoteDialog"
+);
 const LazyNoteRunContext = lazyNamed(
   loadNoteRunContextModule,
   "NoteRunContext"
@@ -674,6 +720,8 @@ type UiMessage = {
   noteReferences?: SelectedNoteChip[];
   /** Exact pasted/reference fragments that cannot mint Notes authority on retry/edit. */
   excludedNoteIntentText?: string[];
+  /** Explicit browser choice that overrides inferred one-turn Notes search. */
+  noteSearchScopeOverride?: boolean | null;
 };
 
 type BisqueViewerLink = {
@@ -704,6 +752,8 @@ type ConversationState = {
   queuedFollowupNotes: SelectedNoteChip[];
   /** Pasted/reference fragments that cannot grant authority to the queued turn. */
   queuedFollowupExcludedNoteIntentText: string[];
+  /** Explicit search choice sealed with the queued turn. */
+  queuedFollowupNoteSearchScopeOverride: boolean | null;
   prompt: string;
   messages: UiMessage[];
   pendingFiles: File[];
@@ -712,6 +762,8 @@ type ConversationState = {
   activeSelectionContext: SelectionContext | null;
   /** Browser-only labels for the exact one-turn Note references in selection context. */
   selectedNotes: SelectedNoteChip[];
+  /** Tri-state: null follows typed intent, true/false is an explicit UI choice. */
+  noteSearchScopeOverride: boolean | null;
   failedUploadPreviewIds: Record<string, true>;
   bisqueLinksByFileId: Record<string, BisqueViewerLink>;
   composerWorkflowPreset: ComposerWorkflowPresetState | null;
@@ -724,6 +776,7 @@ type ConversationState = {
 type TurnSubmissionOverride = {
   selectedNotes?: SelectedNoteChip[];
   excludedNoteIntentText?: string[];
+  noteSearchScopeOverride?: boolean | null;
   preserveComposerScope?: boolean;
   onNoteScopeFailure?: () => void;
 };
@@ -1354,6 +1407,7 @@ const createConversationState = (): ConversationState => {
     queuedFollowup: "",
     queuedFollowupNotes: [],
     queuedFollowupExcludedNoteIntentText: [],
+    queuedFollowupNoteSearchScopeOverride: null,
     prompt: "",
     messages: [],
     pendingFiles: [],
@@ -1361,6 +1415,7 @@ const createConversationState = (): ConversationState => {
     stagedUploadFileIds: [],
     activeSelectionContext: null,
     selectedNotes: [],
+    noteSearchScopeOverride: null,
     failedUploadPreviewIds: {},
     bisqueLinksByFileId: {},
     composerWorkflowPreset: toComposerWorkflowPresetState(
@@ -1738,6 +1793,10 @@ const toUiMessages = (value: unknown, fallbackTime: number): UiMessage[] => {
         excludedNoteIntentText: Array.isArray(row.excludedNoteIntentText)
           ? boundedNoteIntentExclusions(row.excludedNoteIntentText)
           : undefined,
+        noteSearchScopeOverride:
+          typeof row.noteSearchScopeOverride === "boolean"
+            ? row.noteSearchScopeOverride
+            : null,
       };
     })
     .filter((message) => !shouldDropHydratedLegacy404Message(message));
@@ -1811,6 +1870,10 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
     stagedUploadFileIds,
     activeSelectionContext: hydrated ? toSelectionContext(state.activeSelectionContext) : null,
     selectedNotes: hydrated ? toSelectedNoteChips(state.selectedNotes) : [],
+    noteSearchScopeOverride:
+      hydrated && typeof state.noteSearchScopeOverride === "boolean"
+        ? state.noteSearchScopeOverride
+        : null,
     failedUploadPreviewIds: hydrated ? toFailedPreviewIds(state.failedUploadPreviewIds) : {},
     bisqueLinksByFileId: hydrated ? toBisqueLinks(state.bisqueLinksByFileId) : {},
     composerWorkflowPreset: hydrated
@@ -1848,6 +1911,10 @@ const conversationFromRecord = (record: ConversationRecord): ConversationState =
       hydrated && Array.isArray(state.queuedFollowupExcludedNoteIntentText)
         ? boundedNoteIntentExclusions(state.queuedFollowupExcludedNoteIntentText)
         : [],
+    queuedFollowupNoteSearchScopeOverride:
+      hydrated && typeof state.queuedFollowupNoteSearchScopeOverride === "boolean"
+        ? state.queuedFollowupNoteSearchScopeOverride
+        : null,
   };
 };
 
@@ -1941,12 +2008,14 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
           resolvedBisqueResources: message.resolvedBisqueResources ?? [],
           noteReferences: message.noteReferences ?? [],
           excludedNoteIntentText: message.excludedNoteIntentText ?? [],
+          noteSearchScopeOverride: message.noteSearchScopeOverride ?? null,
         };
       }),
       uploadedFiles: conversation.uploadedFiles,
       stagedUploadFileIds: conversation.stagedUploadFileIds,
       activeSelectionContext: conversation.activeSelectionContext,
       selectedNotes: conversation.selectedNotes,
+      noteSearchScopeOverride: conversation.noteSearchScopeOverride,
       failedUploadPreviewIds: conversation.failedUploadPreviewIds,
       bisqueLinksByFileId: conversation.bisqueLinksByFileId,
       composerWorkflowPreset: conversation.composerWorkflowPreset,
@@ -1959,6 +2028,8 @@ const conversationToRecord = (conversation: ConversationState): ConversationReco
       queuedFollowupNotes: conversation.queuedFollowupNotes ?? [],
       queuedFollowupExcludedNoteIntentText:
         conversation.queuedFollowupExcludedNoteIntentText ?? [],
+      queuedFollowupNoteSearchScopeOverride:
+        conversation.queuedFollowupNoteSearchScopeOverride ?? null,
     },
   };
 };
@@ -5326,7 +5397,7 @@ function ComposerAttachMenu({
             <DropdownMenuItem onSelect={onOpenNotes}>
               <NotebookPen data-icon="inline-start" aria-hidden="true" />
               <div className="app-composer-attach-menu-item">
-                <span>Note</span>
+                <span>Use a note</span>
                 <span className="app-composer-attach-menu-detail">Use for this message</span>
               </div>
             </DropdownMenuItem>
@@ -5354,11 +5425,19 @@ export function App() {
   const [authUser, setAuthUser] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
   const [authProvider, setAuthProvider] = useState<AuthProvider>("local");
+  const [notesRecoveryScope, setNotesRecoveryScope] = useState<string | null>(null);
+  const notesRecoveryScopeRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    notesRecoveryScopeRef.current = notesRecoveryScope;
+  }, [notesRecoveryScope]);
   const [authIsAdmin, setAuthIsAdmin] = useState(false);
   const [bisqueCredentialsLinked, setBisqueCredentialsLinked] = useState(false);
   const [authError, setAuthError] = useState<string | null>(() => readAuthErrorFromLocation());
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [unsafeNotesDeparturePending, setUnsafeNotesDeparturePending] = useState<
+    "logout" | "unlink" | null
+  >(null);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
   // Private Notes never enter a model turn until the server explicitly
   // advertises the production read path. Missing/unreachable config is off.
@@ -5590,6 +5669,62 @@ export function App() {
   const [composerResourcesError, setComposerResourcesError] = useState<string | null>(null);
   const [composerResourcePickerOpen, setComposerResourcePickerOpen] = useState(false);
   const [composerNotePickerOpen, setComposerNotePickerOpen] = useState(false);
+  const [noteSelectionCapture, setNoteSelectionCapture] =
+    useState<OwnedNoteSelectionCapture | null>(null);
+  const noteSelectionCaptureRef = useRef<OwnedNoteSelectionCapture | null>(null);
+  useLayoutEffect(() => {
+    noteSelectionCaptureRef.current = noteSelectionCapture;
+  }, [noteSelectionCapture]);
+  const activeNoteSelectionCapture =
+    noteSelectionCapture?.ownerScope === notesRecoveryScope ? noteSelectionCapture : null;
+  const noteSelectionCaptureHydratedScopeRef = useRef<string | null>(null);
+  const noteSelectionDiscardInFlightRef = useRef<{
+    key: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const discardSelectionAppendAttemptRef = useRef<
+    ((snapshot: OwnedNoteSelectionCapture, clearCapture: boolean) => Promise<void>) | null
+  >(null);
+  const [noteSelectionDialogOpen, setNoteSelectionDialogOpen] = useState(false);
+  const [notesInitialDraft, setNotesInitialDraft] = useState<{
+    key: string;
+    bodyMarkdown: string;
+  } | null>(null);
+  const notesLogoutFlushRef = useRef<(() => Promise<boolean>) | null>(null);
+  const handleNotesLogoutFlushReady = useCallback(
+    (flush: (() => Promise<boolean>) | null): void => {
+      // Keep the last serialized writer after the lazy Notes panel unmounts.
+      // Its cleanup may still be saving while the user switches to Chat and
+      // immediately signs out. A remount replaces this handoff; null cleanup
+      // never erases a newer/live writer.
+      if (flush) notesLogoutFlushRef.current = flush;
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (authStatus !== "authenticated" || !notesRecoveryScope) {
+      noteSelectionCaptureHydratedScopeRef.current = null;
+      return;
+    }
+    if (noteSelectionCaptureHydratedScopeRef.current === notesRecoveryScope) return;
+    noteSelectionCaptureHydratedScopeRef.current = notesRecoveryScope;
+    const previousCapture = noteSelectionCaptureRef.current;
+    if (previousCapture && previousCapture.ownerScope !== notesRecoveryScope) {
+      dismissToast(`note-selection-paused:${previousCapture.idempotencyKey}`);
+    }
+    const recovered = readNoteSelectionCaptureRecovery(
+      resolveBrowserSessionStorage(),
+      notesRecoveryScope
+    );
+    setNoteSelectionCapture((current) => {
+      if (current?.ownerScope === notesRecoveryScope) return current;
+      const next = recovered ? { ...recovered, ownerScope: notesRecoveryScope } : null;
+      noteSelectionCaptureRef.current = next;
+      return next;
+    });
+    if (recovered) setNoteSelectionDialogOpen(false);
+  }, [authStatus, notesRecoveryScope]);
   const [activeComposerResourceId, setActiveComposerResourceId] = useState<string | null>(null);
   const [composerResourcePickerSelection, setComposerResourcePickerSelection] = useState<
     Record<string, ResourceRecord>
@@ -5655,6 +5790,7 @@ export function App() {
     prompt: string;
     selectedNotes: SelectedNoteChip[];
     excludedNoteIntentText: string[];
+    noteSearchScopeOverride: boolean | null;
     onNoteScopeFailure: () => void;
   } | null>(null);
   const [initialComposerDraftStorage] = useState(readComposerDraftsFromStorage);
@@ -5947,7 +6083,7 @@ export function App() {
       const currentConversation = conversations.find(
         (conversation) => conversation.id === normalizedConversationId
       );
-      if (!currentConversation || currentConversation.hydrated) {
+      if (currentConversation?.hydrated) {
         return;
       }
       if (hydratingConversationIdsRef.current.has(normalizedConversationId)) {
@@ -5961,12 +6097,48 @@ export function App() {
           mergeConversationPage(previous, [hydratedConversation])
         );
       } catch (error) {
-        setUiErrorBanner(`Failed to load chat: ${normalizeApiError(error)}`);
+        if (error instanceof ApiError && error.status === 404) {
+          const existingFallbackConversation = selectLatestAvailableConversation(
+            conversations,
+            normalizedConversationId,
+            shouldExposeConversationInUrl
+          );
+          const fallbackConversation =
+            existingFallbackConversation ?? createConversationState();
+          if (!conversations.some((conversation) => conversation.id === fallbackConversation.id)) {
+            optimisticConversationIdsRef.current.add(fallbackConversation.id);
+          }
+          conversationSnapshotWriter.cancelPending(normalizedConversationId);
+          delete persistedConversationHashesRef.current[normalizedConversationId];
+          setConversations((previous) => {
+            const withoutMissing = previous.filter(
+              (conversation) => conversation.id !== normalizedConversationId
+            );
+            return withoutMissing.some(
+              (conversation) => conversation.id === fallbackConversation.id
+            )
+              ? withoutMissing
+              : [fallbackConversation, ...withoutMissing];
+          });
+          setActiveConversationId(fallbackConversation.id);
+          replaceConversationIdInLocation(
+            shouldExposeConversationInUrl(fallbackConversation)
+              ? fallbackConversation.id
+              : null
+          );
+          setUiErrorBanner(
+            existingFallbackConversation
+              ? MISSING_REQUESTED_CONVERSATION_MESSAGE
+              : MISSING_REQUESTED_CONVERSATION_NEW_MESSAGE
+          );
+        } else {
+          setUiErrorBanner(`Failed to load chat: ${normalizeApiError(error)}`);
+        }
       } finally {
         hydratingConversationIdsRef.current.delete(normalizedConversationId);
       }
     },
-    [apiClient, conversations]
+    [apiClient, conversations, conversationSnapshotWriter]
   );
 
   const loadMoreConversations = useCallback(async (): Promise<void> => {
@@ -6053,6 +6225,7 @@ export function App() {
             null;
           setAuthStatus("authenticated");
           setAuthUser(sessionUser);
+          setNotesRecoveryScope(noteRecoveryScopeFromSession(session));
           setAuthMode(
             session.mode === "guest"
               ? "guest"
@@ -6067,6 +6240,7 @@ export function App() {
         }
         setAuthStatus("unauthenticated");
         setAuthUser(null);
+        setNotesRecoveryScope(null);
         setAuthMode(null);
         setAuthIsAdmin(false);
         setBisqueCredentialsLinked(false);
@@ -6079,6 +6253,7 @@ export function App() {
         setAuthProvider("local");
         setAuthStatus("unauthenticated");
         setAuthUser(null);
+        setNotesRecoveryScope(null);
         setAuthMode(null);
         setAuthIsAdmin(false);
         setBisqueCredentialsLinked(false);
@@ -6179,7 +6354,6 @@ export function App() {
             }
             if (error instanceof ApiError && error.status === 404) {
               missingRequestedConversationId = targetConversationId;
-              setUiErrorBanner(MISSING_REQUESTED_CONVERSATION_MESSAGE);
             } else {
               setUiErrorBanner(`Failed to open chat from URL: ${normalizeApiError(error)}`);
             }
@@ -6191,6 +6365,10 @@ export function App() {
           optimisticConversationIdsRef.current.add(seed.id);
           setConversations([seed]);
           setActiveConversationId(seed.id);
+          if (missingRequestedConversationId) {
+            replaceConversationIdInLocation(null);
+            setUiErrorBanner(MISSING_REQUESTED_CONVERSATION_NEW_MESSAGE);
+          }
           persistedConversationHashesRef.current = {};
           setConversationsHydrated(true);
           return;
@@ -6215,7 +6393,22 @@ export function App() {
         Object.entries(hydratedHashes).forEach(([conversationId, fingerprint]) => {
           conversationSnapshotWriter.seedAcknowledged(conversationId, fingerprint);
         });
+        const missingConversationFallback = missingRequestedConversationId
+          ? mergedConversations.find((conversation) => conversation.hydrated) ??
+            mergedConversations[0]
+          : null;
+        if (missingConversationFallback) {
+          replaceConversationIdInLocation(
+            shouldExposeConversationInUrl(missingConversationFallback)
+              ? missingConversationFallback.id
+              : null
+          );
+          setUiErrorBanner(MISSING_REQUESTED_CONVERSATION_MESSAGE);
+        }
         setActiveConversationId((current) => {
+          if (missingConversationFallback) {
+            return missingConversationFallback.id;
+          }
           if (
             targetConversationId &&
             mergedConversations.some((conversation) => conversation.id === targetConversationId)
@@ -7006,6 +7199,55 @@ export function App() {
         showErrorToast("Remove a Note before adding another. Up to eight Notes can be used per message.");
         return;
       }
+      const unsupportedContext = notesTurnHasUnsupportedAnalysisContext({
+        pendingFileCount: activeConversation.pendingFiles.length,
+        activeUploadCount: activeConversation.stagedUploadFileIds.length,
+        selectionContext: activeConversation.activeSelectionContext,
+        workflowSelected: Boolean(activeConversation.composerWorkflowPreset),
+        selectedToolNames: activeConversation.composerWorkflowPreset?.selectedToolNames ?? [],
+      });
+      if (unsupportedContext) {
+        showErrorToast(NOTES_TEXT_ONLY_GUIDANCE, {
+          action: {
+            label: "Use Note instead",
+            onClick: () => {
+              updateConversation(activeConversation.id, (conversation) => {
+                if (conversation.queuedFollowup) {
+                  return {
+                    ...conversation,
+                    updatedAt: Date.now(),
+                    pendingFiles: [],
+                    stagedUploadFileIds: [],
+                    activeSelectionContext: null,
+                    composerWorkflowPreset: null,
+                    queuedFollowupNotes: mergeSelectedNoteChips(
+                      conversation.queuedFollowupNotes,
+                      [note]
+                    ),
+                  };
+                }
+                const selectedNotes = mergeSelectedNoteChips(
+                  conversation.selectedNotes,
+                  [note]
+                );
+                return {
+                  ...conversation,
+                  updatedAt: Date.now(),
+                  pendingFiles: [],
+                  stagedUploadFileIds: [],
+                  composerWorkflowPreset: null,
+                  selectedNotes,
+                  activeSelectionContext: noteSelectionContextForChips(null, selectedNotes),
+                };
+              });
+              setComposerNotePickerOpen(false);
+              setActivePanel("chat");
+              window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+            },
+          },
+        });
+        return;
+      }
       updateConversation(activeConversation.id, (conversation) => {
         if (conversation.queuedFollowup) {
           return {
@@ -7077,6 +7319,25 @@ export function App() {
     [updateActiveConversation]
   );
 
+  const removeQueuedNoteSearchScope = useCallback((): void => {
+    const conversationId = activeConversation?.id;
+    if (!conversationId) return;
+    const previousOverride =
+      activeConversation.queuedFollowupNoteSearchScopeOverride;
+    updateConversation(conversationId, (conversation) => ({
+      ...conversation,
+      updatedAt: Date.now(),
+      queuedFollowupNoteSearchScopeOverride: false,
+    }));
+    showUndoToast("Notes search removed for this queued message", () => {
+      updateConversation(conversationId, (conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        queuedFollowupNoteSearchScopeOverride: previousOverride,
+      }));
+    });
+  }, [activeConversation, updateConversation]);
+
   // Single entry point for attaching files to the active conversation — used
   // by the composer FileUpload (pickers + card drops) and the window-level
   // chat drop overlay, so every path shares identical pending-file semantics.
@@ -7095,12 +7356,68 @@ export function App() {
         );
         return;
       }
+      if (activeConversation && modelNotesReadEnabled) {
+        const queued = Boolean(activeConversation.queuedFollowup);
+        const draftText = queued
+          ? activeConversation.queuedFollowup
+          : Object.prototype.hasOwnProperty.call(
+                composerDraftsByConversationId,
+                activeConversation.id
+              )
+            ? composerDraftsByConversationId[activeConversation.id] ?? ""
+            : activeConversation.prompt;
+        const excludedText = queued
+          ? activeConversation.queuedFollowupExcludedNoteIntentText
+          : pastedComposerTextByConversationRef.current.get(activeConversation.id) ?? [];
+        const scopeOverride = queued
+          ? activeConversation.queuedFollowupNoteSearchScopeOverride
+          : activeConversation.noteSearchScopeOverride;
+        const selectedNotes = queued
+          ? activeConversation.queuedFollowupNotes
+          : activeConversation.selectedNotes;
+        const hasNotesContext =
+          selectedNotes.length > 0 ||
+          notesSearchScopeState(draftText, excludedText, scopeOverride).active;
+        if (hasNotesContext) {
+          showErrorToast(NOTES_TEXT_ONLY_GUIDANCE, {
+            action: {
+              label: "Use files instead",
+              onClick: () => {
+                updateConversation(activeConversation.id, (conversation) => ({
+                  ...conversation,
+                  updatedAt: Date.now(),
+                  pendingFiles: [...conversation.pendingFiles, ...files],
+                  ...(conversation.queuedFollowup
+                    ? {
+                        queuedFollowupNotes: [],
+                        queuedFollowupNoteSearchScopeOverride: false,
+                      }
+                    : {
+                        selectedNotes: [],
+                        noteSearchScopeOverride: false,
+                        activeSelectionContext: withoutNoteAccess(
+                          conversation.activeSelectionContext
+                        ),
+                      }),
+                }));
+              },
+            },
+          });
+          return;
+        }
+      }
       updateActiveConversation((conversation) => ({
         ...conversation,
         pendingFiles: [...conversation.pendingFiles, ...files],
       }));
     },
-    [activeConversation, updateActiveConversation]
+    [
+      activeConversation,
+      composerDraftsByConversationId,
+      modelNotesReadEnabled,
+      updateActiveConversation,
+      updateConversation,
+    ]
   );
 
   /* A paste that reads as data rather than prompt (see shouldAttachPastedText)
@@ -7641,12 +7958,14 @@ export function App() {
     setAuthSubmitting(true);
     setAuthError(null);
     setAuthNotice(null);
+    setUnsafeNotesDeparturePending(null);
     try {
       const session = await apiClient.loginBisque(payload);
       if (!session.authenticated) {
         throw new Error("Authentication did not complete.");
       }
       setAuthUser(String(session.username ?? payload.username).trim() || payload.username);
+      setNotesRecoveryScope(noteRecoveryScopeFromSession(session));
       setAuthMode(session.mode === "workos" ? "workos" : "bisque");
       setAuthProvider(
         session.provider === "workos" || session.mode === "workos" ? "workos" : "local"
@@ -7658,6 +7977,7 @@ export function App() {
     } catch (error) {
       setAuthStatus("unauthenticated");
       setAuthUser(null);
+      setNotesRecoveryScope(null);
       setAuthMode(null);
       setAuthIsAdmin(false);
       setBisqueCredentialsLinked(false);
@@ -7684,6 +8004,7 @@ export function App() {
     } catch (error) {
       setAuthStatus("unauthenticated");
       setAuthUser(null);
+      setNotesRecoveryScope(null);
       setAuthMode(null);
       setAuthIsAdmin(false);
       setBisqueCredentialsLinked(false);
@@ -7746,6 +8067,7 @@ export function App() {
         setBisqueNavLinks(buildBisqueNavLinks(sessionBisqueRoot));
       }
       setAuthUser(String(session.username ?? payload.username).trim() || payload.username);
+      setNotesRecoveryScope(noteRecoveryScopeFromSession(session));
       setAuthMode(session.mode === "workos" ? "workos" : "bisque");
       setAuthProvider(
         session.provider === "workos" || session.mode === "workos" ? "workos" : "local"
@@ -7791,6 +8113,7 @@ export function App() {
         throw new Error("Account request unexpectedly returned an authenticated session.");
       }
       setAuthUser(null);
+      setNotesRecoveryScope(null);
       setAuthMode(null);
       setAuthIsAdmin(false);
       setBisqueCredentialsLinked(false);
@@ -7802,6 +8125,7 @@ export function App() {
     } catch (error) {
       setAuthStatus("unauthenticated");
       setAuthUser(null);
+      setNotesRecoveryScope(null);
       setAuthMode(null);
       setAuthIsAdmin(false);
       setBisqueCredentialsLinked(false);
@@ -7814,17 +8138,30 @@ export function App() {
   };
 
   const clearAuthViewState = useCallback((): void => {
+    dismissAllToasts();
+    const captureToHide = noteSelectionCaptureRef.current;
+    if (captureToHide) {
+      dismissToast(`note-selection-paused:${captureToHide.idempotencyKey}`);
+    }
+    noteSelectionCaptureRef.current = null;
+    notesLogoutFlushRef.current = null;
     setAuthStatus("unauthenticated");
     setAuthUser(null);
+    setNotesRecoveryScope(null);
     setAuthMode(null);
     setAuthIsAdmin(false);
     setBisqueCredentialsLinked(false);
     setAuthError(null);
     setAuthNotice(null);
+    setUnsafeNotesDeparturePending(null);
     setBisqueResourceCountsState({ requestKey: "", counts: null });
     setComposerDraftsByConversationId({});
     setComposerDraftExcludedNoteIntentTextByConversationId({});
     pastedComposerTextByConversationRef.current.clear();
+    setSelectionAsk(null);
+    setNoteSelectionCapture(null);
+    setNoteSelectionDialogOpen(false);
+    setNotesInitialDraft(null);
     setConversations([]);
     setActiveConversationId(null);
     setConversationsHydrated(false);
@@ -7871,6 +8208,37 @@ export function App() {
         .getBisqueSession()
         .then((session) => {
           if (session.authenticated) {
+            const nextScope = noteRecoveryScopeFromSession(session);
+            if (nextScope !== notesRecoveryScope) {
+              // A definitive authenticated principal change is an account
+              // boundary, not a routine session refresh. Remove every owner-
+              // bound cache/view before applying B so A's transcript,
+              // resources, admin data, and Note affordances never flash in B.
+              clearAuthViewState();
+              setNotesRecoveryScope(nextScope);
+              const sessionUser =
+                String(session.username ?? "").trim() ||
+                String(session.user?.email ?? "").trim() ||
+                String(session.user?.username ?? "").trim() ||
+                String(session.user?.id ?? "").trim() ||
+                null;
+              setAuthUser(sessionUser);
+              setAuthStatus("authenticated");
+              setAuthMode(
+                session.mode === "guest"
+                  ? "guest"
+                  : session.mode === "workos"
+                    ? "workos"
+                    : "bisque"
+              );
+              setAuthProvider(
+                session.provider === "workos" || session.mode === "workos"
+                  ? "workos"
+                  : "local"
+              );
+              setAuthIsAdmin(Boolean(session.is_admin));
+              setBisqueCredentialsLinked(Boolean(session.bisque_linked));
+            }
             return;
           }
           clearAuthViewState();
@@ -7882,26 +8250,86 @@ export function App() {
     return () => {
       document.removeEventListener("visibilitychange", revalidateSession);
     };
-  }, [apiClient, authStatus, clearAuthViewState]);
+  }, [apiClient, authStatus, clearAuthViewState, notesRecoveryScope]);
 
-  const logoutBisque = useCallback(async (): Promise<void> => {
-    let logoutUrl = "";
+  const leaveAuthenticatedAccount = useCallback(async (
+    departure: "logout" | "unlink",
+    discardUnconfirmed = false
+  ): Promise<void> => {
+    const logoutScope = notesRecoveryScope;
+    const selectionSnapshot = activeNoteSelectionCapture;
+    if (selectionSnapshot?.attempt) {
+      try {
+        const reconcileAndClear = discardSelectionAppendAttemptRef.current;
+        if (!reconcileAndClear) return;
+        await reconcileAndClear(selectionSnapshot, true);
+      } catch (error) {
+        setNoteSelectionDialogOpen(true);
+        showErrorToast(
+          error instanceof Error
+            ? `Couldn’t safely finish the paused Note add — ${error.message}`
+            : "Couldn’t safely finish the paused Note add. Stay signed in and retry."
+        );
+        return;
+      }
+    } else {
+      clearNoteSelectionCaptureRecovery(
+        resolveBrowserSessionStorage(),
+        selectionSnapshot?.ownerScope ?? logoutScope
+      );
+    }
+
+    let noteDraftsConfirmed = discardUnconfirmed || !notesLogoutFlushRef.current;
+    const flushNotes = notesLogoutFlushRef.current;
+    if (!discardUnconfirmed && flushNotes) {
+      try {
+        // Account departure cannot race an uncancelable create/PATCH. Await
+        // the real serialized writer so purge is never authorized while a
+        // response may still arrive and change the server outcome.
+        noteDraftsConfirmed = await flushNotes();
+      } catch {
+        noteDraftsConfirmed = false;
+      }
+    }
+    if (noteDraftsConfirmed) {
+      purgeAndDisableNoteDraftRecovery(resolveBrowserLocalStorage(), logoutScope);
+    }
+    if (!noteDraftsConfirmed) {
+      setUnsafeNotesDeparturePending(departure);
+      return;
+    }
+
+    setUnsafeNotesDeparturePending(null);
+
+    let logoutUrl: string;
     try {
-      const session = await apiClient.logoutBisque();
-      logoutUrl = String(session.logout_url ?? "").trim();
+      logoutUrl = await requestAuthenticatedAccountDeparture(apiClient, departure);
     } catch {
-      // If logout endpoint fails, still clear local auth view state.
+      // The server may still hold a valid session. Keep the protected account
+      // view mounted, re-enable device recovery for subsequent edits, and let
+      // the person retry instead of presenting a false signed-out state.
+      enableNoteDraftRecoveryScope(logoutScope);
+      showErrorToast(
+        departure === "logout"
+          ? "Couldn’t sign out. You’re still signed in; try again."
+          : "Couldn’t unlink this account. You’re still signed in; try again."
+      );
+      return;
     }
     clearAuthViewState();
     if (logoutUrl && typeof window !== "undefined") {
       window.location.assign(logoutUrl);
     }
-  }, [apiClient, clearAuthViewState]);
+  }, [activeNoteSelectionCapture, apiClient, clearAuthViewState, notesRecoveryScope]);
+
+  const logoutBisque = useCallback(
+    async (): Promise<void> => await leaveAuthenticatedAccount("logout"),
+    [leaveAuthenticatedAccount]
+  );
 
   const unlinkBisqueAccount = useCallback(async (): Promise<void> => {
-    await apiClient.unlinkBisqueAccount();
-    clearAuthViewState();
-  }, [apiClient, clearAuthViewState]);
+    await leaveAuthenticatedAccount("unlink");
+  }, [leaveAuthenticatedAccount]);
 
   const promptBisqueAuthentication = useCallback(async (message: string): Promise<void> => {
     const nextMessage = message.trim() || "BisQue authentication is required.";
@@ -8483,6 +8911,61 @@ export function App() {
     )
       ? composerDraftsByConversationId[activeConversation.id] ?? ""
       : activeConversation?.prompt ?? "";
+  const activeExcludedNoteIntentText = activeConversation
+    ? composerDraftExcludedNoteIntentTextByConversationId[activeConversation.id] ?? []
+    : EMPTY_STRING_ARRAY;
+  const activeNoteSearchScope = notesSearchScopeState(
+    activePrompt,
+    activeExcludedNoteIntentText,
+    activeConversation?.noteSearchScopeOverride ?? null
+  );
+  const activeQueuedNoteSearchScope = Boolean(
+    activeConversation?.queuedFollowup &&
+      notesSearchScopeState(
+        activeConversation.queuedFollowup,
+        activeConversation.queuedFollowupExcludedNoteIntentText,
+        activeConversation.queuedFollowupNoteSearchScopeOverride
+      ).active
+  );
+
+  useEffect(() => {
+    const conversationId = activeConversation?.id;
+    const override = activeConversation?.noteSearchScopeOverride ?? null;
+    if (!conversationId || !shouldResetNotesSearchScope(activePrompt, override)) {
+      return;
+    }
+    setPastedComposerTextForConversation(conversationId, []);
+    updateActiveConversation((conversation) => ({
+      ...conversation,
+      updatedAt: Date.now(),
+      noteSearchScopeOverride: null,
+    }));
+  }, [
+    activeConversation?.id,
+    activeConversation?.noteSearchScopeOverride,
+    activePrompt,
+    setPastedComposerTextForConversation,
+    updateActiveConversation,
+  ]);
+
+  const setActiveNoteSearchScopeOverride = useCallback(
+    (value: boolean | null): void => {
+      updateActiveConversation((conversation) => ({
+        ...conversation,
+        updatedAt: Date.now(),
+        noteSearchScopeOverride: value,
+      }));
+      window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+    },
+    [updateActiveConversation]
+  );
+  const removeActiveNoteSearchScope = useCallback((): void => {
+    const previousOverride = activeConversation?.noteSearchScopeOverride ?? null;
+    setActiveNoteSearchScopeOverride(false);
+    showUndoToast("Notes search removed for this message", () => {
+      setActiveNoteSearchScopeOverride(previousOverride);
+    });
+  }, [activeConversation?.noteSearchScopeOverride, setActiveNoteSearchScopeOverride]);
 
   // Slim-composer threshold: the pill holds one calm line while the prompt
   // fits; the moment content wraps (or a newline arrives) it expands, and it
@@ -11777,6 +12260,161 @@ export function App() {
     focusComposerTextarea();
   }, [attachPastedText, focusComposerTextarea, selectionAsk, setActivePromptValue]);
 
+  const addSelectionToNote = useCallback((): void => {
+    const capture = selectionAsk;
+    setSelectionAsk(null);
+    if (!capture) return;
+    window.getSelection()?.removeAllRanges();
+    if (activeNoteSelectionCapture?.attempt) {
+      setNoteSelectionDialogOpen(true);
+      showActionToast("Finish the earlier Note add first", {
+        description: `Your earlier selection and target “${activeNoteSelectionCapture.attempt.note_title}” are still protected.`,
+        duration: 5000,
+      });
+      return;
+    }
+    const nextCapture: OwnedNoteSelectionCapture = {
+      text: capture.text,
+      idempotencyKey: `selection:${makeId()}`,
+      ownerScope: notesRecoveryScope,
+    };
+    noteSelectionCaptureRef.current = nextCapture;
+    setNoteSelectionCapture(nextCapture);
+    setNoteSelectionDialogOpen(true);
+  }, [activeNoteSelectionCapture, notesRecoveryScope, selectionAsk]);
+
+  const discardSelectionAppendAttempt = useCallback(
+    async (snapshot: OwnedNoteSelectionCapture, clearCapture: boolean): Promise<void> => {
+      const attempt = snapshot.attempt;
+      if (!attempt) return;
+      const lockKey = `${snapshot.ownerScope ?? ""}\u0000${snapshot.idempotencyKey}\u0000${attempt.note_id}\u0000${attempt.expected_revision}\u0000${attempt.idempotency_key}`;
+      const inFlight = noteSelectionDiscardInFlightRef.current;
+      if (inFlight) {
+        if (inFlight.key !== lockKey) {
+          throw new Error("Finish resolving the previous Note add before discarding another one.");
+        }
+        await inFlight.promise;
+        return;
+      }
+
+      const promise = (async (): Promise<void> => {
+        const reconciledReceipt = await reconcileAndUndoNoteSelectionAppend(apiClient, {
+          text: snapshot.text,
+          attempt,
+        });
+
+        clearNoteSelectionCaptureRecoveryIfMatches(
+          resolveBrowserSessionStorage(),
+          snapshot.ownerScope,
+          {
+            captureKey: snapshot.idempotencyKey,
+            appendKey: attempt.idempotency_key,
+          }
+        );
+
+        if (!ownedNoteSelectionCaptureMatches(noteSelectionCaptureRef.current, snapshot)) {
+          return;
+        }
+
+        setNoteSelectionCapture((current) => {
+          if (!current || !ownedNoteSelectionCaptureMatches(current, snapshot)) return current;
+          const next: OwnedNoteSelectionCapture | null = clearCapture
+            ? null
+            : { ...current, attempt: undefined };
+          noteSelectionCaptureRef.current = next;
+          return next;
+        });
+        if (reconciledReceipt) handleNoteChanged();
+      })();
+
+      noteSelectionDiscardInFlightRef.current = { key: lockKey, promise };
+      try {
+        await promise;
+      } finally {
+        if (noteSelectionDiscardInFlightRef.current?.promise === promise) {
+          noteSelectionDiscardInFlightRef.current = null;
+        }
+      }
+    },
+    [apiClient, handleNoteChanged]
+  );
+  useLayoutEffect(() => {
+    discardSelectionAppendAttemptRef.current = discardSelectionAppendAttempt;
+  }, [discardSelectionAppendAttempt]);
+
+  const handleSelectionAddedToNote = useCallback(
+    (snapshot: OwnedNoteSelectionCapture, receipt: NoteDirectAppendReceipt): void => {
+      if (!ownedNoteSelectionCaptureMatches(noteSelectionCaptureRef.current, snapshot)) {
+        return;
+      }
+      const pauseToastId = `note-selection-paused:${snapshot.idempotencyKey}`;
+      clearNoteSelectionCaptureRecoveryIfMatches(
+        resolveBrowserSessionStorage(),
+        snapshot.ownerScope,
+        {
+          captureKey: snapshot.idempotencyKey,
+          appendKey: snapshot.attempt?.idempotency_key,
+        }
+      );
+      noteSelectionCaptureRef.current = null;
+      setNoteSelectionCapture(null);
+      setNoteSelectionDialogOpen(false);
+      handleNoteChanged();
+      showSuccessToast(`Added to “${receipt.note_title}”`, {
+        id: pauseToastId,
+        duration: 10000,
+        action: {
+          label: "Undo",
+          onClick: () => {
+            if (notesRecoveryScopeRef.current !== snapshot.ownerScope) return;
+            void apiClient
+              .undoDirectNoteAppendOperation(receipt.operation_id)
+              .then(() => {
+                if (notesRecoveryScopeRef.current !== snapshot.ownerScope) return;
+                handleNoteChanged();
+                showSuccessToast(`Removed from “${receipt.note_title}”`);
+              })
+              .catch((error: unknown) => {
+                if (notesRecoveryScopeRef.current !== snapshot.ownerScope) return;
+                showErrorToast(
+                  error instanceof Error
+                    ? error.message
+                    : "This note changed, so the append can’t be undone automatically."
+                );
+              });
+          },
+        },
+        cancel: {
+          label: "Open",
+          onClick: () => {
+            if (notesRecoveryScopeRef.current === snapshot.ownerScope) {
+              openSpecificNote(receipt.note_id);
+            }
+          },
+        },
+      });
+    },
+    [apiClient, handleNoteChanged, openSpecificNote]
+  );
+
+  const startNoteFromSelection = useCallback(
+    (text: string): void => {
+      if (activeNoteSelectionCapture) {
+        clearNoteSelectionCaptureRecoveryIfMatches(
+          resolveBrowserSessionStorage(),
+          activeNoteSelectionCapture.ownerScope,
+          { captureKey: activeNoteSelectionCapture.idempotencyKey }
+        );
+      }
+      noteSelectionCaptureRef.current = null;
+      setNoteSelectionCapture(null);
+      setNoteSelectionDialogOpen(false);
+      setNotesInitialDraft({ key: makeId(), bodyMarkdown: text });
+      openNotesPanel();
+    },
+    [activeNoteSelectionCapture, openNotesPanel]
+  );
+
   useEffect(() => {
     if (
       authStatus !== "authenticated" ||
@@ -11790,9 +12428,9 @@ export function App() {
       setSelectionAsk(null);
       return;
     }
-    /* Reads the live selection and produces the chip's anchor, or null.
-       Restricted to `.pk-message` at BOTH ends so sidebar titles, composer
-       internals and stray UI text never grow a chip. */
+      /* Reads the live selection and produces the chip's anchor, or null.
+         Both endpoints must resolve to the same message-content root so a drag
+         across turns cannot capture captions, actions, or another message. */
     const measureSelection = (): { text: string; x: number; y: number } | null => {
       // A dialog above the transcript, or a composer that cannot accept a
       // quote yet (conversation still hydrating), means no offer.
@@ -11810,12 +12448,15 @@ export function App() {
       if (!text.trim()) {
         return null;
       }
-      const withinMessage = (node: Node | null): boolean => {
+      const messageContentRoot = (node: Node | null): Element | null => {
         const element =
           node instanceof Element ? node : (node?.parentElement ?? null);
-        return Boolean(element?.closest(".pk-message"));
+        const root = element?.closest(".pk-message-content") ?? null;
+        return root?.closest(".pk-message") ? root : null;
       };
-      if (!withinMessage(selection.anchorNode) || !withinMessage(selection.focusNode)) {
+      const anchorRoot = messageContentRoot(selection.anchorNode);
+      const focusRoot = messageContentRoot(selection.focusNode);
+      if (!anchorRoot || anchorRoot !== focusRoot) {
         return null;
       }
       const rect = selection.getRangeAt(0).getBoundingClientRect();
@@ -11837,7 +12478,7 @@ export function App() {
         text,
         // Clamped so the chip never slides off-viewport on selections that
         // start at the edge; it renders translate(-50%, -100%) from this point.
-        x: Math.min(Math.max(rect.left + rect.width / 2, 72), window.innerWidth - 72),
+        x: Math.min(Math.max(rect.left + rect.width / 2, 120), window.innerWidth - 120),
         y: Math.max(rect.top, 44),
       };
     };
@@ -12277,6 +12918,7 @@ export function App() {
       const previousDeletedRunIds = conversation.deletedRunIds ?? [];
       const previousDraft = conversation.prompt;
       const previousSelectedNotes = conversation.selectedNotes;
+      const previousNoteSearchScopeOverride = conversation.noteSearchScopeOverride;
       const previousSelectionContext = conversation.activeSelectionContext;
       const previousPastedText =
         pastedComposerTextByConversationRef.current.get(conversationId) ?? [];
@@ -12285,6 +12927,10 @@ export function App() {
       const historicalExcludedNoteIntentText = boundedNoteIntentExclusions(
         messageToEdit?.excludedNoteIntentText ?? []
       );
+      const historicalNoteSearchScopeOverride =
+        typeof messageToEdit?.noteSearchScopeOverride === "boolean"
+          ? messageToEdit.noteSearchScopeOverride
+          : null;
       void (async () => {
         const noteReferences = await resealTurnNotes(conversationId, historicalReferences);
         if (!noteReferences || activeConversationIdentityRef.current !== conversationId) return;
@@ -12293,6 +12939,7 @@ export function App() {
           ...current,
           updatedAt: Date.now(),
           selectedNotes: noteReferences,
+          noteSearchScopeOverride: historicalNoteSearchScopeOverride,
           activeSelectionContext: noteSelectionContextForChips(
             current.activeSelectionContext,
             noteReferences
@@ -12315,6 +12962,7 @@ export function App() {
             messages: previousMessages,
             deletedRunIds: previousDeletedRunIds,
             selectedNotes: previousSelectedNotes,
+            noteSearchScopeOverride: previousNoteSearchScopeOverride,
             activeSelectionContext: previousSelectionContext,
           }));
           if (previousPastedText.length > 0) {
@@ -12387,9 +13035,14 @@ export function App() {
         ...(originatingUserMessage.excludedNoteIntentText ?? []),
         ...turnExcludedNoteIntentText,
       ]);
+      const historicalNoteSearchScopeOverride =
+        typeof originatingUserMessage.noteSearchScopeOverride === "boolean"
+          ? originatingUserMessage.noteSearchScopeOverride
+          : null;
       const conversationId = conversation.id;
       const previousMessages = conversation.messages;
       const previousSelectedNotes = conversation.selectedNotes;
+      const previousNoteSearchScopeOverride = conversation.noteSearchScopeOverride;
       const previousSelectionContext = conversation.activeSelectionContext;
       const resealKey = `retry:${conversationId}:${assistantMessageId}`;
       if (noteTurnResealInFlightRef.current.has(resealKey)) return;
@@ -12406,6 +13059,7 @@ export function App() {
           sending: false,
           streamingMessageId: null,
           selectedNotes: noteReferences,
+          noteSearchScopeOverride: historicalNoteSearchScopeOverride,
           activeSelectionContext: noteSelectionContextForChips(
             current.activeSelectionContext,
             noteReferences
@@ -12429,12 +13083,14 @@ export function App() {
             prompt,
             selectedNotes: noteReferences,
             excludedNoteIntentText: historicalExcludedNoteIntentText,
+            noteSearchScopeOverride: historicalNoteSearchScopeOverride,
             onNoteScopeFailure: () => {
               updateConversation(conversationId, (current) => ({
                 ...current,
                 updatedAt: Date.now(),
                 messages: previousMessages,
                 selectedNotes: previousSelectedNotes,
+                noteSearchScopeOverride: previousNoteSearchScopeOverride,
                 activeSelectionContext: previousSelectionContext,
               }));
             },
@@ -12514,7 +13170,6 @@ export function App() {
       openSpecificNote,
       handleNoteChanged,
       retryAssistantResponse,
-      setActivePromptValue,
       stopActiveConversation,
       toggleReportDocument,
     ]
@@ -12555,10 +13210,15 @@ export function App() {
       turnOverride?.excludedNoteIntentText ??
       pastedComposerTextByConversationRef.current.get(conversation.id) ??
       [];
+    const noteSearchScopeOverrideForTurn =
+      turnOverride?.noteSearchScopeOverride !== undefined
+        ? turnOverride.noteSearchScopeOverride
+        : conversation.noteSearchScopeOverride;
     const requestedNoteAccess = noteAccessForTurn(
       text,
       noteReferencesAtSubmit,
-      excludedNoteIntentTextForTurn
+      excludedNoteIntentTextForTurn,
+      noteSearchScopeOverrideForTurn
     );
     const bisqueUrls = extractBisqueUrls(text);
     const rejectNotesTurn = (message: string): void => {
@@ -12868,7 +13528,12 @@ export function App() {
     selectionContextForTurn = withNoteAccess(
       withoutNoteAccess(selectionContextForTurn),
       modelNotesReadEnabled
-        ? noteAccessForTurn(text, selectedNotesForTurn, excludedNoteIntentTextForTurn)
+        ? noteAccessForTurn(
+            text,
+            selectedNotesForTurn,
+            excludedNoteIntentTextForTurn,
+            noteSearchScopeOverrideForTurn
+          )
         : null
     );
 
@@ -12883,6 +13548,7 @@ export function App() {
         excludedNoteIntentTextForTurn.length > 0
           ? boundedNoteIntentExclusions(excludedNoteIntentTextForTurn)
           : undefined,
+      noteSearchScopeOverride: noteSearchScopeOverrideForTurn,
     };
 
     const conversationId = conversation.id;
@@ -12906,6 +13572,9 @@ export function App() {
         : null,
       messages: nextMessages,
       selectedNotes: turnOverride?.preserveComposerScope ? current.selectedNotes : [],
+      noteSearchScopeOverride: turnOverride?.preserveComposerScope
+        ? current.noteSearchScopeOverride
+        : null,
       activeSelectionContext: turnOverride?.preserveComposerScope
         ? current.activeSelectionContext
         : withoutNoteAccess(current.activeSelectionContext),
@@ -13357,6 +14026,7 @@ export function App() {
     void handleSubmitRef.current(pending.prompt, {
       selectedNotes: pending.selectedNotes,
       excludedNoteIntentText: pending.excludedNoteIntentText,
+      noteSearchScopeOverride: pending.noteSearchScopeOverride,
       onNoteScopeFailure: pending.onNoteScopeFailure,
     });
   }, [activeConversation]);
@@ -13415,7 +14085,14 @@ export function App() {
         ...current.queuedFollowupExcludedNoteIntentText,
         ...pastedReferenceText,
       ]),
+      queuedFollowupNoteSearchScopeOverride: mergeQueuedNoteSearchScopeOverride({
+        existingOverride: current.queuedFollowupNoteSearchScopeOverride,
+        incomingOverride: conversation.noteSearchScopeOverride,
+        incomingText: text,
+        incomingExcludedReferenceText: pastedReferenceText,
+      }),
       selectedNotes: [],
+      noteSearchScopeOverride: null,
       activeSelectionContext: withoutNoteAccess(current.activeSelectionContext),
     }));
     setPastedComposerTextForConversation(conversation.id, []);
@@ -13459,7 +14136,11 @@ export function App() {
       queuedFollowup: "",
       queuedFollowupNotes: [],
       queuedFollowupExcludedNoteIntentText: [],
+      queuedFollowupNoteSearchScopeOverride: null,
       selectedNotes: restoredNotes,
+      noteSearchScopeOverride:
+        current.noteSearchScopeOverride ??
+        conversation.queuedFollowupNoteSearchScopeOverride,
       activeSelectionContext: noteSelectionContextForChips(
         current.activeSelectionContext,
         restoredNotes
@@ -13509,7 +14190,11 @@ export function App() {
     if (
       assistantRunOriginatedWithNotes(conversation.messages, activeAssistantMessageId) ||
       conversation.selectedNotes.length > 0 ||
-      notesSearchRequested(text, excludedNoteIntentText)
+      notesSearchScopeState(
+        text,
+        excludedNoteIntentText,
+        conversation.noteSearchScopeOverride
+      ).active
     ) {
       // Steering cannot broaden the immutable run Notes scope or make the
       // proposal tool appear. It also must not steer files/resources into an
@@ -13561,7 +14246,12 @@ export function App() {
       } else {
         messages.push(message);
       }
-      return { ...current, updatedAt: Date.now(), messages };
+      return {
+        ...current,
+        updatedAt: Date.now(),
+        noteSearchScopeOverride: null,
+        messages,
+      };
     });
     void (async () => {
       let fileIds: string[] = [];
@@ -13664,9 +14354,21 @@ export function App() {
                 ...current.queuedFollowupExcludedNoteIntentText,
                 ...excludedNoteIntentText,
               ]),
+              queuedFollowupNoteSearchScopeOverride:
+                mergeQueuedNoteSearchScopeOverride({
+                  existingOverride: current.queuedFollowupNoteSearchScopeOverride,
+                  incomingOverride: conversation.noteSearchScopeOverride,
+                  incomingText: text,
+                  incomingExcludedReferenceText: excludedNoteIntentText,
+                }),
             };
           }
-          return { ...current, updatedAt: Date.now(), messages };
+          return {
+            ...current,
+            updatedAt: Date.now(),
+            noteSearchScopeOverride: conversation.noteSearchScopeOverride,
+            messages,
+          };
         });
         if (!isSteeringClosedError(error)) {
           setActivePromptValue((previous) =>
@@ -13752,6 +14454,8 @@ export function App() {
     const queuedNotes = conversation.queuedFollowupNotes;
     const queuedExcludedNoteIntentText =
       conversation.queuedFollowupExcludedNoteIntentText;
+    const queuedNoteSearchScopeOverride =
+      conversation.queuedFollowupNoteSearchScopeOverride;
     const restoreQueuedToDraft = (): void => {
       updateConversation(conversation.id, (current) => {
         const selectedNotes = mergeSelectedNoteChips(
@@ -13764,7 +14468,10 @@ export function App() {
           queuedFollowup: "",
           queuedFollowupNotes: [],
           queuedFollowupExcludedNoteIntentText: [],
+          queuedFollowupNoteSearchScopeOverride: null,
           selectedNotes,
+          noteSearchScopeOverride:
+            current.noteSearchScopeOverride ?? queuedNoteSearchScopeOverride,
           activeSelectionContext: noteSelectionContextForChips(
             current.activeSelectionContext,
             selectedNotes
@@ -13794,10 +14501,12 @@ export function App() {
         queuedFollowup: "",
         queuedFollowupNotes: [],
         queuedFollowupExcludedNoteIntentText: [],
+        queuedFollowupNoteSearchScopeOverride: null,
       }));
       void handleSubmitRef.current(queued, {
         selectedNotes: queuedNotes,
         excludedNoteIntentText: queuedExcludedNoteIntentText,
+        noteSearchScopeOverride: queuedNoteSearchScopeOverride,
         preserveComposerScope: true,
         onNoteScopeFailure: restoreQueuedToDraft,
       }).finally(() => {
@@ -14436,8 +15145,43 @@ export function App() {
 
           {showAppShellBanner ? (
             <div className="bg-background z-10 shrink-0 px-4 pt-3">
-              <SystemMessage variant="error" fill>
+              <SystemMessage variant={appShellBannerVariant(uiErrorBanner)} fill>
                 {uiErrorBanner}
+              </SystemMessage>
+            </div>
+          ) : null}
+
+          {activeNoteSelectionCapture?.attempt && !noteSelectionDialogOpen ? (
+            <div className="bg-background z-10 shrink-0 px-4 pt-3">
+              <SystemMessage variant="action" fill>
+                <div className="flex w-full flex-wrap items-center gap-2">
+                  <NotebookPen className="size-4 shrink-0" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 truncate">
+                    Add to “{activeNoteSelectionCapture.attempt.note_title}” is paused. Your exact selection is protected.
+                  </span>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setNoteSelectionDialogOpen(true)}>
+                    Resume
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      void discardSelectionAppendAttempt(activeNoteSelectionCapture, true).catch(
+                        (error: unknown) => {
+                          setNoteSelectionDialogOpen(true);
+                          showErrorToast(
+                            error instanceof Error
+                              ? `Couldn’t safely discard this add — ${error.message}`
+                              : "Couldn’t safely discard this add. The exact attempt is still here."
+                          );
+                        }
+                      );
+                    }}
+                  >
+                    Discard
+                  </Button>
+                </div>
               </SystemMessage>
             </div>
           ) : null}
@@ -14633,17 +15377,24 @@ export function App() {
           ) : activePanel === "notes" ? (
             <Suspense
               fallback={
-                <PanelLoadingState
-                  title="Loading notes..."
-                  subtitle="Your notes stay out of the main bundle until you open them."
+                  <PanelLoadingState
+                  title="Opening Notes…"
                 />
               }
             >
               <LazyNotesPage
                 apiClient={apiClient}
+                recoveryScope={notesRecoveryScope}
                 initialNoteId={activeNotesPageNoteId}
                 refreshVersion={notesRefreshVersion}
                 listRequestVersion={notesListRequestVersion}
+                initialDraft={notesInitialDraft}
+                onInitialDraftConsumed={(key: string) => {
+                  setNotesInitialDraft((current) =>
+                    current?.key === key ? null : current
+                  );
+                }}
+                onLogoutFlushReady={handleNotesLogoutFlushReady}
                 onActiveNoteChange={handleNotesPageActiveChange}
                 onUseInChat={
                   modelNotesReadEnabled ? attachNoteToActiveConversation : undefined
@@ -14757,15 +15508,36 @@ export function App() {
                       <div className="chat-queued-followup-text">
                         {activeConversation.queuedFollowup}
                       </div>
-                      {activeConversation.queuedFollowupNotes.length > 0 ? (
+                      {activeConversation.queuedFollowupNotes.length > 0 ||
+                      (modelNotesReadEnabled && activeQueuedNoteSearchScope) ? (
                         <div
                           className="mt-2 flex flex-wrap gap-1.5"
                           aria-label="Notes for queued message"
                         >
+                          {modelNotesReadEnabled && activeQueuedNoteSearchScope ? (
+                            <span className="border-border bg-background/70 inline-flex min-h-11 max-w-full items-center gap-1 rounded-full border py-0.5 pr-1 pl-2 text-xs sm:min-h-8">
+                              <Search
+                                className="text-muted-foreground size-3 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                Search Notes{" "}
+                                <span className="text-muted-foreground">· this message</span>
+                              </span>
+                              <button
+                                type="button"
+                                className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
+                                aria-label="Don’t search Notes for queued message"
+                                onClick={removeQueuedNoteSearchScope}
+                              >
+                                <X className="size-3" aria-hidden="true" />
+                              </button>
+                            </span>
+                          ) : null}
                           {activeConversation.queuedFollowupNotes.map((note) => (
                             <span
                               key={note.note_id}
-                              className="border-border bg-background/70 inline-flex max-w-full items-center gap-1 rounded-full border py-0.5 pr-1 pl-2 text-xs"
+                              className="border-border bg-background/70 inline-flex min-h-11 max-w-full items-center gap-1 rounded-full border py-0.5 pr-1 pl-2 text-xs sm:min-h-8"
                             >
                               <NotebookPen
                                 className="text-muted-foreground size-3 shrink-0"
@@ -14774,7 +15546,7 @@ export function App() {
                               <span className="max-w-44 truncate">{note.title}</span>
                               <button
                                 type="button"
-                                className="hover:bg-accent focus-visible:ring-ring inline-flex size-6 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none"
+                                className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
                                 aria-label={`Remove Note ${note.title} from queued message`}
                                 onClick={() => removeNoteFromQueuedFollowup(note.note_id)}
                               >
@@ -15118,18 +15890,46 @@ export function App() {
                       }}
                     />
 
-                    {activeConversation?.selectedNotes.length ? (
+                    {activeConversation?.selectedNotes.length ||
+                    (modelNotesReadEnabled &&
+                      (activeNoteSearchScope.active ||
+                        activeNoteSearchScope.recoverableFromReferenceText)) ? (
                       <div className="flex flex-wrap gap-1.5 px-3 pt-2" aria-label="Notes for this message">
-                        {activeConversation.selectedNotes.map((note) => (
+                        {modelNotesReadEnabled && activeNoteSearchScope.active ? (
+                          <span className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8">
+                            <Search className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
+                            <span>Search Notes <span className="text-muted-foreground">· this message</span></span>
+                            <button
+                              type="button"
+                              className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
+                              aria-label="Don’t search Notes for this message"
+                              onClick={removeActiveNoteSearchScope}
+                            >
+                              <X className="size-3" aria-hidden="true" />
+                            </button>
+                          </span>
+                        ) : modelNotesReadEnabled &&
+                          activeNoteSearchScope.recoverableFromReferenceText ? (
+                          <button
+                            type="button"
+                            className="border-border hover:bg-accent focus-visible:ring-ring inline-flex min-h-11 items-center gap-1.5 rounded-full border bg-transparent px-2.5 text-xs focus-visible:ring-2 focus-visible:outline-none sm:min-h-8"
+                            aria-label="Allow Ultra to search Notes for this pasted request"
+                            onClick={() => setActiveNoteSearchScopeOverride(true)}
+                          >
+                            <Search className="text-muted-foreground size-3.5" aria-hidden="true" />
+                            Search Notes <span className="text-muted-foreground">· this message</span>
+                          </button>
+                        ) : null}
+                        {activeConversation?.selectedNotes.map((note) => (
                           <span
                             key={note.note_id}
-                            className="border-border bg-muted/55 inline-flex max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs"
+                            className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8"
                           >
                             <NotebookPen className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
                             <span className="max-w-48 truncate">{note.title}</span>
                             <button
                               type="button"
-                              className="hover:bg-accent focus-visible:ring-ring inline-flex size-5 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none"
+                              className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
                               aria-label={`Remove Note ${note.title}`}
                               onClick={() => removeNoteFromActiveConversation(note.note_id)}
                             >
@@ -15715,24 +16515,31 @@ export function App() {
             />
           </Suspense>
         ) : null}
-        {/* Ask-about-selection chip. Portaled to body: the transcript sits in
+        {/* Selection actions. Portaled to body: the transcript sits in
             transformed/overflow ancestors that would trap or clip a
             position:fixed child. Text was captured at show time, so the click
             works even if the browser collapses the selection first. */}
         {selectionAsk
           ? createPortal(
-              <button
-                type="button"
+              <div
                 className="chat-selection-ask"
+                role="group"
+                aria-label="Selection actions"
                 style={{ left: selectionAsk.x, top: selectionAsk.y }}
                 onMouseDown={(event) => {
                   event.preventDefault();
                 }}
-                onClick={askAboutSelection}
               >
-                <TextQuote className="size-3.5" aria-hidden="true" />
-                Ask about this
-              </button>,
+                <button type="button" onClick={askAboutSelection}>
+                  <TextQuote className="size-3.5" aria-hidden="true" />
+                  Ask about this
+                </button>
+                <span aria-hidden="true" />
+                <button type="button" onClick={addSelectionToNote}>
+                  <NotebookPen className="size-3.5" aria-hidden="true" />
+                  Add to note
+                </button>
+              </div>,
               document.body
             )
           : null}
@@ -15751,6 +16558,95 @@ export function App() {
             />
           </Suspense>
         ) : null}
+        {activeNoteSelectionCapture ? (
+          <Suspense fallback={null}>
+            <LazyAddSelectionToNoteDialog
+              apiClient={apiClient}
+              open={noteSelectionDialogOpen}
+              capture={activeNoteSelectionCapture}
+              onOpenChange={(open: boolean) => {
+                setNoteSelectionDialogOpen(open);
+                if (open) return;
+                if (!activeNoteSelectionCapture.attempt) {
+                  clearNoteSelectionCaptureRecoveryIfMatches(
+                    resolveBrowserSessionStorage(),
+                    activeNoteSelectionCapture.ownerScope,
+                    { captureKey: activeNoteSelectionCapture.idempotencyKey }
+                  );
+                  noteSelectionCaptureRef.current = null;
+                  setNoteSelectionCapture(null);
+                  return;
+                }
+                // The calm app-shell banner is the one durable recovery
+                // surface. Closing the dialog simply reveals it.
+              }}
+              onAttemptChange={(attempt: NonNullable<NoteSelectionCapture["attempt"]>) => {
+                const protectedAcrossReload = persistNoteSelectionCaptureRecovery(
+                  resolveBrowserSessionStorage(),
+                  activeNoteSelectionCapture.ownerScope,
+                  { ...activeNoteSelectionCapture, attempt }
+                );
+                if (!protectedAcrossReload) return false;
+                setNoteSelectionCapture((current) =>
+                  current?.ownerScope === activeNoteSelectionCapture.ownerScope &&
+                  current.idempotencyKey === activeNoteSelectionCapture.idempotencyKey
+                    ? (() => {
+                        const next = { ...current, attempt };
+                        noteSelectionCaptureRef.current = next;
+                        return next;
+                      })()
+                    : current
+                );
+                return true;
+              }}
+              onDiscardAttempt={() =>
+                discardSelectionAppendAttempt(activeNoteSelectionCapture, false)
+              }
+              onAdded={(
+                receipt: NoteDirectAppendReceipt,
+                attempt: NonNullable<NoteSelectionCapture["attempt"]>
+              ) =>
+                handleSelectionAddedToNote(
+                  { ...activeNoteSelectionCapture, attempt },
+                  receipt
+                )
+              }
+              onNewNote={startNoteFromSelection}
+            />
+          </Suspense>
+        ) : null}
+        <AlertDialog
+          open={unsafeNotesDeparturePending !== null}
+          onOpenChange={(open) => {
+            if (!open) setUnsafeNotesDeparturePending(null);
+          }}
+        >
+          <AlertDialogContent size="default">
+            <AlertDialogHeader>
+              <AlertDialogMedia className="bg-amber-500/12 text-amber-700 dark:text-amber-300">
+                <NotebookPen className="size-7" />
+              </AlertDialogMedia>
+              <AlertDialogTitle>Some Note changes aren’t confirmed</AlertDialogTitle>
+              <AlertDialogDescription>
+                Ultra couldn’t finish syncing or reconciling a Note change before sign-out.
+                Stay signed in to retry, or discard the device recovery copy and continue.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Stay signed in</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => {
+                  const departure = unsafeNotesDeparturePending;
+                  setUnsafeNotesDeparturePending(null);
+                  if (departure) void leaveAuthenticatedAccount(departure, true);
+                }}
+              >
+                Discard unsaved changes &amp; continue
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         {/* Message delete. Deliberately the same dialog grammar as conversation
             delete: the two differ in scope, not in kind, and a lighter-weight
             confirmation here would imply this one is safe to fire blind. */}

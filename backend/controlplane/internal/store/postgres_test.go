@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -238,8 +239,8 @@ func TestPostgresNoteProposalCommitUndoAndHardDeleteCascade(t *testing.T) {
 		t.Fatalf("CreateNote: %v", err)
 	}
 	hits, err := store.SearchNotesForUser(ctx, domain.NoteSearchInput{UserID: userID, Query: "Protocol", Limit: 10})
-	if err != nil || len(hits) != 1 || hits[0].NoteID != note.NoteID {
-		t.Fatalf("SearchNotesForUser = %+v err=%v", hits, err)
+	if err != nil || len(hits.Notes) != 1 || hits.Notes[0].NoteID != note.NoteID {
+		t.Fatalf("SearchNotesForUser = %+v err=%v", hits.Notes, err)
 	}
 	foreignMarker := "xeno-" + suffix
 	if _, err := store.CreateNote(ctx, domain.NoteRecord{
@@ -248,8 +249,8 @@ func TestPostgresNoteProposalCommitUndoAndHardDeleteCascade(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateNote foreign: %v", err)
 	}
-	if hits, err := store.SearchNotesForUser(ctx, domain.NoteSearchInput{UserID: userID, Query: foreignMarker, Limit: 10}); err != nil || len(hits) != 0 {
-		t.Fatalf("foreign owner search = %+v err=%v", hits, err)
+	if hits, err := store.SearchNotesForUser(ctx, domain.NoteSearchInput{UserID: userID, Query: foreignMarker, Limit: 10}); err != nil || len(hits.Notes) != 0 {
+		t.Fatalf("foreign owner search = %+v err=%v", hits.Notes, err)
 	}
 	readToken := "read-token-" + suffix
 	if err := store.CreateNoteReadGrant(ctx, domain.NoteReadGrantRecord{
@@ -328,8 +329,8 @@ func TestPostgresNoteProposalCommitUndoAndHardDeleteCascade(t *testing.T) {
 	conflictingReplay.ProposalID = "pg-nprop-conflict-" + suffix
 	conflictingReplay.BodyMarkdown = "different fact"
 	conflictingReplay.RequestDigest = domain.ComputeNoteContentDigest(note.NoteID+":1", conflictingReplay.BodyMarkdown)
-	if _, err := store.CreateNoteAppendProposal(ctx, conflictingReplay); !errors.Is(err, ErrConflict) {
-		t.Fatalf("same key with different proposal err = %v, want conflict", err)
+	if _, err := store.CreateNoteAppendProposal(ctx, conflictingReplay); !errors.Is(err, ErrNoteAppendIdempotencyConflict) {
+		t.Fatalf("same key with different proposal err = %v, want typed idempotency conflict", err)
 	}
 	receipt, err := store.CommitNoteAppendProposalForUser(ctx, domain.CommitNoteAppendProposalInput{
 		ProposalID: proposal.ProposalID, OperationID: "pg-nop-" + suffix, UserID: userID, Now: now,
@@ -610,6 +611,295 @@ func TestPostgresNoteCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
 	current, err := notes.GetNoteForUser(ctx, note.NoteID, userID)
 	if err != nil || current.Revision != note.Revision+1 || current.ContentDigest == note.ContentDigest {
 		t.Fatalf("current Note = %+v err=%v, want exactly one durable revision", current, err)
+	}
+}
+
+func TestPostgresNoteRecencySearchAndDirectAppendMatchMemoryContract(t *testing.T) {
+	dsn := os.Getenv("ULTRA_CONTROL_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("ULTRA_CONTROL_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	defer pool.Close()
+	if err := ApplyPostgresSchema(ctx, pool); err != nil {
+		t.Fatalf("ApplyPostgresSchema: %v", err)
+	}
+	notes := NewPostgresStore(pool)
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	userID := "pg-note-recency-" + suffix
+	base := domain.Now().Add(-4 * time.Hour)
+	createRecord := domain.NoteRecord{
+		NoteID: "pg-note-create-first-" + suffix, UserID: userID,
+		Title: "Private title", BodyMarkdown: "private low entropy body",
+		EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: base,
+	}
+	createInput := domain.CreateNoteIdempotentInput{
+		Record: createRecord, IdempotencyKey: "pg-create-key-" + suffix,
+		RequestDigest: domain.ComputeNoteCreateRequestDigest(
+			createRecord.UserID, createRecord.OrgID, createRecord.Title, createRecord.BodyMarkdown,
+			createRecord.Pinned, createRecord.EditorMode,
+		),
+	}
+	createdNote, firstCreate, err := notes.CreateNoteForUserIdempotent(ctx, createInput)
+	if err != nil || !firstCreate {
+		t.Fatalf("first idempotent create = %+v first=%t err=%v", createdNote, firstCreate, err)
+	}
+	createRetry := createInput
+	createRetry.Record.NoteID = "pg-note-create-retry-" + suffix
+	replayedNote, firstCreate, err := notes.CreateNoteForUserIdempotent(ctx, createRetry)
+	if err != nil || firstCreate || replayedNote.NoteID != createdNote.NoteID {
+		t.Fatalf("lost-response create replay = %+v first=%t err=%v", replayedNote, firstCreate, err)
+	}
+	if foundReplay, found, err := notes.FindNoteCreateReplayForUser(ctx, userID, createInput.IdempotencyKey, createInput.RequestDigest); err != nil || !found || foundReplay.NoteID != createdNote.NoteID {
+		t.Fatalf("read-only PG create replay = %+v found=%t err=%v", foundReplay, found, err)
+	}
+	if _, found, err := notes.FindNoteCreateReplayForUser(ctx, userID+"-foreign", createInput.IdempotencyKey, createInput.RequestDigest); err != nil || found {
+		t.Fatalf("foreign PG create replay found=%t err=%v", found, err)
+	}
+	createConflict := createRetry
+	createConflict.RequestDigest = domain.ComputeNoteCreateRequestDigest(
+		createRecord.UserID, createRecord.OrgID, "different", createRecord.BodyMarkdown,
+		createRecord.Pinned, createRecord.EditorMode,
+	)
+	if _, _, err := notes.CreateNoteForUserIdempotent(ctx, createConflict); !errors.Is(err, ErrNoteCreateIdempotencyConflict) {
+		t.Fatalf("create idempotency conflict err = %v", err)
+	}
+	if _, found, err := notes.FindNoteCreateReplayForUser(ctx, userID, createInput.IdempotencyKey, createConflict.RequestDigest); !found || !errors.Is(err, ErrNoteCreateIdempotencyConflict) {
+		t.Fatalf("different PG create replay found=%t err=%v", found, err)
+	}
+	if err := notes.DeleteNoteForUser(ctx, createdNote.NoteID, userID); err != nil {
+		t.Fatalf("delete idempotently-created Note: %v", err)
+	}
+	var tombstoneNoteID, tombstoneDigest *string
+	if err := pool.QueryRow(ctx, `
+SELECT note_id, request_digest FROM control_note_create_receipts
+WHERE user_id = $1 AND idempotency_key = $2`, userID, createInput.IdempotencyKey).Scan(&tombstoneNoteID, &tombstoneDigest); err != nil {
+		t.Fatalf("inspect create tombstone: %v", err)
+	}
+	if tombstoneNoteID != nil || tombstoneDigest != nil {
+		t.Fatalf("create tombstone retained note_id=%v request_digest=%v", tombstoneNoteID, tombstoneDigest)
+	}
+	for name, retry := range map[string]domain.CreateNoteIdempotentInput{
+		"same request":      createRetry,
+		"different request": createConflict,
+	} {
+		if _, _, err := notes.CreateNoteForUserIdempotent(ctx, retry); !errors.Is(err, ErrNoteCreateReplayDeleted) {
+			t.Fatalf("%s after deletion error = %v, want terminal replay-deleted error", name, err)
+		}
+	}
+	if _, found, err := notes.FindNoteCreateReplayForUser(ctx, userID, createInput.IdempotencyKey, createInput.RequestDigest); !found || !errors.Is(err, ErrNoteCreateReplayDeleted) {
+		t.Fatalf("deleted PG create lookup found=%t err=%v, want terminal replay-deleted error", found, err)
+	}
+	pageUserID := userID + "-page"
+	var paged []domain.NoteRecord
+	for index := 0; index < 3; index++ {
+		note, err := notes.CreateNote(ctx, domain.NoteRecord{
+			NoteID: fmt.Sprintf("pg-note-page-%d-%s", index, suffix), UserID: pageUserID,
+			Title: fmt.Sprintf("Page %d", index), BodyMarkdown: "paged",
+			EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: base,
+		})
+		if err != nil {
+			t.Fatalf("seed keyset Note %d: %v", index, err)
+		}
+		paged = append(paged, note)
+	}
+	firstPage, err := notes.SearchNotesForUser(ctx, domain.NoteSearchInput{
+		UserID: pageUserID, Sort: domain.NoteSearchSortRecent, Limit: 1,
+	})
+	if err != nil || len(firstPage.Notes) != 1 || firstPage.Notes[0].NoteID != paged[2].NoteID {
+		t.Fatalf("first PG keyset page = %+v err=%v", firstPage, err)
+	}
+	mutatedBody := "mutated after snapshot"
+	if _, err := notes.UpdateNoteForUser(ctx, paged[2].NoteID, pageUserID, domain.NoteUpdateInput{
+		ExpectedRevision: paged[2].Revision, BodyMarkdown: &mutatedBody,
+	}); err != nil {
+		t.Fatalf("mutate returned keyset Note: %v", err)
+	}
+	if _, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-page-new-" + suffix, UserID: pageUserID, Title: "Concurrent new",
+		BodyMarkdown: "created after snapshot", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: base,
+	}); err != nil {
+		t.Fatalf("create concurrent keyset Note: %v", err)
+	}
+	secondPage, err := notes.SearchNotesForUser(ctx, domain.NoteSearchInput{
+		UserID: pageUserID, Sort: domain.NoteSearchSortRecent, Limit: 1,
+		SnapshotAt: firstPage.SnapshotAt,
+		After: &domain.NoteSearchPageAnchor{
+			Rank: firstPage.Notes[0].SortRank, ContentUpdatedAt: firstPage.Notes[0].ContentUpdatedAt,
+			NoteID: firstPage.Notes[0].NoteID,
+		},
+	})
+	if err != nil || len(secondPage.Notes) != 1 || secondPage.Notes[0].NoteID != paged[1].NoteID {
+		t.Fatalf("second PG keyset page after mutation = %+v err=%v", secondPage, err)
+	}
+	oldPinned, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-old-" + suffix, UserID: userID, Title: "Archive",
+		BodyMarkdown: "old marker-" + suffix, EditorMode: domain.NoteEditorModeMarkdown,
+		CreatedAt: base,
+	})
+	if err != nil {
+		t.Fatalf("CreateNote old: %v", err)
+	}
+	newer, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-new-" + suffix, UserID: userID, Title: "Current",
+		BodyMarkdown: "new marker-" + suffix, EditorMode: domain.NoteEditorModeMarkdown,
+		CreatedAt: base.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateNote newer: %v", err)
+	}
+	oldContentUpdatedAt := oldPinned.ContentUpdatedAt
+	pinned := true
+	oldPinned, err = notes.UpdateNoteForUser(ctx, oldPinned.NoteID, userID, domain.NoteUpdateInput{
+		ExpectedRevision: oldPinned.Revision, Pinned: &pinned,
+	})
+	if err != nil {
+		t.Fatalf("pin old Note: %v", err)
+	}
+	if !oldPinned.ContentUpdatedAt.Equal(oldContentUpdatedAt) || !oldPinned.UpdatedAt.After(oldPinned.ContentUpdatedAt) {
+		t.Fatalf("metadata update changed content recency: %+v", oldPinned)
+	}
+	browse, err := notes.ListNotesForUser(ctx, domain.NoteListInput{UserID: userID, Sort: domain.NoteListSortBrowse})
+	if err != nil || len(browse.Notes) != 2 || browse.Notes[0].NoteID != oldPinned.NoteID {
+		t.Fatalf("browse list = %+v err=%v", browse.Notes, err)
+	}
+	recentList, err := notes.ListNotesForUser(ctx, domain.NoteListInput{UserID: userID, Sort: domain.NoteListSortRecent})
+	if err != nil || len(recentList.Notes) != 2 || recentList.Notes[0].NoteID != newer.NoteID {
+		t.Fatalf("recent list = %+v err=%v", recentList.Notes, err)
+	}
+	recentHits, err := notes.SearchNotesForUser(ctx, domain.NoteSearchInput{
+		UserID: userID, Sort: domain.NoteSearchSortRecent, Limit: 1,
+	})
+	if err != nil || len(recentHits.Notes) != 1 || recentHits.Notes[0].NoteID != newer.NoteID {
+		t.Fatalf("blank recent search = %+v err=%v", recentHits.Notes, err)
+	}
+
+	marker := "lexical-" + suffix
+	exact, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-exact-" + suffix, UserID: userID, Title: marker,
+		BodyMarkdown: "older", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: base.Add(-2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateNote exact: %v", err)
+	}
+	bodyMatch, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-body-" + suffix, UserID: userID, Title: "Other",
+		BodyMarkdown: "newest " + marker, Pinned: true,
+		EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: base.Add(2 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateNote body match: %v", err)
+	}
+	relevance, err := notes.SearchNotesForUser(ctx, domain.NoteSearchInput{
+		UserID: userID, Query: marker, Sort: domain.NoteSearchSortRelevance, Limit: 10,
+	})
+	if err != nil || len(relevance.Notes) != 2 || relevance.Notes[0].NoteID != exact.NoteID {
+		t.Fatalf("relevance search = %+v err=%v", relevance.Notes, err)
+	}
+	filteredRecent, err := notes.SearchNotesForUser(ctx, domain.NoteSearchInput{
+		UserID: userID, Query: marker, Sort: domain.NoteSearchSortRecent, Limit: 10,
+	})
+	if err != nil || len(filteredRecent.Notes) != 2 || filteredRecent.Notes[0].NoteID != bodyMatch.NoteID {
+		t.Fatalf("filtered recent search = %+v err=%v", filteredRecent.Notes, err)
+	}
+
+	directInput := domain.DirectNoteAppendInput{
+		OperationID: "pg-ndop-a-" + suffix, UserID: userID, NoteID: newer.NoteID,
+		ExpectedRevision: newer.Revision, BodyMarkdown: "captured exact text",
+		IdempotencyKey: "pg-direct-key-" + suffix, Now: domain.Now(),
+	}
+	directInput.RequestDigest = domain.ComputeNoteDirectAppendRequestDigest(
+		directInput.UserID, directInput.NoteID, directInput.ExpectedRevision, directInput.BodyMarkdown,
+	)
+	type appendResult struct {
+		receipt domain.NoteDirectAppendOperationRecord
+		created bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan appendResult, 2)
+	for index := 0; index < 2; index++ {
+		input := directInput
+		input.OperationID = fmt.Sprintf("pg-ndop-%d-%s", index, suffix)
+		go func() {
+			<-start
+			receipt, created, err := notes.DirectAppendNoteForUser(ctx, input)
+			results <- appendResult{receipt: receipt, created: created, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	if first.err != nil || second.err != nil || first.created == second.created || first.receipt.OperationID != second.receipt.OperationID {
+		t.Fatalf("concurrent direct replay first=%+v second=%+v", first, second)
+	}
+	receipt := first.receipt
+	if foundReplay, found, err := notes.FindNoteDirectAppendReplayForUser(ctx, userID, directInput.IdempotencyKey, directInput.RequestDigest); err != nil || !found || foundReplay.OperationID != receipt.OperationID {
+		t.Fatalf("read-only PG direct replay = %+v found=%t err=%v", foundReplay, found, err)
+	}
+	if _, found, err := notes.FindNoteDirectAppendReplayForUser(ctx, userID+"-foreign", directInput.IdempotencyKey, directInput.RequestDigest); err != nil || found {
+		t.Fatalf("foreign PG direct replay found=%t err=%v", found, err)
+	}
+	current, err := notes.GetNoteForUser(ctx, newer.NoteID, userID)
+	if err != nil || current.BodyMarkdown != newer.BodyMarkdown+"\n\ncaptured exact text" || current.Revision != newer.Revision+1 {
+		t.Fatalf("direct appended Note = %+v err=%v", current, err)
+	}
+	conflicting := directInput
+	conflicting.BodyMarkdown = "different"
+	conflicting.RequestDigest = domain.ComputeNoteDirectAppendRequestDigest(
+		conflicting.UserID, conflicting.NoteID, conflicting.ExpectedRevision, conflicting.BodyMarkdown,
+	)
+	if _, _, err := notes.DirectAppendNoteForUser(ctx, conflicting); !errors.Is(err, ErrNoteAppendIdempotencyConflict) {
+		t.Fatalf("direct idempotency conflict err = %v", err)
+	}
+	if _, found, err := notes.FindNoteDirectAppendReplayForUser(ctx, userID, directInput.IdempotencyKey, conflicting.RequestDigest); !found || !errors.Is(err, ErrNoteAppendIdempotencyConflict) {
+		t.Fatalf("different PG direct replay found=%t err=%v", found, err)
+	}
+	fullNote, err := notes.CreateNote(ctx, domain.NoteRecord{
+		NoteID: "pg-note-full-" + suffix, UserID: userID, Title: "Full",
+		BodyMarkdown: strings.Repeat("x", maxStoredNoteBodyBytes),
+		EditorMode:   domain.NoteEditorModeMarkdown, CreatedAt: base,
+	})
+	if err != nil {
+		t.Fatalf("create full Note: %v", err)
+	}
+	fullInput := domain.DirectNoteAppendInput{
+		OperationID: "pg-ndop-full-" + suffix, UserID: userID, NoteID: fullNote.NoteID,
+		ExpectedRevision: fullNote.Revision, BodyMarkdown: "capture",
+		IdempotencyKey: "pg-direct-full-key-" + suffix, Now: domain.Now(),
+	}
+	fullInput.RequestDigest = domain.ComputeNoteDirectAppendRequestDigest(
+		fullInput.UserID, fullInput.NoteID, fullInput.ExpectedRevision, fullInput.BodyMarkdown,
+	)
+	if _, created, err := notes.DirectAppendNoteForUser(ctx, fullInput); created || !errors.Is(err, ErrNoteAppendNotCommitted) {
+		t.Fatalf("PG oversize direct append created=%t err=%v, want definitively uncommitted", created, err)
+	}
+	fullCurrent, err := notes.GetNoteForUser(ctx, fullNote.NoteID, userID)
+	if err != nil || fullCurrent.Revision != fullNote.Revision || fullCurrent.BodyMarkdown != fullNote.BodyMarkdown {
+		t.Fatalf("PG oversize direct append mutated Note: revision=%d body=%d err=%v", fullCurrent.Revision, len(fullCurrent.BodyMarkdown), err)
+	}
+	var fullReceiptCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM control_note_direct_append_operations WHERE operation_id = $1`, fullInput.OperationID).Scan(&fullReceiptCount); err != nil || fullReceiptCount != 0 {
+		t.Fatalf("PG oversize direct append receipt count = %d err=%v", fullReceiptCount, err)
+	}
+	undone, err := notes.UndoDirectNoteAppendForUser(ctx, domain.UndoDirectNoteAppendInput{
+		OperationID: receipt.OperationID, UserID: userID, Now: domain.Now(),
+	})
+	if err != nil || undone.UndoRevision != receipt.AfterRevision+1 {
+		t.Fatalf("direct undo = %+v err=%v", undone, err)
+	}
+	if err := notes.DeleteNoteForUser(ctx, newer.NoteID, userID); err != nil {
+		t.Fatalf("DeleteNoteForUser: %v", err)
+	}
+	var receiptCount int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM control_note_direct_append_operations WHERE note_id = $1`, newer.NoteID).Scan(&receiptCount); err != nil || receiptCount != 0 {
+		t.Fatalf("direct receipt count after hard delete = %d err=%v", receiptCount, err)
+	}
+	if _, found, err := notes.FindNoteDirectAppendReplayForUser(ctx, userID, directInput.IdempotencyKey, directInput.RequestDigest); err != nil || found {
+		t.Fatalf("deleted PG direct replay found=%t err=%v, want no surviving effect", found, err)
 	}
 }
 

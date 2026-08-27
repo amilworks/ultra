@@ -84,6 +84,51 @@ func TestSteerRunAcceptsAndWritesTranscript(t *testing.T) {
 	}
 }
 
+func TestSteerRunRejectsNoteScopedRunBeforePersistence(t *testing.T) {
+	t.Parallel()
+	ctx, mem, service, ordinaryRun := newSteeringFixture(t)
+	noteRun, err := service.CreateRun(ctx, CreateRunRequest{
+		ThreadID: ordinaryRun.ThreadID,
+		UserID:   "user-1",
+		Goal:     "Use my Notes.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Use my Notes."}},
+		SelectionContext: domain.CanonicalNoteAccessSelection(nil, domain.NoteAccessScope{
+			Mode: domain.NoteAccessModeSearch,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	messagesBefore, err := mem.ListThreadMessages(ctx, noteRun.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages before steer: %v", err)
+	}
+
+	if _, err := service.SteerRun(ctx, SteerRunRequest{
+		RunID: noteRun.RunID, UserID: "user-1", SteerID: "steer_notes", Text: "Do not append anything.",
+	}); !errors.Is(err, store.ErrSteeringClosed) {
+		t.Fatalf("Notes steer error = %v, want ErrSteeringClosed", err)
+	}
+
+	steers, err := service.ListRunSteerMessages(ctx, noteRun.RunID)
+	if err != nil {
+		t.Fatalf("ListRunSteerMessages: %v", err)
+	}
+	if len(steers) != 0 {
+		t.Fatalf("Notes steer persisted: %+v", steers)
+	}
+	messagesAfter, err := mem.ListThreadMessages(ctx, noteRun.ThreadID)
+	if err != nil {
+		t.Fatalf("ListThreadMessages after steer: %v", err)
+	}
+	if len(messagesAfter) != len(messagesBefore) {
+		t.Fatalf("Notes steer wrote transcript rows: before=%d after=%d", len(messagesBefore), len(messagesAfter))
+	}
+	if kinds := steerEventKinds(t, mem, noteRun.RunID); len(kinds) != 0 {
+		t.Fatalf("Notes steer published lifecycle events: %v", kinds)
+	}
+}
+
 func TestSteerRunRetryIsIdempotent(t *testing.T) {
 	t.Parallel()
 	ctx, mem, service, run := newSteeringFixture(t)

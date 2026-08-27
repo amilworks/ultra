@@ -93,7 +93,7 @@ describe("model Notes release gates", () => {
       "// Keep a stable handle to the latest handleSubmit"
     );
     expect(submit).toMatch(
-      /noteAccessForTurn\(text, selectedNotesForTurn, excludedNoteIntentTextForTurn\)/
+      /noteAccessForTurn\(\s*text,\s*selectedNotesForTurn,\s*excludedNoteIntentTextForTurn,\s*noteSearchScopeOverrideForTurn\s*\)/
     );
   });
 

@@ -3473,6 +3473,10 @@ paths:
         - in: query
           name: offset
           schema: { type: integer }
+        - in: query
+          name: sort
+          description: Browse keeps pins first; recent ignores pins. Active queries always use relevance order.
+          schema: { type: string, enum: [browse, recent], default: browse }
       responses:
         "200":
           description: The caller's notes, pinned first then most recent
@@ -3482,6 +3486,17 @@ paths:
                 $ref: "#/components/schemas/V2NoteListResponse"
     post:
       operationId: createNote
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string, minLength: 1, maxLength: 256 }
+          description: >-
+            Stable opaque local-draft key. When present, the first committed
+            create returns 201 and a same-request replay returns the original
+            Note with 200; a different request returns
+            note_create_idempotency_conflict. Omit only for legacy
+            non-idempotent callers.
       requestBody:
         required: false
         content:
@@ -3489,12 +3504,48 @@ paths:
             schema:
               $ref: "#/components/schemas/V2NoteWriteRequest"
       responses:
+        "400":
+          description: >-
+            Invalid request. Only code note_create_not_committed proves that an
+            authenticated, decodable idempotent request had no prior receipt and
+            did not commit; a generic 400 remains ambiguous to retry recovery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
         "201":
           description: Created note
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NoteRecord"
+        "200":
+          description: Original note returned for an idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteRecord"
+        "409":
+          description: Idempotency-Key is already bound to a different normalized create request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "410":
+          description: >-
+            The owner/key create receipt is a hard-delete tombstone. Code
+            note_create_replay_deleted is terminal and exposes neither the erased
+            Note identity nor its request digest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "413":
+          description: Request rejected before an application receipt lookup; retry state remains ambiguous
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
   /v2/notes/{note_id}:
     parameters:
       - in: path
@@ -3530,6 +3581,67 @@ paths:
       responses:
         "200":
           description: Note hard-deleted
+  /v2/notes/{note_id}/append:
+    parameters:
+      - in: path
+        name: note_id
+        required: true
+        schema: { type: string }
+      - in: header
+        name: Idempotency-Key
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 256 }
+    post:
+      operationId: directAppendNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteDirectAppendRequest"
+      responses:
+        "400":
+          description: >-
+            Invalid request. Only code note_append_not_committed proves that an
+            authenticated, decodable request had no prior receipt and did not
+            append, including a transactional combined Note-size rejection; a
+            generic 400 remains ambiguous to retry recovery.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "201":
+          description: Exact capture appended atomically
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteDirectAppendOperation"
+        "200":
+          description: Stable receipt for an idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteDirectAppendOperation"
+        "409":
+          description: Stale Note revision or idempotency-key conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "404":
+          description: >-
+            No owner-visible target or surviving append receipt. Code
+            note_append_target_unavailable is terminal for this capture.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "413":
+          description: Request rejected before an application receipt lookup; retry state remains ambiguous
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
   /v2/runs/{run_id}/note-search:
     parameters:
       - in: path
@@ -3644,6 +3756,23 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NoteAppendOperation"
+  /v2/note-direct-append-operations/{operation_id}/undo:
+    parameters:
+      - in: path
+        name: operation_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: undoDirectNoteAppendOperation
+      responses:
+        "200":
+          description: Idempotent conditional undo receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteDirectAppendOperation"
+        "409":
+          description: The Note changed after the capture and cannot be safely undone
   /v2/resources:
     get:
       operationId: listResources
@@ -4151,8 +4280,10 @@ paths:
       description: >
         Accept a mid-run steering message from the run's owner. The worker
         folds it into the running agent loop at its next model-call boundary.
-        409 with code "steering_closed" means the run is terminal or
-        finalizing; clients fall back to queueing the text as the next turn.
+        Notes-scoped runs never accept live steering because their access and
+        append-consent scope is immutable for the turn. 409 with code
+        "steering_closed" means the run is Notes-scoped, terminal, or finalizing;
+        clients fall back to queueing the text as the next turn.
       parameters:
         - $ref: "#/components/parameters/RunID"
       requestBody:
@@ -4170,6 +4301,10 @@ paths:
                 $ref: "#/components/schemas/V2RunSteerMessageRecord"
         "409":
           description: Run no longer accepts steering messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
     get:
       operationId: listRunSteerMessages
       parameters:
@@ -6079,7 +6214,7 @@ components:
         run_id: { type: string, nullable: true }
     V2NoteRecord:
       type: object
-      required: [note_id, title, body_markdown, pinned, editor_mode, revision, content_digest, created_at, updated_at]
+      required: [note_id, title, body_markdown, pinned, editor_mode, revision, content_digest, created_at, updated_at, content_updated_at]
       properties:
         note_id: { type: string }
         user_id: { type: string, nullable: true }
@@ -6092,9 +6227,10 @@ components:
         content_digest: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        content_updated_at: { type: string, format: date-time }
     V2NoteListItem:
       type: object
-      required: [note_id, title, snippet, pinned, revision, updated_at]
+      required: [note_id, title, snippet, pinned, revision, updated_at, content_updated_at]
       properties:
         note_id: { type: string }
         title: { type: string }
@@ -6102,6 +6238,7 @@ components:
         pinned: { type: boolean }
         revision: { type: integer, format: int64, minimum: 1 }
         updated_at: { type: string, format: date-time }
+        content_updated_at: { type: string, format: date-time }
     V2NoteListResponse:
       type: object
       required: [notes, total_count]
@@ -6157,13 +6294,25 @@ components:
           $ref: "#/components/schemas/V2NoteAccess"
     V2ModelNoteSearchRequest:
       type: object
-      required: [query]
       properties:
-        query: { type: string, minLength: 1, maxLength: 512 }
-        limit: { type: integer, minimum: 1, maximum: 20, default: 10 }
+        query:
+          type: string
+          maxLength: 512
+          default: ""
+          description: Required and non-blank for relevance; optional for recent.
+        sort: { type: string, enum: [relevance, recent], default: relevance }
+        limit: { type: integer, minimum: 1, maximum: 20, default: 8 }
+        cursor:
+          type: string
+          nullable: true
+          description: >-
+            Opaque v2 cursor bound to the leased run, normalized query, sort
+            mode, store-authoritative search snapshot, and last sort key.
+            Pagination is snapshot-bounded keyset traversal; it is not an
+            offset into mutable Notes.
     V2ModelNoteSearchHit:
       type: object
-      required: [note_id, title, snippet, pinned, revision, updated_at]
+      required: [note_id, title, snippet, pinned, revision, updated_at, content_updated_at]
       properties:
         note_id: { type: string }
         title: { type: string }
@@ -6171,15 +6320,19 @@ components:
         pinned: { type: boolean }
         revision: { type: integer, format: int64, minimum: 1 }
         updated_at: { type: string, format: date-time }
+        content_updated_at: { type: string, format: date-time }
     V2ModelNoteSearchResponse:
       type: object
-      required: [notes, has_more]
+      required: [notes, has_more, next_cursor]
       properties:
         notes:
           type: array
           items:
             $ref: "#/components/schemas/V2ModelNoteSearchHit"
         has_more: { type: boolean }
+        next_cursor:
+          type: string
+          description: Empty when has_more is false.
     V2ModelNoteReadRequest:
       type: object
       required: [note_id]
@@ -6256,6 +6409,31 @@ components:
         operation_id: { type: string }
         proposal_id: { type: string }
         run_id: { type: string, nullable: true }
+        note_id: { type: string }
+        note_title: { type: string }
+        before_revision: { type: integer, format: int64, minimum: 1 }
+        after_revision: { type: integer, format: int64, minimum: 1 }
+        undo_revision: { type: integer, format: int64, minimum: 1, nullable: true }
+        appended_bytes: { type: integer, minimum: 1 }
+        before_content_digest: { type: string }
+        after_content_digest: { type: string }
+        created_at: { type: string, format: date-time }
+        undone_at: { type: string, format: date-time, nullable: true }
+    V2NoteDirectAppendRequest:
+      type: object
+      required: [body_markdown, expected_revision]
+      properties:
+        body_markdown:
+          type: string
+          minLength: 1
+          description: Exact captured text, bounded to 32 KiB of UTF-8 by the server.
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+    V2NoteDirectAppendOperation:
+      type: object
+      description: Content-free receipt for an owner-authenticated exact capture append.
+      required: [operation_id, note_id, note_title, before_revision, after_revision, appended_bytes, before_content_digest, after_content_digest, created_at]
+      properties:
+        operation_id: { type: string }
         note_id: { type: string }
         note_title: { type: string }
         before_revision: { type: integer, format: int64, minimum: 1 }
@@ -6897,6 +7075,7 @@ components:
       required: [error]
       properties:
         error: { type: string }
+        code: { type: string, nullable: true }
         upstream_status: { type: integer, nullable: true }
     V2BisqueNotConfiguredResponse:
       type: object

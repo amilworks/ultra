@@ -68,7 +68,11 @@ import { exitCode } from "@milkdown/kit/prose/commands";
 import type { MarkType, Node as ProseNode } from "@milkdown/kit/prose/model";
 import { Plugin, TextSelection } from "@milkdown/kit/prose/state";
 import { deleteColumn, deleteRow, deleteTable } from "@milkdown/kit/prose/tables";
-import type { NodeViewConstructor } from "@milkdown/kit/prose/view";
+import {
+  Decoration,
+  DecorationSet,
+  type NodeViewConstructor,
+} from "@milkdown/kit/prose/view";
 import { $prose, $useKeymap, $view, callCommand, insert } from "@milkdown/kit/utils";
 import { Milkdown, MilkdownProvider, useEditor } from "@milkdown/react";
 
@@ -287,6 +291,63 @@ const taskTogglePlugin = $prose(
   () =>
     new Plugin({
       props: {
+        decorations: (state) => {
+          const decorations: Decoration[] = [];
+          state.doc.descendants((node, pos) => {
+            if (node.type.name !== "list_item" || node.attrs.checked == null) {
+              return;
+            }
+            decorations.push(
+              Decoration.node(pos, pos + node.nodeSize, {
+                role: "checkbox",
+                "aria-checked": node.attrs.checked ? "true" : "false",
+                "aria-label": node.textContent.trim() || "Task",
+                tabindex: "0",
+              })
+            );
+          });
+          return DecorationSet.create(state.doc, decorations);
+        },
+        handleKeyDown: (view, event) => {
+          if (event.key !== " " && event.key !== "Enter") return false;
+          const target = event.target;
+          if (!(target instanceof HTMLElement)) return false;
+          const taskItem = target.closest<HTMLElement>(
+            'li[data-item-type="task"][role="checkbox"]'
+          );
+          if (!taskItem || !view.dom.contains(taskItem)) return false;
+          let insidePos: number;
+          try {
+            insidePos = view.posAtDOM(taskItem, 0);
+          } catch {
+            return false;
+          }
+          // A DOM position at offset zero is normally the first position
+          // *inside* the list item. Resolve the enclosing node boundary; using
+          // the inside position directly points at its paragraph child.
+          const itemPos = [insidePos - 1, insidePos].find((candidate) => {
+            if (candidate < 0 || candidate >= view.state.doc.content.size) {
+              return false;
+            }
+            const candidateNode = view.state.doc.nodeAt(candidate);
+            return candidateNode?.type.name === "list_item" && candidateNode.attrs.checked != null;
+          });
+          if (itemPos == null) {
+            return false;
+          }
+          const item = view.state.doc.nodeAt(itemPos);
+          if (item?.type.name !== "list_item" || item.attrs.checked == null) {
+            return false;
+          }
+          event.preventDefault();
+          view.dispatch(
+            view.state.tr.setNodeMarkup(itemPos, undefined, {
+              ...item.attrs,
+              checked: !item.attrs.checked,
+            })
+          );
+          return true;
+        },
         handleClick: (view, pos, event) => {
           const $pos = view.state.doc.resolve(pos);
           let item: ProseNode | null = null;

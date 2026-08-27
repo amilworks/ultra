@@ -715,6 +715,13 @@ async def run_job(
         run_lease_token=run_lease_token,
     )
     notes_content_boundary = note_access_from_selection_context(context.selection_context).enabled
+    if notes_content_boundary:
+        # A durable graph slice contains tool messages, including private Note
+        # bodies and opaque read tokens. Notes runs intentionally restart from
+        # the sealed job envelope after delivery failure instead of hydrating or
+        # writing that state. The Notes-only agent factory independently enforces
+        # the same boundary for callers that bypass this runner.
+        checkpointer = None
     # Reuse the worker-owned sequencer when provided so worker lifecycle events
     # (heartbeats, terminal events) and streamed events share one counter; only
     # fall back to a local one when run_job is driven directly (e.g. tests).
@@ -851,7 +858,7 @@ async def run_job(
         # surface, so they never grow a steering channel.
         steering_inbox = (
             build_steering_inbox(settings, run_id=context.run_id)
-            if evaluation_policy is None
+            if evaluation_policy is None and not notes_content_boundary
             else None
         )
         if steering_inbox is not None:

@@ -339,11 +339,23 @@ const mockNoteDigest = (note) =>
 for (const note of mockNotes) {
   note.revision = 1;
   note.content_digest = mockNoteDigest(note);
+  note.content_updated_at = note.updated_at;
 }
-const sortedMockNotes = () =>
-  [...mockNotes].sort((a, b) =>
-    a.pinned === b.pinned ? (a.updated_at < b.updated_at ? 1 : -1) : a.pinned ? -1 : 1
-  );
+const sortedMockNotes = (sort = "browse") =>
+  [...mockNotes].sort((a, b) => {
+    if (sort === "recent") {
+      return a.content_updated_at === b.content_updated_at
+        ? a.note_id.localeCompare(b.note_id)
+        : a.content_updated_at < b.content_updated_at
+          ? 1
+          : -1;
+    }
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    if (a.content_updated_at !== b.content_updated_at) {
+      return a.content_updated_at < b.content_updated_at ? 1 : -1;
+    }
+    return a.note_id.localeCompare(b.note_id);
+  });
 const seedHdf5Lens = process.env.MOCK_SEED_HDF5 === "1";
 const hdf5LensFileId = "file_hdf5_dream3d";
 const hdf5LensDefaultDataset = "/DataContainers/SyntheticVolumeDataContainer/CellData/IPFColor";
@@ -2252,7 +2264,8 @@ const server = http.createServer(async (request, response) => {
 
   if (url.pathname === "/v2/notes" && request.method === "GET") {
     const query = (url.searchParams.get("query") || "").toLowerCase();
-    const matched = sortedMockNotes().filter(
+    const sort = url.searchParams.get("sort") || "browse";
+    const matched = sortedMockNotes(sort).filter(
       (note) =>
         !query ||
         note.title.toLowerCase().includes(query) ||
@@ -2265,6 +2278,7 @@ const server = http.createServer(async (request, response) => {
         snippet: note.body_markdown.slice(0, 300),
         pinned: note.pinned,
         revision: note.revision,
+        content_updated_at: note.content_updated_at,
         updated_at: note.updated_at,
       })),
       total_count: matched.length,
@@ -2277,6 +2291,7 @@ const server = http.createServer(async (request, response) => {
     request.on("end", () => {
       let payload = {};
       try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
+      const createdAt = new Date().toISOString();
       const note = {
         note_id: `note_mock_${++mockNoteCounter}`,
         title: payload.title || "",
@@ -2284,8 +2299,9 @@ const server = http.createServer(async (request, response) => {
         pinned: Boolean(payload.pinned),
         editor_mode: payload.editor_mode === "plaintext" ? "plaintext" : "markdown",
         revision: 1,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
+        created_at: createdAt,
+        content_updated_at: createdAt,
+        updated_at: createdAt,
       };
       note.content_digest = mockNoteDigest(note);
       mockNotes.push(note);
@@ -2317,6 +2333,10 @@ const server = http.createServer(async (request, response) => {
           });
           return;
         }
+        const contentChanged =
+          (typeof payload.title === "string" && payload.title !== note.title) ||
+          (typeof payload.body_markdown === "string" &&
+            payload.body_markdown !== note.body_markdown);
         if (typeof payload.title === "string") note.title = payload.title;
         if (typeof payload.body_markdown === "string") note.body_markdown = payload.body_markdown;
         if (typeof payload.pinned === "boolean") note.pinned = payload.pinned;
@@ -2326,6 +2346,7 @@ const server = http.createServer(async (request, response) => {
         note.revision += 1;
         note.content_digest = mockNoteDigest(note);
         note.updated_at = new Date().toISOString();
+        if (contentChanged) note.content_updated_at = note.updated_at;
         sendJson(response, 200, note);
       });
       return;

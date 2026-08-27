@@ -709,9 +709,11 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/notes/{note_id}", deps.handleGetNote)
 			r.Patch("/notes/{note_id}", deps.handleUpdateNote)
 			r.Delete("/notes/{note_id}", deps.handleDeleteNote)
+			r.Post("/notes/{note_id}/append", deps.handleDirectNoteAppend)
 			r.Get("/note-append-proposals/{proposal_id}", deps.handleGetNoteAppendProposal)
 			r.Post("/note-append-proposals/{proposal_id}/commit", deps.handleCommitNoteAppendProposal)
 			r.Post("/note-append-operations/{operation_id}/undo", deps.handleUndoNoteAppendOperation)
+			r.Post("/note-direct-append-operations/{operation_id}/undo", deps.handleUndoDirectNoteAppend)
 			r.Get("/resources", deps.handleListResources)
 			r.Post("/resources/delete/bulk", deps.handleBulkDeleteResources)
 			r.Post("/resources/restore/bulk", deps.handleBulkRestoreResources)
@@ -11152,8 +11154,8 @@ type ackRunSteerRequest struct {
 }
 
 // handleSteerRun accepts a mid-run steering message from the run's owner.
-// 409 with code "steering_closed" means the run is terminal or finalizing —
-// the client falls back to Phase 0 queueing.
+// 409 with code "steering_closed" means the run is Notes-scoped, terminal, or
+// finalizing — the client falls back to Phase 0 queueing.
 func (deps ServerDeps) handleSteerRun(w http.ResponseWriter, r *http.Request) {
 	if !deps.ready(w) {
 		return

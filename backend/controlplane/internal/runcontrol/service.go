@@ -735,6 +735,14 @@ func (s *Service) SteerRun(ctx context.Context, req SteerRunRequest) (domain.Run
 	if err != nil {
 		return domain.RunSteerMessageRecord{}, err
 	}
+	// Notes runs carry an immutable, server-authored access scope. Live steering
+	// would let a later user message withdraw or change append consent without
+	// changing that sealed authority, so the browser must queue a follow-up turn
+	// instead. Key presence is intentionally fail-closed for malformed legacy
+	// metadata, matching the rest of the Notes privacy boundary.
+	if domain.RunHasNoteAccessSelection(run) {
+		return domain.RunSteerMessageRecord{}, store.ErrSteeringClosed
+	}
 	// Cleanroom evaluation runs execute with a sealed surface — their workers
 	// never construct a steering inbox, so accepting would only ever produce
 	// a misleading pending→missed lifecycle.

@@ -12,6 +12,8 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { mergeQueuedNoteSearchScopeOverride } from "./queued-followup";
+
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
 const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 
@@ -47,6 +49,54 @@ describe("queueing", () => {
     expect(queue).toMatch(/queuedFollowupExcludedNoteIntentText/);
     expect(queue).toMatch(/selectedNotes: \[\]/);
     expect(queue).toMatch(/withoutNoteAccess\(current\.activeSelectionContext\)/);
+  });
+
+  it("uses one precedence rule for normal queueing and steering-closed fallback", () => {
+    expect(appSource.match(/mergeQueuedNoteSearchScopeOverride\(\{/g)).toHaveLength(2);
+    expect(
+      mergeQueuedNoteSearchScopeOverride({
+        existingOverride: false,
+        incomingOverride: null,
+        incomingText: "ordinary follow-up",
+        incomingExcludedReferenceText: [],
+      })
+    ).toBe(false);
+    expect(
+      mergeQueuedNoteSearchScopeOverride({
+        existingOverride: false,
+        incomingOverride: null,
+        incomingText: "Search my notes for calibration",
+        incomingExcludedReferenceText: [],
+      })
+    ).toBe(true);
+    expect(
+      mergeQueuedNoteSearchScopeOverride({
+        existingOverride: true,
+        incomingOverride: false,
+        incomingText: "Search my notes for calibration",
+        incomingExcludedReferenceText: [],
+      })
+    ).toBe(false);
+  });
+
+  it("does not let a paste-only request silently supersede a removed scope", () => {
+    const pasted = "Search my notes for calibration";
+    expect(
+      mergeQueuedNoteSearchScopeOverride({
+        existingOverride: false,
+        incomingOverride: null,
+        incomingText: pasted,
+        incomingExcludedReferenceText: [pasted],
+      })
+    ).toBe(false);
+    expect(
+      mergeQueuedNoteSearchScopeOverride({
+        existingOverride: false,
+        incomingOverride: true,
+        incomingText: pasted,
+        incomingExcludedReferenceText: [pasted],
+      })
+    ).toBe(true);
   });
 
   it("honours the slash-menu and picker contracts the send path enforces", () => {
@@ -172,6 +222,22 @@ describe("the queued bubble", () => {
     expect(appSource).toContain("Queued — sends when this run finishes");
     expect(appSource).toContain('aria-label="Cancel queued follow-up"');
     expect(appSource).toContain('aria-label="Notes for queued message"');
+  });
+
+  it("shows sealed Notes search as a calm removable queued-message chip", () => {
+    expect(appSource).toContain("const activeQueuedNoteSearchScope");
+    expect(appSource).toContain("activeConversation.queuedFollowupExcludedNoteIntentText");
+    expect(appSource).toContain("activeConversation.queuedFollowupNoteSearchScopeOverride");
+    expect(appSource).toContain("Search Notes");
+    expect(appSource).toContain("· this message");
+    expect(appSource).toContain('aria-label="Don’t search Notes for queued message"');
+    const remove = blockFrom(
+      "const removeQueuedNoteSearchScope = useCallback",
+      "}, [activeConversation, updateConversation]);"
+    );
+    expect(remove).toContain("queuedFollowupNoteSearchScopeOverride: false");
+    expect(appSource).toContain("inline-flex min-h-11 max-w-full");
+    expect(appSource).toContain("inline-flex size-11 items-center justify-center");
   });
 
   it("renders outside ConversationTranscript's narrow memo", () => {

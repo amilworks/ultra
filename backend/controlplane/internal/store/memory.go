@@ -16,16 +16,20 @@ import (
 )
 
 var (
-	ErrNotFound                   = errors.New("not found")
-	ErrConflict                   = errors.New("already exists")
-	ErrNoteRevisionConflict       = errors.New("note revision conflict")
-	ErrNoteReadTokenInvalid       = errors.New("note read token is invalid or expired")
-	ErrNoteProposalExpired        = errors.New("note append proposal expired")
-	ErrNoteUndoConflict           = errors.New("note append can no longer be undone safely")
-	ErrNoteRetrievalBudget        = errors.New("note retrieval budget exhausted")
-	ErrNoteSearchTimeout          = errors.New("note search timed out")
-	errRunEventPayloadCycle       = errors.New("run event payload contains a cycle")
-	errRunEventPayloadUnsupported = errors.New("run event payload contains an unsupported mutable reference")
+	ErrNotFound                      = errors.New("not found")
+	ErrConflict                      = errors.New("already exists")
+	ErrNoteRevisionConflict          = errors.New("note revision conflict")
+	ErrNoteReadTokenInvalid          = errors.New("note read token is invalid or expired")
+	ErrNoteProposalExpired           = errors.New("note append proposal expired")
+	ErrNoteUndoConflict              = errors.New("note append can no longer be undone safely")
+	ErrNoteRetrievalBudget           = errors.New("note retrieval budget exhausted")
+	ErrNoteSearchTimeout             = errors.New("note search timed out")
+	ErrNoteAppendIdempotencyConflict = errors.New("note append idempotency key is bound to another request")
+	ErrNoteAppendNotCommitted        = errors.New("note append request was not committed")
+	ErrNoteCreateIdempotencyConflict = errors.New("note create idempotency key is bound to another request")
+	ErrNoteCreateReplayDeleted       = errors.New("note create replay target was deleted")
+	errRunEventPayloadCycle          = errors.New("run event payload contains a cycle")
+	errRunEventPayloadUnsupported    = errors.New("run event payload contains an unsupported mutable reference")
 )
 
 const defaultResourceRetention = 30 * 24 * time.Hour
@@ -77,9 +81,11 @@ type MemoryStore struct {
 	bisque                  map[string]domain.BisqueCredentialRecord
 	leases                  map[string]domain.RunLeaseRecord
 	notes                   map[string]domain.NoteRecord
+	noteCreateReceipts      map[string]memoryNoteCreateReceipt
 	noteReadGrants          map[string]domain.NoteReadGrantRecord
 	noteAppendProposals     map[string]domain.NoteAppendProposalRecord
 	noteAppendOperations    map[string]memoryNoteAppendOperation
+	noteDirectAppendOps     map[string]memoryNoteDirectAppendOperation
 	noteRunUsage            map[string]memoryNoteRunUsage
 	steerMessages           map[string][]domain.RunSteerMessageRecord
 	steerBarriers           map[string]time.Time
@@ -126,9 +132,11 @@ func NewMemoryStore() *MemoryStore {
 		bisque:                  map[string]domain.BisqueCredentialRecord{},
 		leases:                  map[string]domain.RunLeaseRecord{},
 		notes:                   map[string]domain.NoteRecord{},
+		noteCreateReceipts:      map[string]memoryNoteCreateReceipt{},
 		noteReadGrants:          map[string]domain.NoteReadGrantRecord{},
 		noteAppendProposals:     map[string]domain.NoteAppendProposalRecord{},
 		noteAppendOperations:    map[string]memoryNoteAppendOperation{},
+		noteDirectAppendOps:     map[string]memoryNoteDirectAppendOperation{},
 		noteRunUsage:            map[string]memoryNoteRunUsage{},
 		steerMessages:           map[string][]domain.RunSteerMessageRecord{},
 		steerBarriers:           map[string]time.Time{},

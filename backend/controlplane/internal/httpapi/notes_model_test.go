@@ -147,8 +147,9 @@ func TestModelNotesReadProposalCommitAndConditionalUndo(t *testing.T) {
 		t.Fatalf("idempotent replay = %d %+v", replay.Code, replayProposal)
 	}
 	conflictBody := strings.Replace(proposalBody, "new fact", "different fact", 1)
-	if rec := h.workerRequest(http.MethodPost, base+"/note-append-proposals", conflictBody); rec.Code != http.StatusConflict {
-		t.Fatalf("same idempotency key with different body = %d, want 409", rec.Code)
+	if rec := h.workerRequest(http.MethodPost, base+"/note-append-proposals", conflictBody); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "note_append_idempotency_conflict") {
+		t.Fatalf("same idempotency key with different body = %d body=%s, want typed 409", rec.Code, rec.Body.String())
 	}
 
 	get := notesRequest(h.router, http.MethodGet, "/v2/note-append-proposals/"+proposal.ProposalID, "ada", "")
@@ -209,10 +210,11 @@ func TestModelNotesReadProposalCommitAndConditionalUndo(t *testing.T) {
 func TestModelNotesSearchLimitTwentyUsesLookahead(t *testing.T) {
 	t.Parallel()
 	h := newModelNotesHarness(t, domain.NoteAccessModeSearch)
+	baseTime := domain.Now().Add(-time.Hour)
 	for index := 0; index < 21; index++ {
 		_, err := h.store.CreateNote(context.Background(), domain.NoteRecord{
 			NoteID: fmt.Sprintf("note_match_%02d", index), UserID: "ada", Title: fmt.Sprintf("match %02d", index),
-			EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: domain.Now().Add(time.Duration(index) * time.Millisecond),
+			EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime.Add(time.Duration(index) * time.Millisecond),
 		})
 		if err != nil {
 			t.Fatalf("seed note: %v", err)
@@ -228,6 +230,183 @@ func TestModelNotesSearchLimitTwentyUsesLookahead(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK || len(page.Notes) != 20 || !page.HasMore {
 		t.Fatalf("search = %d count=%d has_more=%t", rec.Code, len(page.Notes), page.HasMore)
+	}
+}
+
+func TestModelNotesRecentSearchIsCursorPagedAndBoundToRequest(t *testing.T) {
+	t.Parallel()
+	h := newModelNotesHarness(t, domain.NoteAccessModeSearch)
+	tieTime := domain.Now().Add(-2 * time.Hour)
+	for _, noteID := range []string{"note_recent_b", "note_recent_a"} {
+		if _, err := h.store.CreateNote(context.Background(), domain.NoteRecord{
+			NoteID: noteID, UserID: "ada", Title: "Recent " + noteID,
+			BodyMarkdown: "shared recent body", Pinned: noteID == "note_recent_b",
+			EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: tieTime,
+		}); err != nil {
+			t.Fatalf("seed %s: %v", noteID, err)
+		}
+	}
+	base := "/v2/runs/" + h.run.RunID + "/note-search"
+	first := h.workerRequest(http.MethodPost, base, `{"query":"","sort":"recent","limit":1}`)
+	var firstPage struct {
+		Notes      []domain.NoteSearchHit `json:"notes"`
+		HasMore    bool                   `json:"has_more"`
+		NextCursor string                 `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstPage); err != nil || first.Code != http.StatusOK {
+		t.Fatalf("first recent page = %d page=%+v body=%s err=%v", first.Code, firstPage, first.Body.String(), err)
+	}
+	if len(firstPage.Notes) != 1 || firstPage.Notes[0].NoteID != h.note.NoteID || !firstPage.HasMore || firstPage.NextCursor == "" {
+		t.Fatalf("first recent page = %+v", firstPage)
+	}
+	// A content mutation of an already-returned Note and a new Note both sort
+	// ahead of the old boundary. Offset pagination would now duplicate or skip;
+	// the snapshot-bound keyset excludes both from the in-flight search.
+	returned, err := h.store.GetNoteForUser(context.Background(), firstPage.Notes[0].NoteID, "ada")
+	if err != nil {
+		t.Fatalf("get returned Note: %v", err)
+	}
+	changed := "mutated after the first page"
+	if _, err := h.store.UpdateNoteForUser(context.Background(), returned.NoteID, "ada", domain.NoteUpdateInput{
+		ExpectedRevision: returned.Revision, BodyMarkdown: &changed,
+	}); err != nil {
+		t.Fatalf("mutate returned Note: %v", err)
+	}
+	if _, err := h.store.CreateNote(context.Background(), domain.NoteRecord{
+		NoteID: "note_recent_new", UserID: "ada", Title: "Created after page one",
+		BodyMarkdown: "newer than the search snapshot", EditorMode: domain.NoteEditorModeMarkdown,
+		CreatedAt: domain.Now(),
+	}); err != nil {
+		t.Fatalf("create concurrent Note: %v", err)
+	}
+	secondBody := fmt.Sprintf(`{"query":"","sort":"recent","limit":1,"cursor":%q}`, firstPage.NextCursor)
+	second := h.workerRequest(http.MethodPost, base, secondBody)
+	var secondPage struct {
+		Notes      []domain.NoteSearchHit `json:"notes"`
+		HasMore    bool                   `json:"has_more"`
+		NextCursor string                 `json:"next_cursor"`
+	}
+	_ = json.Unmarshal(second.Body.Bytes(), &secondPage)
+	if second.Code != http.StatusOK || len(secondPage.Notes) != 1 || secondPage.Notes[0].NoteID != "note_recent_a" ||
+		!secondPage.HasMore || secondPage.NextCursor == "" {
+		t.Fatalf("second recent page = %d %+v body=%s", second.Code, secondPage, second.Body.String())
+	}
+	third := h.workerRequest(http.MethodPost, base,
+		fmt.Sprintf(`{"query":"","sort":"recent","limit":1,"cursor":%q}`, secondPage.NextCursor))
+	var thirdPage struct {
+		Notes   []domain.NoteSearchHit `json:"notes"`
+		HasMore bool                   `json:"has_more"`
+	}
+	_ = json.Unmarshal(third.Body.Bytes(), &thirdPage)
+	if third.Code != http.StatusOK || len(thirdPage.Notes) != 1 || thirdPage.Notes[0].NoteID != "note_recent_b" || thirdPage.HasMore {
+		t.Fatalf("third recent page = %d %+v body=%s", third.Code, thirdPage, third.Body.String())
+	}
+	for name, body := range map[string]string{
+		"malformed":  `{"query":"","sort":"recent","cursor":"not-base64"}`,
+		"query swap": fmt.Sprintf(`{"query":"shared","sort":"recent","cursor":%q}`, firstPage.NextCursor),
+		"sort swap":  fmt.Sprintf(`{"query":"shared","sort":"relevance","cursor":%q}`, firstPage.NextCursor),
+	} {
+		if rec := h.workerRequest(http.MethodPost, base, body); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s cursor = %d body=%s, want 400", name, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := h.workerRequest(http.MethodPost, base, `{"query":"","sort":"relevance"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("blank relevance query = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+	if rec := h.workerRequest(http.MethodPost, base, `{"query":"","sort":"popular"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid sort = %d body=%s, want 400", rec.Code, rec.Body.String())
+	}
+}
+
+func TestModelNotesRelevanceCursorCarriesRankAndRejectsSnapshotDrift(t *testing.T) {
+	t.Parallel()
+	h := newModelNotesHarness(t, domain.NoteAccessModeSearch)
+	baseTime := domain.Now().Add(-3 * time.Hour)
+	for _, seed := range []domain.NoteRecord{
+		{NoteID: "note_rank_exact", UserID: "ada", Title: "calibration", BodyMarkdown: "exact", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime},
+		{NoteID: "note_rank_body", UserID: "ada", Title: "Other", BodyMarkdown: "calibration in body", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime.Add(time.Hour)},
+	} {
+		if _, err := h.store.CreateNote(context.Background(), seed); err != nil {
+			t.Fatalf("seed %s: %v", seed.NoteID, err)
+		}
+	}
+	path := "/v2/runs/" + h.run.RunID + "/note-search"
+	requestPage := func(cursor string) (int, struct {
+		Notes      []domain.NoteSearchHit `json:"notes"`
+		HasMore    bool                   `json:"has_more"`
+		NextCursor string                 `json:"next_cursor"`
+	}) {
+		t.Helper()
+		body := `{"query":"calibration","sort":"relevance","limit":1}`
+		if cursor != "" {
+			body = fmt.Sprintf(`{"query":"calibration","sort":"relevance","limit":1,"cursor":%q}`, cursor)
+		}
+		rec := h.workerRequest(http.MethodPost, path, body)
+		var page struct {
+			Notes      []domain.NoteSearchHit `json:"notes"`
+			HasMore    bool                   `json:"has_more"`
+			NextCursor string                 `json:"next_cursor"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &page)
+		return rec.Code, page
+	}
+	code, first := requestPage("")
+	if code != http.StatusOK || len(first.Notes) != 1 || first.Notes[0].NoteID != "note_rank_exact" || !first.HasMore {
+		t.Fatalf("first relevance page = %d %+v", code, first)
+	}
+	exact, _ := h.store.GetNoteForUser(context.Background(), "note_rank_exact", "ada")
+	mutated := "changed after search start"
+	if _, err := h.store.UpdateNoteForUser(context.Background(), exact.NoteID, "ada", domain.NoteUpdateInput{
+		ExpectedRevision: exact.Revision, BodyMarkdown: &mutated,
+	}); err != nil {
+		t.Fatalf("mutate returned exact-title Note: %v", err)
+	}
+	if _, err := h.store.CreateNote(context.Background(), domain.NoteRecord{
+		NoteID: "note_rank_new_exact", UserID: "ada", Title: "calibration",
+		BodyMarkdown: "created after snapshot", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: domain.Now(),
+	}); err != nil {
+		t.Fatalf("create concurrent exact-title Note: %v", err)
+	}
+	code, second := requestPage(first.NextCursor)
+	if code != http.StatusOK || len(second.Notes) != 1 || second.Notes[0].NoteID != h.note.NoteID || !second.HasMore {
+		t.Fatalf("second relevance page = %d %+v", code, second)
+	}
+	code, third := requestPage(second.NextCursor)
+	if code != http.StatusOK || len(third.Notes) != 1 || third.Notes[0].NoteID != "note_rank_body" || third.HasMore {
+		t.Fatalf("third relevance page = %d %+v", code, third)
+	}
+}
+
+func TestModelNoteSearchRelevanceAndRecentUseDifferentStableOrders(t *testing.T) {
+	t.Parallel()
+	h := newModelNotesHarness(t, domain.NoteAccessModeSearch)
+	baseTime := domain.Now().Add(-4 * time.Hour)
+	seeds := []domain.NoteRecord{
+		{NoteID: "note_order_exact", UserID: "ada", Title: "needle", BodyMarkdown: "old", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime},
+		{NoteID: "note_order_title", UserID: "ada", Title: "needle details", BodyMarkdown: "middle", EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime.Add(time.Hour)},
+		{NoteID: "note_order_body", UserID: "ada", Title: "Pinned old label", BodyMarkdown: "new needle body", Pinned: true, EditorMode: domain.NoteEditorModeMarkdown, CreatedAt: baseTime.Add(2 * time.Hour)},
+	}
+	for _, seed := range seeds {
+		if _, err := h.store.CreateNote(context.Background(), seed); err != nil {
+			t.Fatalf("seed %s: %v", seed.NoteID, err)
+		}
+	}
+	path := "/v2/runs/" + h.run.RunID + "/note-search"
+	for _, test := range []struct {
+		body string
+		want string
+	}{
+		{body: `{"query":"needle","sort":"relevance","limit":3}`, want: "note_order_exact"},
+		{body: `{"query":"needle","sort":"recent","limit":3}`, want: "note_order_body"},
+	} {
+		rec := h.workerRequest(http.MethodPost, path, test.body)
+		var page struct {
+			Notes []domain.NoteSearchHit `json:"notes"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &page)
+		if rec.Code != http.StatusOK || len(page.Notes) != 3 || page.Notes[0].NoteID != test.want {
+			t.Fatalf("search %s = %d %+v", test.body, rec.Code, page.Notes)
+		}
 	}
 }
 

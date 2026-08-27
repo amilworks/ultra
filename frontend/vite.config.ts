@@ -95,6 +95,49 @@ export default defineConfig({
                 );
               },
             },
+            {
+              // Notes authority is intentionally a distinct app-shell
+              // dependency: the conservative grammar grows independently of
+              // the chat renderer, while remaining synchronously available to
+              // composer scope and submit preflight.
+              name: "notes-access",
+              priority: 70,
+              test: (id: string) => {
+                const normalizedId = id.replace(/\\/g, "/");
+                return (
+                  !normalizedId.includes("node_modules") &&
+                  [
+                    "/src/lib/notesAccess.ts",
+                    "/src/lib/composerDraftStorage.ts",
+                    "/src/features/chat/queued-followup.ts",
+                  ].some((suffix) => normalizedId.endsWith(suffix))
+                );
+              },
+            },
+            {
+              // Keep account-scoped Notes recovery and capture reconciliation
+              // cohesive and independently budgeted. These helpers remain
+              // synchronous at auth/logout boundaries, but no longer inflate
+              // the primary app-shell chunk as their durability rules grow.
+              name: "notes-recovery",
+              priority: 70,
+              test: (id: string) => {
+                const normalizedId = id.replace(/\\/g, "/");
+                return (
+                  !normalizedId.includes("node_modules") &&
+                  [
+                    "/src/lib/noteDirectAppend.ts",
+                    "/src/lib/noteDraftRecovery.ts",
+                    "/src/lib/noteRecoveryScope.ts",
+                    "/src/lib/noteReferences.ts",
+                    "/src/lib/noteSelectionCaptureRecovery.ts",
+                    "/src/lib/pasted-text.ts",
+                    "/src/lib/selection-capture.ts",
+                    "/src/features/auth/accountDeparture.ts",
+                  ].some((suffix) => normalizedId.endsWith(suffix))
+                );
+              },
+            },
             ...["resources", "admin", "training", "chat"].map((feature) => ({
               name: `${feature}-client`,
               priority: 60,

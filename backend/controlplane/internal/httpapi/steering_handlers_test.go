@@ -120,6 +120,49 @@ func TestSteerEndpointOwnershipAndWorkerGates(t *testing.T) {
 	}
 }
 
+func TestSteerEndpointQueuesNoteScopedRunsWithTypedConflict(t *testing.T) {
+	t.Parallel()
+	router, service, ordinaryRun := newSteeringTestRouter(t)
+	noteRun, err := service.CreateRun(context.Background(), runcontrol.CreateRunRequest{
+		ThreadID: ordinaryRun.ThreadID,
+		UserID:   "ada",
+		Goal:     "Use my Notes.",
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Use my Notes."}},
+		SelectionContext: domain.CanonicalNoteAccessSelection(nil, domain.NoteAccessScope{
+			Mode: domain.NoteAccessModeSearch,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/runs/"+noteRun.RunID+"/steer",
+		strings.NewReader(`{"steer_id":"steer_notes","text":"Do not append anything."}`),
+	)
+	req.Header.Set("X-Ultra-User-Id", "ada")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("Notes steer = %d body=%s, want 409", rec.Code, rec.Body.String())
+	}
+	var conflict map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatalf("decode conflict: %v", err)
+	}
+	if conflict["code"] != "steering_closed" {
+		t.Fatalf("conflict code = %q, want steering_closed", conflict["code"])
+	}
+	steers, err := service.ListRunSteerMessages(context.Background(), noteRun.RunID)
+	if err != nil {
+		t.Fatalf("ListRunSteerMessages: %v", err)
+	}
+	if len(steers) != 0 {
+		t.Fatalf("typed conflict still persisted Notes steer: %+v", steers)
+	}
+}
+
 func TestSteerListVisibleToWorkerAndOwnerOnly(t *testing.T) {
 	t.Parallel()
 	router, service, run := newSteeringTestRouter(t)

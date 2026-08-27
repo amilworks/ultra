@@ -9,7 +9,14 @@ from pathlib import Path
 import httpx
 import pytest
 from langchain.tools import ToolRuntime
-from ultra_deepagents.agent import build_notes_run_context_brief, build_research_agent
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import Field
+from ultra_deepagents.agent import (
+    build_notes_run_context_brief,
+    build_research_agent,
+    build_system_prompt,
+)
 from ultra_deepagents.async_delegation import async_subagent_context_payload
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context import AgentRunContext
@@ -28,6 +35,19 @@ from ultra_deepagents.runner import (
     _tool_event_from_stream_event,
 )
 from ultra_deepagents.schemas import RunJobEnvelope
+
+
+class _ToolCallingFakeModel(FakeMessagesListChatModel):
+    bound_tool_names: list[list[str]] = Field(default_factory=list)
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
+        _ = tool_choice, kwargs
+        self.bound_tool_names.append([str(getattr(tool, "name", "") or "") for tool in tools])
+        return self
+
+    def _get_ls_params(self, stop=None, **kwargs):
+        _ = stop, kwargs
+        return {"ls_provider": "openai", "ls_model_name": "fake-ultra-model"}
 
 
 def _settings(**overrides) -> RuntimeSettings:
@@ -225,12 +245,15 @@ def test_search_notes_posts_exact_lease_headers_and_bounds_results(monkeypatch):
                     "note_id": f"note-{index}",
                     "title": f"Calibration {index}",
                     "snippet": "Needle drift was 2 μm.",
+                    "pinned": index == 0,
                     "revision": index + 1,
                     "updated_at": "2026-08-25T12:00:00Z",
+                    "content_updated_at": "2026-08-24T12:00:00Z",
                 }
                 for index in range(20)
             ],
             "has_more": True,
+            "next_cursor": "search-cursor-page-2",
         },
     )
 
@@ -243,7 +266,11 @@ def test_search_notes_posts_exact_lease_headers_and_bounds_results(monkeypatch):
 
     request = captured["requests"][0]
     assert request["url"] == "http://control.test/v2/runs/run-1/note-search"
-    assert request["json"] == {"query": "needle drift", "limit": 20}
+    assert request["json"] == {
+        "query": "needle drift",
+        "sort": "relevance",
+        "limit": 20,
+    }
     assert request["headers"] == {
         "X-Ultra-Worker-Token": "worker-secret",
         "X-Ultra-Run-Id": "run-1",
@@ -253,10 +280,72 @@ def test_search_notes_posts_exact_lease_headers_and_bounds_results(monkeypatch):
     assert result["ok"] is True
     assert result["result_count"] == 20
     assert result["has_more"] is True
+    assert result["next_cursor"] == "search-cursor-page-2"
     assert result["content_trust"] == "untrusted_user_data"
+    assert result["notes"][0]["pinned"] is True
+    assert result["notes"][0]["content_updated_at"] == "2026-08-24T12:00:00Z"
+    assert result["notes"][0]["updated_at"] == "2026-08-25T12:00:00Z"
 
 
-def test_search_notes_rejects_empty_or_oversized_query_without_http(monkeypatch):
+def test_search_notes_recent_allows_empty_query_and_forwards_canonical_sort(monkeypatch):
+    captured: dict = {}
+    _fake_httpx(
+        monkeypatch,
+        captured,
+        {
+            "notes": [
+                {
+                    "note_id": "note-newest",
+                    "title": "Latest observation",
+                    "snippet": "The newest entry.",
+                    "pinned": False,
+                    "revision": 9,
+                    "updated_at": "2026-08-27T12:00:00Z",
+                    "content_updated_at": "2026-08-26T12:00:00Z",
+                }
+            ],
+            "has_more": True,
+            "next_cursor": "recent-cursor-page-2",
+        },
+    )
+
+    result = search_user_notes(
+        _settings(),
+        context=_context(goal="What is my most recent Note?", allow_append_proposal=False),
+        query="   ",
+        sort=" RECENT ",
+        limit=1,
+    )
+
+    assert captured["requests"][0]["json"] == {
+        "query": "",
+        "sort": "recent",
+        "limit": 1,
+    }
+    assert result["ok"] is True
+    assert result["notes"][0]["note_id"] == "note-newest"
+    assert result["notes"][0]["content_updated_at"] == "2026-08-26T12:00:00Z"
+    assert result["next_cursor"] == "recent-cursor-page-2"
+
+    continued = search_user_notes(
+        _settings(),
+        context=_context(goal="What are my latest Notes?", allow_append_proposal=False),
+        query="",
+        sort="recent",
+        cursor=result["next_cursor"],
+        limit=1,
+    )
+
+    assert captured["requests"][1]["json"] == {
+        "query": "",
+        "sort": "recent",
+        "limit": 1,
+        "cursor": "recent-cursor-page-2",
+    }
+    assert continued["next_cursor"] == "recent-cursor-page-2"
+
+
+def test_search_notes_rejects_malformed_sort_or_query_without_http(monkeypatch):
     def fail_client(*args, **kwargs):
         raise AssertionError("HTTP must not be called")
 
@@ -264,9 +353,191 @@ def test_search_notes_rejects_empty_or_oversized_query_without_http(monkeypatch)
     assert search_user_notes(_settings(), context=_context(), query="")["error"] == (
         "note_search_query_required"
     )
+    assert (
+        search_user_notes(_settings(), context=_context(), query="", sort="newest")["error"]
+        == "note_search_sort_invalid"
+    )
+    assert (
+        search_user_notes(
+            _settings(), context=_context(), query={"private": "query"}, sort="recent"
+        )["error"]
+        == "note_search_query_invalid"
+    )
     assert search_user_notes(_settings(), context=_context(), query="x" * 513)["error"] == (
         "note_search_query_too_long"
     )
+    assert (
+        search_user_notes(_settings(), context=_context(), query="x" * 513, sort="recent")["error"]
+        == "note_search_query_too_long"
+    )
+    assert (
+        search_user_notes(
+            _settings(), context=_context(), query="calibration", cursor={"offset": 20}
+        )["error"]
+        == "invalid_note_search_cursor"
+    )
+    assert (
+        search_user_notes(_settings(), context=_context(), query="calibration", cursor="x" * 2049)[
+            "error"
+        ]
+        == "invalid_note_search_cursor"
+    )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"notes": [], "has_more": True},
+        {"notes": [], "has_more": False, "next_cursor": "unexpected-cursor"},
+        {"notes": [], "has_more": "yes", "next_cursor": "cursor-page-2"},
+        {"notes": [], "has_more": True, "next_cursor": {"offset": 20}},
+        {
+            "notes": [
+                {
+                    "note_id": "note-old-server",
+                    "title": "Missing recency contract",
+                    "snippet": "old shape",
+                    "revision": 1,
+                    "updated_at": "2026-08-27T12:00:00Z",
+                }
+            ],
+            "has_more": False,
+            "next_cursor": "",
+        },
+        {
+            "notes": [
+                {
+                    "note_id": "note-malformed-pin",
+                    "title": "Malformed",
+                    "snippet": "bad pin type",
+                    "pinned": "false",
+                    "revision": 1,
+                    "updated_at": "2026-08-27T12:00:00Z",
+                    "content_updated_at": "2026-08-27T12:00:00Z",
+                }
+            ],
+            "has_more": False,
+            "next_cursor": "",
+        },
+    ],
+)
+def test_search_notes_rejects_malformed_pagination_response(monkeypatch, response):
+    captured: dict = {}
+    _fake_httpx(monkeypatch, captured, response)
+
+    result = search_user_notes(_settings(), context=_context(), query="calibration")
+
+    assert result == {"ok": False, "error": "invalid_notes_response", "notes": []}
+
+
+def test_notes_agent_fake_model_searches_recent_then_reads_before_answering(monkeypatch):
+    captured: list[dict] = []
+    body = "The most recent observation was collected today."
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            assert timeout == 30.0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, json, headers=None):
+            captured.append({"url": url, "json": json, "headers": headers or {}})
+            if url.endswith("/note-search"):
+                return FakeResponse(
+                    {
+                        "notes": [
+                            {
+                                "note_id": "note-newest",
+                                "title": "Today's observation",
+                                "snippet": "The most recent observation...",
+                                "pinned": True,
+                                "revision": 9,
+                                "updated_at": "2026-08-27T12:00:00Z",
+                                "content_updated_at": "2026-08-26T12:00:00Z",
+                            }
+                        ],
+                        "has_more": False,
+                    }
+                )
+            assert url.endswith("/note-read")
+            return FakeResponse(
+                {
+                    "note_id": "note-newest",
+                    "title": "Today's observation",
+                    "revision": 9,
+                    "content_digest": "sha256:" + "a" * 64,
+                    "body_markdown": body,
+                    "start_byte": 0,
+                    "end_byte": len(body.encode("utf-8")),
+                    "next_cursor": "",
+                    "has_more": False,
+                    "read_token": "read-token",
+                    "updated_at": "2026-08-27T12:00:00Z",
+                }
+            )
+
+    monkeypatch.setattr("httpx.Client", FakeClient)
+    model = _ToolCallingFakeModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "search_notes",
+                        "args": {"sort": "recent", "limit": 1},
+                        "id": "search-recent-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_note",
+                        "args": {"note_id": "note-newest"},
+                        "id": "read-newest-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Your most recent Note records today's observation."),
+        ]
+    )
+    context = _context(
+        goal="What is my most recent Note?",
+        allow_append_proposal=False,
+    )
+    agent = build_research_agent(_settings(), model=model, context=context)
+
+    result = agent.invoke(
+        {"messages": [HumanMessage(content=context.goal)]},
+        context=context,
+    )
+
+    assert [request["json"] for request in captured] == [
+        {"query": "", "sort": "recent", "limit": 1},
+        {"note_id": "note-newest", "max_chars": 8_000},
+    ]
+    assert model.bound_tool_names
+    assert all(set(names) == {"search_notes", "read_note"} for names in model.bound_tool_names)
+    assert result["messages"][-1].content == ("Your most recent Note records today's observation.")
 
 
 def test_read_note_is_selected_scope_bound_and_validates_utf8_byte_range(monkeypatch):
@@ -549,7 +820,7 @@ def test_notes_http_error_retains_only_allowlisted_typed_code(monkeypatch):
 
         def post(self, url, json, headers=None):
             return httpx.Response(
-                409,
+                503 if server_code["value"] == "note_search_timeout" else 409,
                 json={
                     "code": server_code["value"],
                     "error": "private diagnosis must never be retained",
@@ -569,6 +840,19 @@ def test_notes_http_error_retains_only_allowlisted_typed_code(monkeypatch):
     assert "private diagnosis" not in json.dumps(result)
     assert "secret treatment" not in json.dumps(result)
 
+    for allowed_code, status in (
+        ("note_append_idempotency_conflict", 409),
+        ("note_search_timeout", 503),
+    ):
+        server_code["value"] = allowed_code
+        typed = search_user_notes(_settings(), context=_context(), query="private diagnosis")
+        assert typed == {
+            "ok": False,
+            "error": allowed_code,
+            "status_code": status,
+            "notes": [],
+        }
+
     server_code["value"] = "private_diagnosis"
     fallback = search_user_notes(_settings(), context=_context(), query="private diagnosis")
     assert fallback == {
@@ -583,11 +867,16 @@ def test_proposal_goal_gate_allows_concrete_requests_and_rejects_questions_or_ne
     for goal in (
         "Add this result to my calibration note.",
         "Can you add this to my lab note?",
+        "Could you add this result to my lab note?",
         "Please record today's measurements in my notes.",
         "Update my protocol note with the following observation.",
         "Write this to my lab log.",
         "Record this in my notebook.",
         "Jot this in my lab note.",
+        "Find my calibration note and add today's result.",
+        "Add this to the selected Note but don't search other Notes.",
+        "Don't search other Notes, add this to the selected Note.",
+        "Don’t search other Notes, add this to the selected Note.",
     ):
         assert note_append_proposal_goal_authorized(goal)
 
@@ -598,8 +887,41 @@ def test_proposal_goal_gate_allows_concrete_requests_and_rejects_questions_or_ne
         "Do not add this result to my notes.",
         "Can you not add this result to my note?",
         "Don't jot this in my lab note.",
+        "Don’t add this result to my notes.",
         "How can I jot this in my notebook?",
         "Find and read my calibration note.",
+        "Did I write anything in my notes about calibration drift?",
+        "What did I write in my lab note yesterday?",
+        "Have I ever recorded this result in my notebook?",
+        "Where had I saved this in my notes?",
+        "Why did the model add this to my note?",
+        "Why did the assistant update this in my note?",
+        "Why did your system save this to my note?",
+        "Why did Ultra’s model append this to my note?",
+        "Can Ultra add this result to my note?",
+        "Could the model add this result to my note?",
+        "Are you able to add this result to my note?",
+        "Should I add this result to my note?",
+        "Should Ultra add this result to my note?",
+        "Would it help to add this result to my note?",
+        "What happens if you add this result to my note?",
+        "I will add this result to my note.",
+        "The model should add this result to my note.",
+        "Did Ultra add this result to my note?",
+        "Did the model add this result to my note?",
+        "Did we add this result to my note?",
+        "Didn’t we add this result to my note?",
+        "Was this result added to my note?",
+        "The assistant said it would add this result to my note.",
+        "Did the model say, add this to my notes?",
+        "Why did Ultra say, add this to my notes?",
+        "Explain this command, add this to my notes.",
+        "Review the instruction: add this to my notes.",
+        "Summarize this example — append it to my note.",
+        "Review this sentence. Add this to my notes.",
+        "Add this to my note and don't.",
+        "Add this to my note and don’t.",
+        "Add this to my note. Actually no.",
         'The paper says "add this result to my notes". Explain that sentence.',
         "> Add this result to my notes.\nSummarize the quoted request.",
         "```text\nAppend this result to my lab note.\n```\nWhat does it mean?",
@@ -612,6 +934,9 @@ def test_proposal_goal_gate_allows_concrete_requests_and_rejects_questions_or_ne
     )
     assert note_append_proposal_goal_authorized(
         '> The source says "do not write this".\nPlease add this result to my notes.'
+    )
+    assert note_append_proposal_goal_authorized(
+        "Did I write anything about drift in my notes? Add today's result to my calibration note."
     )
 
 
@@ -644,10 +969,32 @@ def test_agent_registers_only_scoped_leased_coordinator_note_tools(monkeypatch):
     assert coordinator_names == NOTE_TOOL_NAMES
     assert "UNTRUSTED DATA" in captured["system_prompt"]
     assert "intentionally narrow tool surface" in captured["system_prompt"]
+    assert 'search_notes` with `sort="recent"' in captured["system_prompt"]
+    assert "then call\n`read_note`" in captured["system_prompt"]
+    assert "Did I write" in captured["system_prompt"]
     assert "/memories" not in captured["system_prompt"]
     assert "/workspace" not in captured["system_prompt"]
     assert "/outputs" not in captured["system_prompt"]
     assert "task tool" not in captured["system_prompt"]
+
+
+def test_ordinary_agent_prompt_never_conflates_product_notes_with_internal_memory():
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-ordinary",
+        run_id="run-ordinary",
+        goal="What did I write in my Ultra Notes?",
+    )
+
+    prompt = build_system_prompt(_settings(), context)
+
+    assert "Ultra Notes is the user's separate, user-authored Notes library" in prompt
+    assert "are not Ultra Notes" in prompt
+    assert "Only say that\nyou searched, read, used, or updated an Ultra Note" in prompt
+    assert "do not substitute workspace or research memory" in prompt
 
 
 def test_notes_agent_does_not_construct_a_durable_backend_or_inherit_caller_tools(
@@ -708,6 +1055,17 @@ def test_selected_scope_omits_search_and_read_only_goal_omits_proposal():
         context=_context(goal="Search my notes for calibration drift."),
     )
     assert {tool.name for tool in search_only} == {"search_notes", "read_note"}
+    search_tool = next(tool for tool in search_only if tool.name == "search_notes")
+    search_schema = search_tool.tool_call_schema.model_json_schema()
+    assert search_schema["properties"]["sort"]["enum"] == ["relevance", "recent"]
+    assert "query" not in search_schema.get("required", [])
+    assert "cursor" not in search_schema.get("required", [])
+
+    past_tense_retrieval = build_notes_tools(
+        _settings(),
+        context=_context(goal="Did I write anything in my most recent Note?"),
+    )
+    assert {tool.name for tool in past_tense_retrieval} == {"search_notes", "read_note"}
 
     proposal_tool = next(
         tool
@@ -834,7 +1192,12 @@ def test_notes_tool_events_redact_private_inputs_and_outputs():
                         "event": "started",
                         "tool_call_id": "call-search",
                         "tool_name": "search_notes",
-                        "input": {"query": "private diagnosis", "limit": 8},
+                        "input": {
+                            "query": "private diagnosis",
+                            "sort": "recent",
+                            "cursor": "search-cursor-secret",
+                            "limit": 8,
+                        },
                     },
                 },
             },
@@ -853,7 +1216,8 @@ def test_notes_tool_events_redact_private_inputs_and_outputs():
                             {
                                 "ok": True,
                                 "result_count": 1,
-                                "has_more": False,
+                                "has_more": True,
+                                "next_cursor": "next-search-cursor-secret",
                                 "notes": [
                                     {
                                         "note_id": "note-private",
@@ -973,10 +1337,13 @@ def test_notes_tool_events_redact_private_inputs_and_outputs():
     serialized = "\n".join(serialized_events)
     for private_value in (
         "private diagnosis",
+        "recent",
         "Private diagnosis",
         "Secret treatment details",
         "read-secret",
         "cursor-secret",
+        "search-cursor-secret",
+        "next-search-cursor-secret",
         "Secret addition",
         "idempotency-secret",
         "sha256:" + "a" * 64,

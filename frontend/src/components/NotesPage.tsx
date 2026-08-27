@@ -2,6 +2,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,6 +56,9 @@ import {
 } from "@/components/ui/alert-dialog";
 import { FileUpload, useFileUploadContext } from "@/components/prompt-kit";
 import {
+  ApiError,
+  isDefinitiveNoteWriteReplayRejection,
+  isDeterministicNoteWriteRejection,
   isNoteRevisionConflict,
   type ApiClient,
   type NoteEditorMode,
@@ -62,6 +66,16 @@ import {
   type NoteRecord,
 } from "@/lib/api";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
+import {
+  clearNoteDraftRecovery,
+  enableNoteDraftRecoveryScope,
+  readLatestNoteDraftRecovery,
+  readNoteDraftRecovery,
+  resolveBrowserLocalStorage,
+  writeNoteDraftRecovery,
+  type NoteDraftRecoveryWriteResult,
+  type NoteDraftRecoveryRecord,
+} from "@/lib/noteDraftRecovery";
 import { markdownForUpload } from "@/lib/ultraResource";
 import type { ResourceRecord } from "@/types";
 /* Types only — the editor chunk (ProseMirror + remark) must never ride the
@@ -104,10 +118,12 @@ const LazyMarkdownNoteEditor = lazyNamedWithRetry(
  */
 
 const AUTOSAVE_DEBOUNCE_MS = 700;
+const NOTES_LIST_PAGE_SIZE = 50;
 const LOCAL_DRAFT_ID = "__ultra_local_note_draft__";
 const COMPACT_NOTES_MEDIA = "(max-width: 960px)";
 
 type SaveState = "idle" | "draft" | "dirty" | "saving" | "saved" | "conflict" | "error";
+type DeviceRecoveryState = "available" | Exclude<NoteDraftRecoveryWriteResult, "stored" | "scope_disabled">;
 
 type SlashBlock = {
   id: string;
@@ -196,12 +212,24 @@ type NoteDraft = {
   pinned: boolean;
   editorMode: NoteEditorMode;
   revision: number;
+  createKey: string | null;
+  createAttempt: {
+    title: string;
+    body: string;
+    pinned: boolean;
+    editorMode: NoteEditorMode;
+  } | null;
 };
 
-type SavedDraft = Omit<NoteDraft, "noteId">;
+type SavedDraft = Pick<NoteDraft, "title" | "body" | "pinned" | "editorMode" | "revision">;
 
 const meaningfulDraft = (draft: NoteDraft): boolean =>
   draft.title.trim().length > 0 || draft.body.trim().length > 0;
+
+const freshNoteCreateKey = (): string =>
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? `note-create:${crypto.randomUUID()}`
+    : `note-create:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 
 const draftMatchesSaved = (draft: NoteDraft, saved: SavedDraft | null): boolean =>
   Boolean(
@@ -211,6 +239,12 @@ const draftMatchesSaved = (draft: NoteDraft, saved: SavedDraft | null): boolean 
       saved.pinned === draft.pinned &&
       saved.editorMode === draft.editorMode
   );
+
+const noteRecordMatchesDraftContent = (record: NoteRecord, draft: NoteDraft): boolean =>
+  record.title === draft.title &&
+  record.body_markdown === draft.body &&
+  record.pinned === draft.pinned &&
+  record.editor_mode === draft.editorMode;
 
 const titleFromBody = (markdown: string): string => {
   const firstLine = markdown
@@ -328,6 +362,19 @@ const listGroupFor = (iso: string): string => {
   return "Earlier";
 };
 
+const noteContentUpdatedAt = (
+  note: Pick<NoteListItem, "content_updated_at" | "updated_at">
+): string => note.content_updated_at || note.updated_at;
+
+const sortBrowseNotes = (notes: readonly NoteListItem[]): NoteListItem[] =>
+  [...notes].sort((left, right) => {
+    if (left.pinned !== right.pinned) return left.pinned ? -1 : 1;
+    const byContentTime =
+      new Date(noteContentUpdatedAt(right)).getTime() -
+      new Date(noteContentUpdatedAt(left)).getTime();
+    return byContentTime || left.note_id.localeCompare(right.note_id);
+  });
+
 const cleanSnippet = (snippet: string): string =>
   snippet
     .replace(/^#+\s+/gm, "")
@@ -375,24 +422,37 @@ const resourceKindLabel = (kind: string): string => {
 
 export type NotesPageProps = {
   apiClient: ApiClient;
+  recoveryScope?: string | null;
   initialNoteId?: string | null;
   refreshVersion?: number;
   listRequestVersion?: number;
+  initialDraft?: { key: string; bodyMarkdown: string } | null;
+  onInitialDraftConsumed?: (key: string) => void;
   onActiveNoteChange?: (noteId: string | null) => void;
   onUseInChat?: (note: { note_id: string; title: string; revision: number }) => void;
+  onLogoutFlushReady?: (flush: (() => Promise<boolean>) | null) => void;
 };
 
 export function NotesPage({
   apiClient,
+  recoveryScope = null,
   initialNoteId = null,
   refreshVersion = 0,
   listRequestVersion = 0,
+  initialDraft = null,
+  onInitialDraftConsumed,
   onActiveNoteChange,
   onUseInChat,
+  onLogoutFlushReady,
 }: NotesPageProps) {
   const [items, setItems] = useState<NoteListItem[]>([]);
   const [listLoading, setListLoading] = useState(true);
+  const [listLoadingMore, setListLoadingMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [listNextOffset, setListNextOffset] = useState(0);
+  const [listHasMore, setListHasMore] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  const [listMoreError, setListMoreError] = useState<string | null>(null);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
@@ -402,6 +462,10 @@ export function NotesPage({
   const [noteLoading, setNoteLoading] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [recoveredChanges, setRecoveredChanges] = useState(false);
+  const [recoveredMissingOriginal, setRecoveredMissingOriginal] = useState(false);
+  const [deviceRecoveryState, setDeviceRecoveryState] =
+    useState<DeviceRecoveryState>("available");
   const [conflictRecord, setConflictRecord] = useState<NoteRecord | null>(null);
   const [slashOpen, setSlashOpen] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
@@ -431,16 +495,35 @@ export function NotesPage({
 
   const titleRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const plaintextTabExitArmedRef = useRef(false);
+  const itemsRef = useRef(items);
+  useLayoutEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
   const saveTimerRef = useRef<number | null>(null);
   const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const saveQueuedRef = useRef(false);
+  const recoveryTimerRef = useRef<number | null>(null);
+  const pendingRecoveryRef = useRef<NoteDraft | null>(null);
   // State drives the banner; this synchronous guard drives the write channel.
   // It prevents blur/unmount flushes from retrying a known-stale revision
   // before the writer has explicitly chosen which version to keep.
   const saveBlockedByConflictRef = useRef(false);
+  // Once a create response is uncertain, passive blur/unmount flushes must not
+  // keep replaying it behind the writer's back. Recovery stays durable until
+  // an explicit retry, discard, or fresh edit resumes the same idempotent
+  // attempt.
+  const createReconciliationRequiredRef = useRef(false);
+  // A typed client rejection proves that create did not commit, but passive
+  // blur/unmount flushes must not resubmit the same rejected draft forever.
+  // Editing or an explicit Retry sync reopens the write channel; Discard stays
+  // local because there is no uncertain server-side create to reconcile.
+  const createRetryBlockedUntilEditRef = useRef(false);
+  const deleteReconciliationNoteIdRef = useRef<string | null>(null);
   const draftRef = useRef<NoteDraft | null>(null);
   const savedRef = useRef<SavedDraft | null>(null);
   const searchGenerationRef = useRef(0);
+  const searchQueryRef = useRef("");
   const noteGenerationRef = useRef(0);
   const resourceGenerationRef = useRef(0);
   const initialOpenHandledRef = useRef(false);
@@ -450,23 +533,168 @@ export function NotesPage({
   const refreshVersionRef = useRef(refreshVersion);
   const listRequestVersionRef = useRef(listRequestVersion);
 
+  useEffect(() => {
+    enableNoteDraftRecoveryScope(recoveryScope);
+  }, [recoveryScope]);
+
+  const cancelPendingRecovery = useCallback((noteId?: string): void => {
+    if (noteId && pendingRecoveryRef.current?.noteId !== noteId) return;
+    pendingRecoveryRef.current = null;
+    if (recoveryTimerRef.current !== null) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+  }, []);
+
+  const readRecovery = useCallback(
+    (noteId: string): NoteDraftRecoveryRecord | null => {
+      const storage = resolveBrowserLocalStorage();
+      if (!storage) {
+        setDeviceRecoveryState("unavailable");
+        return null;
+      }
+      const result = readNoteDraftRecovery(storage, recoveryScope, noteId);
+      if (result.status === "unavailable") setDeviceRecoveryState("unavailable");
+      return result.record;
+    },
+    [recoveryScope]
+  );
+
+  const readLatestRecovery = useCallback((): NoteDraftRecoveryRecord | null => {
+    const storage = resolveBrowserLocalStorage();
+    if (!storage) {
+      setDeviceRecoveryState("unavailable");
+      return null;
+    }
+    const result = readLatestNoteDraftRecovery(storage, recoveryScope);
+    if (result.status === "unavailable") setDeviceRecoveryState("unavailable");
+    return result.record;
+  }, [recoveryScope]);
+
+  const clearRecovery = useCallback(
+    (noteId: string): void => {
+      cancelPendingRecovery(noteId);
+      const storage = resolveBrowserLocalStorage();
+      if (!storage) return;
+      clearNoteDraftRecovery(storage, recoveryScope, noteId);
+    },
+    [cancelPendingRecovery, recoveryScope]
+  );
+
+  const persistRecovery = useCallback(
+    (draft: NoteDraft | null): void => {
+      if (!draft) return;
+      cancelPendingRecovery(draft.noteId);
+      // A pristine local draft is disposable. Emptying an existing Note (or
+      // changing only pin/mode) is a real unsaved edit and must remain durable.
+      if (
+        draft.noteId === LOCAL_DRAFT_ID &&
+        !meaningfulDraft(draft) &&
+        !draft.createAttempt
+      ) {
+        clearRecovery(draft.noteId);
+        return;
+      }
+      const storage = resolveBrowserLocalStorage();
+      if (!storage) {
+        setDeviceRecoveryState("unavailable");
+        return;
+      }
+      const result = writeNoteDraftRecovery(storage, recoveryScope, {
+        note_id: draft.noteId,
+        title: draft.title,
+        body_markdown: draft.body,
+        pinned: draft.pinned,
+        editor_mode: draft.editorMode,
+        expected_revision: draft.revision,
+        ...(draft.createKey ? { create_key: draft.createKey } : {}),
+        ...(draft.createAttempt
+          ? {
+              create_attempt: {
+                title: draft.createAttempt.title,
+                body_markdown: draft.createAttempt.body,
+                pinned: draft.createAttempt.pinned,
+                editor_mode: draft.createAttempt.editorMode,
+              },
+            }
+          : {}),
+      });
+      if (result === "stored") setDeviceRecoveryState("available");
+      else if (result !== "scope_disabled") setDeviceRecoveryState(result);
+    },
+    [cancelPendingRecovery, clearRecovery, recoveryScope]
+  );
+
+  const scheduleRecovery = useCallback(
+    (draft: NoteDraft): void => {
+      pendingRecoveryRef.current = {
+        ...draft,
+        createAttempt: draft.createAttempt ? { ...draft.createAttempt } : null,
+      };
+      if (recoveryTimerRef.current !== null) return;
+      recoveryTimerRef.current = window.setTimeout(() => {
+        recoveryTimerRef.current = null;
+        const pending = pendingRecoveryRef.current;
+        pendingRecoveryRef.current = null;
+        if (pending) persistRecovery(pending);
+      }, 400);
+    },
+    [persistRecovery]
+  );
+
+  const flushRecoveryNow = useCallback((): void => {
+    const pending = pendingRecoveryRef.current;
+    if (!pending) return;
+    pendingRecoveryRef.current = null;
+    if (recoveryTimerRef.current !== null) {
+      window.clearTimeout(recoveryTimerRef.current);
+      recoveryTimerRef.current = null;
+    }
+    persistRecovery(pending);
+  }, [persistRecovery]);
+
   const refreshList = useCallback(
-    async (query: string) => {
+    async (query: string, offset = 0, quiet = false) => {
       const generation = ++searchGenerationRef.current;
-      setListError(null);
+      if (offset === 0 && !quiet) setListLoading(true);
+      if (offset > 0) setListLoadingMore(true);
+      if (offset === 0) {
+        setListError(null);
+        setListMoreError(null);
+      }
+      else setListMoreError(null);
       try {
-        const page = await apiClient.listNotes({ query: query || undefined, limit: 200 });
+        const page = await apiClient.listNotes({
+          query: query || undefined,
+          limit: NOTES_LIST_PAGE_SIZE,
+          offset,
+        });
         if (generation !== searchGenerationRef.current) {
           return;
         }
-        setItems(page.notes);
-        setListLoading(false);
+        const consumed = offset + page.notes.length;
+        setItems((current) => {
+          if (offset === 0) return page.notes;
+          const seen = new Set(current.map((note) => note.note_id));
+          return [...current, ...page.notes.filter((note) => !seen.has(note.note_id))];
+        });
+        setTotalCount(page.total_count);
+        setListNextOffset(consumed);
+        setListHasMore(page.notes.length > 0 && consumed < page.total_count);
+        if (!quiet) setListLoading(false);
+        if (offset > 0) setListLoadingMore(false);
       } catch (error) {
         if (generation !== searchGenerationRef.current) {
           return;
         }
-        setListError(error instanceof Error ? error.message : String(error));
-        setListLoading(false);
+        const message = error instanceof Error ? error.message : String(error);
+        if (offset === 0) {
+          setItems([]);
+          setListError(message);
+        }
+        else setListMoreError(message);
+        if (!quiet) setListLoading(false);
+        if (offset > 0) setListLoadingMore(false);
       }
     },
     [apiClient]
@@ -476,9 +704,18 @@ export function NotesPage({
   // immediately; subsequent queries wait just long enough to avoid a request
   // per keystroke. The generation counter rejects stale responses.
   useEffect(() => {
+    searchQueryRef.current = searchQuery.trim();
     const delay = searchGenerationRef.current === 0 ? 0 : 180;
+    // Invalidate any old request as soon as the visible query changes, not
+    // after the debounce. Rows from browse/query A must never appear clickable
+    // as if they matched query B.
+    ++searchGenerationRef.current;
+    setItems([]);
+    setListError(null);
+    setListMoreError(null);
+    setListLoading(true);
     const handle = window.setTimeout(() => {
-      void refreshList(searchQuery.trim());
+      void refreshList(searchQuery.trim(), 0);
     }, delay);
     return () => window.clearTimeout(handle);
   }, [searchQuery, refreshList]);
@@ -533,8 +770,29 @@ export function NotesPage({
     return () => window.clearTimeout(handle);
   }, [apiClient, resourcePickerOpen, resourceQuery, resourceRefreshKey]);
 
-  const flushSave = useCallback(async (): Promise<boolean> => {
+  const flushSave = useCallback(async (
+    options: { reconcileCreate?: boolean } = {}
+  ): Promise<boolean> => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
     if (saveBlockedByConflictRef.current) {
+      return false;
+    }
+    if (
+      createRetryBlockedUntilEditRef.current &&
+      draftRef.current?.noteId === LOCAL_DRAFT_ID &&
+      !options.reconcileCreate
+    ) {
+      return false;
+    }
+    if (
+      createReconciliationRequiredRef.current &&
+      draftRef.current?.noteId === LOCAL_DRAFT_ID &&
+      draftRef.current.createAttempt &&
+      !options.reconcileCreate
+    ) {
       return false;
     }
     if (saveInFlightRef.current) {
@@ -549,11 +807,19 @@ export function NotesPage({
         if (!currentDraft) {
           return true;
         }
-        if (currentDraft.noteId === LOCAL_DRAFT_ID && !meaningfulDraft(currentDraft)) {
+        if (
+          currentDraft.noteId === LOCAL_DRAFT_ID &&
+          !meaningfulDraft(currentDraft) &&
+          !currentDraft.createAttempt
+        ) {
+          clearRecovery(currentDraft.noteId);
+          setRecoveredChanges(false);
           setSaveState("draft");
           return true;
         }
         if (currentDraft.noteId !== LOCAL_DRAFT_ID && draftMatchesSaved(currentDraft, savedRef.current)) {
+          clearRecovery(currentDraft.noteId);
+          setRecoveredChanges(false);
           setSaveState("saved");
           return true;
         }
@@ -563,12 +829,26 @@ export function NotesPage({
         setSaveError(null);
         try {
           if (snapshot.noteId === LOCAL_DRAFT_ID) {
-            const record = await apiClient.createNote({
+            const createKey = snapshot.createKey ?? freshNoteCreateKey();
+            const createAttempt = snapshot.createAttempt ?? {
               title: snapshot.title,
-              body_markdown: snapshot.body,
+              body: snapshot.body,
               pinned: snapshot.pinned,
-              editor_mode: snapshot.editorMode,
-            });
+              editorMode: snapshot.editorMode,
+            };
+            if (!snapshot.createKey || !snapshot.createAttempt) {
+              const latest = draftRef.current;
+              if (latest?.noteId === LOCAL_DRAFT_ID) {
+                draftRef.current = { ...latest, createKey, createAttempt };
+                persistRecovery(draftRef.current);
+              }
+            }
+            const record = await apiClient.createNote({
+              title: createAttempt.title,
+              body_markdown: createAttempt.body,
+              pinned: createAttempt.pinned,
+              editor_mode: createAttempt.editorMode,
+            }, createKey);
             const latest = draftRef.current;
             if (!latest || latest.noteId !== LOCAL_DRAFT_ID) {
               return true;
@@ -577,7 +857,12 @@ export function NotesPage({
               ...latest,
               noteId: record.note_id,
               revision: record.revision,
+              createKey: null,
+              createAttempt: null,
             };
+            createReconciliationRequiredRef.current = false;
+            createRetryBlockedUntilEditRef.current = false;
+            clearRecovery(LOCAL_DRAFT_ID);
             draftRef.current = persistedLatest;
             savedRef.current = {
               title: record.title,
@@ -599,19 +884,31 @@ export function NotesPage({
                   }
                 : current
             );
-            setItems((current) => [
-              {
-                note_id: record.note_id,
-                title: persistedLatest.title,
-                snippet: persistedLatest.body.slice(0, 300),
-                pinned: persistedLatest.pinned,
-                revision: record.revision,
-                updated_at: record.updated_at,
-              },
-              ...current.filter((item) => item.note_id !== record.note_id),
-            ]);
+            if (searchQueryRef.current) {
+              void refreshList(searchQueryRef.current, 0, true);
+            } else {
+              setItems((current) =>
+                sortBrowseNotes([
+                  {
+                    note_id: record.note_id,
+                    title: persistedLatest.title,
+                    snippet: persistedLatest.body.slice(0, 300),
+                    pinned: persistedLatest.pinned,
+                    revision: record.revision,
+                    content_updated_at: record.content_updated_at ?? record.updated_at,
+                    updated_at: record.updated_at,
+                  },
+                  ...current.filter((item) => item.note_id !== record.note_id),
+                ])
+              );
+              setTotalCount((current) => current + 1);
+              setListNextOffset((current) => current + 1);
+            }
             if (!draftMatchesSaved(persistedLatest, savedRef.current)) {
+              persistRecovery(persistedLatest);
               saveQueuedRef.current = true;
+            } else {
+              clearRecovery(record.note_id);
             }
           } else {
             const record = await apiClient.updateNote(snapshot.noteId, {
@@ -643,9 +940,13 @@ export function NotesPage({
                   snippet: latest.body.slice(0, 300),
                   pinned: latest.pinned,
                   revision: record.revision,
+                  content_updated_at: record.content_updated_at ?? record.updated_at,
                   updated_at: record.updated_at,
                 };
-                return [updated, ...current.filter((item) => item.note_id !== record.note_id)];
+                const next = current.map((item) =>
+                  item.note_id === record.note_id ? updated : item
+                );
+                return searchQueryRef.current ? next : sortBrowseNotes(next);
               });
               setActiveNote((current) =>
                 current && current.note_id === record.note_id
@@ -653,20 +954,155 @@ export function NotesPage({
                       ...current,
                       revision: record.revision,
                       content_digest: record.content_digest,
+                      content_updated_at: record.content_updated_at ?? record.updated_at,
                       updated_at: record.updated_at,
                     }
                   : current
               );
+              if (searchQueryRef.current) {
+                void refreshList(searchQueryRef.current, 0, true);
+              }
               if (!draftMatchesSaved(revisedLatest, savedRef.current)) {
+                persistRecovery(revisedLatest);
                 saveQueuedRef.current = true;
+              } else {
+                clearRecovery(record.note_id);
               }
             }
           }
         } catch (error) {
+          if (snapshot.noteId === LOCAL_DRAFT_ID) {
+            const replayingUncertainCreate = Boolean(
+              snapshot.createKey && snapshot.createAttempt
+            );
+            if (
+              (!replayingUncertainCreate &&
+                isDeterministicNoteWriteRejection(error)) ||
+              (replayingUncertainCreate &&
+                isDefinitiveNoteWriteReplayRejection(error, "create"))
+            ) {
+              // A current-call deterministic rejection, or the endpoint's
+              // receipt-first post-lookup terminal proof, establishes that
+              // this exact create did not commit. Retire its frozen request so
+              // a corrected draft gets a fresh key and payload.
+              const latest = draftRef.current;
+              if (latest?.noteId === LOCAL_DRAFT_ID) {
+                const retryableDraft: NoteDraft = {
+                  ...latest,
+                  createKey: freshNoteCreateKey(),
+                  createAttempt: null,
+                };
+                draftRef.current = retryableDraft;
+                persistRecovery(retryableDraft);
+              }
+              createReconciliationRequiredRef.current = false;
+              createRetryBlockedUntilEditRef.current = true;
+            } else {
+              // A transport failure, malformed success response, or 5xx may
+              // follow a committed transaction. Preserve the exact key and
+              // payload until an idempotent replay resolves that ambiguity.
+              createReconciliationRequiredRef.current = true;
+              createRetryBlockedUntilEditRef.current = false;
+            }
+          }
+          if (
+            snapshot.noteId !== LOCAL_DRAFT_ID &&
+            error instanceof ApiError &&
+            error.status === 404
+          ) {
+            const latest = draftRef.current;
+            if (latest?.noteId === snapshot.noteId) {
+              const recoveredAsNew: NoteDraft = {
+                ...latest,
+                noteId: LOCAL_DRAFT_ID,
+                revision: 0,
+                createKey: freshNoteCreateKey(),
+                createAttempt: null,
+              };
+              clearRecovery(snapshot.noteId);
+              draftRef.current = recoveredAsNew;
+              savedRef.current = null;
+              persistRecovery(recoveredAsNew);
+              createReconciliationRequiredRef.current = false;
+              createRetryBlockedUntilEditRef.current = false;
+              saveBlockedByConflictRef.current = false;
+              setConflictRecord(null);
+              setActiveNoteId(LOCAL_DRAFT_ID);
+              onActiveNoteChange?.(null);
+              setActiveNote((current) =>
+                current
+                  ? {
+                      ...noteRecordForLocalDraft(),
+                      title: recoveredAsNew.title,
+                      body_markdown: recoveredAsNew.body,
+                      pinned: recoveredAsNew.pinned,
+                      editor_mode: recoveredAsNew.editorMode,
+                    }
+                  : current
+              );
+              const removedLoadedNote = itemsRef.current.some(
+                (item) => item.note_id === snapshot.noteId
+              );
+              setItems((current) =>
+                current.filter((item) => item.note_id !== snapshot.noteId)
+              );
+              if (removedLoadedNote) {
+                setTotalCount((current) => Math.max(0, current - 1));
+                setListNextOffset((current) => Math.max(0, current - 1));
+              }
+              setRecoveredChanges(true);
+              setRecoveredMissingOriginal(true);
+              saveQueuedRef.current = true;
+              continue;
+            }
+          }
           if (snapshot.noteId !== LOCAL_DRAFT_ID && isNoteRevisionConflict(error)) {
-            saveBlockedByConflictRef.current = true;
             try {
               const latestRecord = await apiClient.getNote(snapshot.noteId);
+              if (noteRecordMatchesDraftContent(latestRecord, snapshot)) {
+                const latest = draftRef.current;
+                if (latest?.noteId === snapshot.noteId) {
+                  const revisedLatest = { ...latest, revision: latestRecord.revision };
+                  draftRef.current = revisedLatest;
+                  savedRef.current = {
+                    title: latestRecord.title,
+                    body: latestRecord.body_markdown,
+                    pinned: latestRecord.pinned,
+                    editorMode: latestRecord.editor_mode,
+                    revision: latestRecord.revision,
+                  };
+                  setItems((current) => {
+                    const next = current.map((item) =>
+                      item.note_id === latestRecord.note_id
+                        ? {
+                            ...item,
+                            title: latestRecord.title,
+                            snippet: latestRecord.body_markdown.slice(0, 300),
+                            pinned: latestRecord.pinned,
+                            revision: latestRecord.revision,
+                            content_updated_at:
+                              latestRecord.content_updated_at ?? latestRecord.updated_at,
+                            updated_at: latestRecord.updated_at,
+                          }
+                        : item
+                    );
+                    return searchQueryRef.current ? next : sortBrowseNotes(next);
+                  });
+                  setActiveNote((current) =>
+                    current?.note_id === latestRecord.note_id ? latestRecord : current
+                  );
+                  saveBlockedByConflictRef.current = false;
+                  setConflictRecord(null);
+                  if (draftMatchesSaved(revisedLatest, savedRef.current)) {
+                    clearRecovery(latestRecord.note_id);
+                  } else {
+                    persistRecovery(revisedLatest);
+                    saveQueuedRef.current = true;
+                  }
+                }
+                continue;
+              }
+              saveBlockedByConflictRef.current = true;
               if (draftRef.current?.noteId === snapshot.noteId) {
                 setConflictRecord(latestRecord);
                 setSaveState("conflict");
@@ -675,6 +1111,7 @@ export function NotesPage({
                 );
               }
             } catch {
+              saveBlockedByConflictRef.current = true;
               setSaveState("conflict");
               setSaveError(
                 "This note changed elsewhere. Your version is still open; reload the note before saving again."
@@ -690,6 +1127,7 @@ export function NotesPage({
 
       setSaveState("saved");
       setSaveError(null);
+      setRecoveredChanges(false);
       return true;
     };
 
@@ -702,7 +1140,17 @@ export function NotesPage({
         saveInFlightRef.current = null;
       }
     }
-  }, [apiClient, onActiveNoteChange]);
+  }, [apiClient, clearRecovery, onActiveNoteChange, persistRecovery, refreshList]);
+
+  useEffect(() => {
+    if (!onLogoutFlushReady) return;
+    const flushForLogout = async (): Promise<boolean> => {
+      flushRecoveryNow();
+      return await flushSave({ reconcileCreate: true });
+    };
+    onLogoutFlushReady(flushForLogout);
+    return () => onLogoutFlushReady(null);
+  }, [flushRecoveryNow, flushSave, onLogoutFlushReady]);
 
   const scheduleSave = useCallback(() => {
     if (saveBlockedByConflictRef.current) {
@@ -724,12 +1172,19 @@ export function NotesPage({
   // flush too, without claiming offline or browser-shutdown durability.
   useEffect(() => {
     return () => {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-      }
+      flushRecoveryNow();
       void flushSave();
     };
-  }, [flushSave]);
+  }, [flushRecoveryNow, flushSave]);
+
+  useEffect(() => {
+    const handlePageHide = () => {
+      flushRecoveryNow();
+      void flushSave();
+    };
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
+  }, [flushRecoveryNow, flushSave]);
 
   const openNote = useCallback(
     async (noteId: string) => {
@@ -761,36 +1216,124 @@ export function NotesPage({
       setResourcePickerOpen(false);
       setEditorActive(EDITOR_IDLE);
       setEditorError(null);
+      setRecoveredMissingOriginal(false);
       setMobileListOpen(false);
+      const recovery = readRecovery(noteId);
       try {
         const record = await apiClient.getNote(noteId);
         if (generation !== noteGenerationRef.current) {
           return;
         }
-        draftRef.current = {
+        const serverDraft: NoteDraft = {
           noteId: record.note_id,
           title: record.title,
           body: record.body_markdown,
           pinned: record.pinned,
           editorMode: record.editor_mode === "plaintext" ? "plaintext" : "markdown",
           revision: record.revision,
+          createKey: null,
+          createAttempt: null,
         };
+        const recoveredDraft: NoteDraft | null = recovery
+          ? {
+              noteId: record.note_id,
+              title: recovery.title,
+              body: recovery.body_markdown,
+              pinned: recovery.pinned,
+              editorMode: recovery.editor_mode,
+              revision: recovery.expected_revision,
+              createKey: null,
+              createAttempt: null,
+            }
+          : null;
+        const hasRecoveredChanges = Boolean(
+          recoveredDraft && !draftMatchesSaved(recoveredDraft, {
+            title: serverDraft.title,
+            body: serverDraft.body,
+            pinned: serverDraft.pinned,
+            editorMode: serverDraft.editorMode,
+            revision: serverDraft.revision,
+          })
+        );
+        if (recovery && !hasRecoveredChanges) clearRecovery(noteId);
+        draftRef.current = hasRecoveredChanges && recoveredDraft ? recoveredDraft : serverDraft;
         savedRef.current = {
           title: record.title,
           body: record.body_markdown,
           pinned: record.pinned,
-          editorMode: draftRef.current.editorMode,
+          editorMode: serverDraft.editorMode,
           revision: record.revision,
         };
-        setActiveNote(record);
+        setActiveNote(
+          hasRecoveredChanges && recoveredDraft
+            ? {
+                ...record,
+                title: recoveredDraft.title,
+                body_markdown: recoveredDraft.body,
+                pinned: recoveredDraft.pinned,
+                editor_mode: recoveredDraft.editorMode,
+              }
+            : record
+        );
         setTitleEditing(false);
         setEditorSessionKey((current) => current + 1);
-        setSaveState("idle");
-        setSaveError(null);
-        saveBlockedByConflictRef.current = false;
-        setConflictRecord(null);
+        setRecoveredChanges(hasRecoveredChanges);
+        if (hasRecoveredChanges && recoveredDraft?.revision !== record.revision) {
+          saveBlockedByConflictRef.current = true;
+          setConflictRecord(record);
+          setSaveState("conflict");
+          setSaveError(
+            "Recovered unsaved changes, but this note also changed elsewhere. Your version is still open."
+          );
+        } else {
+          setSaveError(null);
+          saveBlockedByConflictRef.current = false;
+          setConflictRecord(null);
+          if (hasRecoveredChanges) scheduleSave();
+          else setSaveState("idle");
+        }
       } catch (error) {
         if (generation !== noteGenerationRef.current) {
+          return;
+        }
+        if (recovery && error instanceof ApiError && error.status === 404) {
+          const recoveredDraft: NoteDraft = {
+            noteId: LOCAL_DRAFT_ID,
+            title: recovery.title,
+            body: recovery.body_markdown,
+            pinned: recovery.pinned,
+            editorMode: recovery.editor_mode,
+            revision: 0,
+            createKey: freshNoteCreateKey(),
+            createAttempt: null,
+          };
+          clearRecovery(noteId);
+          draftRef.current = recoveredDraft;
+          savedRef.current = null;
+          persistRecovery(recoveredDraft);
+          createReconciliationRequiredRef.current = false;
+          createRetryBlockedUntilEditRef.current = false;
+          saveBlockedByConflictRef.current = false;
+          setConflictRecord(null);
+          setActiveNoteId(LOCAL_DRAFT_ID);
+          onActiveNoteChange?.(null);
+          setActiveNote({
+            ...noteRecordForLocalDraft(),
+            title: recoveredDraft.title,
+            body_markdown: recoveredDraft.body,
+            pinned: recoveredDraft.pinned,
+            editor_mode: recoveredDraft.editorMode,
+          });
+          setItems((current) => current.filter((item) => item.note_id !== noteId));
+          setTotalCount((current) => Math.max(0, current - 1));
+          setListNextOffset((current) => Math.max(0, current - 1));
+          setEditorSessionKey((current) => current + 1);
+          setRecoveredChanges(true);
+          setRecoveredMissingOriginal(true);
+          setSaveState("draft");
+          setSaveError(null);
+          setEditorError(null);
+          scheduleSave();
           return;
         }
         setEditorError(error instanceof Error ? error.message : String(error));
@@ -801,26 +1344,51 @@ export function NotesPage({
         }
       }
     },
-    [apiClient, flushSave, onActiveNoteChange]
+    [apiClient, clearRecovery, flushSave, onActiveNoteChange, persistRecovery, readRecovery, scheduleSave]
   );
 
-  const startNewNote = useCallback(async () => {
+  const startNewNote = useCallback(async (
+    initialBody = "",
+    recovery: NoteDraftRecoveryRecord | null = null
+  ): Promise<boolean> => {
     const current = draftRef.current;
     const disposableBlank =
       current?.noteId === LOCAL_DRAFT_ID && !meaningfulDraft(current);
     if (current && !disposableBlank && !(await flushSave())) {
-      return;
+      return false;
     }
     ++noteGenerationRef.current;
-    const record = noteRecordForLocalDraft();
-    draftRef.current = {
+    const nextDraft: NoteDraft = {
       noteId: LOCAL_DRAFT_ID,
-      title: "",
-      body: "",
-      pinned: false,
-      editorMode: "markdown",
+      title: recovery?.title ?? "",
+      body: recovery?.body_markdown ?? initialBody,
+      pinned: recovery?.pinned ?? false,
+      editorMode: recovery?.editor_mode ?? "markdown",
       revision: 0,
+      createKey: recovery?.create_key ?? freshNoteCreateKey(),
+      createAttempt: recovery?.create_attempt
+        ? {
+            title: recovery.create_attempt.title,
+            body: recovery.create_attempt.body_markdown,
+            pinned: recovery.create_attempt.pinned,
+            editorMode: recovery.create_attempt.editor_mode,
+          }
+        : null,
     };
+    const record = {
+      ...noteRecordForLocalDraft(),
+      title: nextDraft.title,
+      body_markdown: nextDraft.body,
+      pinned: nextDraft.pinned,
+      editor_mode: nextDraft.editorMode,
+    };
+    draftRef.current = nextDraft;
+    // Installing a recovered/prefilled draft is a fresh, visible resume point.
+    // Give its stable create key one automatic attempt; a failure flips the
+    // reconciliation guard so blur/unmount cannot hot-loop it afterward.
+    createReconciliationRequiredRef.current = false;
+    createRetryBlockedUntilEditRef.current = false;
+    persistRecovery(nextDraft);
     savedRef.current = null;
     pendingBodyFocusRef.current = true;
     setActiveNoteId(LOCAL_DRAFT_ID);
@@ -831,6 +1399,8 @@ export function NotesPage({
     setNoteLoading(false);
     setSaveState("draft");
     setSaveError(null);
+    setRecoveredChanges(Boolean(recovery));
+    setRecoveredMissingOriginal(false);
     saveBlockedByConflictRef.current = false;
     setConflictRecord(null);
     setEditorError(null);
@@ -845,14 +1415,50 @@ export function NotesPage({
     setEditorActive(EDITOR_IDLE);
     setSearchQuery("");
     setMobileListOpen(false);
+    if (meaningfulDraft(nextDraft) || nextDraft.createAttempt) {
+      scheduleSave();
+    }
     window.requestAnimationFrame(() => editorApiRef.current?.focus());
-  }, [flushSave, onActiveNoteChange]);
+    return true;
+  }, [flushSave, onActiveNoteChange, persistRecovery, scheduleSave]);
 
-  // Desktop opens the most recent note. Phones stay on the list until the
-  // user chooses a note, so navigation is never hidden behind an arbitrary
-  // recent document.
+  const consumedInitialDraftKeyRef = useRef<string | null>(null);
+  const installingInitialDraftKeyRef = useRef<string | null>(null);
+  const failedInitialDraftKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (listLoading || initialOpenHandledRef.current) {
+    if (
+      !initialDraft ||
+      consumedInitialDraftKeyRef.current === initialDraft.key ||
+      installingInitialDraftKeyRef.current === initialDraft.key
+    ) return;
+    if (failedInitialDraftKeyRef.current === initialDraft.key) {
+      if (saveState !== "saved" && saveState !== "idle" && saveState !== "dirty") {
+        return;
+      }
+      failedInitialDraftKeyRef.current = null;
+    }
+    installingInitialDraftKeyRef.current = initialDraft.key;
+    void startNewNote(initialDraft.bodyMarkdown).then((installed) => {
+      if (installed) {
+        consumedInitialDraftKeyRef.current = initialDraft.key;
+        failedInitialDraftKeyRef.current = null;
+        onInitialDraftConsumed?.(initialDraft.key);
+      } else {
+        failedInitialDraftKeyRef.current = initialDraft.key;
+      }
+    }).finally(() => {
+      if (installingInitialDraftKeyRef.current === initialDraft.key) {
+        installingInitialDraftKeyRef.current = null;
+      }
+    });
+  }, [initialDraft, onInitialDraftConsumed, saveState, startNewNote]);
+
+  // Desktop opens the most recently edited content. Browse ordering is pinned
+  // first, so resolve this with the explicit recent endpoint rather than
+  // guessing from the first (possibly paginated) browse page. Phones stay on
+  // the list until the user chooses a note.
+  useEffect(() => {
+    if (listLoading || initialDraft || initialOpenHandledRef.current) {
       return;
     }
     initialOpenHandledRef.current = true;
@@ -860,12 +1466,45 @@ export function NotesPage({
       typeof window.matchMedia === "function" && window.matchMedia(COMPACT_NOTES_MEDIA).matches;
     if (initialNoteId?.trim()) {
       void openNote(initialNoteId.trim());
-    } else if (compact) {
-      setMobileListOpen(true);
-    } else if (!activeNoteId && items.length > 0) {
-      void openNote(items[0].note_id);
+    } else if (!activeNoteId) {
+      const recovery = readLatestRecovery();
+      if (recovery?.note_id === LOCAL_DRAFT_ID) {
+        void startNewNote("", recovery);
+      } else if (recovery) {
+        void openNote(recovery.note_id);
+      } else if (compact) {
+        setMobileListOpen(true);
+      } else if (items.length > 0) {
+        const navigationGeneration = noteGenerationRef.current;
+        void apiClient
+          .listNotes({ sort: "recent", limit: 1, offset: 0 })
+          .then((page) => {
+            const mostRecent = page.notes[0];
+            if (
+              mostRecent &&
+              navigationGeneration === noteGenerationRef.current &&
+              !draftRef.current
+            ) {
+              void openNote(mostRecent.note_id);
+            }
+          })
+          .catch(() => {
+            // The browse list remains fully usable if this convenience request
+            // fails; do not replace it with a second, unrelated error state.
+          });
+      }
     }
-  }, [listLoading, activeNoteId, initialNoteId, items, openNote]);
+  }, [
+    activeNoteId,
+    apiClient,
+    initialDraft,
+    initialNoteId,
+    items.length,
+    listLoading,
+    openNote,
+    readLatestRecovery,
+    startNewNote,
+  ]);
 
   useEffect(() => {
     const requestedNoteId = initialNoteId?.trim();
@@ -887,10 +1526,14 @@ export function NotesPage({
       if (!draft) {
         return;
       }
-      draftRef.current = { ...draft, ...patch };
+      const nextDraft = { ...draft, ...patch };
+      draftRef.current = nextDraft;
+      createReconciliationRequiredRef.current = false;
+      createRetryBlockedUntilEditRef.current = false;
+      scheduleRecovery(nextDraft);
       scheduleSave();
     },
-    [scheduleSave]
+    [scheduleRecovery, scheduleSave]
   );
 
   /* The mode is a deliberate, sticky choice — flip the surface immediately
@@ -902,6 +1545,9 @@ export function NotesPage({
         return;
       }
       draftRef.current = { ...draft, editorMode: nextMode };
+      createReconciliationRequiredRef.current = false;
+      createRetryBlockedUntilEditRef.current = false;
+      persistRecovery(draftRef.current);
       setActiveNote((current) => (current ? { ...current, editor_mode: nextMode } : current));
       setEditorActive(EDITOR_IDLE);
       editorActiveRef.current = EDITOR_IDLE;
@@ -911,7 +1557,7 @@ export function NotesPage({
       setSlashQuery("");
       void flushSave();
     },
-    [flushSave]
+    [flushSave, persistRecovery]
   );
 
   const togglePinned = useCallback(async () => {
@@ -921,12 +1567,24 @@ export function NotesPage({
     }
     const nextPinned = !draft.pinned;
     draftRef.current = { ...draft, pinned: nextPinned };
+    createReconciliationRequiredRef.current = false;
+    createRetryBlockedUntilEditRef.current = false;
+    persistRecovery(draftRef.current);
     setActiveNote((current) => (current ? { ...current, pinned: nextPinned } : current));
-    setItems((current) =>
-      current.map((item) => (item.note_id === draft.noteId ? { ...item, pinned: nextPinned } : item))
-    );
-    await flushSave();
-  }, [flushSave]);
+    setItems((current) => {
+      const next = current.map((item) =>
+        item.note_id === draft.noteId ? { ...item, pinned: nextPinned } : item
+      );
+      return searchQueryRef.current ? next : sortBrowseNotes(next);
+    });
+    const saved = await flushSave();
+    if (saved && !searchQueryRef.current) {
+      // Pinning changes the browse sort tuple and can move a row across the
+      // current offset boundary. Restart browse pagination from the server so
+      // a later Load more cannot skip or duplicate shifted rows.
+      void refreshList("", 0, true);
+    }
+  }, [flushSave, persistRecovery, refreshList]);
 
   const deleteActiveNote = useCallback(async () => {
     const requestedNoteId = draftRef.current?.noteId ?? activeNoteId;
@@ -949,10 +1607,24 @@ export function NotesPage({
     if (generation !== noteGenerationRef.current) {
       return;
     }
+    if (
+      draftRef.current?.noteId === LOCAL_DRAFT_ID &&
+      draftRef.current.createAttempt &&
+      !(await flushSave({ reconcileCreate: true }))
+    ) {
+      setDeleteDialogOpen(false);
+      setEditorError(
+        "Couldn’t confirm whether this draft was already created. It is still here; try discarding again when the connection returns."
+      );
+      return;
+    }
     const noteId = draftRef.current?.noteId ?? requestedNoteId;
     ++noteGenerationRef.current;
 
     if (noteId === LOCAL_DRAFT_ID) {
+      clearRecovery(noteId);
+      createReconciliationRequiredRef.current = false;
+      createRetryBlockedUntilEditRef.current = false;
       draftRef.current = null;
       savedRef.current = null;
       setDeleteDialogOpen(false);
@@ -960,6 +1632,7 @@ export function NotesPage({
       setActiveNote(null);
       setSaveState("idle");
       setSaveError(null);
+      setRecoveredChanges(false);
       saveBlockedByConflictRef.current = false;
       setConflictRecord(null);
       setEditorError(null);
@@ -969,6 +1642,24 @@ export function NotesPage({
     }
     try {
       await apiClient.deleteNote(noteId);
+    } catch (error) {
+      const reconciledMissing = error instanceof ApiError && error.status === 404;
+      if (!reconciledMissing) {
+        deleteReconciliationNoteIdRef.current = isDeterministicNoteWriteRejection(error)
+          ? null
+          : noteId;
+        setDeleteDialogOpen(false);
+        setEditorError(
+          error instanceof Error ? `Couldn’t delete this note — ${error.message}` : "Couldn’t delete this note."
+        );
+        return;
+      }
+    }
+    deleteReconciliationNoteIdRef.current = null;
+    try {
+      clearRecovery(noteId);
+      createReconciliationRequiredRef.current = false;
+      createRetryBlockedUntilEditRef.current = false;
       draftRef.current = null;
       savedRef.current = null;
       setDeleteDialogOpen(false);
@@ -976,21 +1667,35 @@ export function NotesPage({
       setActiveNote(null);
       setSaveState("idle");
       setSaveError(null);
+      setRecoveredChanges(false);
       saveBlockedByConflictRef.current = false;
       setConflictRecord(null);
       setEditorError(null);
+      const removedLoadedNote = items.some((item) => item.note_id === noteId);
       setItems((current) => current.filter((item) => item.note_id !== noteId));
+      setTotalCount((current) => Math.max(0, current - 1));
+      if (removedLoadedNote) {
+        setListNextOffset((current) => Math.max(0, current - 1));
+      }
+      if (searchQueryRef.current) {
+        void refreshList(searchQueryRef.current, 0, true);
+      }
       setMobileListOpen(true);
       onActiveNoteChange?.(null);
     } catch (error) {
+      // Local cleanup should not normally throw, but retain a visible failure
+      // rather than allowing a render exception to strand the page.
       setDeleteDialogOpen(false);
       setEditorError(
         error instanceof Error ? `Couldn’t delete this note — ${error.message}` : "Couldn’t delete this note."
       );
     }
-  }, [activeNoteId, apiClient, onActiveNoteChange]);
+  }, [activeNoteId, apiClient, clearRecovery, flushSave, items, onActiveNoteChange, refreshList]);
 
   const adoptNoteRecord = useCallback((record: NoteRecord) => {
+    clearRecovery(record.note_id);
+    createReconciliationRequiredRef.current = false;
+    createRetryBlockedUntilEditRef.current = false;
     const editorMode = record.editor_mode === "plaintext" ? "plaintext" : "markdown";
     draftRef.current = {
       noteId: record.note_id,
@@ -999,6 +1704,8 @@ export function NotesPage({
       pinned: record.pinned,
       editorMode,
       revision: record.revision,
+      createKey: null,
+      createAttempt: null,
     };
     savedRef.current = {
       title: record.title,
@@ -1008,8 +1715,8 @@ export function NotesPage({
       revision: record.revision,
     };
     setActiveNote(record);
-    setItems((current) =>
-      current.map((item) =>
+    setItems((current) => {
+      const next = current.map((item) =>
         item.note_id === record.note_id
           ? {
               ...item,
@@ -1017,17 +1724,20 @@ export function NotesPage({
               snippet: record.body_markdown.slice(0, 300),
               pinned: record.pinned,
               revision: record.revision,
+              content_updated_at: record.content_updated_at ?? record.updated_at,
               updated_at: record.updated_at,
             }
           : item
-      )
-    );
+      );
+      return searchQueryRef.current ? next : sortBrowseNotes(next);
+    });
     setEditorSessionKey((current) => current + 1);
     saveBlockedByConflictRef.current = false;
     setConflictRecord(null);
     setSaveError(null);
+    setRecoveredChanges(false);
     setSaveState("saved");
-  }, []);
+  }, [clearRecovery]);
 
   const useLatestConflictVersion = useCallback(() => {
     const record = conflictRecord;
@@ -1044,6 +1754,7 @@ export function NotesPage({
       return;
     }
     draftRef.current = { ...draft, revision: record.revision };
+    persistRecovery(draftRef.current);
     setActiveNote((current) =>
       current?.note_id === record.note_id ? { ...current, revision: record.revision } : current
     );
@@ -1052,7 +1763,7 @@ export function NotesPage({
     setSaveState("dirty");
     setSaveError(null);
     await flushSave();
-  }, [conflictRecord, flushSave]);
+  }, [conflictRecord, flushSave, persistRecovery]);
 
   const retryConflictLoad = useCallback(async () => {
     const noteId = draftRef.current?.noteId;
@@ -1386,8 +2097,9 @@ export function NotesPage({
   );
 
   const handleEditorBlur = useCallback(() => {
+    flushRecoveryNow();
     void flushSave();
-  }, [flushSave]);
+  }, [flushRecoveryNow, flushSave]);
 
   /* File pastes in Markdown mode are caught before ProseMirror sees them and
      ride the one upload pipeline; text pastes pass straight through to the
@@ -1406,6 +2118,16 @@ export function NotesPage({
 
   const handleMarkdownShellKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.shiftKey &&
+        event.key.toLowerCase() === "h"
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        editorApiRef.current?.exec("highlight");
+        return;
+      }
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
         event.preventDefault();
         event.stopPropagation();
@@ -1478,9 +2200,20 @@ export function NotesPage({
         }
         return;
       }
+      if (event.key === "Escape") {
+        plaintextTabExitArmedRef.current = true;
+        return;
+      }
+      if (event.key === "Tab" && plaintextTabExitArmedRef.current) {
+        // One explicit Escape hands the next Tab back to the browser so a
+        // keyboard user can leave the raw-source editor without a pointer.
+        plaintextTabExitArmedRef.current = false;
+        return;
+      }
+      plaintextTabExitArmedRef.current = false;
       if (event.key === "Tab" && !event.shiftKey) {
-        // Sublime-grade plaintext: Tab indents, it never escapes the editor.
-        // (⌘E, Escape-then-Tab, and every toolbar button remain the exits.)
+        // Sublime-grade plaintext: Tab indents until the user explicitly
+        // arms the browser's normal focus traversal with Escape.
         event.preventDefault();
         const start = textarea.selectionStart;
         const end = textarea.selectionEnd;
@@ -1506,11 +2239,13 @@ export function NotesPage({
   const returnToList = useCallback(async () => {
     const draft = draftRef.current;
     if (draft?.noteId === LOCAL_DRAFT_ID && !meaningfulDraft(draft)) {
+      clearRecovery(draft.noteId);
       draftRef.current = null;
       savedRef.current = null;
       setActiveNoteId(null);
       setActiveNote(null);
       setSaveState("idle");
+      setRecoveredChanges(false);
     } else if (draft && !(await flushSave())) {
       return;
     }
@@ -1524,7 +2259,7 @@ export function NotesPage({
     setResourcePickerOpen(false);
     setMobileListOpen(true);
     onActiveNoteChange?.(null);
-  }, [flushSave, onActiveNoteChange]);
+  }, [clearRecovery, flushSave, onActiveNoteChange]);
 
   // App-level Back/Forward owns the URL, while this component owns the mobile
   // split-pane state. A monotonic request bridges “?view=notes” back to the
@@ -1590,16 +2325,8 @@ export function NotesPage({
           window.clearTimeout(saveTimerRef.current);
           saveTimerRef.current = null;
         }
+        flushRecoveryNow();
         void flushSave();
-        return;
-      }
-      if (modifier && event.shiftKey && event.key.toLowerCase() === "e") {
-        event.preventDefault();
-        const draft = draftRef.current;
-        if (!draft) {
-          return;
-        }
-        switchEditorMode(draft.editorMode === "markdown" ? "plaintext" : "markdown");
         return;
       }
       if (event.key === "Escape") {
@@ -1634,6 +2361,7 @@ export function NotesPage({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [
+    flushRecoveryNow,
     flushSave,
     closeResourcePicker,
     focusMode,
@@ -1643,7 +2371,6 @@ export function NotesPage({
     slashOpen,
     slashQuery,
     startNewNote,
-    switchEditorMode,
   ]);
 
   const groupedItems = useMemo(() => {
@@ -1655,7 +2382,7 @@ export function NotesPage({
     }
     const byPeriod = new Map<string, NoteListItem[]>();
     for (const item of rest) {
-      const label = listGroupFor(item.updated_at);
+      const label = listGroupFor(noteContentUpdatedAt(item));
       const rows = byPeriod.get(label) ?? [];
       rows.push(item);
       byPeriod.set(label, rows);
@@ -1668,6 +2395,14 @@ export function NotesPage({
     }
     return groups;
   }, [items]);
+  const searchActive = Boolean(searchQuery.trim());
+  const displayedGroups = useMemo(
+    () =>
+      searchActive
+        ? [{ label: null, rows: items }]
+        : groupedItems.map((group) => ({ ...group, label: group.label as string | null })),
+    [groupedItems, items, searchActive]
+  );
 
   const richSlashBlocks = useMemo(() => matchingSlashBlocks(slashQuery), [slashQuery]);
   const selectionPosition = selectionAnchor
@@ -1695,6 +2430,8 @@ export function NotesPage({
   const saveLabel =
     saveState === "saving"
       ? "Saving…"
+      : recoveredChanges && (saveState === "draft" || saveState === "dirty")
+        ? "Recovered unsaved changes"
       : saveState === "draft"
         ? "Draft · Not saved yet"
       : saveState === "dirty"
@@ -1706,6 +2443,14 @@ export function NotesPage({
           : activeNote
             ? `Saved ${relativeTime(activeNote.updated_at)}`
             : "";
+  const deviceRecoveryMessage =
+    deviceRecoveryState === "unavailable"
+      ? "Device recovery unavailable. Server autosave is still on."
+      : deviceRecoveryState === "too_large"
+        ? "This note is too large for device recovery. Server autosave is still on."
+        : deviceRecoveryState === "budget_exceeded"
+          ? "Device recovery is full. Server autosave is still on."
+          : null;
 
   return (
     <div
@@ -1756,16 +2501,16 @@ export function NotesPage({
           </div>
         ) : (
           <div className="notes-list-scroll">
-            {groupedItems.map((group) => (
-              <div key={group.label}>
-                <div className="notes-group-label">{group.label}</div>
+            {displayedGroups.map((group, groupIndex) => (
+              <div key={group.label ?? `results-${groupIndex}`}>
+                {group.label ? <div className="notes-group-label">{group.label}</div> : null}
                 {group.rows.map((item) => (
                   <button
                     key={item.note_id}
                     type="button"
                     className="notes-row"
                     data-active={item.note_id === activeNoteId ? "true" : undefined}
-                    aria-label={`${item.pinned ? "Pinned, " : ""}${listTitle(item)}, ${relativeTime(item.updated_at)}`}
+                    aria-label={`${item.pinned ? "Pinned, " : ""}${listTitle(item)}, ${relativeTime(noteContentUpdatedAt(item))}`}
                     onClick={() => void openNote(item.note_id)}
                   >
                     <span className="notes-row-title">
@@ -1773,15 +2518,43 @@ export function NotesPage({
                       {listTitle(item)}
                     </span>
                     <span className="notes-row-snippet">{listSnippet(item)}</span>
-                    <span className="notes-row-time">{relativeTime(item.updated_at)}</span>
+                    <span className="notes-row-time">{relativeTime(noteContentUpdatedAt(item))}</span>
                   </button>
                 ))}
               </div>
             ))}
+            {listHasMore && listNextOffset < totalCount ? (
+              listMoreError ? (
+                <div className="notes-list-state notes-list-error" role="alert">
+                  <span>Couldn’t load more notes.</span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshList(searchQuery.trim(), listNextOffset)}
+                  >
+                    Try again
+                  </button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="notes-load-more"
+                  disabled={listLoadingMore}
+                  onClick={() => void refreshList(searchQuery.trim(), listNextOffset)}
+                >
+                  {listLoadingMore ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+                  Load more
+                </Button>
+              )
+            ) : null}
           </div>
         )}
         <div className="notes-list-foot">
-          Scoped to your account. Ultra reads Notes only when you attach one or ask it to search.
+          Saved Notes live in your Ultra account. Unsynced edits are also kept on this device for
+          up to 30 days and cleared when you sign out. {onUseInChat
+            ? "Ultra reads Notes only when you use one or ask it to search."
+            : "Using Notes in chat is currently unavailable."}
         </div>
       </aside>
 
@@ -1838,7 +2611,9 @@ export function NotesPage({
                           <strong>Ultra couldn’t sync this note.</strong>
                           <span>{saveError || "Your text is still open in this editor."}</span>
                         </div>
-                        <DropdownMenuItem onSelect={() => void flushSave()}>
+                        <DropdownMenuItem
+                          onSelect={() => void flushSave({ reconcileCreate: true })}
+                        >
                           <RotateCcw aria-hidden="true" /> Retry sync
                         </DropdownMenuItem>
                       </>
@@ -1958,6 +2733,25 @@ export function NotesPage({
               </div>
             ) : null}
 
+            {deviceRecoveryMessage ? (
+              <div className="notes-editor-error" role="status">
+                <AlertCircle aria-hidden="true" />
+                <span>{deviceRecoveryMessage}</span>
+              </div>
+            ) : null}
+
+            {recoveredMissingOriginal ? (
+              <div
+                className="border-border bg-muted/45 mx-5 mt-3 rounded-xl border px-4 py-3 text-sm sm:mx-8"
+                role="status"
+              >
+                <strong className="block font-medium">Recovered edits are ready as a new note.</strong>
+                <span className="text-muted-foreground">
+                  The original note is no longer available. Ultra kept your device copy and will save it as a new note.
+                </span>
+              </div>
+            ) : null}
+
             {saveState === "conflict" ? (
               <div
                 className="mx-5 mt-3 flex flex-col gap-3 rounded-xl border border-border bg-muted/45 px-4 py-3 text-sm sm:mx-8 sm:flex-row sm:items-center sm:justify-between"
@@ -2000,6 +2794,7 @@ export function NotesPage({
                 onFocus={() => setTitleEditing(true)}
                 onBlur={() => {
                   setTitleEditing(false);
+                  flushRecoveryNow();
                   void flushSave();
                 }}
                 onChange={(event) => {
@@ -2008,7 +2803,7 @@ export function NotesPage({
                   updateDraft({ title });
                 }}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === "Tab") {
+                  if (event.key === "Enter" || (event.key === "Tab" && !event.shiftKey)) {
                     event.preventDefault();
                     setTitleEditing(false);
                     if (draftRef.current?.editorMode === "markdown") {
@@ -2025,7 +2820,7 @@ export function NotesPage({
               <span>
                 {activeNote.note_id === LOCAL_DRAFT_ID
                   ? "Created when you start writing"
-                  : `Edited ${relativeTime(activeNote.updated_at)}`}
+                  : `Edited ${relativeTime(activeNote.content_updated_at ?? activeNote.updated_at)}`}
               </span>
               {!showTitleInput ? (
                 <button
@@ -2061,7 +2856,10 @@ export function NotesPage({
                     updateDraft({ body });
                   }}
                   onKeyDown={handleBodyKeyDown}
-                  onBlur={() => void flushSave()}
+                  onBlur={() => {
+                    flushRecoveryNow();
+                    void flushSave();
+                  }}
                 />
                 {slashOpen ? (
                   <div className="notes-slash" role="listbox" aria-label="Insert block">
@@ -2430,7 +3228,7 @@ export function NotesPage({
             <AlertDialogDescription>
               {activeNote?.note_id === LOCAL_DRAFT_ID
                 ? "This draft has not been created in Ultra. Its current text will be discarded."
-                : "Deletion is permanent in the current Notes service and cannot be undone."}
+                : "This permanently deletes this Note and cannot be undone."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

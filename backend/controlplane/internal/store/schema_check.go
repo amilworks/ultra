@@ -32,6 +32,8 @@ var requiredPostgresControlTables = []string{
 	"control_note_run_usage",
 	"control_note_append_proposals",
 	"control_note_append_operations",
+	"control_note_create_receipts",
+	"control_note_direct_append_operations",
 	"control_run_steer_messages",
 	"control_run_steer_barriers",
 	"control_worker_heartbeats",

@@ -410,6 +410,15 @@ identity. Work only from the current goal and ordinary shipped tools. Write fina
 /outputs/ when the active backend exposes that path, otherwise use /workspace/outputs and report
 those artifact paths clearly."""
 
+_PRODUCT_NOTES_SYSTEM_GUIDANCE = """## Ultra Notes and agent memory
+
+Ultra Notes is the user's separate, user-authored Notes library. Files under `/memories`,
+`/workspace`, and `/outputs`, research-context memory, prior artifacts, and resource-catalog results
+are not Ultra Notes and must never be described as the user's Note or Notes library. Only say that
+you searched, read, used, or updated an Ultra Note when this run exposes the corresponding Notes
+tool and that tool succeeds. If Notes tools are unavailable, say that Ultra Notes were not shared
+for this message; do not substitute workspace or research memory and imply it came from Notes."""
+
 _DURABLE_CATALOG_SYSTEM_GUIDANCE = """When the user refers to data that is not attached to this chat — a dataset, image, or
 prior result named or described (e.g. "the CT scans with norm in the name", "the NPM1
 image", "my segmentation outputs") — search their catalog with search_resources, then
@@ -490,6 +499,8 @@ partway through a response.
 {_GROUNDING_SYSTEM_GUIDANCE}
 
 {PRODUCT_IDENTITY_GUIDANCE}
+
+{_PRODUCT_NOTES_SYSTEM_GUIDANCE}
 
 {_DURABLE_MEMORY_SYSTEM_GUIDANCE}
 
@@ -2483,7 +2494,13 @@ def _build_notes_context_agent(
     new privacy boundary, not inherited accidentally.
     """
 
-    del tools
+    # Notes content and opaque read capabilities must never enter ordinary
+    # LangGraph durability. Notes runs deliberately restart from the sealed job
+    # envelope after a delivery failure; server-side budgets and proposal
+    # idempotency remain authoritative across attempts. Live steering is also
+    # excluded because the run's Notes/append authority is immutable for the
+    # turn; the control plane queues the text as a follow-up instead.
+    del tools, checkpointer, steering_inbox
     note_tools = (
         build_notes_tools(settings, context=context)
         if _should_register_notes_tools(context, settings)
@@ -2503,14 +2520,6 @@ def _build_notes_context_agent(
 
     resolved_model = model or build_chat_model(settings)
     middleware: list[Any] = [UltraNotesRunContextPromptMiddleware()]
-    if steering_inbox is not None:
-        middleware.append(
-            SteeringInboxMiddleware(
-                steering_inbox,
-                context=context,
-                upload_roots=settings.rarespot_upload_roots,
-            )
-        )
     if not settings.model_supports_multimodal:
         middleware.append(TextOnlyMultimodalMiddleware())
 
@@ -2552,7 +2561,7 @@ def _build_notes_context_agent(
         system_prompt=system_prompt,
         context_schema=AgentRunContext,
         middleware=middleware,
-        checkpointer=checkpointer,
+        checkpointer=None,
     )
 
 
@@ -2582,10 +2591,12 @@ def build_research_agent(
             model=model,
             tools=tools,
             context=context,
-            checkpointer=checkpointer,
+            # Defense in depth: the Notes-only builder also ignores this value,
+            # but do not propagate durable state into that privacy boundary.
+            checkpointer=None,
             surface_attestation_sink=surface_attestation_sink,
             trace_surface_sink=trace_surface_sink,
-            steering_inbox=steering_inbox,
+            steering_inbox=None,
         )
     cleanroom = bool(
         context is not None and is_cleanroom_evaluation_profile(context.evaluation_profile)

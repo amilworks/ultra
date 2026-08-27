@@ -24,6 +24,20 @@ type memoryNoteAppendOperation struct {
 	AppendSHA256    string
 }
 
+type memoryNoteDirectAppendOperation struct {
+	domain.NoteDirectAppendOperationRecord
+	AppendStartByte int
+	AppendSHA256    string
+}
+
+type memoryNoteCreateReceipt struct {
+	UserID         string
+	IdempotencyKey string
+	RequestDigest  string
+	NoteID         string
+	CreatedAt      time.Time
+}
+
 func (s *MemoryStore) CreateNote(ctx context.Context, record domain.NoteRecord) (domain.NoteRecord, error) {
 	_ = ctx
 	s.mu.Lock()
@@ -36,8 +50,71 @@ func (s *MemoryStore) CreateNote(ctx context.Context, record domain.NoteRecord) 
 	}
 	ensureNoteIdentity(&record)
 	record.UpdatedAt = record.CreatedAt
+	record.ContentUpdatedAt = record.CreatedAt
 	s.notes[record.NoteID] = record
 	return record, nil
+}
+
+func (s *MemoryStore) CreateNoteForUserIdempotent(ctx context.Context, input domain.CreateNoteIdempotentInput) (domain.NoteRecord, bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := input.Record
+	if record.UserID == "" || record.NoteID == "" || strings.TrimSpace(input.IdempotencyKey) == "" || input.RequestDigest == "" {
+		return domain.NoteRecord{}, false, ErrConflict
+	}
+	receiptKey := record.UserID + "\x00" + input.IdempotencyKey
+	if existing, found, err := s.findNoteCreateReplayLocked(record.UserID, input.IdempotencyKey, input.RequestDigest); err != nil {
+		return domain.NoteRecord{}, false, err
+	} else if found {
+		return existing, false, nil
+	}
+	if _, exists := s.notes[record.NoteID]; exists {
+		return domain.NoteRecord{}, false, ErrConflict
+	}
+	if record.EditorMode == "" {
+		record.EditorMode = domain.NoteEditorModeMarkdown
+	}
+	ensureNoteIdentity(&record)
+	record.UpdatedAt = record.CreatedAt
+	record.ContentUpdatedAt = record.CreatedAt
+	s.notes[record.NoteID] = record
+	s.noteCreateReceipts[receiptKey] = memoryNoteCreateReceipt{
+		UserID: record.UserID, IdempotencyKey: input.IdempotencyKey,
+		RequestDigest: input.RequestDigest, NoteID: record.NoteID, CreatedAt: record.CreatedAt,
+	}
+	return record, true, nil
+}
+
+// FindNoteCreateReplayForUser performs the owner/key/request receipt lookup
+// without creating anything. HTTP handlers use it before mutable validation so
+// a committed response-loss retry remains recoverable after validation rules
+// tighten. The authoritative create method repeats this lookup under its write
+// lock to close the race with another first attempt.
+func (s *MemoryStore) FindNoteCreateReplayForUser(ctx context.Context, userID string, idempotencyKey string, requestDigest string) (domain.NoteRecord, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.findNoteCreateReplayLocked(userID, idempotencyKey, requestDigest)
+}
+
+func (s *MemoryStore) findNoteCreateReplayLocked(userID string, idempotencyKey string, requestDigest string) (domain.NoteRecord, bool, error) {
+	receipt, exists := s.noteCreateReceipts[userID+"\x00"+idempotencyKey]
+	if !exists {
+		return domain.NoteRecord{}, false, nil
+	}
+	if receipt.NoteID == "" {
+		return domain.NoteRecord{}, true, ErrNoteCreateReplayDeleted
+	}
+	if receipt.RequestDigest != requestDigest {
+		return domain.NoteRecord{}, true, ErrNoteCreateIdempotencyConflict
+	}
+	existing, ok := s.notes[receipt.NoteID]
+	if !ok || existing.UserID != userID {
+		return domain.NoteRecord{}, true, ErrNoteCreateReplayDeleted
+	}
+	ensureNoteIdentity(&existing)
+	return existing, true, nil
 }
 
 func (s *MemoryStore) GetNoteForUser(ctx context.Context, noteID string, userID string) (domain.NoteRecord, error) {
@@ -64,10 +141,14 @@ func (s *MemoryStore) UpdateNoteForUser(ctx context.Context, noteID string, user
 	if input.ExpectedRevision <= 0 || input.ExpectedRevision != record.Revision {
 		return domain.NoteRecord{}, ErrNoteRevisionConflict
 	}
+	contentChanged := noteContentWillChange(record, input)
 	applyNoteUpdate(&record, input)
 	record.Revision++
 	record.ContentDigest = domain.ComputeNoteContentDigest(record.Title, record.BodyMarkdown)
 	record.UpdatedAt = domain.Now()
+	if contentChanged {
+		record.ContentUpdatedAt = record.UpdatedAt
+	}
 	s.notes[noteID] = record
 	return record, nil
 }
@@ -81,6 +162,13 @@ func (s *MemoryStore) DeleteNoteForUser(ctx context.Context, noteID string, user
 		return ErrNotFound
 	}
 	delete(s.notes, noteID)
+	for receiptKey, receipt := range s.noteCreateReceipts {
+		if receipt.NoteID == noteID {
+			receipt.NoteID = ""
+			receipt.RequestDigest = ""
+			s.noteCreateReceipts[receiptKey] = receipt
+		}
+	}
 	for token, grant := range s.noteReadGrants {
 		if grant.NoteID == noteID {
 			delete(s.noteReadGrants, token)
@@ -94,6 +182,11 @@ func (s *MemoryStore) DeleteNoteForUser(ctx context.Context, noteID string, user
 	for operationID, operation := range s.noteAppendOperations {
 		if operation.NoteID == noteID {
 			delete(s.noteAppendOperations, operationID)
+		}
+	}
+	for operationID, operation := range s.noteDirectAppendOps {
+		if operation.NoteID == noteID {
+			delete(s.noteDirectAppendOps, operationID)
 		}
 	}
 	return nil
@@ -123,7 +216,7 @@ func (s *MemoryStore) ListNotesForUser(ctx context.Context, input domain.NoteLis
 		}
 		matched = append(matched, record)
 	}
-	sortNotes(matched, query)
+	sortNotesForList(matched, query, input.Sort)
 	page := domain.NoteListPage{Notes: []domain.NoteListItem{}, TotalCount: len(matched)}
 	for index := offset; index < len(matched) && len(page.Notes) < limit; index++ {
 		record := matched[index]
@@ -131,13 +224,13 @@ func (s *MemoryStore) ListNotesForUser(ctx context.Context, input domain.NoteLis
 			NoteID: record.NoteID, Title: record.Title,
 			Snippet: noteMatchSnippet(record.BodyMarkdown, query, 500),
 			Pinned:  record.Pinned, Revision: maxInt64(record.Revision, 1),
-			UpdatedAt: record.UpdatedAt,
+			UpdatedAt: record.UpdatedAt, ContentUpdatedAt: record.ContentUpdatedAt,
 		})
 	}
 	return page, nil
 }
 
-func (s *MemoryStore) SearchNotesForUser(ctx context.Context, input domain.NoteSearchInput) ([]domain.NoteSearchHit, error) {
+func (s *MemoryStore) SearchNotesForUser(ctx context.Context, input domain.NoteSearchInput) (domain.NoteSearchPage, error) {
 	_ = ctx
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -146,14 +239,51 @@ func (s *MemoryStore) SearchNotesForUser(ctx context.Context, input domain.NoteS
 		limit = 10
 	}
 	query := strings.ToLower(strings.TrimSpace(input.Query))
+	sortMode := input.Sort
+	if sortMode == "" {
+		sortMode = domain.NoteSearchSortRelevance
+	}
+	if sortMode != domain.NoteSearchSortRelevance && sortMode != domain.NoteSearchSortRecent {
+		return domain.NoteSearchPage{}, ErrConflict
+	}
+	snapshotAt := input.SnapshotAt
+	if snapshotAt.IsZero() {
+		snapshotAt = domain.Now()
+	}
 	matched := make([]domain.NoteRecord, 0)
 	for _, record := range s.notes {
-		if record.UserID == input.UserID &&
-			(strings.Contains(strings.ToLower(record.Title), query) || strings.Contains(strings.ToLower(record.BodyMarkdown), query)) {
-			matched = append(matched, record)
+		if record.UserID != input.UserID {
+			continue
 		}
+		ensureNoteIdentity(&record)
+		if record.ContentUpdatedAt.After(snapshotAt) {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(record.Title), query) &&
+			!strings.Contains(strings.ToLower(record.BodyMarkdown), query) {
+			continue
+		}
+		if query == "" && sortMode != domain.NoteSearchSortRecent {
+			continue
+		}
+		matched = append(matched, record)
 	}
-	sortNotes(matched, query)
+	sortNotesForSearch(matched, query, sortMode)
+	if input.After != nil {
+		if input.SnapshotAt.IsZero() || input.After.NoteID == "" || input.After.ContentUpdatedAt.IsZero() ||
+			input.After.ContentUpdatedAt.After(snapshotAt) || input.After.Rank < 0 || input.After.Rank > 2 ||
+			(sortMode == domain.NoteSearchSortRecent && input.After.Rank != 0) {
+			return domain.NoteSearchPage{}, ErrConflict
+		}
+		first := len(matched)
+		for index, record := range matched {
+			if noteSearchRecordAfterAnchor(record, query, sortMode, *input.After) {
+				first = index
+				break
+			}
+		}
+		matched = matched[first:]
+	}
 	if len(matched) > limit {
 		matched = matched[:limit]
 	}
@@ -163,13 +293,14 @@ func (s *MemoryStore) SearchNotesForUser(ctx context.Context, input domain.NoteS
 			NoteID: record.NoteID, Title: record.Title,
 			Snippet: noteMatchSnippet(record.BodyMarkdown, query, 500),
 			Pinned:  record.Pinned, Revision: maxInt64(record.Revision, 1),
-			UpdatedAt: record.UpdatedAt,
+			UpdatedAt: record.UpdatedAt, ContentUpdatedAt: record.ContentUpdatedAt,
+			SortRank: noteSearchRank(record, query, sortMode),
 		})
 	}
-	return hits, nil
+	return domain.NoteSearchPage{Notes: hits, SnapshotAt: snapshotAt}, nil
 }
 
-func sortNotes(records []domain.NoteRecord, query string) {
+func sortNotesForList(records []domain.NoteRecord, query string, sortMode domain.NoteListSort) {
 	sort.Slice(records, func(i, j int) bool {
 		if query != "" {
 			iTitle, jTitle := strings.ToLower(records[i].Title), strings.ToLower(records[j].Title)
@@ -187,15 +318,64 @@ func sortNotes(records []domain.NoteRecord, query string) {
 			if iRank != jRank {
 				return iRank < jRank
 			}
+			if !records[i].ContentUpdatedAt.Equal(records[j].ContentUpdatedAt) {
+				return records[i].ContentUpdatedAt.After(records[j].ContentUpdatedAt)
+			}
+			return records[i].NoteID < records[j].NoteID
+		}
+		if sortMode == domain.NoteListSortRecent {
+			if !records[i].ContentUpdatedAt.Equal(records[j].ContentUpdatedAt) {
+				return records[i].ContentUpdatedAt.After(records[j].ContentUpdatedAt)
+			}
+			return records[i].NoteID < records[j].NoteID
 		}
 		if records[i].Pinned != records[j].Pinned {
 			return records[i].Pinned
 		}
-		if !records[i].UpdatedAt.Equal(records[j].UpdatedAt) {
-			return records[i].UpdatedAt.After(records[j].UpdatedAt)
+		if !records[i].ContentUpdatedAt.Equal(records[j].ContentUpdatedAt) {
+			return records[i].ContentUpdatedAt.After(records[j].ContentUpdatedAt)
 		}
 		return records[i].NoteID < records[j].NoteID
 	})
+}
+
+func sortNotesForSearch(records []domain.NoteRecord, query string, sortMode domain.NoteSearchSort) {
+	sort.Slice(records, func(i, j int) bool {
+		iRank := noteSearchRank(records[i], query, sortMode)
+		jRank := noteSearchRank(records[j], query, sortMode)
+		if iRank != jRank {
+			return iRank < jRank
+		}
+		if !records[i].ContentUpdatedAt.Equal(records[j].ContentUpdatedAt) {
+			return records[i].ContentUpdatedAt.After(records[j].ContentUpdatedAt)
+		}
+		return records[i].NoteID < records[j].NoteID
+	})
+}
+
+func noteSearchRank(record domain.NoteRecord, query string, sortMode domain.NoteSearchSort) int {
+	if sortMode == domain.NoteSearchSortRecent {
+		return 0
+	}
+	title := strings.ToLower(record.Title)
+	if title == query {
+		return 0
+	}
+	if strings.Contains(title, query) {
+		return 1
+	}
+	return 2
+}
+
+func noteSearchRecordAfterAnchor(record domain.NoteRecord, query string, sortMode domain.NoteSearchSort, anchor domain.NoteSearchPageAnchor) bool {
+	rank := noteSearchRank(record, query, sortMode)
+	if rank != anchor.Rank {
+		return rank > anchor.Rank
+	}
+	if !record.ContentUpdatedAt.Equal(anchor.ContentUpdatedAt) {
+		return record.ContentUpdatedAt.Before(anchor.ContentUpdatedAt)
+	}
+	return record.NoteID > anchor.NoteID
 }
 
 func noteMatchSnippet(body string, lowerQuery string, maxRunes int) string {
@@ -325,6 +505,129 @@ func (s *MemoryStore) ExpireNoteReadGrants(ctx context.Context, now time.Time, l
 	return expired, nil
 }
 
+func (s *MemoryStore) DirectAppendNoteForUser(ctx context.Context, input domain.DirectNoteAppendInput) (domain.NoteDirectAppendOperationRecord, bool, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if strings.TrimSpace(input.IdempotencyKey) == "" || input.RequestDigest == "" {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrConflict
+	}
+	if existing, found, err := s.findNoteDirectAppendReplayLocked(input.UserID, input.IdempotencyKey, input.RequestDigest); err != nil {
+		return domain.NoteDirectAppendOperationRecord{}, false, err
+	} else if found {
+		return existing, false, nil
+	}
+	if input.OperationID == "" || input.NoteID == "" || input.ExpectedRevision <= 0 ||
+		strings.TrimSpace(input.BodyMarkdown) == "" || len(input.BodyMarkdown) > maxNoteAppendBodyBytes {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrConflict
+	}
+	note, ok := s.notes[input.NoteID]
+	if !ok || note.UserID != input.UserID {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrNotFound
+	}
+	ensureNoteIdentity(&note)
+	if note.Revision != input.ExpectedRevision {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrNoteRevisionConflict
+	}
+	if _, exists := s.noteDirectAppendOps[input.OperationID]; exists {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrConflict
+	}
+	suffix := noteAppendSuffix(note.BodyMarkdown, input.BodyMarkdown)
+	if len(note.BodyMarkdown)+len(suffix) > maxStoredNoteBodyBytes {
+		return domain.NoteDirectAppendOperationRecord{}, false, ErrNoteAppendNotCommitted
+	}
+	startByte := len(note.BodyMarkdown)
+	beforeDigest := note.ContentDigest
+	note.BodyMarkdown += suffix
+	note.Revision++
+	note.ContentDigest = domain.ComputeNoteContentDigest(note.Title, note.BodyMarkdown)
+	note.UpdatedAt = input.Now
+	note.ContentUpdatedAt = input.Now
+	operation := memoryNoteDirectAppendOperation{
+		NoteDirectAppendOperationRecord: domain.NoteDirectAppendOperationRecord{
+			OperationID: input.OperationID, NoteID: note.NoteID, NoteTitle: note.Title,
+			UserID: input.UserID, IdempotencyKey: input.IdempotencyKey, RequestDigest: input.RequestDigest,
+			BeforeRevision: input.ExpectedRevision, AfterRevision: note.Revision,
+			AppendedBytes: len(suffix), BeforeContentDigest: beforeDigest,
+			AfterContentDigest: note.ContentDigest, CreatedAt: input.Now,
+		},
+		AppendStartByte: startByte, AppendSHA256: domain.NoteBodySHA256(suffix),
+	}
+	s.notes[note.NoteID] = note
+	storedOperation := operation
+	storedOperation.NoteTitle = ""
+	s.noteDirectAppendOps[operation.OperationID] = storedOperation
+	return operation.NoteDirectAppendOperationRecord, true, nil
+}
+
+// FindNoteDirectAppendReplayForUser is the read-only replay half of the direct
+// append contract. It intentionally exposes only the public, content-free
+// receipt and never consults mutable Note revision/liveness before a live exact
+// replay is resolved.
+func (s *MemoryStore) FindNoteDirectAppendReplayForUser(ctx context.Context, userID string, idempotencyKey string, requestDigest string) (domain.NoteDirectAppendOperationRecord, bool, error) {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.findNoteDirectAppendReplayLocked(userID, idempotencyKey, requestDigest)
+}
+
+func (s *MemoryStore) findNoteDirectAppendReplayLocked(userID string, idempotencyKey string, requestDigest string) (domain.NoteDirectAppendOperationRecord, bool, error) {
+	for _, existing := range s.noteDirectAppendOps {
+		if existing.UserID != userID || existing.IdempotencyKey != idempotencyKey {
+			continue
+		}
+		if existing.RequestDigest != requestDigest {
+			return domain.NoteDirectAppendOperationRecord{}, true, ErrNoteAppendIdempotencyConflict
+		}
+		return s.publicMemoryDirectNoteOperation(existing), true, nil
+	}
+	return domain.NoteDirectAppendOperationRecord{}, false, nil
+}
+
+func (s *MemoryStore) publicMemoryDirectNoteOperation(operation memoryNoteDirectAppendOperation) domain.NoteDirectAppendOperationRecord {
+	public := operation.NoteDirectAppendOperationRecord
+	public.NoteTitle = ""
+	if note, ok := s.notes[operation.NoteID]; ok && note.UserID == operation.UserID {
+		public.NoteTitle = note.Title
+	}
+	return public
+}
+
+func (s *MemoryStore) UndoDirectNoteAppendForUser(ctx context.Context, input domain.UndoDirectNoteAppendInput) (domain.NoteDirectAppendOperationRecord, error) {
+	_ = ctx
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	operation, ok := s.noteDirectAppendOps[input.OperationID]
+	if !ok || operation.UserID != input.UserID {
+		return domain.NoteDirectAppendOperationRecord{}, ErrNotFound
+	}
+	if operation.UndoneAt != nil {
+		return s.publicMemoryDirectNoteOperation(operation), nil
+	}
+	note, ok := s.notes[operation.NoteID]
+	if !ok || note.UserID != input.UserID {
+		return domain.NoteDirectAppendOperationRecord{}, ErrNotFound
+	}
+	ensureNoteIdentity(&note)
+	endByte := operation.AppendStartByte + operation.AppendedBytes
+	if note.Revision != operation.AfterRevision || operation.AppendStartByte < 0 || operation.AppendedBytes <= 0 ||
+		endByte != len(note.BodyMarkdown) || domain.NoteBodySHA256(note.BodyMarkdown[operation.AppendStartByte:endByte]) != operation.AppendSHA256 {
+		return domain.NoteDirectAppendOperationRecord{}, ErrNoteUndoConflict
+	}
+	note.BodyMarkdown = note.BodyMarkdown[:operation.AppendStartByte]
+	note.Revision++
+	note.ContentDigest = domain.ComputeNoteContentDigest(note.Title, note.BodyMarkdown)
+	note.UpdatedAt = input.Now
+	note.ContentUpdatedAt = input.Now
+	undoneAt := input.Now
+	operation.UndoneAt = &undoneAt
+	operation.UndoRevision = note.Revision
+	operation.NoteTitle = ""
+	s.notes[note.NoteID] = note
+	s.noteDirectAppendOps[input.OperationID] = operation
+	return s.publicMemoryDirectNoteOperation(operation), nil
+}
+
 func (s *MemoryStore) CreateNoteAppendProposal(ctx context.Context, input domain.CreateNoteAppendProposalInput) (domain.NoteAppendProposalRecord, error) {
 	_ = ctx
 	s.mu.Lock()
@@ -338,7 +641,7 @@ func (s *MemoryStore) CreateNoteAppendProposal(ctx context.Context, input domain
 	for _, existing := range s.noteAppendProposals {
 		if existing.RunID == input.RunID && existing.UserID == input.UserID && existing.IdempotencyKey == input.IdempotencyKey {
 			if existing.RequestDigest != input.RequestDigest {
-				return domain.NoteAppendProposalRecord{}, ErrConflict
+				return domain.NoteAppendProposalRecord{}, ErrNoteAppendIdempotencyConflict
 			}
 			return s.publicMemoryNoteProposal(existing), nil
 		}
@@ -348,7 +651,7 @@ func (s *MemoryStore) CreateNoteAppendProposal(ctx context.Context, input domain
 			existing.BaseRevision == input.ExpectedRevision && existing.BodySHA256 == bodySHA &&
 			existing.Status != domain.NoteAppendProposalStatusExpired {
 			if existing.RequestDigest != input.RequestDigest {
-				return domain.NoteAppendProposalRecord{}, ErrConflict
+				return domain.NoteAppendProposalRecord{}, ErrNoteAppendIdempotencyConflict
 			}
 			return s.publicMemoryNoteProposal(existing), nil
 		}
@@ -488,6 +791,7 @@ func (s *MemoryStore) CommitNoteAppendProposalForUser(ctx context.Context, input
 	note.Revision++
 	note.ContentDigest = domain.ComputeNoteContentDigest(note.Title, note.BodyMarkdown)
 	note.UpdatedAt = input.Now
+	note.ContentUpdatedAt = input.Now
 	operation := memoryNoteAppendOperation{
 		NoteAppendOperationRecord: domain.NoteAppendOperationRecord{
 			OperationID: input.OperationID, ProposalID: proposal.ProposalID, RunID: proposal.RunID,
@@ -558,6 +862,7 @@ func (s *MemoryStore) UndoNoteAppendOperationForUser(ctx context.Context, input 
 	note.Revision++
 	note.ContentDigest = domain.ComputeNoteContentDigest(note.Title, note.BodyMarkdown)
 	note.UpdatedAt = input.Now
+	note.ContentUpdatedAt = input.Now
 	undoneAt := input.Now
 	operation.UndoneAt = &undoneAt
 	operation.UndoRevision = note.Revision

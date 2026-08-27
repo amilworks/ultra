@@ -219,6 +219,11 @@ services:
       ULTRA_CONTROL_NGFF_SERVICE_URL: ${ULTRA_CONTROL_NGFF_SERVICE_URL:-http://ngff-service:8091}
       ULTRA_CONTROL_AUTH_PROVIDER: ${ULTRA_AUTH_PROVIDER:-dev}
       ULTRA_CONTROL_DEV_ADMIN_ENABLED: ${ULTRA_DEV_ADMIN_ENABLED:-true}
+      # Independent emergency stops for model-side Notes retrieval and append
+      # proposals. Browser-owned Notes CRUD remains available.
+      ULTRA_CONTROL_MODEL_NOTES_READ_ENABLED: ${ULTRA_CONTROL_MODEL_NOTES_READ_ENABLED:-true}
+      ULTRA_CONTROL_MODEL_NOTES_PROPOSALS_ENABLED: ${ULTRA_CONTROL_MODEL_NOTES_PROPOSALS_ENABLED:-true}
+      ULTRA_CONTROL_NOTES_REQUIRE_EXPECTED_REVISION: ${ULTRA_CONTROL_NOTES_REQUIRE_EXPECTED_REVISION:-true}
       # Bootstrap admin allowlist — same mechanism production uses to grant the
       # admin console (the session role is recomputed from this on every session
       # read; comma-separated, case-insensitive).
@@ -300,6 +305,8 @@ services:
       ULTRA_UPLOAD_ROOTS: /data/uploads
       ULTRA_DEEPAGENTS_WORKSPACE_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/workspace
       ULTRA_DEEPAGENTS_MEMORY_ROOT: ${ULTRA_DATA_DIR:-/tmp/ultra-data}/memory
+      ULTRA_DEEPAGENTS_CHECKPOINT_RETENTION_SECONDS: ${ULTRA_DEEPAGENTS_CHECKPOINT_RETENTION_SECONDS:-259200}
+      ULTRA_DEEPAGENTS_CHECKPOINT_GC_INTERVAL_SECONDS: ${ULTRA_DEEPAGENTS_CHECKPOINT_GC_INTERVAL_SECONDS:-3600}
       # Code execution: the worker runs each run's code in the sandbox image via
       # the host Docker daemon (mounted socket). The sandbox bind-mounts the run's
       # workspace + artifact dir BY PATH on the host daemon, so those dirs must sit

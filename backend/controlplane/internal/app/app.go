@@ -160,6 +160,12 @@ func New(cfg config.Config) (*App, error) {
 		}
 	}
 	var startFns []func(context.Context) error
+	if expiryStore, ok := controlStore.(httpapi.NoteProposalExpiryStore); ok {
+		startFns = append(startFns, func(ctx context.Context) error {
+			go httpapi.RunNoteProposalExpiryGC(ctx, expiryStore, time.Minute, 200)
+			return nil
+		})
+	}
 	// Backfill filesystem publication fences before any background subscribers
 	// or recovery loops can expose pre-upgrade deleted resources to a retried
 	// worker. New deletes create the same fence transactionally in the handler.

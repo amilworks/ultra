@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +35,18 @@ def _context() -> AgentRunContext:
         goal="Explain the result.",
         workspace_root="/tmp/ws",
         artifact_root="/tmp/art",
+    )
+
+
+def _notes_context() -> AgentRunContext:
+    return replace(
+        _context(),
+        selection_context={
+            "note_access": {
+                "mode": "selected",
+                "notes": [{"note_id": "note-private", "revision": 1}],
+            }
+        },
     )
 
 
@@ -83,6 +97,44 @@ def test_streamer_coalesces_thinking_and_closes_on_first_answer_token():
     assert second["payload"]["text"] == "Settling on the answer."
     assert [event["sequence"] for event in published] == [1, 2]
     assert streamer.observed_chars == len(long_thought) + len("Settling on the answer.")
+
+
+def test_streamer_emits_content_free_reasoning_for_notes_enabled_runs():
+    published: list[dict[str, Any]] = []
+
+    async def publish_event(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    streamer = ReasoningEventStreamer(
+        context=_notes_context(),
+        sequencer=RunEventSequencer("run_reasoning_test"),
+        publish_event=publish_event,
+        redact_content=True,
+    )
+    sentinel = "NOTE_SENTINEL_REASONING_MUST_NOT_PERSIST"
+
+    async def scenario() -> None:
+        run_id = uuid4()
+        await streamer.on_chat_model_start({}, [], run_id=run_id, metadata={})
+        await streamer.on_llm_new_token(
+            "",
+            chunk=_reasoning_chunk(sentinel),
+            run_id=run_id,
+        )
+        await streamer.on_llm_end(None, run_id=run_id)
+
+    asyncio.run(scenario())
+
+    assert len(published) == 1
+    event = published[0]
+    assert event["message"] is None
+    assert event["payload"] == {
+        "source": "coordinator",
+        "status": "completed",
+        "redacted": True,
+        "reasoning_chars": len(sentinel),
+    }
+    assert sentinel not in json.dumps(published)
 
 
 def test_streamer_closes_round_on_model_end_before_tools():
@@ -326,6 +378,58 @@ def test_execute_progress_streamer_publishes_threaded_tool_progress():
     assert event["scope_id"] == "builder:execute"
 
 
+def test_execute_progress_streamer_redacts_notes_enabled_output():
+    published: list[dict[str, Any]] = []
+    sentinel = "NOTE_SENTINEL_IN_SUBPROCESS_OUTPUT"
+
+    async def publish_event(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    async def scenario() -> None:
+        streamer = ExecuteProgressEventStreamer(
+            context=_notes_context(),
+            sequencer=RunEventSequencer("run_reasoning_test"),
+            publish_event=publish_event,
+        )
+        streamer.bind_tool_event(
+            {
+                "event_kind": "tool_call.started",
+                "payload": {
+                    "tool_name": "execute",
+                    "status": "started",
+                    "tool_call_id": "call-exec-notes",
+                },
+            }
+        )
+        await asyncio.to_thread(
+            streamer.emit_sync,
+            ExecuteProgressEvent(
+                command=f"printf {sentinel}",
+                stream="stdout",
+                text=sentinel,
+                elapsed_seconds=1,
+                output_size_chars=len(sentinel),
+                progress_index=1,
+                suppressed_line_count=0,
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    assert len(published) == 1
+    event = published[0]
+    assert event["message"] == ""
+    assert event["payload"] == {
+        "tool_name": "execute",
+        "status": "progress",
+        "redacted": True,
+        "progress_kind": "output",
+        "progress_index": 1,
+        "tool_call_id": "call-exec-notes",
+    }
+    assert sentinel not in json.dumps(published)
+
+
 class CallbackDrivingAgent:
     """Fake agent that drives the config callbacks the way LangGraph does:
     model-chunk callbacks fire while the graph stream yields message events."""
@@ -388,6 +492,70 @@ def test_stream_agent_attempt_publishes_reasoning_before_answer():
     assert published[1]["payload"]["text"] == "The answer is 42."
     # Sequences stay strictly increasing across both publish paths.
     assert [event["sequence"] for event in published] == [1, 2]
+
+
+def test_stream_agent_attempt_redacts_notes_reasoning_and_disables_input_trace():
+    published: list[dict[str, Any]] = []
+    sentinel = "NOTE_SENTINEL_ONLY_IN_PRIVATE_REASONING"
+
+    async def publish_event(event: dict[str, Any]) -> None:
+        published.append(event)
+
+    class NotesCallbackDrivingAgent(CallbackDrivingAgent):
+        def astream_events(self, _payload: Any, *, config: Any = None, **_kwargs: Any) -> Any:
+            callbacks = list((config or {}).get("callbacks") or [])
+            self.seen_callbacks = callbacks
+
+            async def generate() -> Any:
+                run_id = uuid4()
+                for handler in callbacks:
+                    if hasattr(handler, "on_chat_model_start"):
+                        await handler.on_chat_model_start({}, [], run_id=run_id, metadata={})
+                for handler in callbacks:
+                    if hasattr(handler, "on_llm_new_token"):
+                        await handler.on_llm_new_token(
+                            "",
+                            chunk=_reasoning_chunk(sentinel),
+                            run_id=run_id,
+                        )
+                for handler in callbacks:
+                    if hasattr(handler, "on_llm_end"):
+                        await handler.on_llm_end(None, run_id=run_id)
+                yield {
+                    "event": "on_chat_model_stream",
+                    "data": {"chunk": AIMessageChunk(content="Safe final response.")},
+                    "metadata": {},
+                }
+
+            return generate()
+
+    agent = NotesCallbackDrivingAgent()
+
+    async def scenario() -> None:
+        await _stream_agent_attempt(
+            agent,
+            messages=[{"role": "user", "content": "Use my attached note."}],
+            context=_notes_context(),
+            sequencer=RunEventSequencer("run_reasoning_test"),
+            publish_event=publish_event,
+            trace_lens_inputs_enabled=True,
+        )
+
+    asyncio.run(scenario())
+
+    assert [event["event_kind"] for event in published] == [
+        "trace.reasoning.delta",
+        "message.delta",
+    ]
+    reasoning = published[0]
+    assert reasoning["message"] is None
+    assert reasoning["payload"]["redacted"] is True
+    assert "text" not in reasoning["payload"]
+    assert published[1]["payload"]["text"] == "Safe final response."
+    assert sentinel not in json.dumps(published)
+    assert not any(
+        handler.__class__.__name__ == "TraceLensInputCallback" for handler in agent.seen_callbacks
+    )
 
 
 def test_stream_agent_attempt_rejects_split_deepseek_protocol_before_it_reaches_ui():
@@ -809,8 +977,7 @@ def test_bare_tool_markup_flood_trips_protocol_guard():
     guard = _VisibleModelProtocolGuard()
     # Condensed verbatim shape from the observed production response.
     flood = (
-        '<invoke name="read_file">\n</invoke>\n' * 6
-        + "</tool_calls>\n<tool>\n</tool>\n</invoke>\n"
+        '<invoke name="read_file">\n</invoke>\n' * 6 + "</tool_calls>\n<tool>\n</tool>\n</invoke>\n"
     )
     with pytest.raises(ModelProtocolLeakError) as excinfo:
         for chunk in [flood[i : i + 37] for i in range(0, len(flood), 37)]:
@@ -822,7 +989,7 @@ def test_bare_tool_markup_flood_trips_protocol_guard():
 def test_bare_tool_markup_validate_catches_trailing_flood_in_long_answer():
     from ultra_deepagents.runner import ModelProtocolLeakError, _VisibleModelProtocolGuard
 
-    long_valid_answer = ("The delta rule updates W by an outer product correction. " * 200)
+    long_valid_answer = "The delta rule updates W by an outer product correction. " * 200
     flood = '<invoke name="read_file">\n</invoke>\n' * 10
     with pytest.raises(ModelProtocolLeakError):
         _VisibleModelProtocolGuard.validate(long_valid_answer + flood)
@@ -834,7 +1001,7 @@ def test_isolated_tool_markup_mentions_do_not_trip_guard():
 
     guard = _VisibleModelProtocolGuard()
     prose = (
-        "In Anthropic's dialect a call looks like <invoke name=\"read_file\"> "
+        'In Anthropic\'s dialect a call looks like <invoke name="read_file"> '
         "followed by </invoke>, whereas OpenAI uses JSON tool_calls. "
         "The retrieval MAE was 4.07 for the delta rule versus 5.62 additive, "
         "a ratio of 1.38, computed over 64 probes with d=32. " * 8

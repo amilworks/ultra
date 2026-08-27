@@ -109,6 +109,134 @@ func TestSQLCThreadListContractIncludesPaginationAndCount(t *testing.T) {
 	}
 }
 
+func TestModelNotesSchemaIsMirroredAndPrivacyBounded(t *testing.T) {
+	t.Parallel()
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000014_model_note_context.up.sql")
+	if err != nil {
+		t.Fatalf("read Notes migration: %v", err)
+	}
+	for _, marker := range []string{
+		"revision bigint NOT NULL DEFAULT 1",
+		"content_digest text NOT NULL DEFAULT ''",
+		"control_note_read_grants",
+		"control_note_run_usage",
+		"control_note_append_proposals",
+		"control_note_append_operations",
+		"idx_control_note_append_proposals_run_idempotency",
+		"idx_control_note_append_proposals_pending_expiry",
+		"idx_control_note_read_grants_expiry",
+		"REFERENCES control_notes(note_id) ON DELETE CASCADE",
+		"REFERENCES control_note_append_proposals(proposal_id) ON DELETE NO ACTION",
+	} {
+		if !strings.Contains(string(schema), marker) {
+			t.Fatalf("schema.sql missing %q", marker)
+		}
+		if !strings.Contains(string(migration), marker) {
+			t.Fatalf("migration missing %q", marker)
+		}
+	}
+	operationStart := strings.Index(string(schema), "CREATE TABLE IF NOT EXISTS control_note_append_operations")
+	if operationStart < 0 {
+		t.Fatal("could not isolate note operation receipt schema")
+	}
+	operationEnd := strings.Index(string(schema)[operationStart:], ");")
+	if operationEnd < 0 {
+		t.Fatal("could not isolate note operation receipt schema")
+	}
+	operationDDL := string(schema)[operationStart : operationStart+operationEnd]
+	if strings.Contains(operationDDL, "note_title") || strings.Contains(operationDDL, "body_markdown") {
+		t.Fatalf("permanent operation receipt retains sensitive text: %s", operationDDL)
+	}
+	if !strings.Contains(operationDDL, "REFERENCES control_note_append_proposals(proposal_id) ON DELETE NO ACTION") {
+		t.Fatalf("committed proposal deletion could erase its operation receipt: %s", operationDDL)
+	}
+}
+
+func TestDeepagentsCheckpointRunCascadeIsMirrored(t *testing.T) {
+	t.Parallel()
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("read schema.sql: %v", err)
+	}
+	migration, err := os.ReadFile("../../migrations/000014_model_note_context.up.sql")
+	if err != nil {
+		t.Fatalf("read model Notes migration: %v", err)
+	}
+	for _, marker := range []string{
+		"CREATE TABLE IF NOT EXISTS deepagents_checkpoint_threads",
+		"deepagents_checkpoint_threads_updated_at_idx",
+		"LOCK TABLE deepagents_checkpoint_threads IN SHARE ROW EXCLUSIVE MODE",
+		"DELETE FROM deepagents_checkpoint_threads checkpoint",
+		"REFERENCES control_runs(run_id) ON DELETE CASCADE",
+		"deepagents_checkpoint_threads_run_fk",
+	} {
+		if !strings.Contains(string(schema), marker) {
+			t.Fatalf("schema.sql missing checkpoint ownership marker %q", marker)
+		}
+		if !strings.Contains(string(migration), marker) {
+			t.Fatalf("migration missing checkpoint ownership marker %q", marker)
+		}
+	}
+	schemaText := string(schema)
+	indexDOStart := strings.Index(schemaText, "DO $$\nDECLARE\n  checkpoint_index_oid oid;\n  checkpoint_index_matches boolean;")
+	if indexDOStart < 0 {
+		t.Fatal("schema.sql does not isolate checkpoint index reconciliation in a conditional DO block")
+	}
+	indexDOEnd := strings.Index(schemaText[indexDOStart:], "END $$;")
+	if indexDOEnd < 0 {
+		t.Fatal("schema.sql does not isolate checkpoint index reconciliation in a conditional DO block")
+	}
+	indexReconciliation := schemaText[indexDOStart : indexDOStart+indexDOEnd]
+	indexGuard := strings.Index(indexReconciliation, "IF COALESCE(checkpoint_index_matches, false) THEN")
+	indexDrop := strings.Index(indexReconciliation, "DROP INDEX deepagents_checkpoint_threads_updated_at_idx")
+	indexCreate := strings.Index(indexReconciliation, "CREATE INDEX IF NOT EXISTS deepagents_checkpoint_threads_updated_at_idx")
+	if indexGuard < 0 || indexDrop <= indexGuard || indexCreate <= indexGuard {
+		t.Fatalf("checkpoint index DDL must be guarded behind catalog mismatch: %s", indexReconciliation)
+	}
+	for _, catalogMarker := range []string{
+		"index_definition.indisvalid",
+		"index_definition.indkey[0] = updated_at_column.attnum",
+		"access_method.amname = 'btree'",
+	} {
+		if !strings.Contains(indexReconciliation, catalogMarker) {
+			t.Fatalf("checkpoint index reconciliation does not validate %q: %s", catalogMarker, indexReconciliation)
+		}
+	}
+	if strings.Contains(schemaText[:indexDOStart], "CREATE INDEX IF NOT EXISTS deepagents_checkpoint_threads_updated_at_idx") {
+		t.Fatal("schema.sql creates the checkpoint index before checking catalog state")
+	}
+	doStart := strings.Index(schemaText, "DO $$\nDECLARE\n  constraint_name text;\n  needs_reconciliation boolean;")
+	if doStart < 0 {
+		t.Fatal("schema.sql does not isolate checkpoint FK reconciliation in a conditional DO block")
+	}
+	doEnd := strings.Index(schemaText[doStart:], "END $$;")
+	if doEnd < 0 {
+		t.Fatal("schema.sql does not isolate checkpoint FK reconciliation in a conditional DO block")
+	}
+	reconciliation := schemaText[doStart : doStart+doEnd]
+	guard := strings.Index(reconciliation, "IF NOT needs_reconciliation THEN")
+	checkpointLock := strings.Index(reconciliation, "LOCK TABLE deepagents_checkpoint_threads IN SHARE ROW EXCLUSIVE MODE")
+	orphanCleanup := strings.Index(reconciliation, "DELETE FROM deepagents_checkpoint_threads checkpoint")
+	if guard < 0 || checkpointLock <= guard || orphanCleanup <= checkpointLock {
+		t.Fatalf("checkpoint reconciliation must guard lock and orphan cleanup behind catalog mismatch: %s", reconciliation)
+	}
+	if strings.Contains(schemaText[:doStart], "LOCK TABLE deepagents_checkpoint_threads") {
+		t.Fatal("schema.sql takes a checkpoint write-conflicting lock before checking catalog state")
+	}
+	down, err := os.ReadFile("../../migrations/000014_model_note_context.down.sql")
+	if err != nil {
+		t.Fatalf("read model Notes down migration: %v", err)
+	}
+	if strings.Contains(string(down), "DROP TABLE IF EXISTS deepagents_checkpoint_threads") ||
+		strings.Contains(string(down), "DROP TABLE deepagents_checkpoint_threads") {
+		t.Fatal("rollback destroys temporary run checkpoint durability")
+	}
+}
+
 func TestResourceRetentionClaimIndexesAreMirrored(t *testing.T) {
 	t.Parallel()
 

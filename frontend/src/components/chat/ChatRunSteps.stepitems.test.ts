@@ -49,6 +49,48 @@ describe("buildStepItems (canonical RunStep grouping)", () => {
     expect(buildStepItems([], [])).toEqual([]);
   });
 
+  it("renders redacted reasoning and Note activity as generic labels with no detail", () => {
+    const sentinel = "PRIVATE_NOTE_SENTINEL";
+    const steps = buildStepItems(
+      [
+        {
+          event_type: "trace.reasoning.delta",
+          payload: { redacted: true, text: sentinel, status: "running" },
+        },
+        {
+          event_type: "tool_call.completed",
+          payload: {
+            redacted: true,
+            tool_name: "read_note",
+            tool_call_id: "call-note",
+            message: sentinel,
+            text: sentinel,
+            status: "completed",
+          },
+        },
+      ],
+      []
+    );
+
+    expect(steps).toEqual([
+      {
+        id: "reasoning",
+        kind: "phase",
+        label: "Thinking",
+        detail: null,
+        status: "running",
+      },
+      {
+        id: "tool:call-note",
+        kind: "tool",
+        label: "Reading a Note",
+        detail: null,
+        status: "completed",
+      },
+    ]);
+    expect(JSON.stringify(steps)).not.toContain(sentinel);
+  });
+
   it("coalesces execute progress into the active tool step and lets completion win", () => {
     const events = [
       toolEvent("tool_call.started", "call-exec", "execute", "started"),

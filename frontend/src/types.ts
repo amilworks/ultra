@@ -76,6 +76,18 @@ export type KnowledgeContext = {
   pack_ids?: string[];
 };
 
+export type SelectedNoteReference = {
+  note_id: string;
+  revision?: number;
+};
+
+export type NoteAccessContext = {
+  mode: "selected" | "search";
+  notes: SelectedNoteReference[];
+  /** Exact current-turn authority to create a browser-reviewed append proposal. */
+  allow_append_proposal: boolean;
+};
+
 export type SelectionContext = {
   context_id?: string | null;
   source?: string | null;
@@ -87,6 +99,8 @@ export type SelectionContext = {
   originating_user_text?: string | null;
   suggested_domain?: string | null;
   suggested_tool_names?: string[];
+  /** Per-run Notes authority. Absence means the model cannot inspect Notes. */
+  note_access?: NoteAccessContext;
 };
 
 export type RemoteMutationIntent = "bisque.upload" | "bisque.create_dataset";
@@ -2490,10 +2504,15 @@ export type UploadViewerHistogramResponse = {
   };
 };
 
+export type PublicFeatureFlags = {
+  model_notes_read?: boolean;
+  [feature: string]: boolean | undefined;
+};
+
 export type PublicConfigResponse = {
   app_name?: string | null;
   app_version?: string | null;
-  features?: Record<string, boolean>;
+  features?: PublicFeatureFlags;
   bisque_root?: string | null;
   bisque_browser_url?: string | null;
   bisque_auth_enabled?: boolean;

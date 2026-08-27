@@ -31,7 +31,12 @@ from ultra_deepagents.code_execution.cleanup import (
 from ultra_deepagents.config import RuntimeSettings
 from ultra_deepagents.context_tools import clear_steer_file_authorizations
 from ultra_deepagents.evaluation_profiles import evaluation_profile_policy
-from ultra_deepagents.runner import RunEventSequencer, run_job
+from ultra_deepagents.notes.access import note_access_from_selection_context
+from ultra_deepagents.runner import (
+    CheckpointReconciliationPendingError,
+    RunEventSequencer,
+    run_job,
+)
 from ultra_deepagents.schemas import RunJobEnvelope
 
 logger = logging.getLogger(__name__)
@@ -934,6 +939,7 @@ class NATSDeepAgentsWorker:
         self._canceled_run_reasons: dict[str, str] = {}
         self._shutting_down = False
         self._checkpointer: Any | None = None
+        self._checkpointer_init_lock = asyncio.Lock()
         # Serialize sandbox-container sweeps so the startup sweep and the first periodic
         # tick (or overlapping ticks) never issue redundant docker calls on the same IDs.
         self._sandbox_reaper_lock = asyncio.Lock()
@@ -975,6 +981,7 @@ class NATSDeepAgentsWorker:
         js = nc.jetstream()
         cancel_subscription = None
         reaper_task: asyncio.Task | None = None
+        checkpoint_gc_task: asyncio.Task | None = None
         try:
             await self._ensure_stream(js)
             # Clear any orphaned/leftover sandbox containers from a previous (possibly
@@ -983,6 +990,11 @@ class NATSDeepAgentsWorker:
             await self._reap_sandbox_containers_once()
             if self.settings.sandbox_reaper_interval_seconds > 0:
                 reaper_task = asyncio.create_task(self._sandbox_reaper_loop())
+            if (
+                self.settings.checkpointer_enabled
+                and self.settings.checkpoint_retention_seconds > 0
+            ):
+                checkpoint_gc_task = asyncio.create_task(self._checkpoint_gc_loop())
 
             async def handle_cancel_message(message: Any) -> None:
                 await self._handle_cancel_message(message)
@@ -1032,6 +1044,10 @@ class NATSDeepAgentsWorker:
                 reaper_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await reaper_task
+            if checkpoint_gc_task is not None:
+                checkpoint_gc_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await checkpoint_gc_task
             if "active_message_tasks" in locals():
                 await _cancel_message_tasks(active_message_tasks)
             if cancel_subscription is not None:
@@ -1073,6 +1089,43 @@ class NATSDeepAgentsWorker:
             logger.info(
                 "Reaped orphaned sandbox containers.",
                 extra={"reaped": len(reaped)},
+            )
+
+    async def _checkpoint_gc_loop(self) -> None:
+        """Reap old terminal rows when immediate checkpoint cleanup failed."""
+
+        interval = max(0.01, float(self.settings.checkpoint_gc_interval_seconds))
+        while True:
+            await self._reap_abandoned_checkpoints_once()
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+
+    async def _reap_abandoned_checkpoints_once(self) -> None:
+        retention = self.settings.checkpoint_retention_seconds
+        if not self.settings.checkpointer_enabled or retention <= 0:
+            return
+        try:
+            checkpointer = await self._ensure_checkpointer()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Durable checkpoint initialization failed.", exc_info=True)
+            return
+        if checkpointer is None:
+            return
+        try:
+            reaped = await checkpointer.gc(retention)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Durable checkpoint GC failed.", exc_info=True)
+            return
+        if reaped:
+            logger.info(
+                "Reaped abandoned durable checkpoint rows.",
+                extra={"reaped": reaped},
             )
 
     async def _ensure_stream(self, js: Any) -> None:
@@ -1216,7 +1269,15 @@ class NATSDeepAgentsWorker:
                         delay_seconds=active_duplicate_redelivery_delay(self.settings),
                     )
                     return
-                await _ack_message(message)
+                acknowledged = await _ack_message(message)
+                if acknowledged:
+                    # A prior delivery may have reached a terminal event and
+                    # crashed before local cleanup. Once this redelivery is
+                    # durably acknowledged, remove any private checkpoint it
+                    # left behind; otherwise retain it for another delivery.
+                    await self._delete_checkpointer_thread(job.run_id)
+                else:
+                    await self._release_checkpointer_thread(job.run_id)
                 return
             existing_task = self._active_tasks.get(job.run_id)
             if existing_task is not None:
@@ -1261,6 +1322,25 @@ class NATSDeepAgentsWorker:
             def mark_control_lease_lost() -> None:
                 nonlocal control_lease_lost
                 control_lease_lost = True
+
+            def start_run_heartbeat_after_event_emission_ready() -> None:
+                """Start source-sequenced liveness only after runner authority.
+
+                The callback is idempotent because custom runners and future
+                prelude paths may conservatively signal readiness more than
+                once. Ignoring the callback disables heartbeats fail-closed;
+                there is deliberately no timer-based eager fallback.
+                """
+
+                nonlocal heartbeat_task
+                if heartbeat_task is not None:
+                    return
+                heartbeat_task = _start_run_heartbeat_task(
+                    publish_worker_heartbeat,
+                    interval_seconds=job_ack_extension_interval(self.settings),
+                    worker_task=current_task,
+                    on_lease_lost=mark_control_lease_lost,
+                )
 
             def _abort_run_on_lease_lost() -> None:
                 # Scheduled onto this loop via call_soon_threadsafe by the
@@ -1400,20 +1480,13 @@ class NATSDeepAgentsWorker:
                     # resume sequence floor and any prior token usage, instead
                     # of paging the full event history twice. Seed the shared
                     # sequencer above the run's already-persisted events BEFORE
-                    # starting the heartbeat, so a resumed run's events —
-                    # streamed and heartbeat alike — never reuse a
-                    # source_sequence the original partial run already used
-                    # (which the control plane would dedup or, under strict
-                    # partition ingest, stall on).
+                    # handing control to the runner. The runner starts the
+                    # heartbeat only after durable state is classified absent
+                    # or pending, so a completed checkpoint can never reuse a
+                    # terminal event's not-yet-ingested source sequence.
                     resume_floor, prior_usage = await self._run_events_snapshot(job.run_id)
                     if resume_floor > run_sequencer.sequence:
                         run_sequencer.sequence = resume_floor
-                    heartbeat_task = _start_run_heartbeat_task(
-                        publish_worker_heartbeat,
-                        interval_seconds=job_ack_extension_interval(self.settings),
-                        worker_task=current_task,
-                        on_lease_lost=mark_control_lease_lost,
-                    )
                     if prior_usage:
                         resume_kwargs["prior_usage"] = prior_usage
                     if _should_load_user_profile(job):
@@ -1429,6 +1502,9 @@ class NATSDeepAgentsWorker:
                             self.settings,
                             publish_event=publish_event,
                             sequencer=run_sequencer,
+                            on_event_emission_ready=(
+                                start_run_heartbeat_after_event_emission_ready
+                            ),
                             **resume_kwargs,
                         )
                     finally:
@@ -1448,14 +1524,28 @@ class NATSDeepAgentsWorker:
                 except asyncio.CancelledError:
                     await settle_cancelled_delivery()
                     return
+                except CheckpointReconciliationPendingError:
+                    raise
                 except EventPublishError:
                     raise
                 except RunAuthorityUnavailableError:
                     raise
                 except Exception as exc:
-                    logger.exception(
-                        "Deep Agents job failed; terminal event should already be published."
-                    )
+                    notes_content_boundary = note_access_from_selection_context(
+                        job.selection_context
+                    ).enabled
+                    if notes_content_boundary:
+                        logger.error(
+                            "Notes-enabled Deep Agents job failed; private details redacted.",
+                            extra={
+                                "run_id": job.run_id,
+                                "error_type": exc.__class__.__name__,
+                            },
+                        )
+                    else:
+                        logger.exception(
+                            "Deep Agents job failed; terminal event should already be published."
+                        )
                     if not terminal_event_published:
                         await self._publish_failed_event(
                             js,
@@ -1490,6 +1580,19 @@ class NATSDeepAgentsWorker:
                     "Durable run authority unavailable; redelivering job without compute.",
                     extra={"run_id": job.run_id},
                     exc_info=True,
+                )
+                await _nak_message(
+                    message,
+                    delay_seconds=active_duplicate_redelivery_delay(self.settings),
+                )
+            except CheckpointReconciliationPendingError:
+                # The graph is already complete but its original terminal
+                # event has not yet become control-plane authority. Retain the
+                # completed checkpoint and give ingest/recovery time to
+                # converge; never replay the graph or invent a new terminal.
+                logger.info(
+                    "Completed checkpoint is awaiting terminal reconciliation; redelivering later.",
+                    extra={"run_id": job.run_id},
                 )
                 await _nak_message(
                     message,
@@ -1538,8 +1641,17 @@ class NATSDeepAgentsWorker:
                 if run_lock is not None:
                     run_lock.release()
                 if should_ack:
-                    await self._delete_checkpointer_thread(job.run_id)
-                    await _ack_message(message)
+                    # A terminal event does not make this delivery disappear
+                    # from JetStream. Confirm the ACK before destroying the
+                    # only resumable checkpoint; if confirmation fails, flush
+                    # and retain state for the inevitable redelivery.
+                    acknowledged = await _ack_message(message)
+                    if acknowledged:
+                        await self._delete_checkpointer_thread(job.run_id)
+                    else:
+                        await self._release_checkpointer_thread(job.run_id)
+                else:
+                    await self._release_checkpointer_thread(job.run_id)
                 # This worker is done with the run either way (terminal ack or
                 # NAK back to the queue), so drop its cancel bookkeeping. A
                 # redelivery that lost the in-memory fast path still skips via
@@ -1558,47 +1670,42 @@ class NATSDeepAgentsWorker:
             return None
         if self._checkpointer is not None:
             return self._checkpointer
-        from ultra_deepagents.checkpointing import (
-            DurableCheckpointer,
-            build_checkpoint_state_store,
-        )
-
-        try:
-            store = build_checkpoint_state_store(self.settings.control_database_url)
-        except Exception:
-            logger.warning(
-                "Could not build durable checkpoint store; runs will not resume.",
-                exc_info=True,
+        async with self._checkpointer_init_lock:
+            if self._checkpointer is not None:
+                return self._checkpointer
+            from ultra_deepagents.checkpointing import (
+                DurableCheckpointer,
+                build_checkpoint_state_store,
             )
-            return None
-        if store is None:
-            return None
-        self._checkpointer = DurableCheckpointer(store)
-        logger.info("Durable run checkpointing enabled.")
-        # Reap abandoned checkpoint rows (runs that crashed before terminal ack)
-        # on worker startup. Completed runs already delete their own row on ack;
-        # this backstops stragglers without a long-lived background loop.
-        retention = self.settings.checkpoint_retention_seconds
-        if retention > 0:
+
             try:
-                reaped = await self._checkpointer.gc(retention)
-                if reaped:
-                    logger.info(
-                        "Reaped abandoned durable checkpoint rows.",
-                        extra={"reaped": reaped},
-                    )
+                store = build_checkpoint_state_store(self.settings.control_database_url)
             except Exception:
-                logger.warning("Durable checkpoint GC at startup failed.", exc_info=True)
+                logger.warning(
+                    "Could not build durable checkpoint store; runs will not resume.",
+                    exc_info=True,
+                )
+                return None
+            if store is None:
+                return None
+            self._checkpointer = DurableCheckpointer(store)
+            logger.info("Durable run checkpointing enabled.")
         return self._checkpointer
 
     async def _delete_checkpointer_thread(self, run_id: str) -> None:
         """Drop a terminal run's in-memory slice AND its durable row.
 
-        A run that reached terminal ack (succeeded/failed/canceled) will never be
+        A run whose terminal delivery was acknowledged (succeeded/failed/canceled) will never be
         redelivered or resumed, so its durable checkpoint row must be deleted to
         keep the shared control-plane Postgres from accumulating completed-run
         state forever. Best-effort: a cleanup failure never blocks the ack."""
         checkpointer = self._checkpointer
+        if checkpointer is None:
+            # Initial-status terminal redelivery can arrive on a brand-new
+            # worker before compute ever initialized the checkpointer. The ACK
+            # is already confirmed at every caller; initialize the durable
+            # store now so the prior delivery's private row is still removed.
+            checkpointer = await self._ensure_checkpointer()
         if checkpointer is None:
             return
         try:
@@ -1612,6 +1719,42 @@ class NATSDeepAgentsWorker:
         except Exception:
             logger.warning(
                 "Checkpoint cleanup failed; continuing after terminal run.",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+
+    async def _release_checkpointer_thread(self, run_id: str) -> None:
+        """Flush a resumable delivery, then drop its private in-memory slice.
+
+        The durable row remains available to the next delivery. Clearing the
+        worker-local mirror keeps abandoned run context from living for the
+        lifetime of a long-running process.
+        """
+
+        checkpointer = self._checkpointer
+        if checkpointer is None:
+            return
+        try:
+            flush = getattr(checkpointer, "flush", None)
+            if flush is None:
+                logger.warning(
+                    "Checkpoint release cannot confirm durable persistence; retaining worker-local state.",
+                    extra={"run_id": run_id},
+                )
+                return
+            persisted = await flush(run_id)
+            if persisted is not True:
+                logger.warning(
+                    "Checkpoint flush was not confirmed; retaining worker-local state.",
+                    extra={"run_id": run_id},
+                )
+                return
+            clear_thread = getattr(checkpointer, "clear_thread", None)
+            if clear_thread is not None:
+                clear_thread(run_id)
+        except Exception:
+            logger.warning(
+                "Checkpoint release failed; retaining worker-local resume state.",
                 extra={"run_id": run_id},
                 exc_info=True,
             )
@@ -1945,6 +2088,19 @@ class NATSDeepAgentsWorker:
         *,
         sequence: int,
     ) -> None:
+        notes_content_boundary = note_access_from_selection_context(job.selection_context).enabled
+        error_message = (
+            "Notes-enabled run failed."
+            if notes_content_boundary
+            else str(exc) or exc.__class__.__name__
+        )
+        payload: dict[str, Any] = {
+            "error": error_message,
+            "error_type": exc.__class__.__name__,
+            "stage": "worker",
+        }
+        if notes_content_boundary:
+            payload["redacted"] = True
         await self._publish_event(
             js,
             {
@@ -1958,11 +2114,7 @@ class NATSDeepAgentsWorker:
                 "agent_role": "coordinator",
                 "level": "error",
                 "message": "Run failed.",
-                "payload": {
-                    "error": str(exc) or exc.__class__.__name__,
-                    "error_type": exc.__class__.__name__,
-                    "stage": "worker",
-                },
+                "payload": payload,
             },
         )
 
@@ -2356,11 +2508,26 @@ async def _stop_control_status_monitor_task(task: asyncio.Task | None) -> None:
         await task
 
 
-async def _ack_message(message: Any) -> None:
-    if not hasattr(message, "ack"):
-        return
-    with contextlib.suppress(Exception):
-        await message.ack()
+async def _ack_message(message: Any) -> bool:
+    """Acknowledge a JetStream delivery and report observable success.
+
+    Prefer ``ack_sync`` when the client exposes it so checkpoint deletion is
+    ordered after the server confirms the ACK. Test doubles and older clients
+    fall back to ``ack``. Failures stay content-free and return ``False`` so the
+    caller retains resumable state instead of silently discarding it.
+    """
+
+    acknowledge = getattr(message, "ack_sync", None)
+    if acknowledge is None:
+        acknowledge = getattr(message, "ack", None)
+    if acknowledge is None:
+        return False
+    try:
+        await acknowledge()
+    except Exception:
+        logger.warning("JetStream acknowledgement failed; retaining resumable delivery state.")
+        return False
+    return True
 
 
 async def _nak_message(message: Any, *, delay_seconds: float | None = None) -> None:

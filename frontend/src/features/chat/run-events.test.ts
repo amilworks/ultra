@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   appendRunEventCoalescing,
   appendUniqueRunEvent,
+  hasRedactedRunEvent,
   isEphemeralDeltaEvent,
   isEphemeralDeltaEventKind,
+  reasoningFieldsForPersistence,
+  reasoningTextAfterRunEvents,
   reasoningTextFromRunEvents,
   runEventIdentity,
   runHasToolActivity,
@@ -260,6 +263,162 @@ describe("appendRunEventCoalescing", () => {
 
     const next = { event_kind: "tool_call.completed", payload: { sequence: 6, run_id: "run_1" } };
     expect(appendRunEventCoalescing(events, next)).toHaveLength(2);
+  });
+
+  it("treats a redaction marker as a turn-wide privacy boundary", () => {
+    const legacyUnmarkedTool = {
+      event_type: "tool_call.started",
+      payload: {
+        sequence: 0,
+        run_id: "run_private",
+        tool_name: "execute",
+        tool_call_id: "call_private",
+        status: "running",
+        message: "legacy private tool detail",
+      },
+    };
+    const prior = {
+      event_type: "trace.reasoning.delta",
+      payload: { sequence: 1, run_id: "run_private", text: "already streamed private text" },
+    };
+    const marker = {
+      event_type: "trace.reasoning.delta",
+      payload: {
+        sequence: 2,
+        run_id: "run_private",
+        status: "running",
+        redacted: true,
+        text: "RAW_REDACTED_SENTINEL",
+        message: "RAW_REDACTED_SENTINEL",
+      },
+    };
+
+    const safe = appendRunEventCoalescing([legacyUnmarkedTool, prior], marker);
+
+    expect(hasRedactedRunEvent(safe)).toBe(true);
+    expect(reasoningTextAfterRunEvents(safe, "already captured private text")).toBeUndefined();
+    expect(JSON.stringify(safe)).not.toContain("already streamed private text");
+    expect(JSON.stringify(safe)).not.toContain("legacy private tool detail");
+    expect(JSON.stringify(safe)).not.toContain("RAW_REDACTED_SENTINEL");
+    expect(safe).toEqual([
+      {
+        event_type: "tool_call.started",
+        payload: {
+          redacted: true,
+          sequence: 0,
+          run_id: "run_private",
+          tool_name: "execute",
+          tool_call_id: "call_private",
+          status: "running",
+        },
+      },
+      {
+        event_type: "trace.reasoning.delta",
+        payload: {
+          redacted: true,
+          sequence: 2,
+          run_id: "run_private",
+          status: "running",
+        },
+      },
+    ]);
+  });
+
+  it("never writes redacted reasoning content into a conversation snapshot", () => {
+    const sentinel = "RAW_REASONING_MUST_NOT_REACH_THE_RECORD";
+    const rawEvents = [
+      {
+        event_type: "trace.reasoning.delta",
+        level: "debug",
+        ts: "2026-08-25T12:34:56Z",
+        message: sentinel,
+        text: sentinel,
+        query: sentinel,
+        payload: {
+          redacted: true,
+          text: sentinel,
+          sequence: 7,
+          run_id: "run_notes",
+          status: "completed",
+        },
+      },
+      {
+        event_type: "tool_call.completed",
+        message: sentinel,
+        output_preview: sentinel,
+        payload: {
+          redacted: true,
+          tool_name: "read_note",
+          tool_call_id: "call_read_note",
+          note_id: "note_1",
+          revision: 4,
+          ok: false,
+          error: "notes_tool_failed",
+          proposal_status: "pending",
+          output_preview: sentinel,
+          sequence: 8,
+          run_id: "run_notes",
+          status: "completed",
+        },
+      },
+    ];
+
+    // This mirrors the reasoning fields embedded by conversationToRecord.
+    const snapshotRecord = {
+      state: {
+        messages: [
+          reasoningFieldsForPersistence(rawEvents, "private text captured before marker"),
+        ],
+      },
+    };
+    const serialized = JSON.stringify(snapshotRecord);
+
+    expect(serialized).not.toContain(sentinel);
+    expect(serialized).not.toContain("private text captured before marker");
+    expect(snapshotRecord.state.messages[0].reasoning).toBeUndefined();
+    expect(snapshotRecord.state.messages[0].runEvents).toEqual([
+      {
+        event_type: "trace.reasoning.delta",
+        level: "debug",
+        ts: "2026-08-25T12:34:56Z",
+        payload: {
+          redacted: true,
+          sequence: 7,
+          run_id: "run_notes",
+          status: "completed",
+        },
+      },
+      {
+        event_type: "tool_call.completed",
+        payload: {
+          redacted: true,
+          tool_name: "read_note",
+          tool_call_id: "call_read_note",
+          note_id: "note_1",
+          revision: 4,
+          ok: false,
+          error: "notes_tool_failed",
+          proposal_status: "pending",
+          sequence: 8,
+          run_id: "run_notes",
+          status: "completed",
+        },
+      },
+    ]);
+  });
+
+  it("leaves ordinary unredacted event envelopes unchanged", () => {
+    const ordinary = {
+      event_type: "tool_call.completed",
+      message: "ordinary visible detail",
+      query: "ordinary query",
+      payload: { status: "completed", output_preview: "ordinary result" },
+    };
+
+    const events = appendRunEventCoalescing([], ordinary);
+
+    expect(events[0]).toBe(ordinary);
+    expect(events[0]).toEqual(ordinary);
   });
 });
 

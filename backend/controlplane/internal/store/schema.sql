@@ -115,6 +115,186 @@ CREATE TABLE IF NOT EXISTS control_runs (
   metadata jsonb NOT NULL DEFAULT '{}'
 );
 
+-- The Python runtime serializes one resumable LangGraph checkpoint per run.
+-- Keep the table in the Go-owned schema so a hard run/conversation delete also
+-- removes that temporary copy and a late worker cannot resurrect it. Older
+-- runtime releases created this table without a foreign key; remove their
+-- orphan rows before adding the cascade under the schema migration lock.
+CREATE TABLE IF NOT EXISTS deepagents_checkpoint_threads (
+  thread_id text PRIMARY KEY,
+  state bytea NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+DO $$
+DECLARE
+  checkpoint_index_oid oid;
+  checkpoint_index_matches boolean;
+BEGIN
+  -- CREATE INDEX IF NOT EXISTS still takes a ShareLock on the checkpoint table,
+  -- which conflicts with live worker upserts and is retained until the complete
+  -- consolidated schema transaction commits. Inspect the catalog first so the
+  -- steady-state apply executes no checkpoint-index DDL at all. A missing,
+  -- invalid, or mismatched legacy index is repaired under the deployment lock.
+  SELECT index_row.oid,
+         index_definition.indisvalid
+           AND index_definition.indisready
+           AND index_definition.indislive
+           AND NOT index_definition.indisunique
+           AND index_definition.indnkeyatts = 1
+           AND index_definition.indnatts = 1
+           AND index_definition.indpred IS NULL
+           AND index_definition.indexprs IS NULL
+           AND index_definition.indkey[0] = updated_at_column.attnum
+           AND index_definition.indoption[0] = 0
+           AND access_method.amname = 'btree'
+  INTO checkpoint_index_oid, checkpoint_index_matches
+  FROM pg_class table_row
+  JOIN pg_namespace table_namespace
+    ON table_namespace.oid = table_row.relnamespace
+  JOIN pg_class index_row
+    ON index_row.relnamespace = table_namespace.oid
+   AND index_row.relname = 'deepagents_checkpoint_threads_updated_at_idx'
+  JOIN pg_index index_definition
+    ON index_definition.indexrelid = index_row.oid
+   AND index_definition.indrelid = table_row.oid
+  JOIN pg_am access_method
+    ON access_method.oid = index_row.relam
+  JOIN pg_attribute updated_at_column
+    ON updated_at_column.attrelid = table_row.oid
+   AND updated_at_column.attname = 'updated_at'
+   AND NOT updated_at_column.attisdropped
+  WHERE table_row.oid = 'deepagents_checkpoint_threads'::regclass;
+
+  IF COALESCE(checkpoint_index_matches, false) THEN
+    RETURN;
+  END IF;
+
+  IF checkpoint_index_oid IS NOT NULL THEN
+    DROP INDEX deepagents_checkpoint_threads_updated_at_idx;
+  END IF;
+
+  CREATE INDEX IF NOT EXISTS deepagents_checkpoint_threads_updated_at_idx
+    ON deepagents_checkpoint_threads(updated_at);
+END $$;
+
+DO $$
+DECLARE
+  constraint_name text;
+  needs_reconciliation boolean;
+BEGIN
+  -- The consolidated schema is applied on every control-plane start. Inspect
+  -- the catalog before taking a write-conflicting table lock so the normal
+  -- steady-state apply cannot stall live worker checkpoint upserts. The
+  -- advisory migration lock serializes schema owners; workers do not alter
+  -- constraints, so only an actual legacy/mismatched FK needs reconciliation.
+  SELECT
+    EXISTS (
+      SELECT 1
+      FROM pg_constraint constraint_row
+      WHERE constraint_row.conrelid = 'deepagents_checkpoint_threads'::regclass
+        AND constraint_row.contype = 'f'
+        AND constraint_row.conkey = ARRAY[
+          (SELECT attnum FROM pg_attribute
+           WHERE attrelid = 'deepagents_checkpoint_threads'::regclass
+             AND attname = 'thread_id')
+        ]::smallint[]
+        AND NOT (
+          constraint_row.confrelid = 'control_runs'::regclass
+          AND constraint_row.confdeltype = 'c'
+          AND constraint_row.confkey = ARRAY[
+            (SELECT attnum FROM pg_attribute
+             WHERE attrelid = 'control_runs'::regclass
+               AND attname = 'run_id')
+          ]::smallint[]
+        )
+    )
+    OR NOT EXISTS (
+      SELECT 1
+      FROM pg_constraint constraint_row
+      WHERE constraint_row.conrelid = 'deepagents_checkpoint_threads'::regclass
+        AND constraint_row.contype = 'f'
+        AND constraint_row.confrelid = 'control_runs'::regclass
+        AND constraint_row.confdeltype = 'c'
+        AND constraint_row.conkey = ARRAY[
+          (SELECT attnum FROM pg_attribute
+           WHERE attrelid = 'deepagents_checkpoint_threads'::regclass
+             AND attname = 'thread_id')
+        ]::smallint[]
+        AND constraint_row.confkey = ARRAY[
+          (SELECT attnum FROM pg_attribute
+           WHERE attrelid = 'control_runs'::regclass
+             AND attname = 'run_id')
+        ]::smallint[]
+    )
+  INTO needs_reconciliation;
+
+  IF NOT needs_reconciliation THEN
+    RETURN;
+  END IF;
+
+  -- Fence concurrent Python upserts only for the one-time legacy repair, then
+  -- remove orphans before validating the run-owned cascade.
+  LOCK TABLE deepagents_checkpoint_threads IN SHARE ROW EXCLUSIVE MODE;
+
+  DELETE FROM deepagents_checkpoint_threads checkpoint
+  WHERE NOT EXISTS (
+    SELECT 1 FROM control_runs run WHERE run.run_id = checkpoint.thread_id
+  );
+
+  -- Normalize any legacy FK on thread_id whose target or delete action was not
+  -- the run-owned cascade. Leaving a NO ACTION FK beside the cascade could make
+  -- delete behavior depend on trigger order.
+  FOR constraint_name IN
+    SELECT constraint_row.conname
+    FROM pg_constraint constraint_row
+    WHERE constraint_row.conrelid = 'deepagents_checkpoint_threads'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.conkey = ARRAY[
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'deepagents_checkpoint_threads'::regclass
+           AND attname = 'thread_id')
+      ]::smallint[]
+      AND NOT (
+        constraint_row.confrelid = 'control_runs'::regclass
+        AND constraint_row.confdeltype = 'c'
+        AND constraint_row.confkey = ARRAY[
+          (SELECT attnum FROM pg_attribute
+           WHERE attrelid = 'control_runs'::regclass
+             AND attname = 'run_id')
+        ]::smallint[]
+      )
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE deepagents_checkpoint_threads DROP CONSTRAINT %I',
+      constraint_name
+    );
+  END LOOP;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint constraint_row
+    WHERE constraint_row.conrelid = 'deepagents_checkpoint_threads'::regclass
+      AND constraint_row.contype = 'f'
+      AND constraint_row.confrelid = 'control_runs'::regclass
+      AND constraint_row.confdeltype = 'c'
+      AND constraint_row.conkey = ARRAY[
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'deepagents_checkpoint_threads'::regclass
+           AND attname = 'thread_id')
+      ]::smallint[]
+      AND constraint_row.confkey = ARRAY[
+        (SELECT attnum FROM pg_attribute
+         WHERE attrelid = 'control_runs'::regclass
+           AND attname = 'run_id')
+      ]::smallint[]
+  ) THEN
+    ALTER TABLE deepagents_checkpoint_threads
+      ADD CONSTRAINT deepagents_checkpoint_threads_run_fk
+      FOREIGN KEY (thread_id) REFERENCES control_runs(run_id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
 -- Per-run event sequence allocator. Appends serialize on this row's lock and
 -- read the next sequence from it in one statement, instead of an advisory
 -- lock plus MAX() in a multi-statement transaction. last_sequence may run
@@ -200,6 +380,8 @@ CREATE TABLE IF NOT EXISTS control_notes (
   -- How the owner edits this note: 'markdown' (rich surface) or 'plaintext'
   -- (raw mono). Presentation preference only — the body is always markdown.
   editor_mode text NOT NULL DEFAULT 'markdown',
+  revision bigint NOT NULL DEFAULT 1,
+  content_digest text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL
 );
@@ -208,6 +390,94 @@ CREATE INDEX IF NOT EXISTS idx_control_notes_user_order
   ON control_notes(user_id, pinned DESC, updated_at DESC);
 
 ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS editor_mode text NOT NULL DEFAULT 'markdown';
+ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS revision bigint NOT NULL DEFAULT 1;
+ALTER TABLE control_notes ADD COLUMN IF NOT EXISTS content_digest text NOT NULL DEFAULT '';
+
+-- Short-lived opaque grants prove that a leased run read a particular note
+-- revision before it may propose an append. Only the SHA-256 token digest is
+-- durable; hard note deletion cascades through every derived record.
+CREATE TABLE IF NOT EXISTS control_note_read_grants (
+  token_hash text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  note_id text NOT NULL REFERENCES control_notes(note_id) ON DELETE CASCADE,
+  revision bigint NOT NULL,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_note_read_grants_user_expiry
+  ON control_note_read_grants(user_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_control_note_read_grants_expiry
+  ON control_note_read_grants(expires_at);
+
+CREATE TABLE IF NOT EXISTS control_note_run_usage (
+  run_id text PRIMARY KEY REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  search_calls integer NOT NULL DEFAULT 0,
+  read_calls integer NOT NULL DEFAULT 0,
+  read_bytes bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL
+);
+
+-- The model can prepare, but never apply, a note append. Exact proposed text
+-- lives only in this short-lived row and is erased when committed or expired.
+CREATE TABLE IF NOT EXISTS control_note_append_proposals (
+  proposal_id text PRIMARY KEY,
+  run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  note_id text NOT NULL REFERENCES control_notes(note_id) ON DELETE CASCADE,
+  base_revision bigint NOT NULL,
+  body_markdown text NOT NULL,
+  body_sha256 text NOT NULL,
+  idempotency_key text NOT NULL,
+  request_digest text NOT NULL,
+  committed_body_sha256 text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'pending',
+  operation_id text,
+  expires_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL,
+  CHECK (status IN ('pending', 'committed', 'expired'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_note_append_proposals_user_expiry
+  ON control_note_append_proposals(user_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_control_note_append_proposals_pending_expiry
+  ON control_note_append_proposals(expires_at)
+  WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_control_note_append_proposals_run_idempotency
+  ON control_note_append_proposals(run_id, idempotency_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_control_note_append_proposals_run_content
+  ON control_note_append_proposals(run_id, note_id, base_revision, body_sha256)
+  WHERE status IN ('pending', 'committed');
+
+-- Permanent, content-free receipts make commit retries idempotent and support
+-- conditional undo. The appended bytes themselves are represented only by a
+-- digest and byte range; deleting the note erases the receipt as well.
+CREATE TABLE IF NOT EXISTS control_note_append_operations (
+  operation_id text PRIMARY KEY,
+  -- A committed proposal is part of the operation's idempotency receipt and
+  -- cannot be removed independently. Note/run hard deletion still cascades to
+  -- both rows through their own foreign keys in the same statement.
+  proposal_id text NOT NULL UNIQUE REFERENCES control_note_append_proposals(proposal_id) ON DELETE NO ACTION,
+  run_id text NOT NULL REFERENCES control_runs(run_id) ON DELETE CASCADE,
+  user_id text NOT NULL,
+  note_id text NOT NULL REFERENCES control_notes(note_id) ON DELETE CASCADE,
+  before_revision bigint NOT NULL,
+  after_revision bigint NOT NULL,
+  undo_revision bigint,
+  append_start_byte integer NOT NULL,
+  appended_bytes integer NOT NULL,
+  append_sha256 text NOT NULL,
+  before_content_digest text NOT NULL,
+  after_content_digest text NOT NULL,
+  created_at timestamptz NOT NULL,
+  undone_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_note_append_operations_user_created
+  ON control_note_append_operations(user_id, created_at DESC);
 
 -- Mid-run steering (Phase 1). One row per accepted steering message. The
 -- message_id references the steer's control_thread_messages row AND doubles as

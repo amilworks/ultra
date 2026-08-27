@@ -76,6 +76,9 @@ func TestHealthAndPublicConfig(t *testing.T) {
 
 	router := NewRouter(ServerDeps{
 		Version: "test-version",
+		noteModelFeatures: noteModelFeatureConfig{
+			initialized: true, readEnabled: true, proposalEnabled: true, requireExpectedRevision: true,
+		},
 	})
 
 	healthReq := httptest.NewRequest(http.MethodGet, "/v1/health", nil)
@@ -112,6 +115,36 @@ func TestHealthAndPublicConfig(t *testing.T) {
 	}
 	if config["admin_enabled"] != false {
 		t.Fatalf("admin_enabled = %v, want false without explicit local admin deps", config["admin_enabled"])
+	}
+	features, ok := config["features"].(map[string]any)
+	if !ok {
+		t.Fatalf("features = %#v, want object", config["features"])
+	}
+	if features["model_notes_read"] != true || features["model_notes_proposals"] != true {
+		t.Fatalf("Notes public features = %#v, want read/proposals true", features)
+	}
+}
+
+func TestPublicConfigReportsEffectiveModelNotesProposalAvailability(t *testing.T) {
+	t.Parallel()
+	router := NewRouter(ServerDeps{
+		noteModelFeatures: noteModelFeatureConfig{
+			initialized: true, readEnabled: true, proposalEnabled: true, requireExpectedRevision: false,
+		},
+	})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v2/config/public", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var config struct {
+		Features map[string]bool `json:"features"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &config); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if !config.Features["model_notes_read"] || config.Features["model_notes_proposals"] {
+		t.Fatalf("effective Notes features = %#v", config.Features)
 	}
 }
 
@@ -16131,6 +16164,28 @@ func TestV2EpisodicSearchIsRunAnchoredAndUserScoped(t *testing.T) {
 	completeRun("user-a", "Prairie dog density 2024", "Compare 2024 prairie dog burrow density",
 		"The 2024 RareSpot run found a mean burrow density of 12.3 per hectare.")
 	completeRun("user-a", "Pendulum", "Run a damped pendulum study", "Only A=1.5 is chaotic.")
+	// This response remains in its source conversation, but a later ordinary
+	// run must not retrieve it through unscoped episodic memory.
+	noteSentinel := "note-derived-episodic-sentinel-45cf"
+	noteThread, err := service.CreateThread(ctx, runcontrol.CreateThreadRequest{UserID: "user-a", Title: "Private Note work"})
+	if err != nil {
+		t.Fatalf("CreateThread(Note source): %v", err)
+	}
+	noteRun, err := service.CreateRun(ctx, runcontrol.CreateRunRequest{
+		ThreadID: noteThread.ThreadID, UserID: "user-a", Goal: "Use my Note for " + noteSentinel,
+		Messages: []domain.ThreadMessage{{Role: "user", Content: "Use my Note"}},
+		SelectionContext: domain.JSONMap{domain.NoteAccessSelectionKey: domain.JSONMap{
+			"mode": "search", "notes": []any{},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun(Note source): %v", err)
+	}
+	if _, err := mem.CompleteRun(ctx, domain.CompleteRunInput{
+		RunID: noteRun.RunID, ResponseText: "Private answer containing " + noteSentinel,
+	}); err != nil {
+		t.Fatalf("CompleteRun(Note source): %v", err)
+	}
 	// User B's history mentions RareSpot too — must never leak to A.
 	completeRun("user-b", "Other lab RareSpot", "RareSpot detection for site Z",
 		"User B's confidential RareSpot density was 99.9 per hectare.")
@@ -16189,6 +16244,20 @@ func TestV2EpisodicSearchIsRunAnchoredAndUserScoped(t *testing.T) {
 			t.Fatalf("user B's confidential history leaked into user A's search: %+v", hit)
 		}
 	}
+	noteRec := search("trace-worker-secret", currentRun.RunID, `{"query":"note-derived-episodic-sentinel-45cf"}`)
+	if noteRec.Code != http.StatusOK {
+		t.Fatalf("Note-derived episodic status = %d body=%s", noteRec.Code, noteRec.Body.String())
+	}
+	if err := json.Unmarshal(noteRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode Note-derived episodic response: %v", err)
+	}
+	if len(resp.Hits) != 0 {
+		t.Fatalf("later ordinary run retrieved Note-derived response: %+v", resp.Hits)
+	}
+	if source, err := mem.GetRunForUser(ctx, noteRun.RunID, "user-a"); err != nil ||
+		!strings.Contains(source.ResponseText, noteSentinel) {
+		t.Fatalf("source Note conversation response was removed: %+v err=%v", source, err)
+	}
 
 	// A natural multi-word query matches even when terms are not contiguous and span
 	// goal + response + title ("prairie"/"2024" in goal/title, "hectare" only in response).
@@ -16201,7 +16270,8 @@ func TestV2EpisodicSearchIsRunAnchoredAndUserScoped(t *testing.T) {
 		t.Fatalf("multiword query should match A's 2024 run via all-terms-AND: %+v", resp.Hits)
 	}
 
-	// Empty query (recency-only) returns A's two completed runs, never B's, never the current run.
+	// Empty query returns A's two ordinary completed runs, never the Note-derived
+	// run, B's run, or the current run.
 	recAll := search("trace-worker-secret", currentRun.RunID, `{}`)
 	if recAll.Code != http.StatusOK {
 		t.Fatalf("recency episodic status = %d", recAll.Code)

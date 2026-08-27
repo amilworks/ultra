@@ -291,11 +291,19 @@ class ReasoningEventStreamer(AsyncCallbackHandler):
     never fail or stall a run.
     """
 
-    def __init__(self, *, context: Any, sequencer: Any, publish_event: Any) -> None:
+    def __init__(
+        self,
+        *,
+        context: Any,
+        sequencer: Any,
+        publish_event: Any,
+        redact_content: bool = False,
+    ) -> None:
         super().__init__()
         self._context = context
         self._sequencer = sequencer
         self._publish_event = publish_event
+        self._redact_content = bool(redact_content)
         self._eligible_runs: set[Any] = set()
         # Callback handlers are shared by every coordinator model call in an
         # attempt.  Keep buffers per callback run id so overlapping callbacks
@@ -378,9 +386,10 @@ class ReasoningEventStreamer(AsyncCallbackHandler):
                 self._last_activity_signal_monotonic = now
                 self._activity_version += 1
                 self._activity_event.set()
-            if not state.parts:
+            if state.chars == 0:
                 state.deadline = now + REASONING_FLUSH_MAX_SECONDS
-            state.parts.append(reasoning)
+            if not self._redact_content:
+                state.parts.append(reasoning)
             state.chars += len(reasoning)
             self._observed_chars += len(reasoning)
             state.round_open = True
@@ -414,14 +423,21 @@ class ReasoningEventStreamer(AsyncCallbackHandler):
         if state is None:
             return
         closing = status != "running" and state.round_open
-        if not state.parts and not closing:
+        if not state.parts and not (self._redact_content and state.chars) and not closing:
             return
-        text = "".join(state.parts)
+        text = "" if self._redact_content else "".join(state.parts)
+        reasoning_chars = state.chars
         state.parts = []
         state.chars = 0
         state.round_open = status == "running"
         stamped = self._sequencer.stamp(
-            normalize_reasoning_delta(self._context, text, status=status)
+            normalize_reasoning_delta(
+                self._context,
+                text,
+                status=status,
+                redacted=self._redact_content,
+                reasoning_chars=reasoning_chars,
+            )
         )
         allocated_sequence = stamped.get("sequence")
         try:

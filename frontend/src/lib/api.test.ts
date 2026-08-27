@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiClient, UploadPausedError } from "./api";
+import type { RunEvent } from "@/types";
 
 const scalarIdentityHeaders = (
   width: string,
@@ -952,7 +953,7 @@ describe("ApiClient V2 chat bridge", () => {
       ) {
         const body = [
           'event: run_event\ndata: {"run_id":"run_resume","event_kind":"message.delta","sequence":8,"payload":{"text":" more"}}\n\n',
-          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"run.completed","sequence":9,"payload":{"response_text":"done more"}}\n\n',
+          'event: run_event\ndata: {"run_id":"run_resume","event_kind":"run.completed","sequence":9,"payload":{"response_text":"done more","message":"ordinary completion detail"}}\n\n',
         ].join("");
         return new Response(encoder.encode(body), {
           status: 200,
@@ -993,10 +994,55 @@ describe("ApiClient V2 chat bridge", () => {
     // The message.delta at sequence 8 drives the token stream (above) but is gated out of
     // onRunEvent; only the structural run.completed at sequence 9 reaches onRunEvent.
     expect(eventSequences).toEqual([9]);
+    expect(
+      response.progress_events?.find((event) => event.event === "run.completed")?.message
+    ).toBe("ordinary completion detail");
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
       "https://ultra.example.org/v2/runs/run_resume/events?stream=true&after_sequence=7",
       "https://ultra.example.org/v2/runs/run_resume",
     ]);
+  });
+
+  it("clears legacy progress detail when a private-trace marker arrives", async () => {
+    const encoder = new TextEncoder();
+    const sentinel = "PRIVATE_PROGRESS_SENTINEL";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://ultra.example.org/v2/runs/run_private/events?stream=true&after_sequence=0") {
+        const body = [
+          `event: run_event\ndata: {"run_id":"run_private","event_kind":"tool_call.started","sequence":1,"payload":{"tool_name":"execute","tool_call_id":"call_1","message":"${sentinel}"}}\n\n`,
+          `event: run_event\ndata: {"run_id":"run_private","event_kind":"trace.reasoning.delta","sequence":2,"payload":{"redacted":true,"text":"${sentinel}","status":"running"}}\n\n`,
+          'event: run_event\ndata: {"run_id":"run_private","event_kind":"run.completed","sequence":3,"payload":{"response_text":"Safe final answer"}}\n\n',
+        ].join("");
+        return new Response(encoder.encode(body), {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      if (url === "https://ultra.example.org/v2/runs/run_private") {
+        return new Response(
+          JSON.stringify({
+            run_id: "run_private",
+            status: "succeeded",
+            response_text: "Safe final answer",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const events: RunEvent[] = [];
+    const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
+    const response = await client.resumeRunStream("run_private", {
+      onRunEvent: (event) => events.push(event),
+    });
+
+    expect(response.response_text).toBe("Safe final answer");
+    expect(response.progress_events).toEqual([]);
+    expect(JSON.stringify(events[1])).not.toContain(sentinel);
+    expect(events[1]?.payload).toMatchObject({ redacted: true, status: "running" });
   });
 
   it("gates message.delta out of onRunEvent while streaming every token", async () => {

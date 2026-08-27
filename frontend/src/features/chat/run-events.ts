@@ -43,7 +43,179 @@ type RunEventLike = {
   event_kind?: unknown;
   level?: unknown;
   sequence?: unknown;
+  ts?: unknown;
   payload?: unknown;
+  redacted?: unknown;
+};
+
+const isRedactedFlag = (value: unknown): boolean =>
+  value === true || (typeof value === "string" && value.trim().toLowerCase() === "true");
+
+/**
+ * A runtime redaction marker is a privacy boundary for the whole assistant turn.
+ * Treat a top-level flag defensively too: older event envelopes did not always
+ * normalize metadata into `payload` before reaching the client reducer.
+ */
+export const isRedactedRunEvent = (event: RunEventLike): boolean =>
+  isRedactedFlag(toRecord(event.payload)?.redacted) || isRedactedFlag(event.redacted);
+
+// Redacted tool events still need a very small amount of structural metadata to
+// render calm activity labels and reconstruct the browser-authorized Notes
+// receipt UI. Everything capable of carrying user/model prose is intentionally
+// absent (message, text, input, output, previews, command, query, title, body…).
+const REDACTED_SAFE_PAYLOAD_KEYS = new Set([
+  "redacted",
+  "ok",
+  "error",
+  "status",
+  "proposal_status",
+  "sequence",
+  "event_kind",
+  "event_type",
+  "event_id",
+  "run_id",
+  "thread_id",
+  "node_name",
+  "task_id",
+  "checkpoint_id",
+  "scope_id",
+  "agent_role",
+  "tool_name",
+  "tool",
+  "tool_call_id",
+  "call_id",
+  // Content-free Notes provenance locked by the browser/runtime contract.
+  "note_id",
+  "revision",
+  "returned_bytes",
+  "has_more",
+  "result_count",
+  "proposal_id",
+  "expected_revision",
+  "expires_at",
+]);
+
+const SAFE_CODE_PAYLOAD_KEYS = new Set([
+  "error",
+  "status",
+  "proposal_status",
+  "event_kind",
+  "event_type",
+  "node_name",
+  "agent_role",
+  "tool_name",
+  "tool",
+]);
+const SAFE_IDENTIFIER_PAYLOAD_KEYS = new Set([
+  "event_id",
+  "run_id",
+  "thread_id",
+  "task_id",
+  "checkpoint_id",
+  "scope_id",
+  "tool_call_id",
+  "call_id",
+  "note_id",
+  "proposal_id",
+]);
+const SAFE_BOOLEAN_PAYLOAD_KEYS = new Set(["redacted", "ok", "has_more"]);
+const SAFE_INTEGER_PAYLOAD_KEYS = new Set([
+  "sequence",
+  "revision",
+  "returned_bytes",
+  "result_count",
+  "expected_revision",
+]);
+
+const safeRedactedPayloadValue = (key: string, value: unknown): unknown => {
+  if (SAFE_BOOLEAN_PAYLOAD_KEYS.has(key)) {
+    return typeof value === "boolean" ? value : undefined;
+  }
+  if (SAFE_INTEGER_PAYLOAD_KEYS.has(key)) {
+    return Number.isSafeInteger(value) && Number(value) >= 0 ? value : undefined;
+  }
+  if (SAFE_CODE_PAYLOAD_KEYS.has(key)) {
+    const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+    return /^[a-z][a-z0-9_.-]{0,127}$/.test(normalized) ? normalized : undefined;
+  }
+  if (SAFE_IDENTIFIER_PAYLOAD_KEYS.has(key)) {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$/.test(normalized)
+      ? normalized
+      : undefined;
+  }
+  if (key === "expires_at") {
+    const normalized = typeof value === "string" ? value.trim() : "";
+    return normalized.length <= 80 && /^[0-9T:.+Z-]+$/.test(normalized)
+      ? normalized
+      : undefined;
+  }
+  return undefined;
+};
+
+const safeRedactedEnvelopeCode = (value: unknown): string | undefined => {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z][a-z0-9_.-]{0,127}$/.test(normalized) ? normalized : undefined;
+};
+
+const safeRedactedTimestamp = (value: unknown): string | undefined => {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized.length <= 80 && /^[0-9T:.+Z-]+$/.test(normalized)
+    ? normalized
+    : undefined;
+};
+
+const sanitizeRedactedRunEvent = <T extends RunEventLike>(
+  event: T,
+  forceRedacted = false
+): T => {
+  if (!forceRedacted && !isRedactedRunEvent(event)) {
+    return event;
+  }
+  const payload = toRecord(event.payload) ?? {};
+  const safePayload: Record<string, unknown> = { redacted: true };
+  for (const [key, value] of Object.entries(payload)) {
+    if (REDACTED_SAFE_PAYLOAD_KEYS.has(key)) {
+      const safeValue = safeRedactedPayloadValue(key, value);
+      if (safeValue !== undefined) {
+        safePayload[key] = safeValue;
+      }
+    }
+  }
+  // The privacy decision is authoritative even if a malformed event tried to
+  // overwrite it with `redacted: false` while carrying a top-level marker.
+  safePayload.redacted = true;
+
+  // Rebuild the envelope instead of spreading `event`: legacy/hydrated event
+  // records sometimes carried prose-bearing fields such as `message`, `text`,
+  // or `query` at the top level rather than inside payload. A redaction marker
+  // is authoritative across both locations, so only the structural fields the
+  // timeline/deduper need may survive.
+  const safeEvent: RunEventLike = { payload: safePayload };
+  const eventType = safeRedactedEnvelopeCode(event.event_type);
+  const eventKind = safeRedactedEnvelopeCode(event.event_kind);
+  const level = safeRedactedEnvelopeCode(event.level);
+  const sequence = safeRedactedPayloadValue("sequence", event.sequence);
+  const ts = safeRedactedTimestamp(event.ts);
+  if (eventType !== undefined) {
+    safeEvent.event_type = eventType;
+  }
+  if (eventKind !== undefined) {
+    safeEvent.event_kind = eventKind;
+  }
+  if (level !== undefined) {
+    safeEvent.level = level;
+  }
+  if (sequence !== undefined) {
+    safeEvent.sequence = sequence;
+  }
+  if (ts !== undefined) {
+    safeEvent.ts = ts;
+  }
+  if (isRedactedFlag(event.redacted)) {
+    safeEvent.redacted = true;
+  }
+  return safeEvent as T;
 };
 
 const finiteSequence = (value: unknown): number => {
@@ -100,6 +272,72 @@ export const appendUniqueRunEvent = <T extends RunEventLike>(
 
 const REASONING_DELTA_KIND = "trace.reasoning.delta";
 
+export const isReasoningRunEvent = (event: RunEventLike): boolean =>
+  eventKindOf(event) === REASONING_DELTA_KIND;
+
+/** True once the runtime has declared any trace payload in this turn private. */
+export const hasRedactedRunEvent = (events: readonly RunEventLike[]): boolean =>
+  events.some(isRedactedRunEvent);
+
+// Once a turn crosses the private-content boundary, only answer/usage and
+// user-authored steering lifecycle events remain verbatim. Every internal
+// trace/tool/subagent/phase event is force-scrubbed even if a malformed or
+// out-of-order legacy producer forgot its own marker.
+const isTurnPrivateInternalEvent = (event: RunEventLike): boolean => {
+  const kind = eventKindOf(event);
+  return !(
+    kind === "run.completed" ||
+    kind === "run.token_usage" ||
+    kind === "message.delta" ||
+    kind.startsWith("steer.")
+  );
+};
+
+/**
+ * Make a run-event collection safe for browser state.
+ *
+ * A marker can arrive after ordinary reasoning fragments already streamed. At
+ * that moment those earlier fragments must disappear too, rather than remain in
+ * `message.runEvents` until the next reload. We retain one content-free
+ * reasoning marker (at the original step position) so the UI can still say
+ * “Thinking”, and scrub every individually-redacted tool/phase event through a
+ * strict metadata allowlist.
+ */
+export const sanitizeRunEventsForClient = <T extends RunEventLike>(events: T[]): T[] => {
+  if (!hasRedactedRunEvent(events)) {
+    return events;
+  }
+
+  const firstReasoningIndex = events.findIndex(isReasoningRunEvent);
+  let newestReasoning: T | null = null;
+  let newestReasoningSequence = -1;
+  for (const event of events) {
+    if (!isReasoningRunEvent(event)) {
+      continue;
+    }
+    const sequence = finiteSequence(toRecord(event.payload)?.sequence ?? event.sequence);
+    if (newestReasoning === null || sequence === 0 || sequence >= newestReasoningSequence) {
+      newestReasoning = event;
+      newestReasoningSequence = sequence;
+    }
+  }
+
+  const safeReasoningMarker = newestReasoning
+    ? sanitizeRedactedRunEvent(newestReasoning, true)
+    : null;
+  const safe: T[] = [];
+  events.forEach((event, index) => {
+    if (isReasoningRunEvent(event)) {
+      if (index === firstReasoningIndex && safeReasoningMarker) {
+        safe.push(safeReasoningMarker);
+      }
+      return;
+    }
+    safe.push(sanitizeRedactedRunEvent(event, isTurnPrivateInternalEvent(event)));
+  });
+  return safe;
+};
+
 // The reasoning text carried by a `trace.reasoning.delta` payload.
 const reasoningDeltaText = (event: RunEventLike): string => {
   const text = toRecord(event.payload)?.text;
@@ -146,14 +384,33 @@ export const appendRunEventCoalescing = <T extends RunEventLike>(
   events: T[],
   nextEvent: T
 ): T[] => {
-  if (eventKindOf(nextEvent) === REASONING_DELTA_KIND) {
-    const nextRunID = reasoningRunID(nextEvent);
-    const nextSequence = finiteSequence(
-      toRecord(nextEvent.payload)?.sequence ?? nextEvent.sequence
+  const safeEvents = sanitizeRunEventsForClient(events);
+  const safeNextEvent = sanitizeRedactedRunEvent(nextEvent);
+  const privacyActive = hasRedactedRunEvent(safeEvents) || isRedactedRunEvent(safeNextEvent);
+
+  // Once privacy is active, no later/replayed fragment may re-introduce text.
+  // Redacted events are normally unique by id/sequence; replacing an identity
+  // defensively handles a replay whose privacy marker was added by the server.
+  if (privacyActive) {
+    const nextIdentity = runEventIdentity(safeNextEvent);
+    const duplicateIndex = safeEvents.findIndex(
+      (event) => runEventIdentity(event) === nextIdentity
     );
-    const nextIdentity = runEventIdentity(nextEvent);
-    for (let i = events.length - 1; i >= 0; i--) {
-      const previous = events[i];
+    const combined =
+      duplicateIndex >= 0 && isRedactedRunEvent(safeNextEvent)
+        ? safeEvents.map((event, index) => (index === duplicateIndex ? safeNextEvent : event))
+        : appendUniqueRunEvent(safeEvents, safeNextEvent);
+    return sanitizeRunEventsForClient(combined);
+  }
+
+  if (eventKindOf(safeNextEvent) === REASONING_DELTA_KIND) {
+    const nextRunID = reasoningRunID(safeNextEvent);
+    const nextSequence = finiteSequence(
+      toRecord(safeNextEvent.payload)?.sequence ?? safeNextEvent.sequence
+    );
+    const nextIdentity = runEventIdentity(safeNextEvent);
+    for (let i = safeEvents.length - 1; i >= 0; i--) {
+      const previous = safeEvents[i];
       if (eventKindOf(previous) === REASONING_DELTA_KIND) {
         const previousRunID = reasoningRunID(previous);
         if (previousRunID && nextRunID && previousRunID !== nextRunID) {
@@ -171,19 +428,19 @@ export const appendRunEventCoalescing = <T extends RunEventLike>(
           runEventIdentity(previous) === nextIdentity ||
           (nextSequence === 0 &&
             previousSequence === 0 &&
-            reasoningDeltaText(nextEvent).length > 0 &&
-            reasoningDeltaText(previous).endsWith(reasoningDeltaText(nextEvent)))
+            reasoningDeltaText(safeNextEvent).length > 0 &&
+            reasoningDeltaText(previous).endsWith(reasoningDeltaText(safeNextEvent)))
         ) {
-          return events;
+          return safeEvents;
         }
-        const next = events.slice();
-        next[i] = mergeReasoningDelta(previous, nextEvent);
+        const next = safeEvents.slice();
+        next[i] = mergeReasoningDelta(previous, safeNextEvent);
         return next;
       }
     }
-    return appendUniqueRunEvent(events, nextEvent);
+    return appendUniqueRunEvent(safeEvents, safeNextEvent);
   }
-  return appendUniqueRunEvent(events, nextEvent);
+  return appendUniqueRunEvent(safeEvents, safeNextEvent);
 };
 
 // The full accumulated reasoning text across a message's run events — the durable trace of the
@@ -193,6 +450,9 @@ export const appendRunEventCoalescing = <T extends RunEventLike>(
 export const reasoningTextFromRunEvents = (
   events: Array<{ event_type?: unknown; event_kind?: unknown; payload?: unknown }>
 ): string => {
+  if (hasRedactedRunEvent(events)) {
+    return "";
+  }
   let text = "";
   let previousStatus = "";
   for (const event of events) {
@@ -206,6 +466,43 @@ export const reasoningTextFromRunEvents = (
     }
   }
   return text.trim();
+};
+
+/**
+ * Sticky live reasoning unless a privacy marker has appeared. The explicit
+ * `undefined` on redaction is what clears an already-populated
+ * `message.reasoning` field in React state.
+ */
+export const reasoningTextAfterRunEvents = (
+  events: Array<{ event_type?: unknown; event_kind?: unknown; payload?: unknown }>,
+  previous?: string
+): string | undefined => {
+  if (hasRedactedRunEvent(events)) {
+    return undefined;
+  }
+  return reasoningTextFromRunEvents(events) || previous || undefined;
+};
+
+/**
+ * The exact reasoning fields written into a conversation snapshot. Normal
+ * deltas remain omitted (their accumulated text is stored once); a safe generic
+ * redaction marker is retained so hydration cannot accidentally revive a stale
+ * reasoning string.
+ */
+export const reasoningFieldsForPersistence = <T extends RunEventLike>(
+  events: T[],
+  accumulatedReasoning?: string
+): { runEvents: T[]; reasoning?: string } => {
+  const safeEvents = sanitizeRunEventsForClient(events);
+  const redacted = hasRedactedRunEvent(safeEvents);
+  return {
+    runEvents: safeEvents.filter(
+      (event) => !isReasoningRunEvent(event) || isRedactedRunEvent(event)
+    ),
+    reasoning: redacted
+      ? undefined
+      : (accumulatedReasoning ?? reasoningTextFromRunEvents(safeEvents)) || undefined,
+  };
 };
 
 // Whether a run is a multi-step agentic run (it ran a tool / executed code) vs. a plain text reply.

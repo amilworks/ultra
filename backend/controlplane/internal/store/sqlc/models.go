@@ -159,15 +159,72 @@ type ControlDatasetSnapshotShareGrant struct {
 }
 
 type ControlNote struct {
-	NoteID       string             `json:"note_id"`
-	UserID       string             `json:"user_id"`
-	OrgID        pgtype.Text        `json:"org_id"`
-	Title        string             `json:"title"`
-	BodyMarkdown string             `json:"body_markdown"`
-	Pinned       bool               `json:"pinned"`
-	EditorMode   string             `json:"editor_mode"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	NoteID        string             `json:"note_id"`
+	UserID        string             `json:"user_id"`
+	OrgID         pgtype.Text        `json:"org_id"`
+	Title         string             `json:"title"`
+	BodyMarkdown  string             `json:"body_markdown"`
+	Pinned        bool               `json:"pinned"`
+	EditorMode    string             `json:"editor_mode"`
+	Revision      int64              `json:"revision"`
+	ContentDigest string             `json:"content_digest"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlNoteAppendOperation struct {
+	OperationID         string             `json:"operation_id"`
+	ProposalID          string             `json:"proposal_id"`
+	RunID               string             `json:"run_id"`
+	UserID              string             `json:"user_id"`
+	NoteID              string             `json:"note_id"`
+	BeforeRevision      int64              `json:"before_revision"`
+	AfterRevision       int64              `json:"after_revision"`
+	UndoRevision        pgtype.Int8        `json:"undo_revision"`
+	AppendStartByte     int32              `json:"append_start_byte"`
+	AppendedBytes       int32              `json:"appended_bytes"`
+	AppendSha256        string             `json:"append_sha256"`
+	BeforeContentDigest string             `json:"before_content_digest"`
+	AfterContentDigest  string             `json:"after_content_digest"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UndoneAt            pgtype.Timestamptz `json:"undone_at"`
+}
+
+type ControlNoteAppendProposal struct {
+	ProposalID          string             `json:"proposal_id"`
+	RunID               string             `json:"run_id"`
+	UserID              string             `json:"user_id"`
+	NoteID              string             `json:"note_id"`
+	BaseRevision        int64              `json:"base_revision"`
+	BodyMarkdown        string             `json:"body_markdown"`
+	BodySha256          string             `json:"body_sha256"`
+	IdempotencyKey      string             `json:"idempotency_key"`
+	RequestDigest       string             `json:"request_digest"`
+	CommittedBodySha256 string             `json:"committed_body_sha256"`
+	Status              string             `json:"status"`
+	OperationID         pgtype.Text        `json:"operation_id"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ControlNoteReadGrant struct {
+	TokenHash string             `json:"token_hash"`
+	RunID     string             `json:"run_id"`
+	UserID    string             `json:"user_id"`
+	NoteID    string             `json:"note_id"`
+	Revision  int64              `json:"revision"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+type ControlNoteRunUsage struct {
+	RunID       string             `json:"run_id"`
+	UserID      string             `json:"user_id"`
+	SearchCalls int32              `json:"search_calls"`
+	ReadCalls   int32              `json:"read_calls"`
+	ReadBytes   int64              `json:"read_bytes"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }
 
 type ControlOrganization struct {
@@ -768,4 +825,10 @@ type ControlWorkerHeartbeat struct {
 	LastHeartbeatAt pgtype.Timestamptz `json:"last_heartbeat_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 	Metadata        []byte             `json:"metadata"`
+}
+
+type DeepagentsCheckpointThread struct {
+	ThreadID  string             `json:"thread_id"`
+	State     []byte             `json:"state"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
 }

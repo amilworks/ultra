@@ -277,7 +277,12 @@ paths:
           in: header
           required: false
           schema: { type: string }
-          description: Reuses the existing run for the same thread, user, and key instead of dispatching duplicate work.
+          description: >-
+            Reuses the existing run for the same thread, user, and key instead
+            of dispatching duplicate work. For a Notes run, a raw retry that
+            omitted Note revisions is reconciled against the stored canonical
+            scope without rereading mutable Note state; explicit revisions,
+            mode, note ids, and proposal authority must still match.
       requestBody:
         required: true
         content:
@@ -294,6 +299,24 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        "400":
+          description: Invalid run request, including Notes access combined with unsupported selected context
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "409":
+          description: Idempotency key was already used with a different immutable run capability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
+        "503":
+          description: Model Notes access is disabled for a new Notes-enabled run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2APIErrorResponse"
   /v2/uploads:
     post:
       operationId: uploadFiles
@@ -3494,7 +3517,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/V2NoteWriteRequest"
+              $ref: "#/components/schemas/V2NoteUpdateRequest"
       responses:
         "200":
           description: Updated note
@@ -3507,6 +3530,120 @@ paths:
       responses:
         "200":
           description: Note hard-deleted
+  /v2/runs/{run_id}/note-search:
+    parameters:
+      - in: path
+        name: run_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: searchRunNotes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ModelNoteSearchRequest"
+      responses:
+        "200":
+          description: Bounded owner-scoped Note matches for the leased run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ModelNoteSearchResponse"
+  /v2/runs/{run_id}/note-read:
+    parameters:
+      - in: path
+        name: run_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: readRunNote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ModelNoteReadRequest"
+      responses:
+        "200":
+          description: Revision-bound chunk of a Note allowed by the leased run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ModelNoteReadResponse"
+  /v2/runs/{run_id}/note-append-proposals:
+    parameters:
+      - in: path
+        name: run_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: createRunNoteAppendProposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2ModelNoteAppendProposalRequest"
+      responses:
+        "201":
+          description: Metadata-only append proposal; exact text is not echoed to the worker
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2ModelNoteAppendProposalResponse"
+  /v2/note-append-proposals/{proposal_id}:
+    parameters:
+      - in: path
+        name: proposal_id
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getNoteAppendProposal
+      responses:
+        "200":
+          description: Owner-scoped proposal review state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteAppendProposal"
+  /v2/note-append-proposals/{proposal_id}/commit:
+    parameters:
+      - in: path
+        name: proposal_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: commitNoteAppendProposal
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2NoteAppendCommitRequest"
+      responses:
+        "200":
+          description: Idempotent atomic append receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteAppendOperation"
+  /v2/note-append-operations/{operation_id}/undo:
+    parameters:
+      - in: path
+        name: operation_id
+        required: true
+        schema: { type: string }
+    post:
+      operationId: undoNoteAppendOperation
+      responses:
+        "200":
+          description: Idempotent conditional undo receipt
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NoteAppendOperation"
   /v2/resources:
     get:
       operationId: listResources
@@ -5276,6 +5413,14 @@ components:
         features:
           type: object
           additionalProperties: { type: boolean }
+          properties:
+            v2_runs: { type: boolean }
+            model_notes_read:
+              type: boolean
+              description: Whether new runs may request bounded model Notes search/read access.
+            model_notes_proposals:
+              type: boolean
+              description: Whether Notes runs may request browser-reviewed append proposals.
     AuthSessionResponse:
       type: object
       required: [authenticated]
@@ -5934,7 +6079,7 @@ components:
         run_id: { type: string, nullable: true }
     V2NoteRecord:
       type: object
-      required: [note_id, title, body_markdown, pinned, editor_mode, created_at, updated_at]
+      required: [note_id, title, body_markdown, pinned, editor_mode, revision, content_digest, created_at, updated_at]
       properties:
         note_id: { type: string }
         user_id: { type: string, nullable: true }
@@ -5943,16 +6088,19 @@ components:
         body_markdown: { type: string }
         pinned: { type: boolean }
         editor_mode: { type: string, enum: [markdown, plaintext] }
+        revision: { type: integer, format: int64, minimum: 1 }
+        content_digest: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
     V2NoteListItem:
       type: object
-      required: [note_id, title, snippet, pinned, updated_at]
+      required: [note_id, title, snippet, pinned, revision, updated_at]
       properties:
         note_id: { type: string }
         title: { type: string }
         snippet: { type: string }
         pinned: { type: boolean }
+        revision: { type: integer, format: int64, minimum: 1 }
         updated_at: { type: string, format: date-time }
     V2NoteListResponse:
       type: object
@@ -5970,6 +6118,154 @@ components:
         body_markdown: { type: string, nullable: true }
         pinned: { type: boolean, nullable: true }
         editor_mode: { type: string, enum: [markdown, plaintext], nullable: true }
+    V2NoteUpdateRequest:
+      allOf:
+        - $ref: "#/components/schemas/V2NoteWriteRequest"
+        - type: object
+          required: [expected_revision]
+          properties:
+            expected_revision: { type: integer, format: int64, minimum: 1 }
+    V2NoteReference:
+      type: object
+      required: [note_id]
+      properties:
+        note_id: { type: string }
+        revision: { type: integer, format: int64, minimum: 1, nullable: true }
+    V2NoteAccess:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [selected, search] }
+        notes:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/V2NoteReference"
+        allow_append_proposal:
+          type: boolean
+          default: false
+          description: >-
+            Allows the model to submit an append proposal for this run when
+            the server proposal feature is also available. It never authorizes
+            a Note write; an authenticated user must review and commit the
+            proposal in the browser.
+    V2SelectionContext:
+      type: object
+      additionalProperties: true
+      properties:
+        note_access:
+          $ref: "#/components/schemas/V2NoteAccess"
+    V2ModelNoteSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 512 }
+        limit: { type: integer, minimum: 1, maximum: 20, default: 10 }
+    V2ModelNoteSearchHit:
+      type: object
+      required: [note_id, title, snippet, pinned, revision, updated_at]
+      properties:
+        note_id: { type: string }
+        title: { type: string }
+        snippet: { type: string }
+        pinned: { type: boolean }
+        revision: { type: integer, format: int64, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+    V2ModelNoteSearchResponse:
+      type: object
+      required: [notes, has_more]
+      properties:
+        notes:
+          type: array
+          items:
+            $ref: "#/components/schemas/V2ModelNoteSearchHit"
+        has_more: { type: boolean }
+    V2ModelNoteReadRequest:
+      type: object
+      required: [note_id]
+      properties:
+        note_id: { type: string }
+        cursor: { type: string, nullable: true }
+        max_chars: { type: integer, minimum: 1, maximum: 16000, default: 8000 }
+    V2ModelNoteReadResponse:
+      type: object
+      required: [note_id, title, revision, content_digest, body_markdown, start_byte, end_byte, next_cursor, has_more, read_token]
+      properties:
+        note_id: { type: string }
+        title: { type: string }
+        revision: { type: integer, format: int64, minimum: 1 }
+        content_digest: { type: string }
+        body_markdown: { type: string }
+        start_byte: { type: integer, minimum: 0 }
+        end_byte: { type: integer, minimum: 0 }
+        next_cursor: { type: string }
+        has_more: { type: boolean }
+        read_token: { type: string }
+    V2ModelNoteAppendProposalRequest:
+      type: object
+      required: [note_id, expected_revision, body_markdown, read_token, idempotency_key]
+      properties:
+        note_id: { type: string }
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+        body_markdown:
+          type: string
+          minLength: 1
+          description: Exact proposed append text, bounded to 32 KiB of UTF-8 by the server.
+        read_token: { type: string }
+        idempotency_key: { type: string, minLength: 1, maxLength: 256 }
+    V2NoteAppendProposal:
+      type: object
+      required: [proposal_id, note_id, note_title, expected_revision, status, expires_at, created_at]
+      properties:
+        proposal_id: { type: string }
+        note_id: { type: string }
+        note_title: { type: string }
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+        body_markdown: { type: string, nullable: true }
+        status: { type: string, enum: [pending, committed, expired] }
+        operation_id: { type: string, nullable: true }
+        operation:
+          nullable: true
+          $ref: "#/components/schemas/V2NoteAppendOperation"
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    V2ModelNoteAppendProposalResponse:
+      type: object
+      description: Content-redacted proposal metadata returned to the leased worker.
+      required: [proposal_id, note_id, note_title, expected_revision, status, expires_at, created_at]
+      properties:
+        proposal_id: { type: string }
+        note_id: { type: string }
+        note_title: { type: string }
+        expected_revision: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [pending, committed, expired] }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    V2NoteAppendCommitRequest:
+      type: object
+      properties:
+        body_markdown:
+          type: string
+          minLength: 1
+          nullable: true
+          description: Optional reviewed replacement text, bounded to 32 KiB of UTF-8 by the server.
+    V2NoteAppendOperation:
+      type: object
+      required: [operation_id, proposal_id, note_id, note_title, before_revision, after_revision, appended_bytes, before_content_digest, after_content_digest, created_at]
+      properties:
+        operation_id: { type: string }
+        proposal_id: { type: string }
+        run_id: { type: string, nullable: true }
+        note_id: { type: string }
+        note_title: { type: string }
+        before_revision: { type: integer, format: int64, minimum: 1 }
+        after_revision: { type: integer, format: int64, minimum: 1 }
+        undo_revision: { type: integer, format: int64, minimum: 1, nullable: true }
+        appended_bytes: { type: integer, minimum: 1 }
+        before_content_digest: { type: string }
+        after_content_digest: { type: string }
+        created_at: { type: string, format: date-time }
+        undone_at: { type: string, format: date-time, nullable: true }
     V2ThreadRecord:
       type: object
       required: [thread_id, status, created_at, updated_at, metadata]
@@ -6080,7 +6376,12 @@ components:
           $ref: "#/components/schemas/JsonObject"
         selection_context:
           nullable: true
-          $ref: "#/components/schemas/JsonObject"
+          $ref: "#/components/schemas/V2SelectionContext"
+          description: >-
+            Typed per-run context capability. note_access cannot currently be
+            combined with file_ids, resource_uris, dataset_uris,
+            knowledge_context, workflow_hint, or selected_tool_names; ordinary
+            user message text remains supported.
         workflow_hint:
           nullable: true
           $ref: "#/components/schemas/JsonObject"

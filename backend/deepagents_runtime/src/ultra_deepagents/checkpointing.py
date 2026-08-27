@@ -28,6 +28,7 @@ import logging
 import pickle
 import time
 import zlib
+from enum import Enum
 from typing import Any, Protocol
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -44,6 +45,19 @@ _COMPRESSION_ZSTD = "zstd"
 _COMPRESSION_ZLIB = "zlib"
 
 _CHECKPOINT_TABLE = "deepagents_checkpoint_threads"
+_CHECKPOINT_UPDATED_AT_INDEX = f"{_CHECKPOINT_TABLE}_updated_at_idx"
+
+
+class CheckpointRunState(str, Enum):
+    """Authoritative durable state for one run before graph invocation."""
+
+    ABSENT = "absent"
+    PENDING = "pending"
+    COMPLETED = "completed"
+
+
+class CheckpointStateUnavailableError(RuntimeError):
+    """Durable checkpoint state could not be classified safely."""
 
 
 class CheckpointStateStore(Protocol):
@@ -120,18 +134,70 @@ class PostgresCheckpointStateStore:
             await conn.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {_CHECKPOINT_TABLE} (
-                    thread_id text PRIMARY KEY,
+                    thread_id text PRIMARY KEY
+                      REFERENCES control_runs(run_id) ON DELETE CASCADE,
                     state bytea NOT NULL,
                     updated_at timestamptz NOT NULL DEFAULT now()
                 )
                 """
             )
-            await conn.execute(
+            # CREATE INDEX IF NOT EXISTS still takes relation locks. Issuing it
+            # every time a fresh worker process starts can therefore block live
+            # checkpoint upserts even though the index already exists. Inspect
+            # the catalog first and reserve DDL for genuine first-time setup.
+            cursor = await conn.execute(
                 f"""
-                CREATE INDEX IF NOT EXISTS {_CHECKPOINT_TABLE}_updated_at_idx
-                ON {_CHECKPOINT_TABLE} (updated_at)
+                SELECT
+                  pg_catalog.to_regclass(
+                    pg_catalog.current_schema() || '.{_CHECKPOINT_UPDATED_AT_INDEX}'
+                  ) IS NOT NULL AS index_exists,
+                  EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_class AS index_relation
+                    JOIN pg_catalog.pg_index AS index_info
+                      ON index_info.indexrelid = index_relation.oid
+                    JOIN pg_catalog.pg_class AS table_relation
+                      ON table_relation.oid = index_info.indrelid
+                    JOIN pg_catalog.pg_namespace AS table_namespace
+                      ON table_namespace.oid = table_relation.relnamespace
+                    JOIN pg_catalog.pg_attribute AS indexed_column
+                      ON indexed_column.attrelid = table_relation.oid
+                     AND indexed_column.attnum = index_info.indkey[0]
+                    WHERE index_relation.relname = '{_CHECKPOINT_UPDATED_AT_INDEX}'
+                      AND table_relation.relname = '{_CHECKPOINT_TABLE}'
+                      AND table_namespace.nspname = pg_catalog.current_schema()
+                      AND index_info.indisvalid
+                      AND index_info.indisready
+                      AND index_info.indislive
+                      AND NOT index_info.indisunique
+                      AND index_info.indnkeyatts = 1
+                      AND index_info.indnatts = 1
+                      AND index_info.indpred IS NULL
+                      AND index_info.indexprs IS NULL
+                      AND index_info.indoption[0] = 0
+                      AND indexed_column.attname = 'updated_at'
+                      AND index_relation.relam = (
+                        SELECT access_method.oid
+                        FROM pg_catalog.pg_am AS access_method
+                        WHERE access_method.amname = 'btree'
+                      )
+                  ) AS index_is_current
                 """
             )
+            row = await cursor.fetchone()
+            index_exists = bool(row and row[0])
+            index_is_current = bool(row and row[1])
+            if index_exists and not index_is_current:
+                raise RuntimeError(
+                    f"checkpoint index {_CHECKPOINT_UPDATED_AT_INDEX} has an incompatible definition"
+                )
+            if not index_is_current:
+                await conn.execute(
+                    f"""
+                    CREATE INDEX IF NOT EXISTS {_CHECKPOINT_UPDATED_AT_INDEX}
+                    ON {_CHECKPOINT_TABLE} (updated_at)
+                    """
+                )
             self._ready = True
 
     async def load(self, thread_id: str) -> bytes | None:
@@ -178,17 +244,24 @@ class PostgresCheckpointStateStore:
             )
 
     async def delete_older_than(self, retention_seconds: float) -> int:
-        """Reap abandoned checkpoint rows (runs that crashed before terminal ack
-        and were never resumed). Completed runs delete their row on terminal ack,
-        so this only catches stragglers."""
+        """Reap old checkpoint rows only after their run is terminal.
+
+        Age alone is not evidence that a queued/running/waiting run is
+        abandoned: long-lived jobs and wedged partitions still need their only
+        resume point. Normal terminal handling deletes immediately; this is the
+        bounded privacy backstop for cleanup failures.
+        """
         if retention_seconds <= 0:
             return 0
         await self.ensure_schema()
         async with self._lock:
             conn = await self._connection()
             cursor = await conn.execute(
-                f"DELETE FROM {_CHECKPOINT_TABLE} "
-                f"WHERE updated_at < now() - make_interval(secs => %s)",
+                f"DELETE FROM {_CHECKPOINT_TABLE} AS checkpoint_row "
+                "USING control_runs AS control_run "
+                "WHERE checkpoint_row.thread_id = control_run.run_id "
+                "AND control_run.status IN ('succeeded', 'failed', 'canceled') "
+                "AND checkpoint_row.updated_at < now() - make_interval(secs => %s)",
                 (float(retention_seconds),),
             )
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
@@ -236,38 +309,51 @@ class DurableCheckpointer(InMemorySaver):
         self._hydrated: set[str] = set()
         self._persist_debounce_seconds = max(0.0, persist_debounce_seconds)
         self._dirty: set[str] = set()
-        self._persist_tasks: dict[str, asyncio.Task[None]] = {}
+        self._persist_tasks: dict[str, asyncio.Task[bool]] = {}
+        # Generation fencing lets flush prove that the freshest in-memory
+        # state, not merely some earlier successful snapshot, reached the
+        # durable store before worker-local state is released.
+        self._mutation_generation: dict[str, int] = {}
+        self._persisted_generation: dict[str, int] = {}
 
     async def hydrate(self, thread_id: str) -> bool:
         """Load a run's prior checkpoint slice into memory. Returns True when
         durable state was found and restored. Safe to call repeatedly."""
         if thread_id in self._hydrated:
-            return False
-        self._hydrated.add(thread_id)
+            # A run that started without a durable row can acquire in-memory
+            # state before an ACK/flush failure redelivers it to the same
+            # worker. Treat that retained state as existing checkpoint
+            # authority; returning False here would restart the graph.
+            return self._thread_has_runtime_state(thread_id)
         try:
             blob = await self._store.load(thread_id)
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Checkpoint hydrate failed; treating run as fresh.",
+                "Checkpoint hydrate failed; refusing to classify the run as fresh.",
                 extra={"thread_id": thread_id},
                 exc_info=True,
             )
-            return False
-        if not blob:
+            raise CheckpointStateUnavailableError("durable checkpoint could not be loaded") from exc
+        if blob is None:
+            self._hydrated.add(thread_id)
             return False
         try:
             slice_ = _decode_thread_slice(blob)
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "Checkpoint slice could not be decoded; treating run as fresh.",
+                "Checkpoint slice could not be decoded; refusing to restart the run.",
                 extra={"thread_id": thread_id},
                 exc_info=True,
             )
-            return False
+            raise CheckpointStateUnavailableError(
+                "durable checkpoint could not be decoded"
+            ) from exc
         self._restore_thread_slice(thread_id, slice_)
+        self._hydrated.add(thread_id)
         return True
 
-    async def _persist(self, thread_id: str) -> None:
+    async def _persist(self, thread_id: str) -> bool:
+        generation = self._mutation_generation.get(thread_id, 0)
         try:
             # Snapshot the slice synchronously on the loop (consistent view of
             # the saver's in-memory dicts), then pickle+compress it off-loop:
@@ -276,20 +362,28 @@ class DurableCheckpointer(InMemorySaver):
             slice_ = self._collect_thread_slice(thread_id)
             blob = await asyncio.to_thread(_encode_thread_slice, slice_)
             await self._store.save(thread_id, blob)
+            self._persisted_generation[thread_id] = max(
+                self._persisted_generation.get(thread_id, 0),
+                generation,
+            )
+            return True
         except Exception:
-            # Never let a durability hiccup crash an in-flight run; the run
-            # still streams and completes, it just may not resume on restart.
+            # The graph may keep running through a transient durability
+            # hiccup, but flush reports failure at the delivery boundary so the
+            # worker retains its freshest in-memory recovery state.
             logger.warning(
                 "Checkpoint persist failed; resume may be unavailable for this run.",
                 extra={"thread_id": thread_id},
                 exc_info=True,
             )
+            return False
 
     def _schedule_persist(self, thread_id: str) -> None:
         """Mark the thread dirty and ensure exactly one trailing persist task is
         in flight for it; a task already running will pick up the latest slice."""
         if not thread_id:
             return
+        self._mutation_generation[thread_id] = self._mutation_generation.get(thread_id, 0) + 1
         self._dirty.add(thread_id)
         existing = self._persist_tasks.get(thread_id)
         if existing is not None and not existing.done():
@@ -303,13 +397,14 @@ class DurableCheckpointer(InMemorySaver):
             # back to leaving the thread dirty so a later flush persists it.
             self._dirty.add(thread_id)
 
-    async def _debounced_persist(self, thread_id: str) -> None:
+    async def _debounced_persist(self, thread_id: str) -> bool:
+        persisted = True
         try:
             if self._persist_debounce_seconds > 0:
                 await asyncio.sleep(self._persist_debounce_seconds)
             if thread_id in self._dirty:
                 self._dirty.discard(thread_id)
-                await self._persist(thread_id)
+                persisted = await self._persist(thread_id)
         finally:
             if self._persist_tasks.get(thread_id) is asyncio.current_task():
                 self._persist_tasks.pop(thread_id, None)
@@ -317,22 +412,58 @@ class DurableCheckpointer(InMemorySaver):
         # one more trailing persist so the very last super-step is never lost.
         if thread_id in self._dirty:
             self._schedule_persist(thread_id)
+        return persisted
 
-    async def flush(self, thread_id: str | None = None) -> None:
+    async def flush(self, thread_id: str | None = None) -> bool:
         """Force any pending debounced persist(s) to complete.
 
         Awaited at graceful boundaries (and in tests) so the latest committed
-        super-step is durable before another process may hydrate it.
+        super-step is durable before another process may hydrate it. Returns
+        True only when every requested thread's freshest generation is known to
+        be durable.
         """
-        targets = [thread_id] if thread_id else list(self._persist_tasks.keys())
+        targets = (
+            [thread_id]
+            if thread_id
+            else list(set(self._persist_tasks) | self._dirty | set(self._mutation_generation))
+        )
+        all_persisted = True
         for tid in targets:
-            task = self._persist_tasks.get(tid)
-            if task is not None and not task.done():
-                with contextlib.suppress(Exception):
-                    await task
-            if tid and tid in self._dirty:
-                self._dirty.discard(tid)
-                await self._persist(tid)
+            if not tid:
+                continue
+            while True:
+                task = self._persist_tasks.get(tid)
+                if task is not None:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        # _persist reports ordinary save failures as False, but
+                        # retain fail-closed behavior for an unexpected task
+                        # exception too.
+                        logger.warning(
+                            "Checkpoint persist task failed; retaining worker-local state.",
+                            extra={"thread_id": tid},
+                            exc_info=True,
+                        )
+                    continue
+                if tid in self._dirty:
+                    self._dirty.discard(tid)
+                    if not await self._persist(tid):
+                        all_persisted = False
+                        break
+                    continue
+                generation = self._mutation_generation.get(tid, 0)
+                if self._persisted_generation.get(tid, 0) < generation:
+                    # A prior debounced save failed after consuming the dirty
+                    # bit. Make one synchronous boundary retry; failure is
+                    # returned to the worker rather than hidden.
+                    if not await self._persist(tid):
+                        all_persisted = False
+                    break
+                break
+        return all_persisted
 
     async def aput(self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any) -> Any:
         result = await super().aput(config, checkpoint, metadata, new_versions)
@@ -350,6 +481,13 @@ class DurableCheckpointer(InMemorySaver):
         blobs = {key: value for key, value in self.blobs.items() if key[0] == thread_id}
         writes = {key: dict(value) for key, value in self.writes.items() if key[0] == thread_id}
         return {"storage": storage, "blobs": blobs, "writes": writes}
+
+    def _thread_has_runtime_state(self, thread_id: str) -> bool:
+        return bool(
+            self.storage.get(thread_id)
+            or any(key and key[0] == thread_id for key in self.blobs)
+            or any(key and key[0] == thread_id for key in self.writes)
+        )
 
     def clear_thread(self, thread_id: str) -> None:
         """Drop only this run's in-memory checkpoint slice.
@@ -370,6 +508,8 @@ class DurableCheckpointer(InMemorySaver):
             if key and key[0] == thread_id:
                 self.writes.pop(key, None)
         self._hydrated.discard(thread_id)
+        self._mutation_generation.pop(thread_id, None)
+        self._persisted_generation.pop(thread_id, None)
 
     async def delete_thread(self, thread_id: str) -> None:
         """Drop a terminal run's in-memory slice AND its durable row.
@@ -399,8 +539,12 @@ class DurableCheckpointer(InMemorySaver):
             )
 
     async def gc(self, retention_seconds: float) -> int:
-        """Reap durable rows for abandoned runs (crashed before terminal ack and
-        never resumed). No-op when the store has no time-based reaper."""
+        """Reap old terminal-run rows after immediate cleanup failed.
+
+        Production Postgres keeps resumable nonterminal rows regardless of age.
+        Test/local stores without run-status metadata retain their simple
+        time-based behavior.
+        """
         reaper = getattr(self._store, "delete_older_than", None)
         if reaper is None or retention_seconds <= 0:
             return 0
@@ -494,23 +638,39 @@ def run_graph_config(run_id: str, *, recursion_limit: int) -> dict[str, Any]:
     }
 
 
-async def checkpoint_has_pending_work(agent: Any, config: dict[str, Any]) -> bool:
-    """True when a prior checkpoint exists for this run with unfinished work, so
-    the graph should resume rather than start over."""
+async def checkpoint_run_state(
+    agent: Any,
+    config: dict[str, Any],
+    *,
+    hydrated: bool,
+) -> CheckpointRunState:
+    """Classify a run without collapsing completed state into absence.
+
+    Only an absent durable row authorizes a fresh graph invocation. A restored
+    snapshot with pending tasks resumes; a restored snapshot with no pending
+    tasks is completed and must wait for terminal-event reconciliation instead
+    of replaying the original request.
+    """
+    if not hydrated:
+        return CheckpointRunState.ABSENT
     getter = getattr(agent, "aget_state", None)
     if getter is None:
-        return False
+        raise CheckpointStateUnavailableError(
+            "compiled graph cannot classify restored checkpoint state"
+        )
     try:
         snapshot = await getter(config)
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "Could not read checkpoint state; starting run fresh.",
+            "Could not read restored checkpoint state; refusing to restart the run.",
             extra={"thread_id": _thread_id_from_config(config)},
             exc_info=True,
         )
-        return False
+        raise CheckpointStateUnavailableError(
+            "restored checkpoint state could not be classified"
+        ) from exc
     pending = bool(getattr(snapshot, "next", ()) or ())
-    return pending
+    return CheckpointRunState.PENDING if pending else CheckpointRunState.COMPLETED
 
 
 def build_checkpoint_state_store(database_url: str) -> CheckpointStateStore | None:

@@ -332,6 +332,14 @@ const mockNotes = [
     updated_at: new Date(Date.now() - 86400e3 * 8).toISOString(),
   },
 ];
+const mockNoteDigest = (note) =>
+  createHash("sha256")
+    .update(JSON.stringify([note.title, note.body_markdown]))
+    .digest("hex");
+for (const note of mockNotes) {
+  note.revision = 1;
+  note.content_digest = mockNoteDigest(note);
+}
 const sortedMockNotes = () =>
   [...mockNotes].sort((a, b) =>
     a.pinned === b.pinned ? (a.updated_at < b.updated_at ? 1 : -1) : a.pinned ? -1 : 1
@@ -1682,6 +1690,7 @@ const server = http.createServer(async (request, response) => {
       bisque_guest_enabled: true,
       auth_provider: "local",
       admin_enabled: false,
+      features: { model_notes_read: true },
     });
     return;
   }
@@ -1695,6 +1704,7 @@ const server = http.createServer(async (request, response) => {
       bisque_guest_enabled: false,
       auth_provider: "workos",
       admin_enabled: false,
+      features: { model_notes_read: true },
     });
     return;
   }
@@ -2254,6 +2264,7 @@ const server = http.createServer(async (request, response) => {
         title: note.title,
         snippet: note.body_markdown.slice(0, 300),
         pinned: note.pinned,
+        revision: note.revision,
         updated_at: note.updated_at,
       })),
       total_count: matched.length,
@@ -2272,9 +2283,11 @@ const server = http.createServer(async (request, response) => {
         body_markdown: payload.body_markdown || "",
         pinned: Boolean(payload.pinned),
         editor_mode: payload.editor_mode === "plaintext" ? "plaintext" : "markdown",
+        revision: 1,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
+      note.content_digest = mockNoteDigest(note);
       mockNotes.push(note);
       sendJson(response, 201, note);
     });
@@ -2297,12 +2310,21 @@ const server = http.createServer(async (request, response) => {
       request.on("end", () => {
         let payload = {};
         try { payload = JSON.parse(body || "{}"); } catch { /* malformed JSON keeps the empty payload */ }
+        if (!Number.isSafeInteger(payload.expected_revision) || payload.expected_revision !== note.revision) {
+          sendJson(response, 409, {
+            error: "note changed since it was read",
+            code: "note_revision_conflict",
+          });
+          return;
+        }
         if (typeof payload.title === "string") note.title = payload.title;
         if (typeof payload.body_markdown === "string") note.body_markdown = payload.body_markdown;
         if (typeof payload.pinned === "boolean") note.pinned = payload.pinned;
         if (payload.editor_mode === "markdown" || payload.editor_mode === "plaintext") {
           note.editor_mode = payload.editor_mode;
         }
+        note.revision += 1;
+        note.content_digest = mockNoteDigest(note);
         note.updated_at = new Date().toISOString();
         sendJson(response, 200, note);
       });

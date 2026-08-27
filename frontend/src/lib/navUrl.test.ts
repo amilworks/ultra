@@ -17,6 +17,7 @@ const loc = (search: string, pathname = "/", hash = "") => ({ pathname, search, 
 const nav = (partial: Partial<NavState> & Pick<NavState, "panel">): NavState => ({
   resourceFileIds: [],
   resourceCollectionId: null,
+  noteId: null,
   ...partial,
 });
 
@@ -73,6 +74,13 @@ describe("navUrl", () => {
       expect(buildNavUrl(loc(""), nav({ panel: "resources" }))).toBe("/?view=resources");
       expect(buildNavUrl(loc(""), nav({ panel: "admin" }))).toBe("/?view=admin");
       expect(buildNavUrl(loc(""), nav({ panel: "training" }))).toBe("/?view=training");
+    });
+
+    it("deep-links one Note and clears the Note outside the Notes panel", () => {
+      expect(buildNavUrl(loc(""), nav({ panel: "notes", noteId: "note-42" }))).toBe(
+        "/?view=notes&note=note-42"
+      );
+      expect(buildNavUrl(loc("?view=notes&note=note-42"), nav({ panel: "chat" }))).toBe("/");
     });
 
     it("encodes Lens with its resource id(s)", () => {
@@ -140,6 +148,7 @@ describe("navUrl", () => {
       expect(parseNavFromSearch("?view=resources").panel).toBe("resources");
       expect(parseNavFromSearch("?view=admin").panel).toBe("admin");
       expect(parseNavFromSearch("?view=training").panel).toBe("training");
+      expect(parseNavFromSearch("?view=notes&note=note-42").noteId).toBe("note-42");
       expect(parseNavFromSearch("?view=lens").panel).toBe("scientific-viewer");
     });
 
@@ -180,6 +189,7 @@ describe("navUrl", () => {
       );
       expect(parseNavFromSearch("?view=lens&collection=col-42").resourceCollectionId).toBeNull();
       expect(parseNavFromSearch("?collection=col-42").resourceCollectionId).toBeNull();
+      expect(parseNavFromSearch("?note=note-42").noteId).toBeNull();
     });
 
     it("ignores a resource param outside Lens and tolerates unknown views", () => {
@@ -192,6 +202,7 @@ describe("navUrl", () => {
         nav({ panel: "chat" }),
         nav({ panel: "resources" }),
         nav({ panel: "resources", resourceCollectionId: "col-7" }),
+        nav({ panel: "notes", noteId: "note-7" }),
         nav({ panel: "scientific-viewer", resourceFileIds: ["file-7"] }),
         nav({ panel: "scientific-viewer", resourceFileIds: ["x", "y"] }),
       ];
@@ -207,6 +218,7 @@ describe("navUrl", () => {
     it("is stable per panel and includes panel-specific identity", () => {
       expect(navStateKey(nav({ panel: "resources" }))).toBe("resources|");
       expect(navStateKey(nav({ panel: "resources", resourceCollectionId: "col-1" }))).toBe("resources|col-1");
+      expect(navStateKey(nav({ panel: "notes", noteId: "note-1" }))).toBe("notes|note-1");
       expect(navStateKey(nav({ panel: "scientific-viewer", resourceFileIds: ["a", "b"] }))).toBe(
         "scientific-viewer|a,b"
       );

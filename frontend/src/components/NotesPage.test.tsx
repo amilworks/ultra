@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { NotesPage } from "./NotesPage";
-import type { ApiClient, NoteRecord, NoteWritePayload } from "@/lib/api";
+import { ApiError, type ApiClient, type NoteRecord, type NoteWritePayload } from "@/lib/api";
 
 vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
   const React = await import("react");
@@ -73,6 +73,8 @@ const note = (noteId: string, overrides: Partial<NoteRecord> = {}): NoteRecord =
   body_markdown: `Body ${noteId}`,
   pinned: false,
   editor_mode: "markdown",
+  revision: 1,
+  content_digest: `digest-${noteId}`,
   created_at: now,
   updated_at: now,
   ...overrides,
@@ -87,6 +89,7 @@ const apiFor = (records: NoteRecord[] = []) => {
         title: record.title,
         snippet: record.body_markdown,
         pinned: record.pinned,
+        revision: record.revision,
         updated_at: record.updated_at,
       })),
       total_count: records.length,
@@ -106,6 +109,8 @@ const apiFor = (records: NoteRecord[] = []) => {
         body_markdown: payload.body_markdown ?? "",
         pinned: payload.pinned ?? false,
         editor_mode: payload.editor_mode ?? "markdown",
+        revision: (payload.expected_revision ?? 0) + 1,
+        content_digest: `updated-${noteId}`,
       })
     ),
     deleteNote: vi.fn().mockResolvedValue(undefined),
@@ -200,6 +205,40 @@ describe("NotesPage writing flow", () => {
     expect(mocks.deleteNote).not.toHaveBeenCalled();
   });
 
+  it("only exposes Use in chat when the caller enables model Notes context", async () => {
+    const first = note("first", { title: "Field protocol", revision: 7 });
+    const { api } = apiFor([first]);
+    const disabledView = render(<NotesPage apiClient={api} />);
+    await advance();
+    await advance();
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "More note actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await advance();
+    expect(screen.queryByRole("menuitem", { name: "Use in chat" })).not.toBeInTheDocument();
+    disabledView.unmount();
+
+    const onUseInChat = vi.fn();
+    render(<NotesPage apiClient={api} onUseInChat={onUseInChat} />);
+    await advance();
+    await advance();
+    fireEvent.pointerDown(screen.getByRole("button", { name: "More note actions" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await advance();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Use in chat" }));
+    await advance();
+
+    expect(onUseInChat).toHaveBeenCalledWith({
+      note_id: "first",
+      title: "Field protocol",
+      revision: 7,
+    });
+  });
+
   it("keeps the title optional until the writer explicitly asks for it", async () => {
     const { api, mocks } = apiFor();
     render(<NotesPage apiClient={api} />);
@@ -255,6 +294,7 @@ describe("NotesPage writing flow", () => {
       body_markdown: "Revised finding",
       pinned: false,
       editor_mode: "markdown",
+      expected_revision: 1,
     });
   });
 
@@ -348,6 +388,71 @@ describe("NotesPage writing flow", () => {
     expect(mocks.getNote).toHaveBeenCalledTimes(2);
   });
 
+  it("clears the specific-note deep link when mobile navigation returns to the list", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    const first = note("first", { title: "First note", body_markdown: "First body" });
+    const { api } = apiFor([first]);
+    const onActiveNoteChange = vi.fn();
+
+    render(
+      <NotesPage
+        apiClient={api}
+        initialNoteId="first"
+        onActiveNoteChange={onActiveNoteChange}
+      />
+    );
+    await advance();
+    await advance();
+
+    expect(screen.getByLabelText("Note body")).toHaveValue("First body");
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    await advance();
+
+    expect(onActiveNoteChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("mirrors browser Back and Forward between the mobile list and a warm Note", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    const first = note("first", { title: "First note", body_markdown: "First body" });
+    const { api } = apiFor([first]);
+    const view = render(
+      <NotesPage apiClient={api} initialNoteId="first" listRequestVersion={0} />
+    );
+    await advance();
+    await advance();
+    expect(screen.getByTestId("notes-page")).not.toHaveAttribute("data-mobile-list");
+
+    view.rerender(
+      <NotesPage apiClient={api} initialNoteId={null} listRequestVersion={1} />
+    );
+    await advance();
+    expect(screen.getByTestId("notes-page")).toHaveAttribute("data-mobile-list", "true");
+
+    view.rerender(
+      <NotesPage apiClient={api} initialNoteId="first" listRequestVersion={1} />
+    );
+    await advance();
+    expect(screen.getByTestId("notes-page")).not.toHaveAttribute("data-mobile-list");
+  });
+
   it("keeps the current note open when sync fails instead of navigating away", async () => {
     const first = note("first", { title: "First note", body_markdown: "First body" });
     const second = note("second", { title: "Second note", body_markdown: "Second body" });
@@ -368,6 +473,75 @@ describe("NotesPage writing flow", () => {
     expect(mocks.getNote).not.toHaveBeenCalledWith("second");
     expect(screen.getByLabelText("Note body")).toHaveValue("Unsynced finding");
     expect(screen.getByText("Couldn’t sync")).toBeInTheDocument();
+  });
+
+  it("preserves local writing on a revision conflict and requires an explicit choice", async () => {
+    const first = note("first", { title: "Protocol", body_markdown: "Original" });
+    const latest = note("first", {
+      title: "Protocol",
+      body_markdown: "Updated elsewhere",
+      revision: 2,
+      content_digest: "latest",
+    });
+    const { api, mocks } = apiFor([first]);
+    mocks.updateNote.mockRejectedValueOnce(
+      new ApiError("note revision conflict", 409, { code: "note_revision_conflict" })
+    );
+    mocks.getNote.mockResolvedValueOnce(first).mockResolvedValueOnce(latest);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    await advance();
+
+    const body = screen.getByLabelText("Note body");
+    fireEvent.change(body, { target: { value: "My unsaved revision" } });
+    await advance(700);
+
+    expect(body).toHaveValue("My unsaved revision");
+    expect(screen.getByRole("alert")).toHaveTextContent("This note changed elsewhere");
+    expect(screen.getByRole("button", { name: "Use latest" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save my version" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Use latest" }));
+    await advance();
+    expect(screen.getByLabelText("Note body")).toHaveValue("Updated elsewhere");
+  });
+
+  it("freezes automatic writes after conflict and overwrites only after explicit approval", async () => {
+    const first = note("first", { title: "Protocol", body_markdown: "Original" });
+    const latest = note("first", {
+      title: "Protocol",
+      body_markdown: "Updated elsewhere",
+      revision: 2,
+      content_digest: "latest",
+    });
+    const { api, mocks } = apiFor([first]);
+    mocks.updateNote.mockRejectedValueOnce(
+      new ApiError("note revision conflict", 409, { code: "note_revision_conflict" })
+    );
+    mocks.getNote.mockResolvedValueOnce(first).mockResolvedValueOnce(latest);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    await advance();
+
+    const body = screen.getByLabelText("Note body");
+    fireEvent.change(body, { target: { value: "My reviewed version" } });
+    await advance(700);
+    expect(mocks.updateNote).toHaveBeenCalledTimes(1);
+
+    fireEvent.blur(body);
+    await advance(1000);
+    expect(mocks.updateNote).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save my version" }));
+    await advance();
+    expect(mocks.updateNote).toHaveBeenCalledTimes(2);
+    expect(mocks.updateNote).toHaveBeenLastCalledWith("first", {
+      title: "Protocol",
+      body_markdown: "My reviewed version",
+      pinned: false,
+      editor_mode: "markdown",
+      expected_revision: 2,
+    });
   });
 
   it("opens recent Ultra resources from the quiet paperclip action", async () => {

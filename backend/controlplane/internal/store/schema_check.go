@@ -23,10 +23,15 @@ var requiredPostgresControlTables = []string{
 	"control_run_token_usage_finalized",
 	"control_thread_messages",
 	"control_runs",
+	"deepagents_checkpoint_threads",
 	"control_run_events",
 	"control_run_event_sequences",
 	"control_run_leases",
 	"control_notes",
+	"control_note_read_grants",
+	"control_note_run_usage",
+	"control_note_append_proposals",
+	"control_note_append_operations",
 	"control_run_steer_messages",
 	"control_run_steer_barriers",
 	"control_worker_heartbeats",
@@ -98,6 +103,32 @@ WHERE table_schema = 'public'
 	if len(missing) > 0 {
 		slices.Sort(missing)
 		return fmt.Errorf("postgres control schema is not ready; apply migrations before starting: missing tables %s", strings.Join(missing, ", "))
+	}
+
+	var checkpointRunCascade bool
+	if err := db.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1
+  FROM pg_constraint constraint_row
+  WHERE constraint_row.conrelid = 'deepagents_checkpoint_threads'::regclass
+    AND constraint_row.confrelid = 'control_runs'::regclass
+    AND constraint_row.contype = 'f'
+    AND constraint_row.confdeltype = 'c'
+    AND constraint_row.conkey = ARRAY[
+      (SELECT attnum FROM pg_attribute
+       WHERE attrelid = 'deepagents_checkpoint_threads'::regclass
+         AND attname = 'thread_id')
+    ]::smallint[]
+    AND constraint_row.confkey = ARRAY[
+      (SELECT attnum FROM pg_attribute
+       WHERE attrelid = 'control_runs'::regclass
+         AND attname = 'run_id')
+    ]::smallint[]
+)`).Scan(&checkpointRunCascade); err != nil {
+		return fmt.Errorf("verify postgres checkpoint ownership: %w", err)
+	}
+	if !checkpointRunCascade {
+		return fmt.Errorf("postgres control schema is not ready; apply migrations before starting: deepagents_checkpoint_threads must reference control_runs(run_id) ON DELETE CASCADE")
 	}
 	return nil
 }

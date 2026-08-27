@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,13 +15,53 @@ import (
 )
 
 func newNotesTestRouter(t *testing.T) http.Handler {
+	return newNotesTestRouterWithRevisionPolicy(t, true)
+}
+
+func newNotesTestRouterWithRevisionPolicy(t *testing.T, requireExpectedRevision bool) http.Handler {
 	t.Helper()
 	mem := store.NewMemoryStore()
 	return NewRouter(ServerDeps{
 		Version: "test-version",
 		Runs:    runcontrol.NewService(mem, eventbus.NewMemoryBus()),
 		Store:   mem,
+		noteModelFeatures: noteModelFeatureConfig{
+			initialized: true, requireExpectedRevision: requireExpectedRevision,
+		},
 	})
+}
+
+func TestNotesRevisionRolloutSupportsLegacyThenStrictCAS(t *testing.T) {
+	t.Parallel()
+	compat := newNotesTestRouterWithRevisionPolicy(t, false)
+	created := notesRequest(compat, http.MethodPost, "/v2/notes", "ada", `{"title":"compat","body_markdown":"draft"}`)
+	var legacyNote domain.NoteRecord
+	if err := json.Unmarshal(created.Body.Bytes(), &legacyNote); err != nil || created.Code != http.StatusCreated {
+		t.Fatalf("compat create = %d note=%+v err=%v", created.Code, legacyNote, err)
+	}
+	legacyPatch := notesRequest(compat, http.MethodPatch, "/v2/notes/"+legacyNote.NoteID, "ada", `{"body_markdown":"legacy autosave"}`)
+	var legacyUpdated domain.NoteRecord
+	if err := json.Unmarshal(legacyPatch.Body.Bytes(), &legacyUpdated); err != nil || legacyPatch.Code != http.StatusOK {
+		t.Fatalf("compat patch = %d note=%+v err=%v", legacyPatch.Code, legacyUpdated, err)
+	}
+	if legacyUpdated.BodyMarkdown != "legacy autosave" || legacyUpdated.Revision != legacyNote.Revision+1 {
+		t.Fatalf("compat patch did not use revisioned store path: %+v", legacyUpdated)
+	}
+
+	strict := newNotesTestRouterWithRevisionPolicy(t, true)
+	created = notesRequest(strict, http.MethodPost, "/v2/notes", "ada", `{"title":"strict","body_markdown":"draft"}`)
+	var strictNote domain.NoteRecord
+	_ = json.Unmarshal(created.Body.Bytes(), &strictNote)
+	rejected := notesRequest(strict, http.MethodPatch, "/v2/notes/"+strictNote.NoteID, "ada", `{"body_markdown":"missing CAS"}`)
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "expected_revision") {
+		t.Fatalf("strict missing-revision patch = %d body=%s, want 400", rejected.Code, rejected.Body.String())
+	}
+	unchanged := notesRequest(strict, http.MethodGet, "/v2/notes/"+strictNote.NoteID, "ada", "")
+	var current domain.NoteRecord
+	_ = json.Unmarshal(unchanged.Body.Bytes(), &current)
+	if current.BodyMarkdown != "draft" || current.Revision != strictNote.Revision {
+		t.Fatalf("strict rejected patch changed Note: %+v", current)
+	}
 }
 
 func notesRequest(router http.Handler, method, path, user, body string) *httptest.ResponseRecorder {
@@ -73,12 +114,12 @@ func TestNotesCrudIsOwnerScoped(t *testing.T) {
 			t.Fatalf("stranger %s = %d, want 404", method, rec.Code)
 		}
 	}
-	if rec := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "mallory", `{"title":"mine now"}`); rec.Code != http.StatusNotFound {
+	if rec := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "mallory", fmt.Sprintf(`{"title":"mine now","expected_revision":%d}`, note.Revision)); rec.Code != http.StatusNotFound {
 		t.Fatalf("stranger patch = %d, want 404", rec.Code)
 	}
 
 	updated := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada",
-		`{"body_markdown":"Transect spacing 40 m. Flag GSD < 1.2 cm.","pinned":true,"editor_mode":"plaintext"}`)
+		fmt.Sprintf(`{"body_markdown":"Transect spacing 40 m. Flag GSD < 1.2 cm.","pinned":true,"editor_mode":"plaintext","expected_revision":%d}`, note.Revision))
 	if updated.Code != http.StatusOK {
 		t.Fatalf("owner patch = %d body=%s", updated.Code, updated.Body.String())
 	}
@@ -92,9 +133,13 @@ func TestNotesCrudIsOwnerScoped(t *testing.T) {
 	if patched.EditorMode != domain.NoteEditorModePlaintext {
 		t.Fatalf("editor_mode = %q, want the flip to plaintext persisted", patched.EditorMode)
 	}
+	stale := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada", fmt.Sprintf(`{"title":"stale","expected_revision":%d}`, note.Revision))
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "note_revision_conflict") {
+		t.Fatalf("stale patch = %d body=%s", stale.Code, stale.Body.String())
+	}
 
 	// The mode is sticky: a later partial update without editor_mode keeps it.
-	retitled := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada", `{"title":"Field protocol v2"}`)
+	retitled := notesRequest(router, http.MethodPatch, "/v2/notes/"+note.NoteID, "ada", fmt.Sprintf(`{"title":"Field protocol v2","expected_revision":%d}`, patched.Revision))
 	var afterRetitle domain.NoteRecord
 	if err := json.Unmarshal(retitled.Body.Bytes(), &afterRetitle); err != nil {
 		t.Fatalf("decode retitle: %v", err)

@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import os
 import pickle
+import uuid
 
 import pytest
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 from ultra_deepagents.checkpointing import (
+    CheckpointRunState,
     DurableCheckpointer,
     InMemoryCheckpointStateStore,
     PostgresCheckpointStateStore,
     _decode_thread_slice,
     _encode_thread_slice,
+    checkpoint_run_state,
     run_graph_config,
 )
 
@@ -104,6 +107,40 @@ def test_durable_checkpointer_reports_no_pending_work_for_unknown_run():
         return await saver.hydrate("run_never_seen")
 
     assert asyncio.run(scenario()) is False
+
+
+def test_checkpoint_run_state_distinguishes_absent_pending_and_completed():
+    import asyncio
+
+    class _Agent:
+        def __init__(self, pending: tuple[str, ...]) -> None:
+            self.pending = pending
+            self.calls = 0
+
+        async def aget_state(self, _config):
+            self.calls += 1
+
+            class _Snapshot:
+                next = self.pending
+
+            return _Snapshot()
+
+    async def scenario() -> tuple[CheckpointRunState, CheckpointRunState, CheckpointRunState, int]:
+        absent_agent = _Agent(("must-not-be-read",))
+        pending_agent = _Agent(("tools",))
+        completed_agent = _Agent(())
+        config = run_graph_config("run-state", recursion_limit=50)
+        absent = await checkpoint_run_state(absent_agent, config, hydrated=False)
+        pending = await checkpoint_run_state(pending_agent, config, hydrated=True)
+        completed = await checkpoint_run_state(completed_agent, config, hydrated=True)
+        return absent, pending, completed, absent_agent.calls
+
+    absent, pending, completed, absent_calls = asyncio.run(scenario())
+
+    assert absent is CheckpointRunState.ABSENT
+    assert pending is CheckpointRunState.PENDING
+    assert completed is CheckpointRunState.COMPLETED
+    assert absent_calls == 0
 
 
 def test_durable_checkpointer_clear_thread_removes_only_runtime_state_and_preserves_durable_store():
@@ -200,11 +237,16 @@ def test_postgres_checkpoint_store_schema_indexes_updated_at_for_gc():
 
     statements: list[str] = []
 
+    class _Cursor:
+        async def fetchone(self):
+            return False, False
+
     class _FakeConn:
         closed = False
 
         async def execute(self, sql, _params=None):
             statements.append(sql)
+            return _Cursor()
 
     class _FakeStore(PostgresCheckpointStateStore):
         async def _connection(self):
@@ -214,8 +256,74 @@ def test_postgres_checkpoint_store_schema_indexes_updated_at_for_gc():
 
     joined = "\n".join(statements)
     assert "CREATE TABLE IF NOT EXISTS deepagents_checkpoint_threads" in joined
-    assert "deepagents_checkpoint_threads_updated_at_idx" in joined
+    assert "REFERENCES control_runs(run_id) ON DELETE CASCADE" in joined
+    assert "CREATE INDEX IF NOT EXISTS deepagents_checkpoint_threads_updated_at_idx" in joined
     assert "ON deepagents_checkpoint_threads (updated_at)" in joined
+
+
+def test_postgres_checkpoint_store_skips_index_ddl_when_catalog_definition_is_current():
+    import asyncio
+
+    statements: list[str] = []
+
+    class _Cursor:
+        async def fetchone(self):
+            return True, True
+
+    class _FakeConn:
+        closed = False
+
+        async def execute(self, sql, _params=None):
+            statements.append(sql)
+            return _Cursor()
+
+    class _FakeStore(PostgresCheckpointStateStore):
+        async def _connection(self):
+            return _FakeConn()
+
+    asyncio.run(_FakeStore("postgresql://unused").ensure_schema())
+
+    catalog_queries = [
+        sql for sql in statements if "FROM pg_catalog.pg_class AS index_relation" in sql
+    ]
+    assert len(catalog_queries) == 1
+    assert "index_info.indislive" in catalog_queries[0]
+    assert not any("CREATE INDEX IF NOT EXISTS" in sql for sql in statements)
+
+
+def test_postgres_checkpoint_gc_preserves_nonterminal_resume_state():
+    import asyncio
+
+    calls: list[tuple[str, tuple | None]] = []
+
+    class _Cursor:
+        rowcount = 2
+
+    class _FakeConn:
+        closed = False
+
+        async def execute(self, sql, params=None):
+            calls.append((sql, params))
+            return _Cursor()
+
+    class _FakeStore(PostgresCheckpointStateStore):
+        async def _connection(self):
+            return _FakeConn()
+
+    async def scenario() -> int:
+        store = _FakeStore("postgresql://unused")
+        store._ready = True
+        return await store.delete_older_than(72 * 3600)
+
+    assert asyncio.run(scenario()) == 2
+    sql, params = calls[-1]
+    assert "USING control_runs AS control_run" in sql
+    assert "checkpoint_row.thread_id = control_run.run_id" in sql
+    assert "control_run.status IN ('succeeded', 'failed', 'canceled')" in sql
+    assert "queued" not in sql
+    assert "running" not in sql
+    assert "waiting_for_input" not in sql
+    assert params == (float(72 * 3600),)
 
 
 def test_postgres_checkpoint_store_skips_identical_state_rewrites():
@@ -233,7 +341,12 @@ def test_postgres_checkpoint_store_skips_identical_state_rewrites():
         async def _connection(self):
             return _FakeConn()
 
-    asyncio.run(_FakeStore("postgresql://unused").save("run-1", b"state"))
+    async def scenario() -> None:
+        store = _FakeStore("postgresql://unused")
+        store._ready = True
+        await store.save("run-1", b"state")
+
+    asyncio.run(scenario())
 
     save_sql = "\n".join(statements)
     assert "ON CONFLICT (thread_id)" in save_sql
@@ -282,9 +395,13 @@ def test_run_job_resumes_with_none_payload_and_seeded_sequencer_when_checkpoint_
         return _FakeResumingAgent()
 
     published: list[dict] = []
+    event_emission_ready_at_event_counts: list[int] = []
 
     async def publish(event):
         published.append(event)
+
+    def on_event_emission_ready() -> None:
+        event_emission_ready_at_event_counts.append(len(published))
 
     settings = RuntimeSettings(
         openai_base_url="http://example.test/v1",
@@ -305,7 +422,7 @@ def test_run_job_resumes_with_none_payload_and_seeded_sequencer_when_checkpoint_
             # A fresh worker must hydrate durable state before deciding to
             # resume; record the call so the ordering is pinned.
             type(self).hydrated_runs.append(thread_id)
-            return await super().hydrate(thread_id)
+            return True
 
     checkpointer = _HydrateTrackingCheckpointer(store)
 
@@ -317,6 +434,7 @@ def test_run_job_resumes_with_none_payload_and_seeded_sequencer_when_checkpoint_
             agent_factory=fake_agent_factory,
             checkpointer=checkpointer,
             sequence_floor=42,
+            on_event_emission_ready=on_event_emission_ready,
         )
     )
 
@@ -327,6 +445,7 @@ def test_run_job_resumes_with_none_payload_and_seeded_sequencer_when_checkpoint_
     assert captured["payload"] is None
     assert captured["config"]["configurable"]["thread_id"] == "run-resume-7"
     assert captured["factory_checkpointer"] is checkpointer
+    assert event_emission_ready_at_event_counts == [0]
     # The first stamped event sits above the seeded floor so it cannot collide
     # with the original partial run's persisted event ids.
     first_sequence = min(event["sequence"] for event in published)
@@ -361,8 +480,14 @@ def test_run_job_starts_fresh_when_no_checkpoint_pending(tmp_path):
                 },
             }
 
+    published: list[dict] = []
+    event_emission_ready_at_event_counts: list[int] = []
+
     async def publish(event):
-        return None
+        published.append(event)
+
+    def on_event_emission_ready() -> None:
+        event_emission_ready_at_event_counts.append(len(published))
 
     settings = RuntimeSettings(
         openai_base_url="http://example.test/v1",
@@ -388,10 +513,88 @@ def test_run_job_starts_fresh_when_no_checkpoint_pending(tmp_path):
             agent_factory=lambda settings, **kwargs: _FakeFreshAgent(),
             checkpointer=DurableCheckpointer(InMemoryCheckpointStateStore()),
             sequence_floor=0,
+            on_event_emission_ready=on_event_emission_ready,
         )
     )
 
     assert captured["payload"] == {"messages": [{"role": "user", "content": "hello"}]}
+    assert event_emission_ready_at_event_counts == [0]
+
+
+def test_run_job_completed_checkpoint_waits_without_publishing_or_recomputing(tmp_path):
+    import asyncio
+
+    from ultra_deepagents.config import RuntimeSettings
+    from ultra_deepagents.runner import CheckpointReconciliationPendingError, run_job
+    from ultra_deepagents.schemas import RunJobEnvelope
+
+    compute_started = False
+    published: list[dict] = []
+    event_emission_ready_calls = 0
+
+    class _CompletedAgent:
+        async def aget_state(self, _config):
+            class _Snapshot:
+                next = ()
+
+            return _Snapshot()
+
+        async def astream_events(self, *_args, **_kwargs):
+            nonlocal compute_started
+            compute_started = True
+            raise AssertionError("completed checkpoint must not restart graph compute")
+            yield  # pragma: no cover
+
+    class _CompletedCheckpointer(DurableCheckpointer):
+        async def hydrate(self, thread_id: str) -> bool:
+            assert thread_id == "run-completed-lag"
+            return True
+
+    async def publish(event):
+        published.append(event)
+
+    def on_event_emission_ready() -> None:
+        nonlocal event_emission_ready_calls
+        event_emission_ready_calls += 1
+
+    settings = RuntimeSettings(
+        openai_base_url="http://example.test/v1",
+        openai_model="deepseek_v4",
+        workspace_root=str(tmp_path / "ws-completed"),
+        artifact_root=str(tmp_path / "art-completed"),
+        memory_root=str(tmp_path / "mem-completed"),
+        title_generation_enabled=False,
+    )
+    job = RunJobEnvelope(
+        run_id="run-completed-lag",
+        thread_id="thread-1",
+        user_id="u",
+        goal="do not replay",
+        messages=[{"role": "user", "content": "do not replay"}],
+    )
+    lease_path = tmp_path / "ws-completed" / "run-completed-lag" / "lease.json"
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    original_lease = '{"status":"succeeded","sentinel":"original-terminal-lease"}'
+    lease_path.write_text(original_lease)
+
+    async def scenario() -> None:
+        with pytest.raises(CheckpointReconciliationPendingError):
+            await run_job(
+                job,
+                settings,
+                publish_event=publish,
+                agent_factory=lambda settings, **kwargs: _CompletedAgent(),
+                checkpointer=_CompletedCheckpointer(InMemoryCheckpointStateStore()),
+                sequence_floor=41,
+                on_event_emission_ready=on_event_emission_ready,
+            )
+
+    asyncio.run(scenario())
+
+    assert compute_started is False
+    assert published == []
+    assert event_emission_ready_calls == 0
+    assert lease_path.read_text() == original_lease
 
 
 _POSTGRES_DSN = os.getenv(
@@ -406,38 +609,66 @@ def test_postgres_checkpoint_store_round_trips_durable_resume():
 
     side_effects: list[str] = []
     crash_armed = {"v": True}
-    run_id = "run_pg_resume_1"
+    suffix = uuid.uuid4().hex
+    thread_id = f"thread_pg_resume_{suffix}"
+    run_id = f"run_pg_resume_{suffix}"
     config = run_graph_config(run_id, recursion_limit=50)
 
     async def scenario() -> dict:
         store1 = PostgresCheckpointStateStore(_POSTGRES_DSN)
-        await store1.ensure_schema()
-        # Clean any prior row for a deterministic test.
-        conn = await store1._connection()
-        await conn.execute(
-            "DELETE FROM deepagents_checkpoint_threads WHERE thread_id = %s", (run_id,)
-        )
-        saver1 = DurableCheckpointer(store1)
-        app1 = _build_crashing_graph(side_effects, crash_armed).compile(checkpointer=saver1)
-        crashed = False
         try:
-            await app1.ainvoke({"steps": []}, config)
-        except RuntimeError:
-            crashed = True
-        await store1.close()
+            await store1.ensure_schema()
+            conn = await store1._connection()
+            await conn.execute(
+                """
+                INSERT INTO control_threads (
+                  thread_id, user_id, title, status, created_at, updated_at, metadata
+                ) VALUES (%s, %s, %s, 'active', now(), now(), '{}'::jsonb)
+                """,
+                (thread_id, f"user_{suffix}", "Checkpoint resume integration"),
+            )
+            await conn.execute(
+                """
+                INSERT INTO control_runs (
+                  run_id, thread_id, user_id, goal, status, workflow_kind,
+                  created_at, updated_at, metadata
+                ) VALUES (%s, %s, %s, %s, 'running', 'deep_agents', now(), now(), '{}'::jsonb)
+                """,
+                (run_id, thread_id, f"user_{suffix}", "Checkpoint resume integration"),
+            )
+            saver1 = DurableCheckpointer(store1)
+            app1 = _build_crashing_graph(side_effects, crash_armed).compile(checkpointer=saver1)
+            crashed = False
+            try:
+                await app1.ainvoke({"steps": []}, config)
+            except RuntimeError:
+                crashed = True
+            assert await saver1.flush(run_id) is True
+            await store1.close()
 
-        # Brand-new store + saver: only Postgres carries the state across.
-        store2 = PostgresCheckpointStateStore(_POSTGRES_DSN)
-        saver2 = DurableCheckpointer(store2)
-        hydrated = await saver2.hydrate(run_id)
-        app2 = _build_crashing_graph(side_effects, crash_armed).compile(checkpointer=saver2)
-        result = await app2.ainvoke(None, config)
-        conn2 = await store2._connection()
-        await conn2.execute(
-            "DELETE FROM deepagents_checkpoint_threads WHERE thread_id = %s", (run_id,)
-        )
-        await store2.close()
-        return {"crashed": crashed, "hydrated": hydrated, "result": result}
+            # Brand-new store + saver: only Postgres carries the state across.
+            store2 = PostgresCheckpointStateStore(_POSTGRES_DSN)
+            saver2 = DurableCheckpointer(store2)
+            try:
+                hydrated = await saver2.hydrate(run_id)
+                app2 = _build_crashing_graph(side_effects, crash_armed).compile(checkpointer=saver2)
+                result = await app2.ainvoke(None, config)
+                await saver2.delete_thread(run_id)
+                return {"crashed": crashed, "hydrated": hydrated, "result": result}
+            finally:
+                await store2.close()
+        finally:
+            if not store1._conn or store1._conn.closed:
+                cleanup = PostgresCheckpointStateStore(_POSTGRES_DSN)
+            else:
+                cleanup = store1
+            try:
+                cleanup_conn = await cleanup._connection()
+                await cleanup_conn.execute(
+                    "DELETE FROM control_threads WHERE thread_id = %s", (thread_id,)
+                )
+            finally:
+                await cleanup.close()
 
     outcome = asyncio.run(scenario())
     assert outcome["crashed"] is True
@@ -494,6 +725,42 @@ def test_durable_checkpointer_delete_thread_cancels_pending_persist_no_resurrect
         return await store.load("run-race")
 
     assert asyncio.run(scenario()) is None
+
+
+def test_durable_checkpointer_flush_reports_failure_until_freshest_state_is_persisted():
+    import asyncio
+
+    class _FailingStore(InMemoryCheckpointStateStore):
+        fail_saves = True
+
+        async def save(self, thread_id: str, blob: bytes) -> None:
+            if self.fail_saves:
+                raise RuntimeError("simulated durable save failure")
+            await super().save(thread_id, blob)
+
+    async def scenario() -> dict:
+        store = _FailingStore()
+        saver = DurableCheckpointer(store, persist_debounce_seconds=5.0)
+        config = run_graph_config("run-flush-fence", recursion_limit=50)
+        app = _build_crashing_graph([], {"v": False}).compile(checkpointer=saver)
+        await app.ainvoke({"steps": []}, config)
+        first = await saver.flush("run-flush-fence")
+        runtime_after_failure = saver._thread_has_runtime_state("run-flush-fence")
+        store.fail_saves = False
+        second = await saver.flush("run-flush-fence")
+        return {
+            "first": first,
+            "second": second,
+            "runtime_after_failure": runtime_after_failure,
+            "durable": await store.load("run-flush-fence"),
+        }
+
+    outcome = asyncio.run(scenario())
+
+    assert outcome["first"] is False
+    assert outcome["runtime_after_failure"] is True
+    assert outcome["second"] is True
+    assert outcome["durable"] is not None
 
 
 def test_checkpoint_store_gc_reaps_only_rows_older_than_retention():

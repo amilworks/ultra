@@ -24,6 +24,8 @@ export type NavState = {
   // In the URL so Back leaves a folder the way it was entered and a refresh
   // reopens the same folder instead of dropping to the collection root.
   resourceCollectionId: string | null;
+  // Open Note; only meaningful when panel === "notes".
+  noteId: string | null;
 };
 
 const PANEL_TO_VIEW: Record<NavPanel, string | null> = {
@@ -46,6 +48,7 @@ const VIEW_TO_PANEL: Record<string, NavPanel> = {
 const VIEW_PARAM = "view";
 const RESOURCE_PARAM = "resource";
 const COLLECTION_PARAM = "collection";
+const NOTE_PARAM = "note";
 
 // The most file ids one Lens view opens. A chat turn can cite many files; Lens
 // opens the first few and ignores the rest rather than firing an unbounded
@@ -107,6 +110,12 @@ export const buildNavUrl = (
   } else {
     params.delete(COLLECTION_PARAM);
   }
+  const noteId = nav.panel === "notes" ? (nav.noteId ?? "").trim() : "";
+  if (noteId) {
+    params.set(NOTE_PARAM, noteId);
+  } else {
+    params.delete(NOTE_PARAM);
+  }
   const search = params.toString();
   return `${current.pathname}${search ? `?${search}` : ""}${current.hash}`;
 };
@@ -121,7 +130,9 @@ export const parseNavFromSearch = (search: string): NavState => {
     panel === "scientific-viewer" && resourceRaw ? normalizeLensFileIds(resourceRaw.split(",")) : [];
   const collectionRaw = (params.get(COLLECTION_PARAM) ?? "").trim();
   const resourceCollectionId = panel === "resources" && collectionRaw ? collectionRaw : null;
-  return { panel, resourceFileIds, resourceCollectionId };
+  const noteRaw = (params.get(NOTE_PARAM) ?? "").trim();
+  const noteId = panel === "notes" && noteRaw ? noteRaw : null;
+  return { panel, resourceFileIds, resourceCollectionId, noteId };
 };
 
 // A stable identity for a nav state, for deduping URL writes (the resource list only
@@ -134,6 +145,9 @@ export const navStateKey = (nav: NavState): string => {
   }
   if (nav.panel === "resources") {
     return `resources|${nav.resourceCollectionId ?? ""}`;
+  }
+  if (nav.panel === "notes") {
+    return `notes|${nav.noteId ?? ""}`;
   }
   return nav.panel;
 };
@@ -161,6 +175,7 @@ export function lensDeepLinkFor(fileIds: string | readonly string[]): string {
       panel: "scientific-viewer",
       resourceFileIds: typeof fileIds === "string" ? [fileIds] : [...fileIds],
       resourceCollectionId: null,
+      noteId: null,
     }
   );
 }

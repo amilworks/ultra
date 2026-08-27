@@ -18,6 +18,7 @@ import {
   getPhaseDetail,
   getPhaseLabel,
 } from "@/lib/runStepCopy";
+import { isRedactedRunEvent } from "@/features/chat/run-events";
 
 type ChatRunStepsProps = {
   runEvents: RunEvent[];
@@ -68,6 +69,9 @@ const TOOL_LABELS: Record<string, string> = {
   resource_lookup: "Resolving your resources",
   search_bisque_resources: "Searching your BisQue library",
   search_resources: "Searching your resources",
+  search_notes: "Searching your Notes",
+  read_note: "Reading a Note",
+  propose_note_append: "Preparing a Note update",
   stage_git_repo_for_analysis: "Cloning a repository",
   stage_resource_for_analysis: "Staging a resource",
   stage_uploaded_files_for_analysis: "Preparing your files",
@@ -201,13 +205,14 @@ export const buildStepItems = (
     }
     const nestedPayload = toRecord(payload.payload);
     const eventType = String(event.event_type || "").trim().toLowerCase();
-    const detail = cleanDetail(payload.message);
+    const redacted = isRedactedRunEvent(event);
+    const detail = redacted ? null : cleanDetail(payload.message);
     if (eventType === "trace.reasoning.delta") {
       upsertStep("reasoning", {
         id: "reasoning",
         kind: "phase",
         label: "Thinking",
-        detail: cleanDetail(payload.text),
+        detail: redacted ? null : cleanDetail(payload.text),
         status: toStepStatus(payload.status ?? "running"),
       });
       return;
@@ -220,7 +225,7 @@ export const buildStepItems = (
       if (toolName.toLowerCase() === "write_todos") {
         // One durable "plan" step for the whole run: write_todos replaces the
         // full list each call, so the latest event's todos are the current plan.
-        const todos = parsePlanTodos(toRecord(payload.input)?.todos);
+        const todos = redacted ? [] : parsePlanTodos(toRecord(payload.input)?.todos);
         const done = todos.filter((todo) => todo.status === "completed").length;
         upsertStep("plan", {
           id: "plan",
@@ -240,11 +245,13 @@ export const buildStepItems = (
         kind: "tool",
         label: formatToolLabel(toolName),
         detail:
-          detail ??
-          cleanDetail(payload.text) ??
-          cleanDetail(payload.output_tail) ??
-          cleanDetail(payload.command_preview) ??
-          cleanDetail(payload.command),
+          redacted
+            ? null
+            : detail ??
+              cleanDetail(payload.text) ??
+              cleanDetail(payload.output_tail) ??
+              cleanDetail(payload.command_preview) ??
+              cleanDetail(payload.command),
         status: statusFromV2ToolEvent(eventType, payload),
       });
       return;
@@ -327,7 +334,7 @@ export const buildStepItems = (
         id: key,
         kind: "tool",
         label: formatToolLabel(toolName),
-        detail: cleanDetail(event.message),
+        detail: event.redacted === true ? null : cleanDetail(event.message),
         status: toStepStatus(event.event),
       });
     });

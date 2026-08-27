@@ -98,6 +98,9 @@ type ServerDeps struct {
 	// captioner lazily generates + disk-caches academic-style captions for run-output
 	// figures via a grounded VLM. nil/disabled = a graceful no-op (no captions).
 	captioner *imageCaptioner
+	// noteModelFeatures are server-authoritative rollout gates for model Notes
+	// and mandatory browser revision CAS.
+	noteModelFeatures noteModelFeatureConfig
 }
 
 type workerAuthState int
@@ -121,6 +124,9 @@ var (
 	workerEpisodicSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/episodic-search$`)
 	workerResourceSearchPattern  = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-search$`)
 	workerResourceResolvePattern = regexp.MustCompile(`^/v[12]/runs/[^/]+/resource-resolve$`)
+	workerNoteSearchPattern      = regexp.MustCompile(`^/v[12]/runs/[^/]+/note-search$`)
+	workerNoteReadPattern        = regexp.MustCompile(`^/v[12]/runs/[^/]+/note-read$`)
+	workerNoteProposalPattern    = regexp.MustCompile(`^/v[12]/runs/[^/]+/note-append-proposals$`)
 	workerDataAgentJobPattern    = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+$`)
 	workerDataAgentLeasePattern  = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/lease$`)
 	workerDataAgentStatusPattern = regexp.MustCompile(`^/v[12]/data-agent/jobs/[^/]+/status$`)
@@ -180,6 +186,12 @@ func isWorkerScopedEndpoint(r *http.Request) bool {
 	case r.Method == http.MethodPost && workerResourceSearchPattern.MatchString(path):
 		return true
 	case r.Method == http.MethodPost && workerResourceResolvePattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerNoteSearchPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerNoteReadPattern.MatchString(path):
+		return true
+	case r.Method == http.MethodPost && workerNoteProposalPattern.MatchString(path):
 		return true
 	case workerLeasePathPattern.MatchString(path):
 		return true
@@ -600,6 +612,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 	if deps.captioner == nil {
 		deps.captioner = newImageCaptionerFromEnv(deps.ArtifactRoot)
 	}
+	if !deps.noteModelFeatures.initialized {
+		deps.noteModelFeatures = newNoteModelFeatureConfigFromEnv()
+	}
 	if !deps.WorkOS.Enabled() {
 		_ = deps.ensureLocalBootstrapAccounts(context.Background())
 	}
@@ -694,6 +709,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Get("/notes/{note_id}", deps.handleGetNote)
 			r.Patch("/notes/{note_id}", deps.handleUpdateNote)
 			r.Delete("/notes/{note_id}", deps.handleDeleteNote)
+			r.Get("/note-append-proposals/{proposal_id}", deps.handleGetNoteAppendProposal)
+			r.Post("/note-append-proposals/{proposal_id}/commit", deps.handleCommitNoteAppendProposal)
+			r.Post("/note-append-operations/{operation_id}/undo", deps.handleUndoNoteAppendOperation)
 			r.Get("/resources", deps.handleListResources)
 			r.Post("/resources/delete/bulk", deps.handleBulkDeleteResources)
 			r.Post("/resources/restore/bulk", deps.handleBulkRestoreResources)
@@ -753,6 +771,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/runs/{run_id}/episodic-search", deps.handleEpisodicSearch)
 			r.Post("/runs/{run_id}/resource-search", deps.handleRunResourceSearch)
 			r.Post("/runs/{run_id}/resource-resolve", deps.handleRunResourceResolve)
+			r.Post("/runs/{run_id}/note-search", deps.handleModelNoteSearch)
+			r.Post("/runs/{run_id}/note-read", deps.handleModelNoteRead)
+			r.Post("/runs/{run_id}/note-append-proposals", deps.handleModelNoteAppendProposal)
 			r.Post("/runs/{run_id}/lease", deps.handleAcquireRunLease)
 			r.Patch("/runs/{run_id}/lease", deps.handleRenewRunLease)
 			r.Delete("/runs/{run_id}/lease", deps.handleReleaseRunLease)
@@ -898,7 +919,9 @@ func handlePublicConfig(deps ServerDeps) http.HandlerFunc {
 			"app_version":   deps.Version,
 			"admin_enabled": deps.DevAdminEnabled,
 			"features": map[string]bool{
-				"v2_runs": true,
+				"v2_runs":               true,
+				"model_notes_read":      deps.noteModelFeatures.readEnabled,
+				"model_notes_proposals": deps.noteModelFeatures.proposalsAvailable(),
 			},
 		}
 		if rootURL, links := publicBisqueNavLinks(deps.bisqueRootURL()); rootURL != "" && links != nil {
@@ -3461,6 +3484,68 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	idempotencyKey := idempotencyKeyFromRequest(r, req.IdempotencyKey)
+	rawSelectionContext := domain.JSONMap(req.SelectionContext)
+	requestedNoteScope, noteAccessPresent, noteAccessValid := domain.ParseNoteAccessScope(rawSelectionContext)
+	if !noteAccessValid {
+		writeError(w, http.StatusBadRequest, errors.New("selection_context.note_access is invalid"))
+		return
+	}
+	selectionContext := rawSelectionContext
+	idempotentNoteReplay := false
+	if noteAccessPresent && idempotencyKey != "" {
+		existing, found, err := deps.Runs.FindRunByIdempotencyKey(
+			r.Context(), threadID, principal.UserID, idempotencyKey,
+		)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		if found {
+			storedScope, stored := domain.NoteAccessScopeFromRun(existing)
+			if !stored || !domain.NoteAccessRequestMatchesStoredScope(requestedNoteScope, storedScope) {
+				writeStoreError(w, store.ErrConflict)
+				return
+			}
+			// The first create sealed owner-authorized Note revisions into the
+			// run. Reuse that canonical capability before any mutable Note lookup
+			// so a retry remains valid after an edit or hard delete.
+			selectionContext = domain.CanonicalNoteAccessSelection(rawSelectionContext, storedScope)
+			idempotentNoteReplay = true
+		}
+	}
+	if noteAccessPresent && evaluationProfile != "" {
+		writeError(w, http.StatusBadRequest, errors.New("protected evaluation profiles forbid Notes access"))
+		return
+	}
+	if noteAccessPresent {
+		if fields := incompatibleNoteAccessSelections(req); len(fields) > 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf(
+				"selection_context.note_access cannot be combined with %s",
+				strings.Join(fields, ", "),
+			))
+			return
+		}
+		if !idempotentNoteReplay && !deps.noteModelFeatures.readEnabled {
+			writeError(w, http.StatusServiceUnavailable, errors.New("model Notes access is disabled"))
+			return
+		}
+		if !idempotentNoteReplay {
+			authorized, _, err := deps.authorizeRunNoteSelection(
+				r.Context(), principal.UserID, rawSelectionContext,
+			)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrNoteRevisionConflict) {
+					writeNoteStoreError(w, err)
+				} else {
+					writeError(w, http.StatusBadRequest, err)
+				}
+				return
+			}
+			selectionContext = authorized
+		}
+	}
+	req.SelectionContext = map[string]any(selectionContext)
 	req.FileIDs = uniqueTrimmedStringValues(req.FileIDs)
 	var selectedResources []domain.ResourceRecord
 	if len(req.FileIDs) > 0 {
@@ -3491,6 +3576,11 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 	delete(runMetadata, domain.EvaluationProfileMetadataKey)
 	delete(runMetadata, domain.RemoteMutationIntentsMetadataKey)
 	delete(runMetadata, domain.BisqueAccountBindingMetadataKey)
+	delete(runMetadata, domain.NotePrivacyLineageMetadataKey)
+	delete(runMetadata, domain.ModelNotesProposalsEnabledMetadataKey)
+	// Selection context is a reserved, independently authorized run input. It
+	// cannot be minted through free-form metadata.
+	delete(runMetadata, "selection_context")
 	jobMetadata := domain.JSONMap{}
 	if sessionID, binding, bound := deps.bisqueRunBindingFromRequest(r, principal); bound {
 		runMetadata[domain.BisqueAccountBindingMetadataKey] = binding
@@ -3504,32 +3594,56 @@ func (deps ServerDeps) handleCreateRun(w http.ResponseWriter, r *http.Request) {
 		remoteMutationIntents = nil
 	}
 	run, err := deps.Runs.CreateRun(r.Context(), runcontrol.CreateRunRequest{
-		ThreadID:              threadID,
-		UserID:                principal.UserID,
-		Goal:                  req.Goal,
-		EvaluationProfile:     evaluationProfile,
-		RemoteMutationIntents: remoteMutationIntents,
-		Messages:              req.Messages,
-		FileIDs:               req.FileIDs,
-		ResourceURIs:          req.ResourceURIs,
-		DatasetURIs:           req.DatasetURIs,
-		SelectedToolNames:     req.SelectedToolNames,
-		KnowledgeContext:      domain.JSONMap(req.KnowledgeContext),
-		WorkflowHint:          domain.JSONMap(req.WorkflowHint),
-		SelectionContext:      domain.JSONMap(req.SelectionContext),
-		ReasoningMode:         req.ReasoningMode,
-		Budgets:               domain.JSONMap(req.Budgets),
-		Benchmark:             domain.JSONMap(req.Benchmark),
-		ResourceDescriptors:   req.ResourceDescriptors,
-		IdempotencyKey:        idempotencyKeyFromRequest(r, req.IdempotencyKey),
-		Metadata:              metadataWithPrincipal(runMetadata, principal),
-		JobMetadata:           jobMetadata,
+		ThreadID:                   threadID,
+		UserID:                     principal.UserID,
+		Goal:                       req.Goal,
+		EvaluationProfile:          evaluationProfile,
+		RemoteMutationIntents:      remoteMutationIntents,
+		Messages:                   req.Messages,
+		FileIDs:                    req.FileIDs,
+		ResourceURIs:               req.ResourceURIs,
+		DatasetURIs:                req.DatasetURIs,
+		SelectedToolNames:          req.SelectedToolNames,
+		KnowledgeContext:           domain.JSONMap(req.KnowledgeContext),
+		WorkflowHint:               domain.JSONMap(req.WorkflowHint),
+		SelectionContext:           domain.JSONMap(req.SelectionContext),
+		ReasoningMode:              req.ReasoningMode,
+		Budgets:                    domain.JSONMap(req.Budgets),
+		Benchmark:                  domain.JSONMap(req.Benchmark),
+		ResourceDescriptors:        req.ResourceDescriptors,
+		ModelNotesProposalsEnabled: noteAccessPresent && deps.noteModelFeatures.proposalsAvailable(),
+		IdempotencyKey:             idempotencyKey,
+		Metadata:                   metadataWithPrincipal(runMetadata, principal),
+		JobMetadata:                jobMetadata,
 	})
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func incompatibleNoteAccessSelections(req createRunRequest) []string {
+	fields := make([]string, 0, 7)
+	if len(req.FileIDs) > 0 {
+		fields = append(fields, "file_ids")
+	}
+	if len(req.ResourceURIs) > 0 || len(req.ResourceDescriptors) > 0 {
+		fields = append(fields, "resource selections")
+	}
+	if len(req.DatasetURIs) > 0 {
+		fields = append(fields, "dataset_uris")
+	}
+	if len(req.KnowledgeContext) > 0 {
+		fields = append(fields, "knowledge_context")
+	}
+	if len(req.WorkflowHint) > 0 {
+		fields = append(fields, "workflow_hint")
+	}
+	if len(req.SelectedToolNames) > 0 {
+		fields = append(fields, "selected_tool_names")
+	}
+	return fields
 }
 
 func idempotencyKeyFromRequest(r *http.Request, bodyValue string) string {

@@ -85,3 +85,66 @@ describe("AppSettingsDialog Profile save", () => {
     expect(saveButton).toHaveFocus();
   });
 });
+
+describe("AppSettingsDialog BisQue unlink", () => {
+  it("keeps the unlink control focusable while a failed request can be retried", async () => {
+    let rejectUnlink: (reason?: unknown) => void = () => undefined;
+    const onUnlinkBisqueAccount = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectUnlink = reject;
+        })
+    );
+
+    render(
+      <AppSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        initialTab="bisque"
+        authUser="ada@example.com"
+        authMode="workos"
+        authIsAdmin={false}
+        bisqueCredentialsLinked
+        themePreference="system"
+        resolvedTheme="light"
+        bisqueNavLinks={null}
+        onThemePreferenceChange={vi.fn()}
+        onOpenAdmin={vi.fn()}
+        onLogout={vi.fn(async () => undefined)}
+        onUnlinkBisqueAccount={onUnlinkBisqueAccount}
+        onLinkBisqueAccount={vi.fn(async () => ({ imageCount: 0 }))}
+        formatError={(error) =>
+          error instanceof Error ? error.message : "Unable to unlink BisQue"
+        }
+      />
+    );
+
+    const unlinkButton = screen.getByRole("button", { name: "Unlink account" });
+    unlinkButton.focus();
+    fireEvent.click(unlinkButton);
+
+    await waitFor(() => expect(unlinkButton).toHaveAccessibleName("Unlinking..."));
+    expect(unlinkButton).toHaveFocus();
+    expect(unlinkButton).not.toBeDisabled();
+    expect(unlinkButton).toHaveAttribute("aria-disabled", "true");
+
+    fireEvent.click(unlinkButton);
+    expect(onUnlinkBisqueAccount).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      rejectUnlink(new Error("BisQue service unavailable"));
+    });
+
+    await waitFor(() => expect(unlinkButton).toHaveAccessibleName("Unlink account"));
+    expect(unlinkButton).toHaveFocus();
+    expect(unlinkButton).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByText("BisQue account linked")).toBeInTheDocument();
+    const errorMessage = screen.getByText("BisQue service unavailable");
+    expect(errorMessage).toBeVisible();
+
+    onUnlinkBisqueAccount.mockResolvedValueOnce(undefined);
+    fireEvent.click(unlinkButton);
+
+    await waitFor(() => expect(onUnlinkBisqueAccount).toHaveBeenCalledTimes(2));
+  });
+});

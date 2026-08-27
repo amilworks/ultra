@@ -36,7 +36,12 @@ describe("model Notes release gates", () => {
     expect(appSource).toMatch(
       /onOpenNotes=\{\s*modelNotesReadEnabled\s*\? \(\) => setComposerNotePickerOpen\(true\)\s*: undefined\s*\}/
     );
-    expect(appSource).toMatch(/\{modelNotesReadEnabled \? \(\s*<NoteContextPicker/);
+    expect(appSource).toMatch(
+      /\{modelNotesReadEnabled && composerNotePickerOpen \? \(\s*<Suspense fallback=\{null\}>\s*<LazyNoteContextPicker/
+    );
+    expect(appSource).toContain(
+      'const loadNoteContextPickerModule = () => import("./components/chat/NoteContextPicker")'
+    );
     const attachMenu = blockFrom("function ComposerAttachMenu", "export function App()");
     expect(attachMenu).toMatch(/onOpenNotes\?: \(\) => void/);
     expect(attachMenu).toMatch(/\{onOpenNotes \? \(/);
@@ -44,6 +49,18 @@ describe("model Notes release gates", () => {
 
   it("keeps the browser mock opted in for visual and interaction QA", () => {
     expect(mockApiSource.match(/features: \{ model_notes_read: true \}/g)).toHaveLength(2);
+  });
+
+  it("loads render-heavy Notes chat surfaces only when they are needed", () => {
+    expect(appSource).toContain(
+      'const loadNoteRunContextModule = () => import("./components/chat/NoteRunContext")'
+    );
+    expect(appSource).toMatch(
+      /!isStreamingAssistant && showNoteRunContext \? \(\s*<Suspense fallback=\{null\}>\s*<LazyNoteRunContext/
+    );
+    expect(appSource).toMatch(
+      /toolName === "read_note" \|\| toolName === "propose_note_append"/
+    );
   });
 
   it("fails mixed Notes/analysis turns before reads, imports, uploads, or runs", () => {

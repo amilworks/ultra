@@ -110,11 +110,7 @@ import {
 } from "./lib/transcript-find";
 import { textFromSelection } from "./lib/selection-capture";
 import { TranscriptFindBar } from "./components/chat/TranscriptFindBar";
-import {
-  NoteContextPicker,
-  type SelectedNoteChip,
-} from "./components/chat/NoteContextPicker";
-import { NoteRunContext } from "./components/chat/NoteRunContext";
+import type { SelectedNoteChip } from "./components/chat/NoteContextPicker";
 // Type-only: erased at compile time, so react-virtuoso itself stays lazy.
 import type { VirtuosoHandle } from "react-virtuoso";
 import {
@@ -497,6 +493,8 @@ const loadAuthScreenModule = () => import("./components/auth/AuthScreen");
 const loadTrainingDashboardModule = () => import("./components/TrainingDashboard");
 const loadScientificViewerPageModule = () => import("./components/ScientificViewerPage");
 const loadResourceBrowserModule = () => import("./components/ResourceBrowser");
+const loadNoteContextPickerModule = () => import("./components/chat/NoteContextPicker");
+const loadNoteRunContextModule = () => import("./components/chat/NoteRunContext");
 const loadComposerSlashMenuModule = () => import("./components/chat/ComposerSlashMenu");
 const loadChatRunStepsModule = () => import("./components/chat/ChatRunSteps");
 const loadInlineDataQuickPreviewModule = () =>
@@ -575,6 +573,14 @@ const LazyResourceBrowser = lazyNamed(
   "ResourceBrowser"
 );
 const LazyNotesPage = lazyNamed(() => import("./components/NotesPage"), "NotesPage");
+const LazyNoteContextPicker = lazyNamed(
+  loadNoteContextPickerModule,
+  "NoteContextPicker"
+);
+const LazyNoteRunContext = lazyNamed(
+  loadNoteRunContextModule,
+  "NoteRunContext"
+);
 const LazyComposerSlashMenu = lazyNamed(
   loadComposerSlashMenuModule,
   "ComposerSlashMenu"
@@ -2083,6 +2089,15 @@ const uniqueFileIds: (rows: string[]) => string[] = dedupeFileIds;
 const sameIdList = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((id, index) => id === b[index]);
 
+const hasNoteRunContextEvents = (events: readonly RunEvent[]): boolean =>
+  events.some((event) => {
+    if (String(event.event_type || "").trim() !== "tool_call.completed") {
+      return false;
+    }
+    const toolName = String(event.payload?.tool_name ?? "").trim();
+    return toolName === "read_note" || toolName === "propose_note_append";
+  });
+
 type ConversationTranscriptActions = {
   onStopConversation: () => void;
   onStreamingRenderComplete: (messageId: string) => void;
@@ -2218,6 +2233,10 @@ const ConversationMessageRow = memo(
           ? ""
           : (message.reasoning ?? "").trim() || reasoningTextFromRunEvents(runEvents),
       [message.reasoning, runEvents]
+    );
+    const showNoteRunContext = useMemo(
+      () => hasNoteRunContextEvents(runEvents),
+      [runEvents]
     );
     const showAssistantMetadataLine = Boolean(elapsedLabel) || Boolean(tokenUsage);
     if (!isAssistant) {
@@ -2409,13 +2428,15 @@ const ConversationMessageRow = memo(
               {displayContent}
             </MessageContent>
           )}
-          {!isStreamingAssistant ? (
-            <NoteRunContext
-              runEvents={runEvents}
-              apiClient={apiClient}
-              onOpenNote={actions.onOpenNote}
-              onNoteChanged={actions.onNoteChanged}
-            />
+          {!isStreamingAssistant && showNoteRunContext ? (
+            <Suspense fallback={null}>
+              <LazyNoteRunContext
+                runEvents={runEvents}
+                apiClient={apiClient}
+                onOpenNote={actions.onOpenNote}
+                onNoteChanged={actions.onNoteChanged}
+              />
+            </Suspense>
           ) : null}
           {message.quickPreviewFileIds &&
           message.quickPreviewFileIds.length > 0 &&
@@ -15715,18 +15736,20 @@ export function App() {
               document.body
             )
           : null}
-        {modelNotesReadEnabled ? (
-          <NoteContextPicker
-            apiClient={apiClient}
-            open={composerNotePickerOpen}
-            selectedNoteIds={(
-              activeConversation?.queuedFollowup
-                ? activeConversation.queuedFollowupNotes
-                : activeConversation?.selectedNotes ?? []
-            ).map((note) => note.note_id)}
-            onOpenChange={setComposerNotePickerOpen}
-            onSelect={attachNoteToActiveConversation}
-          />
+        {modelNotesReadEnabled && composerNotePickerOpen ? (
+          <Suspense fallback={null}>
+            <LazyNoteContextPicker
+              apiClient={apiClient}
+              open={composerNotePickerOpen}
+              selectedNoteIds={(
+                activeConversation?.queuedFollowup
+                  ? activeConversation.queuedFollowupNotes
+                  : activeConversation?.selectedNotes ?? []
+              ).map((note) => note.note_id)}
+              onOpenChange={setComposerNotePickerOpen}
+              onSelect={attachNoteToActiveConversation}
+            />
+          </Suspense>
         ) : null}
         {/* Message delete. Deliberately the same dialog grammar as conversation
             delete: the two differ in scope, not in kind, and a lighter-weight

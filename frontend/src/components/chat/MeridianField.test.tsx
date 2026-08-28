@@ -154,27 +154,26 @@ describe("MeridianField", () => {
       entry[1](timestamp);
     };
 
-    const { rerender, unmount } = render(
-      <MeridianField phaseKey={4} solveStartedAtMs={100} />
-    );
+    const { rerender, unmount } = render(<MeridianField phaseKey={4} />);
     expect(frames).toHaveLength(1);
     runNextFrame(100);
     runNextFrame(1_500);
     runNextFrame(2_900);
     expect(frames).toHaveLength(0);
 
-    rerender(<MeridianField phaseKey={4} solveStartedAtMs={100} />);
+    rerender(<MeridianField phaseKey={4} />);
     expect(frames).toHaveLength(0);
 
-    rerender(<MeridianField phaseKey={5} solveStartedAtMs={3_000} />);
+    performanceNow.mockReturnValue(3_000);
+    rerender(<MeridianField phaseKey={5} />);
     expect(frames).toHaveLength(1);
     expect(requestAnimationFrame).toHaveBeenCalledTimes(4);
 
     // Conversation hydration can briefly unmount the welcome stage. The solve
-    // origin lives above it, so a later remount settles instead of replaying.
+    // origin survives that remount, so it settles instead of replaying.
     unmount();
     performanceNow.mockReturnValue(6_000);
-    render(<MeridianField phaseKey={5} solveStartedAtMs={3_000} />);
+    render(<MeridianField phaseKey={5} />);
     expect(frames).toHaveLength(0);
     expect(requestAnimationFrame).toHaveBeenCalledTimes(4);
   });
@@ -194,7 +193,7 @@ describe("MeridianField", () => {
     const requestAnimationFrame = vi.fn();
     vi.stubGlobal("requestAnimationFrame", requestAnimationFrame);
 
-    render(<MeridianField phaseKey={1} solveStartedAtMs={0} />);
+    render(<MeridianField phaseKey={6} />);
 
     expect(context.clearRect).toHaveBeenCalledOnce();
     expect(requestAnimationFrame).not.toHaveBeenCalled();

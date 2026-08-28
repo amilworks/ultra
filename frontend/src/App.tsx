@@ -298,7 +298,6 @@ import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
-import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -643,6 +642,10 @@ const LazyToolResultCardSection = lazyNamed(
 );
 const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
 const LazyReportCanvas = lazyNamed(loadReportCanvasModule, "ReportCanvas");
+const LazyMeridianField = lazyNamed(
+  () => import("./components/chat/MeridianField"),
+  "MeridianField"
+);
 
 let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
 let adminPanelPreloadPromise: Promise<unknown> | null = null;
@@ -2679,7 +2682,6 @@ type ConversationTranscriptProps = {
   isPhoneView: boolean;
   welcomeName: string | null;
   welcomeNonce: number;
-  welcomeSolveStartedAtMs: number;
   messages: UiMessage[];
   blankChatTokenUsage: TokenUsageResponse | null;
   blankChatUsageLoading: boolean;
@@ -2704,7 +2706,6 @@ const ConversationTranscript = memo(
     isPhoneView,
     welcomeName,
     welcomeNonce,
-    welcomeSolveStartedAtMs,
     messages,
     blankChatTokenUsage,
     blankChatUsageLoading,
@@ -2854,10 +2855,11 @@ const ConversationTranscript = memo(
               </div>
             ) : (
               <div className="blank-chat-welcome">
-                <MeridianField
-                  phaseKey={welcomeNonce}
-                  solveStartedAtMs={welcomeSolveStartedAtMs}
-                />
+                <Suspense
+                  fallback={<div className="meridian-field" aria-hidden="true" />}
+                >
+                  <LazyMeridianField phaseKey={welcomeNonce} />
+                </Suspense>
                 <div className="blank-chat-welcome-greeting">
                   {welcomeName ? (
                     <p className="blank-chat-welcome-eyebrow">
@@ -2913,8 +2915,6 @@ const ConversationTranscript = memo(
     previousProps.isPhoneView === nextProps.isPhoneView &&
     previousProps.welcomeName === nextProps.welcomeName &&
     previousProps.welcomeNonce === nextProps.welcomeNonce &&
-    previousProps.welcomeSolveStartedAtMs ===
-      nextProps.welcomeSolveStartedAtMs &&
     previousProps.messages === nextProps.messages &&
     previousProps.findTarget === nextProps.findTarget &&
     previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
@@ -7565,14 +7565,9 @@ export function App() {
   );
 
   const [welcomeNonce, setWelcomeNonce] = useState(0);
-  const welcomeSolveStartedAtRef = useRef(
-    typeof performance === "undefined" ? 0 : performance.now()
-  );
   const createNewConversation = useCallback((): void => {
     // Advance the rotating welcome prompt on every new-chat action, even when a blank
     // draft is reused (so the prompt still changes when the user clicks New chat).
-    welcomeSolveStartedAtRef.current =
-      typeof performance === "undefined" ? 0 : performance.now();
     setWelcomeNonce((value) => value + 1);
     const reusableBlankDraft = findReusableBlankDraftConversation(
       conversations,
@@ -15485,7 +15480,6 @@ export function App() {
                   isPhoneView={isPhoneView}
                   welcomeName={deriveFirstName(authUser)}
                   welcomeNonce={welcomeNonce}
-                  welcomeSolveStartedAtMs={welcomeSolveStartedAtRef.current}
                   messages={activeMessages}
                   blankChatTokenUsage={blankChatTokenUsage}
                   blankChatUsageLoading={blankChatUsageLoading}

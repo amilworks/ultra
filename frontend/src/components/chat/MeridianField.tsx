@@ -325,14 +325,17 @@ function drawInvariant(
   context.fillRect(anchorX - 1.35, anchorY - 1.35, 2.7, 2.7);
 }
 
+// Hydration can briefly remount the blank-chat stage. Keep the solve origin at
+// module scope so the same phase settles instead of visibly replaying.
+let persistedPhaseKey: number | null = null;
+let persistedSolveOriginMs = 0;
+
 export function MeridianField({
   className,
   phaseKey = 0,
-  solveStartedAtMs,
 }: {
   className?: string;
   phaseKey?: number;
-  solveStartedAtMs?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -494,16 +497,17 @@ export function MeridianField({
     const reducedMotion =
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     let animationFrame: number | null = null;
-    let solveOriginMs = solveStartedAtMs ?? null;
+    if (persistedPhaseKey !== phaseKey) {
+      persistedPhaseKey = phaseKey;
+      persistedSolveOriginMs = performance.now();
+    }
+    const solveOriginMs = persistedSolveOriginMs;
     currentPhase = reducedMotion
       ? 1
-      : solveOriginMs === null
-        ? 0
-        : registrationSolvePhase(performance.now() - solveOriginMs);
+      : registrationSolvePhase(performance.now() - solveOriginMs);
     draw(currentPhase);
 
     const advanceSolve = (timestamp: number): void => {
-      solveOriginMs ??= timestamp;
       currentPhase = registrationSolvePhase(timestamp - solveOriginMs);
       draw(currentPhase);
       if (currentPhase < 1) {
@@ -554,7 +558,7 @@ export function MeridianField({
       resizeObserver?.disconnect();
       themeObserver?.disconnect();
     };
-  }, [phaseKey, solveStartedAtMs]);
+  }, [phaseKey]);
 
   return (
     <canvas

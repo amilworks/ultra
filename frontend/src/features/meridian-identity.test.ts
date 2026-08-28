@@ -312,9 +312,10 @@ describe("the composer — calm focus, and a baseline that records", () => {
 describe("the field — one impossibility, welcome stage only", () => {
   it("mounts MeridianField on the blank welcome and nowhere else", () => {
     expect(appSource).toMatch(
-      /blank-chat-welcome">\s*<MeridianField\s+phaseKey=\{welcomeNonce\}\s+solveStartedAtMs=\{welcomeSolveStartedAtMs\}/
+      /blank-chat-welcome">[\s\S]{0,240}<LazyMeridianField phaseKey=\{welcomeNonce\} \/>/
     );
-    expect(appSource.match(/<MeridianField/g)).toHaveLength(1);
+    expect(appSource.match(/<LazyMeridianField/g)).toHaveLength(1);
+    expect(appSource).toContain('import("./components/chat/MeridianField")');
   });
 
   it("stays decoration: hidden from the tree, inert to the pointer", () => {

@@ -5,16 +5,23 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
+from langchain.agents.middleware import ModelRequest
+from langchain.agents.middleware.types import ModelResponse
 from langchain.tools import ToolRuntime
+from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import Field
 from ultra_deepagents.agent import (
+    UltraRunContextPromptMiddleware,
     build_notes_run_context_brief,
     build_research_agent,
+    build_run_context_brief,
     build_system_prompt,
 )
 from ultra_deepagents.async_delegation import async_subagent_context_payload
@@ -971,6 +978,8 @@ def test_agent_registers_only_scoped_leased_coordinator_note_tools(monkeypatch):
     assert "intentionally narrow tool surface" in captured["system_prompt"]
     assert 'search_notes` with `sort="recent"' in captured["system_prompt"]
     assert "then call\n`read_note`" in captured["system_prompt"]
+    assert "Name each Note by its human-readable title" in captured["system_prompt"]
+    assert "raw note IDs or revisions" in captured["system_prompt"]
     assert "Did I write" in captured["system_prompt"]
     assert "/memories" not in captured["system_prompt"]
     assert "/workspace" not in captured["system_prompt"]
@@ -990,11 +999,218 @@ def test_ordinary_agent_prompt_never_conflates_product_notes_with_internal_memor
     )
 
     prompt = build_system_prompt(_settings(), context)
+    brief = build_run_context_brief(context)
 
     assert "Ultra Notes is the user's separate, user-authored Notes library" in prompt
     assert "are not Ultra Notes" in prompt
     assert "Only say that\nyou searched, read, used, or updated an Ultra Note" in prompt
-    assert "do not substitute workspace or research memory" in prompt
+    assert 'lead with "I can\'t access Ultra Notes in this message."' in prompt
+    assert "Do not enumerate or summarize\nworkspace, research memory" in prompt
+    assert "only as a separate follow-up" in prompt
+    assert "Ultra Notes tools are unavailable for this message" in brief
+    assert "I can't access Ultra Notes in this message" in brief
+    assert "do not count, list, quote, or summarize" in brief
+
+
+def test_ordinary_notes_unavailable_guard_is_reinjected_after_message_compaction():
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-ordinary",
+        run_id="run-ordinary",
+        goal="What did I write in my Ultra Notes?",
+    )
+    middleware = UltraRunContextPromptMiddleware()
+
+    def model_prompt_for(messages: list[HumanMessage]) -> str:
+        captured: list[SystemMessage] = []
+
+        def handler(request: ModelRequest) -> ModelResponse:
+            if isinstance(request.system_message, SystemMessage):
+                captured.append(request.system_message)
+            return ModelResponse(result=[AIMessage(content="ok")])
+
+        request = ModelRequest(
+            model=cast(BaseChatModel, object()),
+            messages=messages,
+            system_message=SystemMessage(content="base prompt"),
+            runtime=cast(Any, SimpleNamespace(context=context)),
+        )
+        middleware.wrap_model_call(request, handler)
+        assert captured
+        return str(captured[0].content)
+
+    before = model_prompt_for([HumanMessage(content="What did I write in my Ultra Notes?")])
+    after = model_prompt_for(
+        [HumanMessage(content="Compacted conversation summary with prior messages replaced.")]
+    )
+
+    for prompt in (before, after):
+        assert "I can't access Ultra Notes in this message" in prompt
+        assert "do not count, list, quote, or summarize" in prompt
+
+
+def test_notes_request_without_typed_scope_gets_a_zero_tool_fail_closed_agent(monkeypatch):
+    import ultra_deepagents.agent as agent_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_agent",
+        lambda **kwargs: captured.update(kwargs) or "compiled",
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "create_deep_agent",
+        lambda **kwargs: pytest.fail(
+            "A Notes request without typed scope must not inherit ordinary corpora or tools"
+        ),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-ordinary",
+        run_id="run-ordinary",
+        goal="What about my notes on NPH?",
+    )
+
+    assert build_research_agent(_settings(), model=object(), context=context) == "compiled"
+    assert captured["tools"] == []
+    assert "## Ultra Notes unavailable" in captured["system_prompt"]
+    assert "/memories" not in captured["system_prompt"]
+    assert "/workspace" not in captured["system_prompt"]
+    assert "I can't access Ultra Notes" in captured["system_prompt"]
+    dynamic_brief = captured["middleware"][0]._brief(
+        SimpleNamespace(runtime=SimpleNamespace(context=context))
+    )
+    assert "Notes access for this run" not in dynamic_brief
+    assert "Ultra Notes tools are unavailable" in dynamic_brief
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "What about my notes on NPH?",
+        "And what about my NPH notes?",
+        "And my notes on NPH?",
+        "And my NPH notes?",
+        "What about NPH in my notes?",
+        "What about the NPH notes I wrote?",
+        "How about the note I wrote about calibration?",
+        "Search my notes for NPH.",
+        "Search Notes for NPH.",
+        "Can you search my Notes?",
+        "Read my Field Protocol note.",
+        "Did I write anything in my most recent note?",
+        "What do my Notes say about p53?",
+    ),
+)
+def test_notes_no_scope_fallback_recognizes_high_confidence_content_requests(goal):
+    import ultra_deepagents.agent as agent_module
+
+    assert agent_module._goal_requests_product_notes_access(goal)
+
+
+@pytest.mark.parametrize(
+    "goal",
+    (
+        "Read my notes in this PDF.",
+        "Use my notes in this PDF.",
+        "What about my notes on NPH in this PDF?",
+        "What about my notes below?",
+        "Review my meeting notes.",
+        "Search Notes in report.pdf.",
+        "How can I search my notes?",
+        "Can the model search my notes?",
+        "Are you able to search my notes?",
+        "Tell me whether you can search my notes.",
+        "What about Ultra Notes?",
+        "What about my Notes app?",
+        "What about my notes privacy?",
+        "What would happen if I asked what about my notes on NPH?",
+        "Review the question: What about my notes on NPH?",
+        "The assistant said it would search my notes.",
+        "Did you search my notes?",
+        'The prompt says, "search my notes for p53."',
+        '"Search my notes for p53."',
+        "> Search my notes for p53.",
+        "```text\nSearch my notes for p53.\n```",
+        "What about my notes on NPH? Actually, don't search.",
+        "What about my notes on NPH, but don't access them.",
+        "Don't search my notes.",
+        "Answer without reading my notes.",
+        "Search my notes. Stop searching.",
+        "Search files, not my Notes.",
+    ),
+)
+def test_notes_no_scope_fallback_leaves_non_content_or_contextual_requests_ordinary(goal):
+    import ultra_deepagents.agent as agent_module
+
+    assert not agent_module._goal_requests_product_notes_access(goal)
+
+
+def test_contextual_notes_request_without_scope_keeps_the_ordinary_agent(monkeypatch):
+    import ultra_deepagents.agent as agent_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_deep_agent",
+        lambda **kwargs: captured.update(kwargs) or "compiled",
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "create_agent",
+        lambda **kwargs: pytest.fail("Document notes are not an Ultra Notes content run"),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-ordinary",
+        run_id="run-ordinary",
+        goal="Read my notes in this PDF.",
+    )
+
+    assert build_research_agent(_settings(), model=object(), backend=object(), context=context) == (
+        "compiled"
+    )
+    assert "## Ultra Notes unavailable" not in captured["system_prompt"]
+
+
+def test_notes_product_privacy_question_does_not_masquerade_as_content_access(monkeypatch):
+    import ultra_deepagents.agent as agent_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        agent_module,
+        "create_deep_agent",
+        lambda **kwargs: captured.update(kwargs) or "compiled",
+    )
+    monkeypatch.setattr(
+        agent_module,
+        "create_agent",
+        lambda **kwargs: pytest.fail("A product privacy question is not a Notes content run"),
+    )
+    context = AgentRunContext(
+        assistant_id="ultra-research-agent",
+        org_id="org-1",
+        user_id="user-1",
+        project_id="project-1",
+        thread_id="thread-ordinary",
+        run_id="run-ordinary",
+        goal="Tell me whether my notes are private.",
+    )
+
+    assert build_research_agent(_settings(), model=object(), backend=object(), context=context) == (
+        "compiled"
+    )
+    assert "Ultra Notes is the user's separate" in captured["system_prompt"]
 
 
 def test_notes_agent_does_not_construct_a_durable_backend_or_inherit_caller_tools(
@@ -1111,6 +1327,7 @@ def test_notes_agent_dynamic_brief_never_advertises_absent_mixed_context_tools()
     brief = build_notes_run_context_brief(mixed)
 
     assert "Notes access for this run: search" in brief
+    assert "Ultra Notes tools are unavailable" not in brief
     assert "file-private" not in brief
     assert "resource-private" not in brief
     assert "dataset-private" not in brief
@@ -1118,6 +1335,11 @@ def test_notes_agent_dynamic_brief_never_advertises_absent_mixed_context_tools()
     assert "artifact-private" not in brief
     assert "stage_" not in brief
     assert "BisQue" not in brief
+
+    unavailable = build_notes_run_context_brief(mixed, notes_tools_available=False)
+    assert "Notes access for this run" not in unavailable
+    assert "Ultra Notes tools are unavailable for this message" in unavailable
+    assert "I can't access Ultra Notes in this message" in unavailable
 
 
 def test_agent_omits_notes_without_scope_lease_or_outside_cleanroom(monkeypatch):
@@ -1136,7 +1358,7 @@ def test_agent_omits_notes_without_scope_lease_or_outside_cleanroom(monkeypatch)
         ),
     )
 
-    def tool_names(context: AgentRunContext) -> set[str]:
+    def compiled_surface(context: AgentRunContext) -> dict:
         captured: dict = {}
 
         def compiler(**kwargs):
@@ -1146,7 +1368,10 @@ def test_agent_omits_notes_without_scope_lease_or_outside_cleanroom(monkeypatch)
         monkeypatch.setattr(agent_module, "create_deep_agent", compiler)
         monkeypatch.setattr(agent_module, "create_agent", compiler)
         build_research_agent(_settings(), model=object(), backend=object(), context=context)
-        return {getattr(tool, "name", "") for tool in captured["tools"]}
+        return captured
+
+    def tool_names(surface: dict) -> set[str]:
+        return {getattr(tool, "name", "") for tool in surface["tools"]}
 
     without_scope = AgentRunContext(
         assistant_id="a",
@@ -1158,19 +1383,27 @@ def test_agent_omits_notes_without_scope_lease_or_outside_cleanroom(monkeypatch)
         run_lease_worker_id="worker-1",
         run_lease_token="lease-secret",
     )
-    assert not (NOTE_TOOL_NAMES & tool_names(without_scope))
-    assert not (
-        NOTE_TOOL_NAMES
-        & tool_names(
-            AgentRunContext(
-                **{
-                    **_context().to_payload(),
-                    "selection_context": _context().selection_context,
-                }
-            )
-        )
+    assert not (NOTE_TOOL_NAMES & tool_names(compiled_surface(without_scope)))
+    missing_lease = AgentRunContext(
+        **{
+            **_context().to_payload(),
+            "selection_context": _context().selection_context,
+        }
     )
-    assert not (NOTE_TOOL_NAMES & tool_names(_context(evaluation_profile="test_cleanroom")))
+    for degraded_context in (
+        missing_lease,
+        _context(evaluation_profile="test_cleanroom"),
+    ):
+        surface = compiled_surface(degraded_context)
+        assert not (NOTE_TOOL_NAMES & tool_names(surface))
+        assert "## Ultra Notes unavailable" in surface["system_prompt"]
+        assert "I can't access Ultra Notes" in surface["system_prompt"]
+        notes_middleware = surface["middleware"][0]
+        dynamic_brief = notes_middleware._brief(
+            SimpleNamespace(runtime=SimpleNamespace(context=degraded_context))
+        )
+        assert "Notes access for this run" not in dynamic_brief
+        assert "Ultra Notes tools are unavailable" in dynamic_brief
 
 
 def test_async_delegation_strips_note_scope_and_lease_authority():

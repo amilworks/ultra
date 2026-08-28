@@ -1332,7 +1332,7 @@ describe("ApiClient V2 chat bridge", () => {
     ]);
   });
 
-  it("sends a stable idempotency key to V2 run creation", async () => {
+  it("sends a stable idempotency key and sealed Notes contract to V2 run creation", async () => {
     const encoder = new TextEncoder();
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;
@@ -1369,10 +1369,21 @@ describe("ApiClient V2 chat bridge", () => {
 
     const client = new ApiClient({ baseUrl: "https://ultra.example.org" });
     await client.chatStream({
-      messages: [{ role: "user", content: "retry-safe prompt" }],
+      messages: [{ role: "user", content: "What about my notes on NPH?" }],
       uploaded_files: [],
+      file_ids: [],
       conversation_id: "conversation-local-123",
-      goal: "retry-safe prompt",
+      goal: "What about my notes on NPH?",
+      selected_tool_names: [],
+      remote_mutation_intents: [],
+      selection_context: {
+        note_access: {
+          mode: "search",
+          notes: [],
+          allow_append_proposal: false,
+        },
+      },
+      workflow_hint: null,
       idempotency_key: "message-key-123",
     });
 
@@ -1392,6 +1403,18 @@ describe("ApiClient V2 chat bridge", () => {
     expect(headers.get("idempotency-key")).toBe("message-key-123");
     expect(JSON.parse(String(init.body))).toMatchObject({
       idempotency_key: "message-key-123",
+      goal: "What about my notes on NPH?",
+      file_ids: [],
+      selected_tool_names: [],
+      remote_mutation_intents: [],
+      selection_context: {
+        note_access: {
+          mode: "search",
+          notes: [],
+          allow_append_proposal: false,
+        },
+      },
+      workflow_hint: null,
     });
   });
 

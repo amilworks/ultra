@@ -290,6 +290,14 @@ def bisque_dataset_annotation_summary(
     return response
 
 
+# The @tool wrapper inside build_bisque_tools reuses this function's exact name,
+# so within that scope the bare name is a closure cell holding the DECORATED
+# StructuredTool — not this function. The wrapper must call through this
+# unshadowed alias; calling the bare name raised TypeError on every invocation
+# (12/12 production calls failed instantly, 2026-07-22 → 2026-08-18).
+_dataset_annotation_summary_impl = bisque_dataset_annotation_summary
+
+
 def list_bisque_module_runs(
     settings: RuntimeSettings,
     *,
@@ -749,7 +757,7 @@ def build_bisque_tools(
         on a large dataset.
         """
         return _json_text(
-            bisque_dataset_annotation_summary(
+            _dataset_annotation_summary_impl(
                 settings,
                 dataset_uniq=dataset_uniq,
                 max_images=max_images,

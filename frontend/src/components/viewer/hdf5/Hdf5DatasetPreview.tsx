@@ -777,13 +777,6 @@ function Hdf5TablePreview({ apiClient, summary }: Hdf5DatasetPreviewProps) {
 
   return (
     <div className="viewer-hdf-preview-body" data-hdf5-preview-kind={summary.preview_kind ?? "table"}>
-      <div className="viewer-hdf-preview-note">
-        <strong>Table preview</strong>
-        <span>
-          Use charts for a quick read on the sampled distribution, then move to rows when you need exact values from the bounded preview window.
-        </span>
-      </div>
-
       {tableLoading ? (
         <div className="viewer-empty">Loading table preview...</div>
       ) : tableError ? (

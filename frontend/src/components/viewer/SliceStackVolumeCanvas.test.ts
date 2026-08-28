@@ -84,6 +84,14 @@ describe("physical volume unit authority", () => {
 
     expect(resolveSpatialUnit(info)).toBe("units");
   });
+
+  it("keeps calibrated source spacing when a standalone volume has no named unit", () => {
+    expect(resolveSpatialUnit(undefined, { x: 1, y: 1, z: 2 })).toBe("units");
+  });
+
+  it("does not invent physical authority from incomplete standalone spacing", () => {
+    expect(resolveSpatialUnit(undefined, { x: 1, y: 1, z: null })).toBe("vox");
+  });
 });
 
 describe("volume delivery authority", () => {

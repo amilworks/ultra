@@ -1984,7 +1984,10 @@ const normalizedSpatialUnit = (value: unknown): string | null => {
   return unit;
 };
 
-export const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string => {
+export const resolveSpatialUnit = (
+  viewerInfo?: UploadViewerInfo | null,
+  deliveredSpacing?: UploadViewerInfo["metadata"]["physical_spacing"] | null
+): string => {
   const explicitUnit = normalizedSpatialUnit(viewerInfo?.metadata.physical_spacing_unit);
   if (explicitUnit) {
     return explicitUnit;
@@ -2028,7 +2031,9 @@ export const resolveSpatialUnit = (viewerInfo?: UploadViewerInfo | null): string
   if (spacingUnitValues.some((unit) => unit != null)) {
     return "vox";
   }
-  return viewerInfo?.metadata.physical_spacing ? "units" : "vox";
+  const hasDeliveredSpacing = [deliveredSpacing?.x, deliveredSpacing?.y, deliveredSpacing?.z]
+    .every((value) => typeof value === "number" && Number.isFinite(value) && value > 0);
+  return viewerInfo?.metadata.physical_spacing || hasDeliveredSpacing ? "units" : "vox";
 };
 
 export function SliceStackVolumeCanvas({
@@ -2124,7 +2129,9 @@ export function SliceStackVolumeCanvas({
     [viewerInfo?.axis_sizes, volumeSource?.axisSizes]
   );
   const spacing = volumeSource?.physicalSpacing ?? viewerInfo?.metadata.physical_spacing ?? null;
-  const geometrySpatialUnit = resolveSpatialUnit(viewerInfo);
+  // HDF5 previews provide a calibrated delivery grid directly through volumeSource.
+  // Its spacing remains authoritative even when the source format has no named unit.
+  const geometrySpatialUnit = resolveSpatialUnit(viewerInfo, spacing);
   const geometrySpacing = geometrySpatialUnit === "vox" ? null : spacing;
   const volumeDepth = Math.max(1, axisSizes.Z);
   const physicalGeometry = useMemo(
@@ -2551,7 +2558,7 @@ export function SliceStackVolumeCanvas({
     [displayState?.volume_camera_mode]
   );
   const volumeViewPreset = resolveVolumeViewPreset(displayState?.volume_view_preset);
-  const spatialUnit = resolveSpatialUnit(viewerInfo);
+  const spatialUnit = geometrySpatialUnit;
   const sliceCursorCue = useMemo(
     () =>
       resolveVolumeSliceCursorCue({

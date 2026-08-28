@@ -79,6 +79,15 @@ describe("Notes turn access", () => {
     "What do my Notes say about p53?",
     "Do my Notes mention calibration?",
     "What’s in my Notes about Simpson’s paradox?",
+    "What about my notes on NPH?",
+    "And what about my NPH notes?",
+    "And my notes on NPH?",
+    "What about NPH in my notes?",
+    "What about the NPH notes I wrote?",
+    "What about my notes on “NPH”?",
+    "How about my notes about p53?",
+    "And what about my lab notes regarding calibration?",
+    "How about the note I wrote about calibration?",
     "Use context from my notes",
     "Add this to my Field Protocol note",
     "Write this to my lab log",
@@ -173,6 +182,25 @@ describe("Notes turn access", () => {
     "Explain how Ultra Notes works.",
     "Compare Ultra Notes with Apple Notes.",
     "Tell me whether my notes are private.",
+    "What about Ultra Notes?",
+    "What about my Notes app?",
+    "What about my notes privacy?",
+    "What about whether you can search my notes?",
+    "What about my notes below?",
+    "What about my notes in this PDF?",
+    "What about my notes on NPH in this PDF?",
+    "What about my notes about NPH in the attached report?",
+    "What about my notes on NPH on this slide?",
+    "What about my notes on NPH in report.pdf?",
+    "What would happen if I asked what about my notes on NPH?",
+    "Review the question: What about my notes on NPH?",
+    "What about my notes on NPH without reading them?",
+    "What about my notes on NPH? Actually, don't search.",
+    "What about my notes on NPH? Actually, don’t search.",
+    "What about my notes on NPH, but don't access them.",
+    "What about my notes on NPH, but don’t access them.",
+    "What about my notes on NPH, but don't look at them.",
+    "What about my notes on NPH, but don’t look at them.",
     "Search my notes. Actually, don't search.",
     "Search my notes. Please don't search.",
     "Search my notes. Stop searching.",
@@ -226,6 +254,40 @@ describe("Notes turn access", () => {
     expect(
       notesSearchRequested("Review: 'What's the latest thing I wrote in my notes?'")
     ).toBe(false);
+  });
+
+  it("turns a natural topical Notes follow-up into visible broad search scope", () => {
+    const prompt = "What about my notes on NPH?";
+    expect(notesSearchScopeState(prompt)).toEqual({
+      active: true,
+      recoverableFromReferenceText: false,
+    });
+    expect(noteAccessForTurn(prompt, [])).toEqual({
+      mode: "search",
+      notes: [],
+      allow_append_proposal: false,
+    });
+    expect(noteAppendProposalRequested(prompt)).toBe(false);
+    expect(
+      noteAccessForTurn(prompt, [{ note_id: "unrelated", revision: 2 }])
+    ).toEqual({
+      mode: "search",
+      notes: [{ note_id: "unrelated", revision: 2 }],
+      allow_append_proposal: false,
+    });
+  });
+
+  it("keeps quoted, pasted, and reported elliptical Notes wording inert", () => {
+    const prompt = "What about my notes on NPH?";
+    expect(notesSearchRequested(`Explain the question “${prompt}”`)).toBe(false);
+    expect(notesSearchRequested(`The assistant asked, ${prompt}`)).toBe(false);
+    expect(notesSearchRequested(`Review this:\n${prompt}`, [prompt])).toBe(false);
+    expect(notesSearchRequested(`> ${prompt}`)).toBe(false);
+    expect(notesSearchRequested(`\`\`\`text\n${prompt}\n\`\`\``)).toBe(false);
+    expect(notesSearchScopeState(prompt, [prompt])).toEqual({
+      active: false,
+      recoverableFromReferenceText: true,
+    });
   });
 
   it("excludes exact inline paste provenance while preserving a request typed around it", () => {
@@ -674,7 +736,7 @@ describe("Notes turn access", () => {
     ).toBeNull();
   });
 
-  it("rejects every non-text analysis context for a Notes-enabled turn", () => {
+  it("rejects capability-bearing analysis context while keeping Pro Mode frictionless", () => {
     expect(notesTurnHasUnsupportedAnalysisContext({})).toBe(false);
     expect(
       notesTurnHasUnsupportedAnalysisContext({
@@ -701,7 +763,8 @@ describe("Notes turn access", () => {
     expect(notesTurnHasUnsupportedAnalysisContext({ pendingFileCount: 1 })).toBe(true);
     expect(notesTurnHasUnsupportedAnalysisContext({ activeUploadCount: 1 })).toBe(true);
     expect(notesTurnHasUnsupportedAnalysisContext({ externalResourceCount: 1 })).toBe(true);
-    expect(notesTurnHasUnsupportedAnalysisContext({ workflowSelected: true })).toBe(true);
+    expect(notesTurnHasUnsupportedAnalysisContext({ workflowId: "image_analysis" })).toBe(true);
+    expect(notesTurnHasUnsupportedAnalysisContext({ workflowId: "pro_mode" })).toBe(false);
     expect(notesTurnHasUnsupportedAnalysisContext({ selectedToolNames: ["bisque"] })).toBe(true);
     expect(
       notesTurnHasUnsupportedAnalysisContext({

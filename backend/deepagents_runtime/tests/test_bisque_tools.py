@@ -1462,3 +1462,60 @@ def test_bisque_count_tools_require_a_reference():
     assert bisque_dataset_member_count(_settings())["error"] == "dataset_uniq_required"
     assert bisque_image_annotation_count(_settings())["error"] == "image_uniq_required"
     assert bisque_dataset_annotation_summary(_settings())["error"] == "dataset_uniq_required"
+
+
+def test_bisque_tool_wrappers_never_shadow_their_implementations():
+    """The annotation-summary wrapper shared its raw function's exact name, so
+    inside build_bisque_tools the bare name was a closure cell holding the
+    DECORATED StructuredTool — the wrapper called the tool object instead of the
+    implementation and raised TypeError instantly on every production call
+    (12/12 failures across 2 users, 2026-07-22 → 2026-08-18), with agents
+    silently degrading to per-image iteration. Any tool whose body closes over
+    its own name is the same bug waiting; this guard bans the class."""
+    from ultra_deepagents.bisque.tools import build_bisque_tools
+
+    tools = build_bisque_tools(_settings(), context=_mutation_context("audit", "bisque.upload"))
+    checked = 0
+    for tool_obj in tools:
+        func = getattr(tool_obj, "func", None)
+        code = getattr(func, "__code__", None)
+        if code is None:
+            continue
+        checked += 1
+        assert tool_obj.name not in code.co_freevars, (
+            f"{tool_obj.name} closes over its own name — its body would call the "
+            "decorated tool object instead of the implementation"
+        )
+    assert checked >= 5, "expected to audit the registered bisque tool wrappers"
+
+
+def test_annotation_summary_wrapper_executes_the_implementation(monkeypatch):
+    """Invoke the REGISTERED wrapper (not the raw function) the way a run does:
+    the request must actually reach the control plane. The raw-function test
+    above stayed green for a month while every wrapper call failed."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from ultra_deepagents.bisque.tools import build_bisque_tools
+
+    _CaptureClient._captured = {}
+    _CaptureClient._response = {
+        "dataset_uniq": "00-ds",
+        "member_count": 106,
+        "images_with_annotations": 7,
+        "total_annotations": 15,
+        "annotated_images": [],
+    }
+    monkeypatch.setattr("httpx.Client", _CaptureClient)
+
+    context = _mutation_context("summarize annotations", "bisque.upload")
+    tools = build_bisque_tools(_settings(), context=context)
+    summary = next(t for t in tools if t.name == "bisque_dataset_annotation_summary")
+
+    raw = summary.func(runtime=SimpleNamespace(context=context), dataset_uniq="00-ds")
+    payload = _json.loads(raw)
+
+    assert _CaptureClient._captured["url"] == "http://control.test/v2/bisque/dataset-annotations"
+    assert _CaptureClient._captured["json"] == {"dataset_uniq": "00-ds"}
+    assert payload["ok"] is True
+    assert payload["images_with_annotations"] == 7

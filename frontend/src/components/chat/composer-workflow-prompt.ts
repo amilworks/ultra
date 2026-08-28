@@ -76,3 +76,43 @@ export const composeComposerWorkflowPromptForModel = (
   const joiner = /[:：]\s*$/.test(scaffold) ? " " : "\n\n";
   return `${scaffold}${joiner}${prompt}`;
 };
+
+export type ComposerWorkflowTurnContract = {
+  modelPrompt: string;
+  selectedToolNames: string[];
+  workflowHint: ComposerWorkflowPresetState["workflowHint"];
+};
+
+/**
+ * Resolves the workflow-owned portion of a chat turn's wire contract.
+ *
+ * Notes access is a sealed, Notes-only surface. A persistent visual preset such
+ * as Pro Mode may remain selected for the next turn, but no persisted scaffold,
+ * tool selection, or workflow hint is allowed to alter the current Notes turn.
+ */
+export const composerWorkflowTurnContract = (
+  workflow: ComposerWorkflowPresetState | null | undefined,
+  userPrompt: string,
+  notesAccessRequested: boolean,
+  selectedToolNamesForTurn: readonly string[] = []
+): ComposerWorkflowTurnContract => {
+  if (notesAccessRequested) {
+    return {
+      modelPrompt: String(userPrompt || "").trim(),
+      selectedToolNames: [],
+      workflowHint: null,
+    };
+  }
+  return {
+    modelPrompt: composeComposerWorkflowPromptForModel(workflow, userPrompt),
+    selectedToolNames: Array.from(
+      new Set([...(workflow?.selectedToolNames ?? []), ...selectedToolNamesForTurn])
+    ),
+    workflowHint: workflow?.workflowHint ?? null,
+  };
+};
+
+export const composerWorkflowPresetAfterSubmit = (
+  workflow: ComposerWorkflowPresetState | null | undefined
+): ComposerWorkflowPresetState | null =>
+  workflow?.persistsAcrossTurns ? workflow : null;

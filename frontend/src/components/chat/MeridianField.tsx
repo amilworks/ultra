@@ -10,9 +10,10 @@ import { cn } from "@/lib/utils";
    point stands for the scientific fact that must survive changes of modality,
    scale, representation, and analysis.
 
-   Static on purpose: registration is a record, not an animation. Day and
-   Night are two exposures of identical geometry, drawn only from live tokens.
-   The construction is analytic rather than random, so every repaint is exact. */
+   On entry, the source lattice resolves once into its registered frame. The
+   motion is the computation: a bounded analytic homotopy, never a decorative
+   loop. The brass observation remains fixed through every phase. Day and Night
+   are two exposures of identical geometry, drawn only from live tokens. */
 
 export const MERIDIAN_INVARIANT = { u: 0.62, v: 0.44 } as const;
 const ANCHOR_U = MERIDIAN_INVARIANT.u;
@@ -22,6 +23,7 @@ const PARALLEL_STEP = 0.16;
 const TWIST_RADIANS = 0.46;
 const TWIST_FALLOFF = 1.35;
 const RADIAL_EXPANSION = 0.045;
+export const MERIDIAN_SOLVE_DURATION_MS = 2_800;
 
 type Point = readonly [x: number, y: number];
 type CoordinateAxis = "meridian" | "parallel";
@@ -57,19 +59,21 @@ const rgba = ([r, g, b]: [number, number, number], alpha: number): string =>
  * identity away from the anchor, remains one-to-one at this bounded strength,
  * and fixes the anchor exactly because radius zero always maps to radius zero.
  */
-export function registrationMap(
+export function registrationMapAtPhase(
   u: number,
   v: number,
   width: number,
-  height: number
+  height: number,
+  phase: number
 ): Point {
+  const solvePhase = Math.min(1, Math.max(0, phase));
   const aspect = width / height;
   const sourceX = (u - ANCHOR_U) * aspect;
   const sourceY = v - ANCHOR_V;
   const radiusSquared = sourceX * sourceX + sourceY * sourceY;
   const influence = Math.exp(-radiusSquared / TWIST_FALLOFF);
-  const angle = TWIST_RADIANS * influence;
-  const scale = 1 + RADIAL_EXPANSION * influence;
+  const angle = TWIST_RADIANS * influence * solvePhase;
+  const scale = 1 + RADIAL_EXPANSION * influence * solvePhase;
   const cosine = Math.cos(angle);
   const sine = Math.sin(angle);
   const registeredX = (sourceX * cosine - sourceY * sine) * scale;
@@ -79,6 +83,24 @@ export function registrationMap(
     width * (ANCHOR_U + registeredX / aspect),
     height * (ANCHOR_V + registeredY),
   ];
+}
+
+export function registrationMap(
+  u: number,
+  v: number,
+  width: number,
+  height: number
+): Point {
+  return registrationMapAtPhase(u, v, width, height, 1);
+}
+
+/** Quintic smoothstep: exact endpoints with zero velocity and acceleration. */
+export function registrationSolvePhase(elapsedMs: number): number {
+  const time = Math.min(
+    1,
+    Math.max(0, elapsedMs / MERIDIAN_SOLVE_DURATION_MS)
+  );
+  return time * time * time * (time * (time * 6 - 15) + 10);
 }
 
 function coordinateValues(
@@ -104,14 +126,15 @@ function traceCoordinate(
   maximum: number,
   step: number,
   width: number,
-  height: number
+  height: number,
+  phase: number
 ): void {
   context.beginPath();
   let first = true;
   for (let parameter = minimum; parameter < maximum; parameter += step) {
     const u = axis === "meridian" ? fixed : parameter;
     const v = axis === "meridian" ? parameter : fixed;
-    const [x, y] = registrationMap(u, v, width, height);
+    const [x, y] = registrationMapAtPhase(u, v, width, height, phase);
     if (first) {
       context.moveTo(x, y);
       first = false;
@@ -121,7 +144,13 @@ function traceCoordinate(
   }
   const endU = axis === "meridian" ? fixed : maximum;
   const endV = axis === "meridian" ? maximum : fixed;
-  const [endX, endY] = registrationMap(endU, endV, width, height);
+  const [endX, endY] = registrationMapAtPhase(
+    endU,
+    endV,
+    width,
+    height,
+    phase
+  );
   context.lineTo(endX, endY);
 }
 
@@ -209,7 +238,9 @@ function drawCoordinateFamily(
   width: number,
   height: number,
   ink: [number, number, number],
-  night: boolean
+  night: boolean,
+  phase: number,
+  opacityScale = 1
 ): void {
   for (const { offset, value } of coordinates) {
     const major = offset === 0;
@@ -220,7 +251,8 @@ function drawCoordinateFamily(
     const majorAlpha = axis === "meridian" ? 0.46 : 0.34;
     context.strokeStyle = rgba(
       ink,
-      major ? majorAlpha : baseAlpha + themeAdjustment + hierarchy
+      (major ? majorAlpha : baseAlpha + themeAdjustment + hierarchy) *
+        opacityScale
     );
     context.lineWidth = major ? 1 : secondary ? 0.85 : 0.7;
     traceCoordinate(
@@ -231,7 +263,8 @@ function drawCoordinateFamily(
       maximum,
       curveStep,
       width,
-      height
+      height,
+      phase
     );
     context.stroke();
   }
@@ -244,21 +277,34 @@ function drawInvariantTicks(
   meridians: CoordinateValue[],
   parallels: CoordinateValue[],
   ink: [number, number, number],
-  night: boolean
+  night: boolean,
+  phase: number
 ): void {
   context.fillStyle = rgba(ink, night ? 0.5 : 0.56);
   for (const { offset, value } of meridians) {
     if (offset === 0) {
       continue;
     }
-    const [x, y] = registrationMap(value, ANCHOR_V, width, height);
+    const [x, y] = registrationMapAtPhase(
+      value,
+      ANCHOR_V,
+      width,
+      height,
+      phase
+    );
     context.fillRect(x - 0.6, y - 0.6, 1.2, 1.2);
   }
   for (const { offset, value } of parallels) {
     if (offset === 0) {
       continue;
     }
-    const [x, y] = registrationMap(ANCHOR_U, value, width, height);
+    const [x, y] = registrationMapAtPhase(
+      ANCHOR_U,
+      value,
+      width,
+      height,
+      phase
+    );
     context.fillRect(x - 0.6, y - 0.6, 1.2, 1.2);
   }
 }
@@ -279,7 +325,18 @@ function drawInvariant(
   context.fillRect(anchorX - 1.35, anchorY - 1.35, 2.7, 2.7);
 }
 
-export function MeridianField({ className }: { className?: string }) {
+// Hydration can briefly remount the blank-chat stage. Keep the solve origin at
+// module scope so the same phase settles instead of visibly replaying.
+let persistedPhaseKey: number | null = null;
+let persistedSolveOriginMs = 0;
+
+export function MeridianField({
+  className,
+  phaseKey = 0,
+}: {
+  className?: string;
+  phaseKey?: number;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -288,19 +345,25 @@ export function MeridianField({ className }: { className?: string }) {
       return;
     }
 
-    const draw = (): void => {
-      const context = canvas.getContext("2d");
-      if (!context) {
-        return; // jsdom and other non-rendering environments
-      }
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return; // jsdom and other non-rendering environments
+    }
+    let currentPhase = 1;
+
+    const draw = (phase: number): void => {
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
       if (width === 0 || height === 0) {
         return;
       }
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
+      const backingWidth = Math.round(width * dpr);
+      const backingHeight = Math.round(height * dpr);
+      if (canvas.width !== backingWidth || canvas.height !== backingHeight) {
+        canvas.width = backingWidth;
+        canvas.height = backingHeight;
+      }
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       context.clearRect(0, 0, width, height);
 
@@ -352,6 +415,42 @@ export function MeridianField({ className }: { className?: string }) {
       context.clip();
       context.lineCap = "round";
       context.lineJoin = "round";
+
+      /* The identity frame remains as a faint residual while the registered
+         field moves away from it. It disappears completely at convergence, so
+         the settled image is identical to the original Meridian construction. */
+      const sourceOpacity = 0.28 * Math.pow(1 - phase, 1.4);
+      const registeredOpacity = 0.72 + 0.28 * phase;
+      if (sourceOpacity > 0.001) {
+        drawCoordinateFamily(
+          context,
+          "parallel",
+          parallels,
+          minimumU,
+          maximumU,
+          curveStep,
+          width,
+          height,
+          ink,
+          night,
+          0,
+          sourceOpacity
+        );
+        drawCoordinateFamily(
+          context,
+          "meridian",
+          meridians,
+          minimumV,
+          maximumV,
+          curveStep,
+          width,
+          height,
+          ink,
+          night,
+          0,
+          sourceOpacity
+        );
+      }
       drawCoordinateFamily(
         context,
         "parallel",
@@ -362,7 +461,9 @@ export function MeridianField({ className }: { className?: string }) {
         width,
         height,
         ink,
-        night
+        night,
+        phase,
+        registeredOpacity
       );
       drawCoordinateFamily(
         context,
@@ -374,7 +475,9 @@ export function MeridianField({ className }: { className?: string }) {
         width,
         height,
         ink,
-        night
+        night,
+        phase,
+        registeredOpacity
       );
       context.restore();
 
@@ -385,12 +488,41 @@ export function MeridianField({ className }: { className?: string }) {
         meridians,
         parallels,
         ink,
-        night
+        night,
+        phase
       );
       drawInvariant(context, width, height, live);
     };
 
-    draw();
+    const reducedMotion =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    let animationFrame: number | null = null;
+    if (persistedPhaseKey !== phaseKey) {
+      persistedPhaseKey = phaseKey;
+      persistedSolveOriginMs = performance.now();
+    }
+    const solveOriginMs = persistedSolveOriginMs;
+    currentPhase = reducedMotion
+      ? 1
+      : registrationSolvePhase(performance.now() - solveOriginMs);
+    draw(currentPhase);
+
+    const advanceSolve = (timestamp: number): void => {
+      currentPhase = registrationSolvePhase(timestamp - solveOriginMs);
+      draw(currentPhase);
+      if (currentPhase < 1) {
+        animationFrame = window.requestAnimationFrame(advanceSolve);
+      } else {
+        animationFrame = null;
+      }
+    };
+    if (
+      currentPhase < 1 &&
+      !reducedMotion &&
+      typeof window.requestAnimationFrame === "function"
+    ) {
+      animationFrame = window.requestAnimationFrame(advanceSolve);
+    }
     /* Redraw only when the LAYOUT size actually changed. Setting the canvas
        width attribute inside a ResizeObserver callback is a feedback loop the
        moment CSS fails to constrain the element. The guard breaks that cycle;
@@ -406,22 +538,27 @@ export function MeridianField({ className }: { className?: string }) {
       }
       drawnWidth = canvas.clientWidth;
       drawnHeight = canvas.clientHeight;
-      draw();
+      draw(currentPhase);
     };
     const resizeObserver =
       typeof ResizeObserver !== "undefined" ? new ResizeObserver(onResize) : null;
     resizeObserver?.observe(canvas);
     const themeObserver =
-      typeof MutationObserver !== "undefined" ? new MutationObserver(draw) : null;
+      typeof MutationObserver !== "undefined"
+        ? new MutationObserver(() => draw(currentPhase))
+        : null;
     themeObserver?.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ["class"],
     });
     return () => {
+      if (animationFrame !== null) {
+        window.cancelAnimationFrame(animationFrame);
+      }
       resizeObserver?.disconnect();
       themeObserver?.disconnect();
     };
-  }, []);
+  }, [phaseKey]);
 
   return (
     <canvas

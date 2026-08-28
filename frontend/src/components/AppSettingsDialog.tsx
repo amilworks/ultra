@@ -366,6 +366,9 @@ export function AppSettingsDialog({
   };
 
   const unlinkBisqueAccount = async (): Promise<void> => {
+    if (bisqueUnlinking) {
+      return;
+    }
     setBisqueUnlinking(true);
     setBisqueLinkError(null);
     setBisquePassword("");
@@ -747,7 +750,8 @@ export function AppSettingsDialog({
                     <Button
                       type="button"
                       variant="outline"
-                      disabled={bisqueUnlinking}
+                      aria-disabled={bisqueUnlinking || undefined}
+                      className="aria-disabled:pointer-events-none aria-disabled:opacity-50"
                       onClick={() => {
                         void unlinkBisqueAccount();
                       }}

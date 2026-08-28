@@ -46,6 +46,11 @@ const SELECTED_NOTE_REFERENCE =
 // Product-qualified Ultra Notes references remain eligible authority.
 const CONTEXTUAL_NOTES_REFERENCE =
   /\b(?:(?:(?:my|a|the)\s+)?notes?\s+(?:below|above|here|attached|provided|included)|(?:(?:my|a|the)\s+)?notes?\s+(?:in|on|from|inside|within)\s+(?:(?:(?:this|that|my|our|uploaded|attached|selected)|(?:a|an|the)(?:\s+(?:uploaded|attached|selected))?)\s+)?(?:pdf|attachment|document|file|email|message|section|slide|page|upload|report)|(?:(?:my|a|the)\s+)?notes?\s+(?:in|on|from|inside|within)\s+[\w.-]+\.(?:pdf|docx?|txt|md)|my\s+(?:meeting|document|pdf|slide|section|email|attachment|file|page)\s+notes?|my\s+notes?\s+from\s+(?:this|that|the|my|our)\s+meeting)\b/i;
+// A topic can sit between "my notes" and the document locator. Treat that
+// wording as contextual too; otherwise "my notes on NPH in this PDF" would
+// silently widen an attachment question into account-wide private search.
+const CONTEXTUAL_TOPICAL_NOTES_REFERENCE =
+  /\b(?:(?:my|a|the)\s+)?notes?\s+(?:about|on|regarding|concerning)\s+[^.!?;]{1,80}?\s+(?:in|on|from|inside|within)\s+(?:(?:(?:this|that|my|our|uploaded|attached|selected)|(?:a|an|the)(?:\s+(?:uploaded|attached|selected))?)\s+(?:pdf|attachment|document|file|email|message|section|slide|page|upload|report)|[\w.-]+\.(?:pdf|docx?|txt|md))\b/i;
 const UNIQUE_PERSONAL_NOTE_TARGET =
   /\bmy\s+(?:notebook|lab\s+(?:notes?|log|notebook))\b/i;
 const NOTES_RETRIEVAL_ACTION =
@@ -66,7 +71,7 @@ const DIRECT_MUTATION_REQUEST =
 const COMPOUND_MUTATION_REQUEST =
   /\b(?:and|then)\s+(?:(?:please|kindly)\s+)?(?:add|append|save|update|write|record|jot)\b/i;
 const NEGATED_RETRIEVAL_ACTION =
-  /\b(?:do\s+not|don['’]t|dont|never|cannot|can['’]t|without|avoid(?:ing)?)\b[^.!?;]{0,120}\b(?:search(?:ing)?|find(?:ing)?|open(?:ing)?|review(?:ing)?|scan(?:ning)?|read(?:ing)?|check(?:ing)?|use|using|look(?:ing)?\s+(?:in|through|up|for)|show(?:ing)?|list(?:ing)?|summariz(?:e|ing)|explain(?:ing)?|compar(?:e|ing)|answer(?:ing)?|tell(?:ing)?)\b/i;
+  /\b(?:do\s+not|don['’]t|dont|never|cannot|can['’]t|without|avoid(?:ing)?)\b[^.!?;]{0,120}\b(?:access(?:ing)?|search(?:ing)?|find(?:ing)?|open(?:ing)?|review(?:ing)?|scan(?:ning)?|read(?:ing)?|check(?:ing)?|use|using|look(?:ing)?\s+(?:at|into|in|through|up|for)|show(?:ing)?|list(?:ing)?|summariz(?:e|ing)|explain(?:ing)?|compar(?:e|ing)|answer(?:ing)?|tell(?:ing)?)\b/i;
 const NEGATED_MUTATION_ACTION =
   /\b(?:do\s+not|don['’]t|dont|never|cannot|can['’]t|without|avoid(?:ing)?)\b[^.!?;]{0,120}\b(?:add(?:ing)?|append(?:ing)?|save|saving|update|updating|write|writing|record(?:ing)?|jot(?:ting)?)\b/i;
 const EXCLUDED_NOTES_TARGET =
@@ -83,6 +88,26 @@ const POSSESSIVE_NOTES_RETRIEVAL =
   /^(?:(?:show(?:\s+me)?|list)\s+my\s+notes?|do\s+i\s+have\s+(?:a|any)\s+notes?|which\s+of\s+my\s+notes?\s+(?:mention|mentions|contain|contains|include|includes|say|says)|what\s+(?:do|does)\s+my\s+notes?\s+(?:mention|mentions|contain|contains|include|includes|say|says)|do\s+my\s+notes?\s+(?:mention|mentions|contain|contains|include|includes|say)|what(?:['’]s|\s+is)\s+in\s+my\s+notes?)\b/i;
 const PERSONAL_NOTE_EXISTENCE_RECALL =
   /^do\s+i\s+have\s+(?:a|any)\s+notes?\b/i;
+// Short follow-ups such as “What about my notes on NPH?” are ordinary
+// collection lookups even though they omit an explicit search/read verb. Keep
+// this personal and turn-local: product/capability questions remain inert, as
+// do contextual notes in an attachment, page, or pasted reference block.
+const ELLIPTICAL_PERSONAL_NOTES_RECALL_FRAME =
+  /^(?:(?:and|also|then|okay|ok)\s*,?\s*)*(?:what|how)\s+about\s+/i;
+const ELLIPTICAL_PERSONAL_NOTES_CONTINUATION_FRAME =
+  /^(?:(?:and|also|then)\s*,?\s*)+/i;
+const ELLIPTICAL_PERSONAL_COLLECTION_TOPIC =
+  /^my\s+(?:notes?|notebook|lab\s+(?:notes?|log|notebook))\s+(?:about|on|regarding|concerning)(?:\s+[\p{L}\p{N}]|$)/iu;
+const ELLIPTICAL_TOPIC_IN_PERSONAL_COLLECTION =
+  /^(?:(?:the\s+)?[\p{L}\p{N}][\p{L}\p{N}._+#'’/-]*(?:\s+[\p{L}\p{N}][\p{L}\p{N}._+#'’/-]*){0,7})\s+(?:in|from)\s+my\s+(?:notes?|notebook|lab\s+(?:notes?|log|notebook))\b/iu;
+const ELLIPTICAL_TITLED_NOTE_REFERENCE =
+  /^my\s+(?:(?:[\p{L}\p{N}][\p{L}\p{N}._+#'’/-]*)\s+){1,6}notes?\b/iu;
+const ELLIPTICAL_AUTHORED_TITLED_NOTE_REFERENCE =
+  /^(?:the\s+)?(?:(?:[\p{L}\p{N}][\p{L}\p{N}._+#'’/-]*)\s+){1,6}notes?\s+i\s+(?:wrote|saved|made|created)\b/iu;
+const ELLIPTICAL_OWN_NOTE_TOPIC =
+  /^(?:(?:the|a|my)\s+)?note\s+i\s+(?:wrote|saved|made|created)\s+(?:about|on|regarding|concerning)\s+[\p{L}\p{N}]/iu;
+const ELLIPTICAL_PRODUCT_TARGET =
+  /^(?:my\s+)?ultra\s+notes?\b|^my\s+notes?\s+(?:app|page|library|privacy|settings|permissions|security|search|access)\b/i;
 const PERSONAL_NAMED_MUTATION_RECALL =
   /^(?:did|didn['’]t)\s+i\s+(?:add|append|save|update|write|record|jot)\b/i;
 const FIRST_PERSON_MUTATION_RECALL =
@@ -96,7 +121,7 @@ const REPORTED_REFERENCE_FRAME =
 const CONTENT_GROUNDING_PREDICATE =
   /\b(?:about|using|from)\b|\b(?:what|whether)\b[^.!?;]{0,80}\b(?:notes?|notebook)\b[^.!?;]{0,30}\b(?:say|says|said|mention|mentions|contain|contains|include|includes)\b/i;
 const STOP_RETRIEVAL_ACTION =
-  /\bstop\s+(?:searching|finding|looking|reading|checking|scanning|using|reviewing|opening|showing|listing|summarizing|explaining|comparing|answering|telling)\b/i;
+  /\bstop\s+(?:accessing|searching|finding|looking|reading|checking|scanning|using|reviewing|opening|showing|listing|summarizing|explaining|comparing|answering|telling)\b/i;
 const ONLY_SELECTED_NOTE_RE =
   /\bonly\s+(?:(?:the|my)\s+)?(?:selected|attached)?\s*(?:this\s+)?notes?\b/i;
 const NON_NOTES_MUTATION_DESTINATION =
@@ -104,7 +129,7 @@ const NON_NOTES_MUTATION_DESTINATION =
 const TRAILING_GENERIC_WITHDRAWAL =
   /\b(?:and|but|then)\s+(?:please\s+)?(?:don['’]t|dont|do\s+not)\s*$/i;
 const LEADING_META_ACTION_FRAME =
-  /^(?:explain|review|summarize|compare)\s+(?:this|the|an?)\s+(?:command|instruction|example|sentence|request|prompt)\b[^.!?;,:—–]{0,80}[.!?;,:—–]\s*(?:then\s+)?(?:(?:please|kindly)\s+)?(?:search|find|read|review|use|add|append|save|update|write|record|jot)\b[^.!?;]{0,120}\b(?:notes?|notebook|lab\s+(?:notes?|log))\b/i;
+  /^(?:explain|review|summarize|compare)\s+(?:this|the|an?)\s+(?:command|instruction|example|sentence|question|request|prompt)\b[^.!?;,:—–]{0,80}[.!?;,:—–]\s*(?:then\s+)?(?:(?:please|kindly)\s+)?(?:search|find|read|review|use|add|append|save|update|write|record|jot|what|how)\b[^.!?;]{0,120}\b(?:notes?|notebook|lab\s+(?:notes?|log))\b/i;
 
 const blankLike = (value: string): string => value.replace(/[^\n]/g, " ");
 
@@ -222,7 +247,7 @@ const wordCount = (value: string): number =>
 const authorityClauses = (value: string): string[] => {
   const clauses: string[] = [];
   const primary = value.split(
-    /[.!?;]+|\s+(?=(?:but|however|instead|actually)\b)|\s+then\s+(?=(?:do\s+not|don['’]t|dont|never|stop)\b)|\s*[—–]\s*/i
+    /[!?;]+|\.(?![\p{L}\p{N}])|\s+(?=(?:but|however|instead|actually)\b)|\s+then\s+(?=(?:do\s+not|don['’]t|dont|never|stop)\b)|\s*[—–]\s*/iu
   );
   const commaDirective =
     /,\s*(?=(?:but|however|instead|actually|then|do\s+not|don['’]t|dont|never|please|kindly|search|find|look|read|check|scan|use|review|open|show|list|summarize|explain|compare|answer|tell|add|append|save|update|write|record|jot)\b)/i;
@@ -243,7 +268,7 @@ const authorityClauses = (value: string): string[] => {
 
 const hasAccountNotesTarget = (clause: string): boolean => {
   if (PRODUCT_NOTES_COLLECTION.test(clause)) return true;
-  if (CONTEXTUAL_NOTES_REFERENCE.test(clause)) return false;
+  if (isContextualNotesReference(clause)) return false;
   return (
     PERSONAL_NOTES_COLLECTION.test(clause) ||
     RELATED_NOTES_REFERENCE.test(clause) ||
@@ -251,6 +276,10 @@ const hasAccountNotesTarget = (clause: string): boolean => {
     OWN_NOTE_REFERENCE.test(clause)
   );
 };
+
+const isContextualNotesReference = (clause: string): boolean =>
+  CONTEXTUAL_NOTES_REFERENCE.test(clause) ||
+  CONTEXTUAL_TOPICAL_NOTES_REFERENCE.test(clause);
 
 const hasAnyAppendTarget = (clause: string): boolean =>
   hasAccountNotesTarget(clause) || SELECTED_NOTE_REFERENCE.test(clause);
@@ -260,9 +289,26 @@ const appendTargetNeedsDiscovery = (clause: string): boolean =>
   OWN_NOTE_REFERENCE.test(clause) ||
   UNIQUE_PERSONAL_NOTE_TARGET.test(clause);
 
+const ellipticalPersonalNotesRecall = (clause: string): boolean => {
+  const frame =
+    ELLIPTICAL_PERSONAL_NOTES_RECALL_FRAME.exec(clause) ??
+    ELLIPTICAL_PERSONAL_NOTES_CONTINUATION_FRAME.exec(clause);
+  if (!frame || isContextualNotesReference(clause)) return false;
+  const target = clause.slice(frame[0].length);
+  if (ELLIPTICAL_PRODUCT_TARGET.test(target)) return false;
+  return (
+    ELLIPTICAL_PERSONAL_COLLECTION_TOPIC.test(target) ||
+    ELLIPTICAL_TOPIC_IN_PERSONAL_COLLECTION.test(target) ||
+    ELLIPTICAL_TITLED_NOTE_REFERENCE.test(target) ||
+    ELLIPTICAL_AUTHORED_TITLED_NOTE_REFERENCE.test(target) ||
+    ELLIPTICAL_OWN_NOTE_TOPIC.test(target)
+  );
+};
+
 const personalRecallRequest = (clause: string): boolean =>
   (PERSONAL_NOTE_EXISTENCE_RECALL.test(clause) &&
-    !CONTEXTUAL_NOTES_REFERENCE.test(clause)) ||
+    !isContextualNotesReference(clause)) ||
+  ellipticalPersonalNotesRecall(clause) ||
   (hasAccountNotesTarget(clause) &&
     (WRITING_RECALL.test(clause) ||
       PAST_NOTES_RECALL.test(clause) ||
@@ -393,7 +439,7 @@ const evaluateNotesAuthorityText = (normalized: string): NotesAuthorityEvaluatio
       !/^(?:explain|compare|answer|tell)$/.test(normalizedRetrievalAction) ||
       CONTENT_GROUNDING_PREDICATE.test(clause);
     const bareProductSearch =
-      !CONTEXTUAL_NOTES_REFERENCE.test(clause) &&
+      !isContextualNotesReference(clause) &&
       (/^(?:(?:please|kindly)\s+)?search\s+notes\b/i.test(clause) ||
         /^(?:can|could|would|will)\s+you(?:\s+please)?\s+search\s+notes\b/i.test(clause));
     if (
@@ -565,14 +611,14 @@ export const notesTurnHasUnsupportedAnalysisContext = ({
   pendingFileCount = 0,
   activeUploadCount = 0,
   selectionContext = null,
-  workflowSelected = false,
+  workflowId = null,
   selectedToolNames = [],
   externalResourceCount = 0,
 }: {
   pendingFileCount?: number;
   activeUploadCount?: number;
   selectionContext?: SelectionContext | null;
-  workflowSelected?: boolean;
+  workflowId?: string | null;
   selectedToolNames?: readonly string[];
   externalResourceCount?: number;
 }): boolean => {
@@ -591,7 +637,7 @@ export const notesTurnHasUnsupportedAnalysisContext = ({
     pendingFileCount > 0 ||
     activeUploadCount > 0 ||
     externalResourceCount > 0 ||
-    workflowSelected ||
+    Boolean(workflowId && workflowId !== "pro_mode") ||
     selectedToolNames.length > 0 ||
     hasCapabilityBearingSelection
   );

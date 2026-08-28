@@ -298,7 +298,6 @@ import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
-import { MeridianField } from "./components/chat/MeridianField";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -643,6 +642,10 @@ const LazyToolResultCardSection = lazyNamed(
 );
 const LazyChatRunDocuments = lazyNamed(loadChatRunDocumentsModule, "ChatRunDocuments");
 const LazyReportCanvas = lazyNamed(loadReportCanvasModule, "ReportCanvas");
+const LazyMeridianField = lazyNamed(
+  () => import("./components/chat/MeridianField"),
+  "MeridianField"
+);
 
 let secondaryPanelPreloadPromise: Promise<unknown[]> | null = null;
 let adminPanelPreloadPromise: Promise<unknown> | null = null;
@@ -2852,7 +2855,11 @@ const ConversationTranscript = memo(
               </div>
             ) : (
               <div className="blank-chat-welcome">
-                <MeridianField />
+                <Suspense
+                  fallback={<div className="meridian-field" aria-hidden="true" />}
+                >
+                  <LazyMeridianField phaseKey={welcomeNonce} />
+                </Suspense>
                 <div className="blank-chat-welcome-greeting">
                   {welcomeName ? (
                     <p className="blank-chat-welcome-eyebrow">

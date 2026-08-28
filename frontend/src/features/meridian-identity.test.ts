@@ -311,7 +311,9 @@ describe("the composer — calm focus, and a baseline that records", () => {
 
 describe("the field — one impossibility, welcome stage only", () => {
   it("mounts MeridianField on the blank welcome and nowhere else", () => {
-    expect(appSource).toMatch(/blank-chat-welcome">\s*<MeridianField \/>/);
+    expect(appSource).toMatch(
+      /blank-chat-welcome">\s*<MeridianField\s+phaseKey=\{welcomeNonce\}\s+solveStartedAtMs=\{welcomeSolveStartedAtMs\}/
+    );
     expect(appSource.match(/<MeridianField/g)).toHaveLength(1);
   });
 
@@ -344,5 +346,16 @@ describe("the field — one impossibility, welcome stage only", () => {
     expect(fieldSource).not.toMatch(
       /createRng|createFieldSampler|drawContours|drawTransect|starCount|speckCount|diffraction|extinction|halation|réseau/i
     );
+  });
+
+  it("runs one bounded solve and settles instead of looping ambiently", () => {
+    const fieldSource = read("src/components/chat/MeridianField.tsx");
+    expect(fieldSource).toContain("registrationMapAtPhase");
+    expect(fieldSource).toContain("registrationSolvePhase");
+    expect(fieldSource).toContain("window.requestAnimationFrame(advanceSolve)");
+    expect(fieldSource).toContain("currentPhase < 1");
+    expect(fieldSource).toContain("performance.now() - solveOriginMs");
+    expect(fieldSource).toContain("(prefers-reduced-motion: reduce)");
+    expect(fieldSource).not.toContain("setInterval");
   });
 });

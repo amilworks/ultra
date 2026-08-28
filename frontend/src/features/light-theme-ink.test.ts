@@ -284,13 +284,18 @@ describe("response reading typography", () => {
   });
 
   it("keeps the New Chat invitation lighter than the reading voice", () => {
+    const desktopInvitation = lightRoot.match(
+      /--font-weight-desktop-invitation:\s*(\d+);/
+    )?.[1];
     const invitation = lightRoot.match(/--font-weight-invitation:\s*(\d+);/)?.[1];
     const reading = lightRoot.match(/--font-weight-reading-body:\s*(\d+);/)?.[1];
+    expect(desktopInvitation).toBe("300");
     expect(invitation).toBe("350");
     expect(reading).toBe("400");
+    expect(Number(desktopInvitation)).toBeLessThan(Number(invitation));
     expect(Number(invitation)).toBeLessThan(Number(reading));
     expect(stylesSource).toMatch(
-      /\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s
+      /\.blank-chat-welcome-hero\s*\{[^}]*font-size:\s*1\.625rem;[^}]*font-weight:\s*var\(--font-weight-desktop-invitation\);/s
     );
     expect(stylesSource).toMatch(
       /\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s

@@ -9,7 +9,8 @@ import {
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { LensSidebarIcon } from "@/components/icons/LensSidebarIcon";
-import { Database, FolderOpen, MessageCircle, PlusIcon, Shield } from "lucide-react";
+import { MeridianFolderIcon } from "@/components/icons/MeridianIcons";
+import { Database, MessageCircle, PlusIcon, Shield } from "lucide-react";
 import { RunningStatusPill } from "./RunningStatusPill";
 import type { HistoryItem } from "@/features/chat/history";
 
@@ -115,7 +116,7 @@ export function CollapsedSidebarRail({
             data-active={resourcesActive ? "true" : undefined}
             onClick={onOpenResources}
           >
-            <FolderOpen data-icon="inline-start" />
+            <MeridianFolderIcon data-icon="inline-start" />
           </Button>
         </RailTooltip>
 

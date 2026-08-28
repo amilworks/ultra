@@ -11,7 +11,7 @@ import {
   mobileSidebarCloseProps,
   mobileSidebarKeepOpenProps,
 } from "@/components/ui/sidebar";
-import { Laptop, LogOut, Moon, Settings, Sun } from "lucide-react";
+import { Activity, Laptop, LogOut, Moon, Settings, Sun } from "lucide-react";
 
 type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
@@ -65,6 +65,7 @@ type SidebarAccountSettingsButtonProps = {
   authIsAdmin: boolean;
   themePreference: ThemePreference;
   onThemePreferenceChange: (value: ThemePreference) => void;
+  onOpenUsage: () => void;
   onOpenSettings: () => void;
   onLogout: () => Promise<void>;
 };
@@ -75,6 +76,7 @@ export function SidebarAccountSettingsButton({
   authIsAdmin,
   themePreference,
   onThemePreferenceChange,
+  onOpenUsage,
   onOpenSettings,
   onLogout,
 }: SidebarAccountSettingsButtonProps) {
@@ -135,6 +137,10 @@ export function SidebarAccountSettingsButton({
                 •
               </span>
             ) : null}
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={onOpenUsage} {...mobileSidebarCloseProps}>
+            <Activity data-icon="inline-start" aria-hidden="true" />
+            <span>Usage</span>
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onOpenSettings} {...mobileSidebarCloseProps}>
             <Settings data-icon="inline-start" aria-hidden="true" />

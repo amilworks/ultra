@@ -169,6 +169,26 @@ describe("the symbol set", () => {
       /\.conversation-history-menu-icon\s*\{[^}]*width:\s*1rem;[^}]*height:\s*1rem;[^}]*flex:\s*0 0 1rem;[^}]*stroke-width:\s*1\.6;/s
     );
   });
+
+  it("animates Resources and Notes as authored Meridian navigation marks", () => {
+    const icons = read("src/components/icons/MeridianIcons.tsx");
+    const collapsedRail = read("src/components/chat/CollapsedSidebarRail.tsx");
+
+    expect(icons).toContain("export function MeridianFolderIcon");
+    expect(icons).toContain("export function MeridianNotesIcon");
+    expect(icons).toMatch(/data-meridian-icon="notes"[\s\S]*pathLength=\{1\}/);
+    expect(appSource).toContain("<MeridianFolderIcon");
+    expect(appSource).toContain("<MeridianNotesIcon");
+    expect(collapsedRail).toContain("<MeridianFolderIcon");
+    expect(stylesSource).toMatch(
+      /\.meridian-folder-closed,[\s\S]*\.meridian-folder-open\s*\{[^}]*transition:[^}]*220ms var\(--motion-ease\)/s
+    );
+    expect(stylesSource).toMatch(/@keyframes meridian-notes-pen-write/);
+    expect(stylesSource).toMatch(/@keyframes meridian-notes-ink-write/);
+    expect(stylesSource).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.meridian-notes-pen,[\s\S]*\.meridian-notes-ink\s*\{[^}]*animation:\s*none;/s
+    );
+  });
 });
 
 describe("de-boxed chrome — depth by value, edges only where real", () => {
@@ -323,8 +343,11 @@ describe("the field — one impossibility, welcome stage only", () => {
   it("is fluid, precision-scaled, and cannot outgrow its container", () => {
     // Width is a share of the column, height leans on the viewport, and the
     // curve sampling scales by AREA so the analytic map stays smooth.
-    expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*width:\s*min\(46rem, 100%\);/s);
-    expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*height:\s*clamp\(/s);
+    expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*width:\s*min\(39rem, 88%\);/s);
+    expect(stylesSource).toMatch(
+      /\.meridian-field\s*\{[^}]*height:\s*clamp\(82px, 13vh, 142px\);/s
+    );
+    expect(stylesSource).toMatch(/\.meridian-field\s*\{[^}]*opacity:\s*0\.82;/s);
     const fieldSource = read("src/components/chat/MeridianField.tsx");
     expect(fieldSource).toMatch(/\(width \* height\) \/ \d+/);
     // The runaway guard: a dev-server CSS hiccup once let the attribute-sized

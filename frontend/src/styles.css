@@ -13792,6 +13792,20 @@ details {
    overflow-y stays hidden because a horizontal scrollport would otherwise report
    a fractional vertical overflow from KaTeX's negative struts and show a useless
    vertical scrollbar on tall math. Height is content-driven, so nothing clips. */
+/* KaTeX's stock 1.21em factor lifts a low-x-height serif math face up to the
+   x-height of a typical text face. Ultra Sans is a high-x-height grotesk, so
+   the same factor overshoots on the extenders instead: caps, parentheses and
+   superscripts tower over the line and inflate every line box an inline
+   formula touches — most of them, in a math-heavy answer. 1.13em pulls the
+   extenders back inside the line's rhythm (measured: re-wraps settle and row
+   heights even out) while math lowercase stays optically near the prose.
+   KaTeX's own stylesheet loads lazily after this one but loses on
+   specificity, deliberately. */
+.pk-markdown .katex,
+.pk-message-content-plain .katex {
+  font-size: 1.13em;
+}
+
 .pk-markdown .katex-display,
 .pk-message-content-plain .katex-display {
   overflow-x: auto;
@@ -13804,6 +13818,62 @@ details {
      gesture at the ends of the scroll. */
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
+}
+
+/* Copy-LaTeX on display equations. The shell sits OUTSIDE the equation's own
+   horizontal scrollport, so the button holds the block's corner while a wide
+   formula scrolls under it. Ghost ink treatment: invisible until the block is
+   hovered or the button holds keyboard focus; pointers that cannot hover get
+   a quiet constant presence instead of an unreachable affordance. */
+.pk-math-display-shell {
+  position: relative;
+  display: block;
+}
+
+.pk-math-copy {
+  position: absolute;
+  top: 0.1rem;
+  right: 0.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
+}
+
+.pk-math-display-shell:hover .pk-math-copy,
+.pk-math-copy:focus-visible {
+  opacity: 1;
+}
+
+.pk-math-copy:hover {
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  color: var(--text-main);
+}
+
+.pk-math-copy svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+@media (hover: none) {
+  .pk-math-copy {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-math-copy {
+    transition: none;
+  }
 }
 
 /* Queued follow-up ("send when this run finishes"): a user-bubble-shaped card

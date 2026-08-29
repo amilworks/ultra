@@ -3083,3 +3083,107 @@ describe("share target picker", () => {
     );
   });
 });
+
+describe("date section eyebrows", () => {
+  const todayResource: ResourceRecord = {
+    ...imageResource,
+    file_id: "file_section_today",
+    original_name: "today-scan.tif",
+    created_at: new Date().toISOString(),
+  };
+  const olderResource: ResourceRecord = {
+    ...fileResource,
+    file_id: "file_section_older",
+    original_name: "older-scan.nii",
+    created_at: "2025-12-20T10:00:00Z",
+  };
+
+  it("labels the card grid with calendar sections when browsing", () => {
+    render(
+      <ResourceBrowser {...baseProps} resources={[todayResource, olderResource]} />
+    );
+    expect(screen.getByText("Today")).toBeInTheDocument();
+    expect(screen.getByText("December 2025")).toBeInTheDocument();
+  });
+
+  it("suppresses section labels while a search query is active", () => {
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        query="scan"
+        resources={[todayResource, olderResource]}
+      />
+    );
+    expect(screen.queryByText("Today")).toBeNull();
+  });
+
+  it("suppresses a lone section — one bucket labels nothing", () => {
+    render(<ResourceBrowser {...baseProps} resources={[todayResource]} />);
+    expect(screen.queryByText("Today")).toBeNull();
+  });
+});
+
+describe("pasted-file humanized titles", () => {
+  it("swaps the machine filename for a content-derived title once the head arrives", async () => {
+    const pastedResource: ResourceRecord = {
+      ...fileResource,
+      file_id: "file_pasted_title",
+      original_name: "pasted-2026-08-29-004747-474.txt",
+      content_type: "text/plain",
+      created_at: new Date().toISOString(),
+    };
+    const quickPeekFetch = vi.fn().mockResolvedValue({
+      file_id: "file_pasted_title",
+      original_name: "pasted-2026-08-29-004747-474.txt",
+      content_type: "text/plain",
+      format: "text",
+      total_size_bytes: 96,
+      offset: 0,
+      returned_bytes: 96,
+      next_offset: 96,
+      truncated: false,
+      encoding: "utf-8",
+      eol: "lf",
+      line_count: 2,
+      approx_total_lines: 2,
+      text: "The **main result is correct**, but see item 3.\nsecond line",
+    });
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resources={[pastedResource]}
+        quickPeekFetch={quickPeekFetch}
+      />
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByText(/The main result is correct, but see item 3\./).length
+      ).toBeGreaterThan(0)
+    );
+    // The real filename stays reachable on hover (the name element's title).
+    expect(
+      screen.getAllByTitle("pasted-2026-08-29-004747-474.txt").length
+    ).toBeGreaterThan(0);
+  });
+
+  it("keeps the filename for ordinary uploads", () => {
+    render(<ResourceBrowser {...baseProps} />);
+    expect(screen.getAllByText(imageResource.original_name).length).toBeGreaterThan(0);
+  });
+});
+
+describe("search match emphasis", () => {
+  it("marks the matched substring in resource names", () => {
+    render(
+      <ResourceBrowser {...baseProps} query="supplement" resources={[publicResource]} />
+    );
+    const marks = document.querySelectorAll("mark.resource-name-match");
+    expect(marks.length).toBeGreaterThan(0);
+    expect(marks[0].textContent).toBe("supplement");
+  });
+
+  it("renders plain names when the query does not match", () => {
+    render(<ResourceBrowser {...baseProps} query="zzz-no-match" />);
+    expect(document.querySelector("mark.resource-name-match")).toBeNull();
+  });
+});

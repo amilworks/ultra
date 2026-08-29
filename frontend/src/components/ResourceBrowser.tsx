@@ -2,6 +2,7 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
+  type ReactNode,
   type UIEvent,
   useCallback,
   useEffect,
@@ -60,7 +61,14 @@ import { ResourceQuickPeek } from "./ResourceQuickPeek";
 import { ResourceThumbnailPreview } from "./ResourceThumbnailPreview";
 import { classifyTextResource, fileTypeLabel, isSourceCodeName } from "@/lib/textFormat";
 import { MeridianFileIcon, MeridianSourceFileIcon } from "@/components/icons/MeridianIcons";
-import { resourceDisplayName } from "@/features/resources/presentation";
+import {
+  derivePastedTitle,
+  findQueryMatches,
+  groupResourcesByDateSection,
+  isPastedTextName,
+  resourceDisplayName,
+} from "@/features/resources/presentation";
+import { getCachedResourcePreview, getResourcePreview } from "@/lib/resourcePreviewCache";
 import {
   ArrowLeft,
   ChevronDown,
@@ -311,6 +319,79 @@ const parseDraggedResourceIds = (value: string): string[] => {
     return [];
   }
 };
+
+// Search matches render as ink emphasis, not pigment: the amber <mark> wash is
+// reserved for content highlighting in rendered markdown, while this is a
+// transient UI signal on chrome-adjacent text.
+const renderNameWithMatches = (text: string, query: string): ReactNode => {
+  const ranges = findQueryMatches(text, query);
+  if (ranges.length === 0) {
+    return text;
+  }
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  ranges.forEach((range, index) => {
+    if (range.start > cursor) {
+      parts.push(text.slice(cursor, range.start));
+    }
+    parts.push(
+      <mark key={index} className="resource-name-match">
+        {text.slice(range.start, range.end)}
+      </mark>
+    );
+    cursor = range.end;
+  });
+  if (cursor < text.length) {
+    parts.push(text.slice(cursor));
+  }
+  return parts;
+};
+
+// The visible name for a resource row/card. For chat-pasted text files —
+// whose machine-stamped filenames carry no identity — it swaps in a title
+// derived from the file's own first words (via the same bounded, deduped
+// preview cache the card thumbnails use), falling back to the filename until
+// the head arrives or when nothing usable can be derived. The REAL filename
+// stays on the parent's `title` hover and in the rename flow; note that
+// server-side search still matches the real filename, not the derived title.
+function ResourceNameText({
+  resource,
+  query,
+  fetchHead,
+}: {
+  resource: ResourceRecord;
+  query: string;
+  fetchHead?: (fileId: string, maxBytes: number) => Promise<ResourceTextHead>;
+}) {
+  const realName = resourceDisplayName(resource);
+  const isPasted = isPastedTextName(realName);
+  const [derivedTitle, setDerivedTitle] = useState<string | null>(() => {
+    if (!isPasted) {
+      return null;
+    }
+    const cached = getCachedResourcePreview(resource.file_id);
+    return cached ? derivePastedTitle(cached.text) : null;
+  });
+  useEffect(() => {
+    if (!isPasted || derivedTitle !== null || !fetchHead) {
+      return;
+    }
+    let cancelled = false;
+    getResourcePreview(resource.file_id, fetchHead)
+      .then((head) => {
+        if (!cancelled) {
+          setDerivedTitle(derivePastedTitle(head.text));
+        }
+      })
+      .catch(() => {
+        // Head unavailable: the filename fallback is already on screen.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isPasted, derivedTitle, fetchHead, resource.file_id]);
+  return <>{renderNameWithMatches(derivedTitle ?? realName, query)}</>;
+}
 
 const formatResourceDate = (value: string): string => {
   try {
@@ -986,6 +1067,33 @@ export function ResourceBrowser({
   const pendingUploadReselectionRef = useRef<ResourceUploadProgress | null>(null);
   const [uploadReselectionError, setUploadReselectionError] = useState<string | null>(null);
   const cardResources = useMemo(() => resources, [resources]);
+  // Date section eyebrows for the card grid: browsing is date-ordered, so the
+  // grid gets the sidebar history's calendar groups. Suppressed while a search
+  // query is active (results are a flat answer, not a timeline) and when
+  // everything falls in one bucket (a lone "Today" over the whole grid labels
+  // nothing). The table keeps its own date column instead.
+  const resourceGridEntries = useMemo<
+    Array<{ kind: "label"; label: string } | { kind: "resource"; resource: ResourceRecord }>
+  >(() => {
+    const flat = cardResources.map((resource) => ({
+      kind: "resource" as const,
+      resource,
+    }));
+    if (query.trim()) {
+      return flat;
+    }
+    const sections = groupResourcesByDateSection(cardResources);
+    if (sections.length < 2) {
+      return flat;
+    }
+    return sections.flatMap((section) => [
+      { kind: "label" as const, label: section.label },
+      ...section.items.map((resource) => ({
+        kind: "resource" as const,
+        resource,
+      })),
+    ]);
+  }, [cardResources, query]);
   const effectiveResourceViewMode: ResourceViewMode =
     isMobileView && resourceViewMode === "table" ? "cards" : resourceViewMode;
   const tableVirtualized =
@@ -2990,7 +3098,11 @@ export function ResourceBrowser({
                                     </span>
                                     <span className="resource-browser-table-primary">
                                       <span className="resource-browser-table-title" title={displayName}>
-                                        {displayName}
+                                        <ResourceNameText
+                                          resource={resource}
+                                          query={query}
+                                          fetchHead={quickPeekFetch}
+                                        />
                                       </span>
                                       <span className="resource-browser-table-subtitle" title={subtitle}>
                                         {subtitle}
@@ -3069,7 +3181,18 @@ export function ResourceBrowser({
                 </div>
               ) : (
                 <div className="resource-browser-grid">
-                  {cardResources.map((resource) => {
+                  {resourceGridEntries.map((entry) => {
+                    if (entry.kind === "label") {
+                      return (
+                        <h3
+                          key={`label:${entry.label}`}
+                          className="resource-browser-section-label"
+                        >
+                          {entry.label}
+                        </h3>
+                      );
+                    }
+                    const resource = entry.resource;
                     const KindIcon = iconForResource(resource);
                     const displayName = resourceDisplayName(resource);
                     const resolvedThumbnailUrl =
@@ -3234,7 +3357,11 @@ export function ResourceBrowser({
                         </div>
                         <div className="resource-browser-meta">
                           <p className="resource-browser-name" title={displayName}>
-                            {displayName}
+                            <ResourceNameText
+                              resource={resource}
+                              query={query}
+                              fetchHead={quickPeekFetch}
+                            />
                           </p>
                           <p className="resource-browser-details">{secondaryLine}</p>
                           <p className="resource-browser-date">{formatResourceDate(resource.created_at)}</p>

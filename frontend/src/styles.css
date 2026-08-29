@@ -3958,7 +3958,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  grid-auto-rows: 1fr;
+  /* `auto`, not `1fr`: cards carry a fixed height, so card rows come out
+     identical either way — but `1fr` sizes EVERY implicit row to the tallest
+     row in the grid, which blew the calendar section labels up to full card
+     height (measured 284px for a 29px eyebrow). Content-sized rows keep the
+     labels at label height and change nothing for the fixed-height cards. */
+  grid-auto-rows: auto;
   gap: 0.9rem;
 }
 
@@ -4092,6 +4097,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
   font-size: 0.82rem;
   font-weight: var(--font-weight-action);
+  /* Same digit discipline as the card names: machine-stamped siblings differ
+     only in a digit run, and equal-width digits make a column of them
+     scannable top-to-bottom. */
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
 }
 
@@ -4126,6 +4135,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 17.75rem;
   display: grid;
   grid-template-rows: 10.75rem minmax(0, 1fr);
+  /* The implicit column must be pinned too. Left implicit, it sizes to the
+     widest item's min-content — and the text-preview snippet is `white-space:
+     pre`, so one long source line inflated the inner column to the snippet's
+     longest line (measured 1877px inside a 365px card). The meta row then
+     stretched to that phantom track and filenames laid out on a giant single
+     line: the 2-line clamp never engaged and the card edge hard-clipped the
+     name with no ellipsis — while cards without text previews stayed fine,
+     which made the bug look intermittent. */
+  grid-template-columns: minmax(0, 1fr);
   transition: border-color 160ms var(--motion-ease), box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease);
 }
 
@@ -4264,6 +4282,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
   white-space: pre;
   overflow: hidden;
+  /* Source lines run far past the card (measured ~1600px of overflow), so the
+     crop is inevitable — but a hard mid-glyph cut reads as broken. The mask
+     fades the last stretch of every line into the card ground instead, which
+     reads as "the text continues", not "the text is damaged". Mask, not a
+     gradient overlay: it works over any ground in both themes without naming
+     a color. */
+  mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent);
 }
 
 .resource-thumb-snippet > div {
@@ -4680,6 +4705,34 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 0.72rem 2.95rem 0.68rem 0.15rem;
 }
 
+/* Calendar eyebrows over the card grid — the sidebar history's exact recipe
+   (size, weight, tracking, muted ink, sentence case) so both surfaces group
+   time in one voice. Spans the full grid row; the first one leans on the
+   grid's own top spacing instead of adding its own. */
+.resource-browser-section-label {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-panel-heading);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  line-height: 1.25;
+  padding: 0.6rem 0.15rem 0;
+}
+
+.resource-browser-grid > .resource-browser-section-label:first-child {
+  padding-top: 0;
+}
+
+/* Search matches in resource names: ink emphasis, not pigment. The amber
+   highlighter wash stays reserved for content marking in rendered markdown;
+   a transient filter echo brightens by weight alone. */
+.resource-name-match {
+  background: transparent;
+  color: inherit;
+  font-weight: var(--font-weight-strong);
+}
+
 .resource-browser-name {
   margin: 0;
   min-height: 2.64em;
@@ -4691,8 +4744,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  font-size: var(--font-size-body);
+  /* The nav rung, not body: a filename is an object label the eye sweeps past
+     at scroll speed, and the label rung fits a full machine-stamped name
+     (30+ chars) in fewer wraps at the 240px column minimum. The nav token is
+     also regime-stable — body inflates on mobile, which blew two-line names
+     to three on 180px phone columns. Tabular figures because sibling files
+     differ only in a digit run (upload stamps, tile indices, counters):
+     equal-width digits put the differing characters at the same x position
+     on every card, so adjacent names diff at a glance instead of a read. */
+  font-size: var(--font-size-nav);
   font-weight: var(--font-weight-action);
+  font-variant-numeric: tabular-nums;
   line-height: 1.32;
   color: var(--text-main);
   overflow: hidden;
@@ -4707,6 +4769,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Same digit discipline as the name row: sizes and timestamps column-align
+     across a row of cards instead of jittering per-card. */
+  font-variant-numeric: tabular-nums;
 }
 
 .resource-browser-share-status-chips {

@@ -2325,6 +2325,13 @@ const ConversationMessageRow = memo(
           /* Row identity for ⌘F: highlight painting and scroll-into-view find
              mounted rows by this attribute, whichever transcript mode is live. */
           data-message-id={message.id}
+          /* Turn identity for assistive tech. The transcript is one `role="log"`
+             region of otherwise unlabeled divs, so a screen reader read the
+             whole conversation as continuous prose with no way to tell who was
+             speaking. `article` makes each turn a navigable unit and the label
+             names the speaker. */
+          role="article"
+          aria-label="You said"
           className={cn(
             "chat-width-frame mx-auto w-full justify-end px-4 sm:px-6",
             isLastMessage && "pk-message-enter"
@@ -2420,6 +2427,8 @@ const ConversationMessageRow = memo(
     return (
       <Message
         data-message-id={message.id}
+        role="article"
+        aria-label="Ultra said"
         className={cn(
           "chat-width-frame mx-auto w-full justify-start px-4 sm:px-6",
           isLastMessage && "pk-message-enter"
@@ -14646,6 +14655,15 @@ export function App() {
                 activeConversation.messages.some((message) => message.role === "user")
               ? activeConversation.title
               : null;
+  // Every view needs exactly one document heading, and the app had none: the
+  // outline started at an H2 inside message prose, so a screen reader's
+  // heading rotor opened onto whatever the model happened to write. The
+  // visible chrome already names the view in a different place per panel (the
+  // mobile bar, a page header, or nothing at all in chat), so this H1 is
+  // screen-reader-only — it gives assistive tech a stable "where am I" anchor
+  // without adding a second visible title.
+  const documentHeading =
+    mobileShellTitle ?? (activePanel === "chat" ? "New chat" : "Ultra");
   const showAppShellBanner = shouldShowAppShellBanner(activePanel, uiErrorBanner);
 
   if (authStatus !== "authenticated") {
@@ -15101,7 +15119,11 @@ export function App() {
       ) : null}
 
       <SidebarInset>
-        <main
+        {/* SidebarInset already renders the page's <main> landmark, so this
+            shell is a plain div. It used to be a second <main> nested inside
+            the first, which is invalid: assistive tech announced two main
+            regions and "skip to main content" became ambiguous. */}
+        <div
           ref={setMainShellElement}
           className="app-main-shell flex min-h-0 flex-1 flex-col overflow-hidden"
           data-welcome-stage={welcomeStageActive ? "true" : undefined}
@@ -15124,6 +15146,7 @@ export function App() {
               : undefined
           }
         >
+          <h1 className="sr-only">{documentHeading}</h1>
           <div className="app-mobile-shell-bar md:hidden">
             <SidebarTrigger
               className="app-mobile-sidebar-trigger"
@@ -16468,7 +16491,7 @@ export function App() {
           ) : null}
             </>
           )}
-        </main>
+        </div>
         {/* Chat drop overlay: while an OS file drag is over the window and the
             chat panel is active, the whole viewport becomes the drop target —
             "dump files anywhere". Resources has its own zone highlighting, and

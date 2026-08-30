@@ -13895,6 +13895,22 @@ details {
   display: block;
 }
 
+/* The button needs a lane of its own. Floating it over the equation put it on
+   top of the glyphs — measured 27x13px of overlap on EVERY display block, at
+   both widths: on desktop it covered the tail of the formula at exactly the
+   moment you hovered to read or copy it, and on touch (where it is
+   permanently visible) it sat on the math permanently. Symmetric inline
+   padding on the scrollport reserves that lane without breaking the optical
+   centering display math depends on: the equation is centered inside the
+   remaining width, and a wide one now starts and ends its scroll clear of
+   the button instead of underneath it. Padding on a horizontal scrollport is
+   part of the scrollable extent, so the glyphs cannot reach the gutter at
+   either end of the scroll. */
+.pk-markdown .pk-math-display-shell .katex-display,
+.pk-message-content-plain .pk-math-display-shell .katex-display {
+  padding-inline: 2.1rem;
+}
+
 .pk-math-copy {
   position: absolute;
   top: 0.1rem;
@@ -13912,6 +13928,15 @@ details {
   opacity: 0;
   cursor: pointer;
   transition: opacity 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
+}
+
+/* A 27px visual box is right for a ghost affordance and wrong for a finger.
+   The pseudo-element grows the HIT area to ~44px (the house touch minimum)
+   without growing the ink. */
+.pk-math-copy::after {
+  content: "";
+  position: absolute;
+  inset: -0.53rem;
 }
 
 .pk-math-display-shell:hover .pk-math-copy,
@@ -15357,6 +15382,15 @@ details {
   border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   max-height: 22rem;
   overflow-y: auto;
+  /* A reasoning trace can hold thousands of lines (measured 19,029px of
+     content in a 352px window) sitting directly in the transcript's reading
+     path. Without containment, a wheel or trackpad gesture that happens to
+     start over one is swallowed by it, and then — once it bottoms out —
+     chains back to the transcript mid-gesture. The reader experiences it as
+     the page randomly refusing to scroll and then lurching. Containment keeps
+     the gesture wherever it started: the trace scrolls only while it has
+     somewhere to go, and never hands the momentum onward. */
+  overscroll-behavior: contain;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 0.8125rem;

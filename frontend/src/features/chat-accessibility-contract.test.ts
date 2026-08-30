@@ -43,6 +43,26 @@ describe("chat accessibility + reading-flow contract", () => {
   });
 });
 
+describe("sidebar keyboard focus", () => {
+  it("restores a visible focus ring on the flat sidebar controls", () => {
+    // These controls ship Tailwind's `outline-hidden` + `focus-visible:ring-2`,
+    // and Tailwind paints that ring through box-shadow — which every flat
+    // sidebar control then erases with a resting `box-shadow: none`. Measured
+    // under real keyboard focus: :focus-visible matched and --tw-ring-shadow
+    // resolved to a real 2px ring while the composed box-shadow stayed none,
+    // leaving the conversation list with no visible focus at all (WCAG 2.4.7).
+    // Stated as an outline so a resting box-shadow can never erase it again.
+    expect(stylesSource).toMatch(
+      /\.app-history-button:focus-visible,[\s\S]{0,400}?\{[^}]*outline:\s*2px solid var\(--sidebar-ring\);[^}]*outline-offset:\s*-2px;/s
+    );
+  });
+
+  it("keeps the resting sidebar flat", () => {
+    // The fix must be focus-visible-only: a pointer click never triggers it.
+    expect(stylesSource).toMatch(/\.app-history-button\s*\{[^}]*box-shadow:\s*none;/s);
+  });
+});
+
 describe("display-math copy affordance", () => {
   it("reserves a gutter so the button never sits on the equation", () => {
     // Measured 27x13px of overlap on every display block at both widths —

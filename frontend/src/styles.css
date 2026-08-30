@@ -2007,6 +2007,34 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.18rem;
 }
 
+/* Keyboard focus in the sidebar.
+
+   The vendored sidebar button ships Tailwind's `outline-hidden` (which removes
+   the browser's own focus ring) paired with `focus-visible:ring-2` to replace
+   it — and Tailwind paints that ring THROUGH box-shadow. Every flat sidebar
+   control here then states `box-shadow: none` for its resting look, which
+   silently erased the replacement: measured under real keyboard focus on a
+   conversation row, `:focus-visible` matched and `--tw-ring-shadow` resolved
+   to a real `0 0 0 2px` ring, while the composed `box-shadow` stayed `none`
+   and `outline-style` stayed `none`. The result was no visible focus at all on
+   the app's most-travelled controls — the conversation list, the brand button,
+   and the collapsed-rail actions — which fails WCAG 2.4.7 and makes the
+   sidebar unusable without a mouse.
+
+   Stated as an outline rather than a box-shadow so it cannot be erased again
+   by a resting `box-shadow: none`, and inset by its own width so the ring hugs
+   the row's rounded rect instead of colliding with the sidebar edge. Keyboard
+   users only — `:focus-visible` never fires for a pointer click, so the
+   resting sidebar stays flat. */
+.app-history-button:focus-visible,
+.app-sidebar-brand-button[data-slot="button"]:focus-visible,
+.app-collapsed-sidebar-toggle:focus-visible,
+.app-collapsed-sidebar-action:focus-visible,
+.app-sidebar-header-trigger[data-slot="sidebar-trigger"]:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: -2px;
+}
+
 .app-history-button {
   border-radius: var(--sidebar-radius-row);
   min-height: 2.18rem;

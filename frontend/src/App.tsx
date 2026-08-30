@@ -14704,6 +14704,23 @@ export function App() {
       open={sidebarOpen}
       onOpenChange={setSidebarOpen}
     >
+      {/* Skip link — the first thing in the tab order. Everything the sidebar
+          holds (nav, then the whole conversation history, which grows without
+          bound) sits before the transcript and composer in the DOM, so reaching
+          the thing you came to use meant tabbing past dozens of controls on
+          every load. A button rather than an `href="#..."` anchor on purpose:
+          this app keeps its navigation state in the query string with no
+          router, and a hash would write a phantom entry into that state. */}
+      <button
+        type="button"
+        className="app-skip-link"
+        onClick={() => {
+          const target = composerTextareaRef.current ?? mainShellElement;
+          target?.focus();
+        }}
+      >
+        Skip to chat
+      </button>
       <Sidebar collapsible="icon" className="app-sidebar">
         <CollapsedSidebarRail
           recentItems={collapsedRecentItems}

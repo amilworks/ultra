@@ -43,6 +43,35 @@ describe("chat accessibility + reading-flow contract", () => {
   });
 });
 
+describe("skip link", () => {
+  it("is the first focusable control and jumps to the composer", () => {
+    // Everything the sidebar holds — nav plus an unbounded conversation
+    // history — precedes the transcript and composer in the DOM, so reaching
+    // the thing you came to use meant tabbing past dozens of controls.
+    expect(appSource).toMatch(/className="app-skip-link"/);
+    expect(appSource).toMatch(/composerTextareaRef\.current \?\? mainShellElement/);
+    // A button, not an href="#..." anchor: this app keeps navigation state in
+    // the query string with no router, and a hash would write a phantom entry.
+    expect(appSource).not.toMatch(/className="app-skip-link"[\s\S]{0,80}href=/);
+  });
+
+  it("stays in the tab order while hidden, and reveals on plain focus", () => {
+    // display:none / visibility:hidden would drop it from the tab order —
+    // the one thing it must stay in.
+    // Comments are stripped first: the rule's own comment explains why
+    // display:none is wrong, and would otherwise trip these assertions.
+    const rule = (stylesSource.match(/\.app-skip-link\s*\{[^}]*\}/s)?.[0] ?? "").replace(
+      /\/\*[\s\S]*?\*\//g,
+      ""
+    );
+    expect(rule).not.toMatch(/display:\s*none/);
+    expect(rule).not.toMatch(/visibility:\s*hidden/);
+    expect(rule).toMatch(/opacity:\s*0/);
+    // `:focus`, not `:focus-visible` — it is unreachable by pointer anyway.
+    expect(stylesSource).toMatch(/\.app-skip-link:focus\s*\{[^}]*opacity:\s*1;/s);
+  });
+});
+
 describe("sidebar keyboard focus", () => {
   it("restores a visible focus ring on the flat sidebar controls", () => {
     // These controls ship Tailwind's `outline-hidden` + `focus-visible:ring-2`,

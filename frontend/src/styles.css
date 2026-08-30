@@ -2007,6 +2007,42 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.18rem;
 }
 
+/* Skip link. Off-screen until it takes keyboard focus, then it lands as a
+   normal small control in the top-left — the one piece of chrome that is
+   allowed to appear from nowhere, because it only ever appears for the person
+   who needs it. Pointer users never see it. */
+.app-skip-link {
+  position: fixed;
+  top: 0.6rem;
+  left: 0.6rem;
+  z-index: 60;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-strong);
+  color: var(--text-main);
+  font-size: var(--font-size-nav);
+  font-weight: var(--font-weight-action);
+  box-shadow: var(--shadow-raised);
+  /* Not `display: none` and not `visibility: hidden` — either would take it
+     out of the tab order, which is the one thing it must stay in. */
+  transform: translateY(-200%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* `:focus`, not `:focus-visible`: the control is off-screen and
+   pointer-events:none, so the only way to reach it at all is the keyboard —
+   and gating on focus-visible would leave it invisible for any focus the
+   browser declines to call keyboard-initiated. */
+.app-skip-link:focus {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
 /* Keyboard focus in the sidebar.
 
    The vendored sidebar button ships Tailwind's `outline-hidden` (which removes

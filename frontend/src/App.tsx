@@ -83,11 +83,8 @@ import {
 } from "./features/chat/brief-tokens";
 import { resourceDisplayName } from "./features/resources/presentation";
 import { BriefOverlay } from "./components/chat/BriefOverlay";
-import {
-  ResourceMentionPicker,
-  resourceMentionKindLabel,
-  resourceMentionOptionId,
-} from "./components/chat/ResourceMentionPicker";
+import type { ResourceMentionPickerProps } from "./components/chat/ResourceMentionPicker";
+import { resourceMentionKindLabel, resourceMentionOptionId } from "./features/chat/resource-mention";
 import { measureTextareaCaret } from "./lib/textareaCaret";
 import {
   BRIEF_TOKEN_STORAGE_KEY,
@@ -570,6 +567,8 @@ const loadResourceBrowserModule = () => import("./components/ResourceBrowser");
 const loadNoteContextPickerModule = () => import("./components/chat/NoteContextPicker");
 const loadNoteRunContextModule = () => import("./components/chat/NoteRunContext");
 const loadComposerSlashMenuModule = () => import("./components/chat/ComposerSlashMenu");
+const loadResourceMentionPickerModule = () =>
+  import("./components/chat/ResourceMentionPicker");
 const loadChatRunStepsModule = () => import("./components/chat/ChatRunSteps");
 const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
@@ -664,6 +663,11 @@ const LazyComposerSlashMenu = lazyNamed(
   "ComposerSlashMenu"
 );
 const LazyChatRunSteps = lazyNamed(loadChatRunStepsModule, "ChatRunSteps");
+// The @ picker is only needed once a mention starts; the idle preloader warms it.
+const LazyResourceMentionPicker = lazyNamed(
+  loadResourceMentionPickerModule,
+  "ResourceMentionPicker"
+);
 const LazyInlineDataQuickPreview = lazyNamed(
   loadInlineDataQuickPreviewModule,
   "InlineDataQuickPreview"
@@ -700,6 +704,7 @@ const preloadSecondaryPanelModules = ({
     loadTrainingDashboardModule(),
     loadAppSettingsDialogModule(),
     loadUploadViewerSheetModule(),
+    loadResourceMentionPickerModule(),
   ]).catch((error: unknown) => {
     secondaryPanelPreloadPromise = null;
     throw error;
@@ -5377,20 +5382,22 @@ const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null
    FileUpload context can open, and App renders that provider — so a child
    component under it hosts the picker and hands the dialog opener down. */
 function BriefMentionPickerHost(
-  props: Omit<React.ComponentProps<typeof ResourceMentionPicker>, "onUploadInstead"> & {
+  props: Omit<ResourceMentionPickerProps, "onUploadInstead"> & {
     onBeforeUpload: () => void;
   }
 ) {
   const { openFilePicker } = useFileUploadContext();
   const { onBeforeUpload, ...pickerProps } = props;
   return (
-    <ResourceMentionPicker
-      {...pickerProps}
-      onUploadInstead={() => {
-        onBeforeUpload();
-        openFilePicker();
-      }}
-    />
+    <Suspense fallback={null}>
+      <LazyResourceMentionPicker
+        {...pickerProps}
+        onUploadInstead={() => {
+          onBeforeUpload();
+          openFilePicker();
+        }}
+      />
+    </Suspense>
   );
 }
 

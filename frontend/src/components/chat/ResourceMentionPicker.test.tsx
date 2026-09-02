@@ -1,11 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  ResourceMentionPicker,
-  resourceMentionKindLabel,
-  resourceMentionOptionId,
-} from "./ResourceMentionPicker";
+import { ResourceMentionPicker } from "./ResourceMentionPicker";
+import { resourceMentionKindLabel, resourceMentionOptionId } from "@/features/chat/resource-mention";
 import type { ResourceRecord } from "@/types";
 
 const resource = (overrides: Partial<ResourceRecord>): ResourceRecord =>

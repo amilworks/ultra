@@ -9368,6 +9368,411 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   opacity: 1;
 }
 
+/* ============================================================================
+   The brief: tokens in the prose.
+
+   The composer is still one <textarea>. Files the user brings in are runs of
+   ordinary text (`@scan.tif`) and the layer below paints a translucent pill
+   under each run — translucent so the textarea's own glyphs show through and
+   nothing is drawn twice. Prose in the layer is transparent: it exists only to
+   put the pills in the right place. The workflow and the intelligence mode are
+   not text at all; they sit as chips at the head of the first line, and the
+   textarea indents its first line by their measured width so both layers share
+   one grid. See components/chat/BriefOverlay.tsx and features/chat/brief-tokens.ts.
+   ========================================================================== */
+.app-composer-shell {
+  --brief-token-bg: color-mix(in oklab, var(--text-main) 7%, transparent);
+  --brief-token-bg-strong: color-mix(in oklab, var(--text-main) 11%, transparent);
+  --brief-whisper: var(--text-muted);
+  --brief-whisper-faint: color-mix(in oklab, var(--text-muted) 62%, transparent);
+}
+
+.dark .app-composer-shell {
+  --brief-token-bg: color-mix(in oklab, var(--text-main) 10%, transparent);
+  --brief-token-bg-strong: color-mix(in oklab, var(--text-main) 16%, transparent);
+}
+
+.app-composer-card-body {
+  position: relative;
+}
+
+.brief-overlay {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.brief-overlay-content {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
+  color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  /* The textarea's own scrollbar gutter, if it ever shows, is not mirrored;
+     the difference is one line wrap at the very end of a 240px-tall draft. */
+}
+
+.brief-overlay-text {
+  color: transparent;
+}
+
+/* Inline horizontal padding would shift the text that follows; the equal
+   negative margin cancels it, so the pill reaches 0.18em into the padding
+   spaces on either side while the glyphs stay exactly where the textarea
+   draws them. Vertical padding is free — it never moves an inline line box.
+   box-decoration-break clone keeps rounded ends when a token wraps. */
+.brief-token {
+  color: transparent;
+  background: var(--brief-token-bg);
+  border-radius: 0.38em;
+  padding: 0.1em 0.18em;
+  margin: 0 -0.18em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  pointer-events: auto;
+  cursor: text;
+  transition: background-color 160ms var(--motion-ease);
+}
+
+.brief-token:hover {
+  background: var(--brief-token-bg-strong);
+}
+
+/* Deleted from the library since it was typed: the pill empties to a dashed
+   frame and the run is struck through in the muted ink, so the eye reads
+   "this one is gone" before the whisper says so. The strike colour is stated
+   because the span's own colour is transparent. */
+.brief-token-gone {
+  background: transparent;
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+  text-decoration-thickness: 1px;
+}
+
+/* Chips at the head of the line: the workflow and the mode. Real controls
+   (they open their menus), so they take pointer events even though the layer
+   around them does not. Height stays inside the line box — 1.45em of the
+   composer's 17px is 24.7px against a 25.9px line — so the first line of the
+   overlay never grows taller than the textarea's. */
+.brief-overlay-prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  vertical-align: baseline;
+  margin-right: 0.45rem;
+  pointer-events: auto;
+  line-height: 1;
+}
+
+.brief-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  height: 1.45em;
+  padding: 0 0.55em 0 0.45em;
+  border: 0;
+  border-radius: 0.42em;
+  background: var(--brief-token-bg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-action);
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.brief-chip:hover,
+.brief-chip[aria-expanded="true"] {
+  background: var(--brief-token-bg-strong);
+  color: var(--text-main);
+}
+
+.brief-chip:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+.brief-chip svg {
+  width: 0.95em;
+  height: 0.95em;
+  flex: 0 0 auto;
+}
+
+/* The workflow leads the sentence in the one filled treatment the composer
+   owns — the same ink as the send button, inverted in Night by the tokens. */
+.brief-chip-workflow {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.brief-chip-workflow:hover,
+.brief-chip-workflow[aria-expanded="true"] {
+  background: var(--brand-strong);
+  color: var(--primary-foreground);
+}
+
+/* The @ picker. Desktop floats it at the caret inside the card body; phones
+   lay it under the line as a sheet. One popover language with the rest of the
+   product: raised ground, hairline, 12px radius, 44px rows. */
+.brief-mention-picker {
+  position: absolute;
+  z-index: 45;
+  box-sizing: border-box;
+  width: min(380px, calc(100% - 1rem));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-main);
+}
+
+.brief-mention-picker-popover {
+  bottom: calc(100% + 0.5rem);
+}
+
+.brief-mention-picker-sheet {
+  position: relative;
+  width: auto;
+  margin: 0.3rem 0.75rem 0.5rem;
+}
+
+.brief-mention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.brief-mention-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.brief-mention-option-active {
+  background: var(--brief-token-bg);
+}
+
+.brief-mention-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--brief-token-bg);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.brief-mention-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.brief-mention-name {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: var(--font-weight-action);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-mention-match {
+  font-weight: var(--font-weight-strong);
+}
+
+.brief-mention-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-mention-empty {
+  padding: 12px 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.brief-mention-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border-top: 1px solid color-mix(in oklab, var(--line) 66%, transparent);
+  font-size: 12px;
+  color: var(--brief-whisper-faint);
+}
+
+.brief-mention-upload {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.brief-mention-upload:hover {
+  color: var(--text-main);
+}
+
+/* The whisper under a ready brief and the eyebrow above a running one. Both
+   speak in the run-meta voice (12px, muted, tabular) — marginalia about the
+   control, never the control's own voice. */
+.brief-whisper,
+.brief-run-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--brief-whisper);
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-whisper {
+  padding: 0 1rem 0.2rem 1.35rem;
+}
+
+.brief-run-eyebrow {
+  padding: 0.55rem 1rem 0 1.35rem;
+}
+
+.brief-whisper-keys,
+.brief-run-eyebrow-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+  color: var(--brief-whisper-faint);
+  white-space: nowrap;
+}
+
+.brief-whisper-keys svg {
+  width: 13px;
+  height: 13px;
+}
+
+.brief-whisper-summary,
+.brief-run-eyebrow-status {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.brief-run-eyebrow-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brief-run-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--text-main);
+  animation: brief-run-dot 1.6s var(--motion-ease) infinite;
+}
+
+@keyframes brief-run-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* A gone file blocks sending: the whisper turns into the notice and offers
+   the one action that repairs it. */
+.brief-whisper-notice {
+  color: var(--text-main);
+}
+
+.brief-whisper-notice button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+/* Stop carries its word. A destructive verb on a pill that fits the same
+   36–44px row as the icon buttons beside it. */
+.app-composer-stop-button.brief-stop-button {
+  width: auto;
+  padding: 0 0.85rem 0 0.7rem;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: var(--font-weight-action);
+}
+
+/* The slim pill and the read-mode collapse hide the whisper: while the line is
+   at rest there is nothing to summarise, and while it is collapsed the strip
+   has no room for marginalia. */
+.app-composer-shell[data-composer-slim="true"] .brief-whisper,
+.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-whisper,
+.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-run-eyebrow {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  /* Phones: no keyboard to whisper about, and 44px targets. */
+  .brief-whisper-keys {
+    display: none;
+  }
+  .brief-mention-option {
+    min-height: 52px;
+  }
+  .brief-mention-picker {
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brief-run-dot {
+    animation: none;
+  }
+  .brief-token,
+  .brief-chip {
+    transition: none;
+  }
+}
+
 .app-composer-actions {
   display: flex;
   align-items: center;

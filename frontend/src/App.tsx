@@ -6,6 +6,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -30,7 +31,6 @@ import {
   ThinkingBar,
 } from "./components/prompt-kit";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -67,6 +67,34 @@ import {
 } from "@/components/ui/sidebar";
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
+import {
+  type BriefFileToken,
+  briefBackspaceTarget,
+  briefCaretAfterArrow,
+  briefDeleteTarget,
+  briefFileTokensInText,
+  briefMentionQueryAtCaret,
+  briefSummary,
+  insertBriefToken,
+  parseBriefSegments,
+  removeBriefSegment,
+  syncBriefRegistryWithText,
+  uniqueBriefLabel,
+} from "./features/chat/brief-tokens";
+import { resourceDisplayName } from "./features/resources/presentation";
+import { BriefOverlay } from "./components/chat/BriefOverlay";
+import {
+  ResourceMentionPicker,
+  resourceMentionKindLabel,
+  resourceMentionOptionId,
+} from "./components/chat/ResourceMentionPicker";
+import { measureTextareaCaret } from "./lib/textareaCaret";
+import {
+  BRIEF_TOKEN_STORAGE_KEY,
+  readBriefTokenStorage,
+  serializeBriefTokenStorage,
+  type BriefTokenStorageState,
+} from "./lib/briefTokenStorage";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { lazyNamedWithRetry } from "@/lib/lazy-retry";
 import {
@@ -337,6 +365,10 @@ import type {
 } from "./components/ResourceBrowser";
 import {
   ArrowUp,
+  Slash,
+  Library,
+  Gauge,
+  CornerDownLeft,
   Check,
   ChevronDown,
   Copy,
@@ -786,6 +818,11 @@ type TurnSubmissionOverride = {
 };
 
 const EMPTY_UI_MESSAGES: UiMessage[] = [];
+const EMPTY_BRIEF_TOKENS: BriefFileToken[] = [];
+/* The overlay prefix's own margin-right (0.45rem) — the textarea's first-line
+   indent has to cover the chips AND the gap after them. */
+const BRIEF_PREFIX_GAP_PX = 7.2;
+const BRIEF_MENTION_RESULT_LIMIT = 8;
 const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
 const EMPTY_RUN_EVENTS: RunEvent[] = [];
 
@@ -5336,16 +5373,41 @@ const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null
   };
 };
 
+/* The @ picker's "Upload instead…" needs the file dialog, which only the
+   FileUpload context can open, and App renders that provider — so a child
+   component under it hosts the picker and hands the dialog opener down. */
+function BriefMentionPickerHost(
+  props: Omit<React.ComponentProps<typeof ResourceMentionPicker>, "onUploadInstead"> & {
+    onBeforeUpload: () => void;
+  }
+) {
+  const { openFilePicker } = useFileUploadContext();
+  const { onBeforeUpload, ...pickerProps } = props;
+  return (
+    <ResourceMentionPicker
+      {...pickerProps}
+      onUploadInstead={() => {
+        onBeforeUpload();
+        openFilePicker();
+      }}
+    />
+  );
+}
+
 function ComposerAttachMenu({
   disabled,
   variant = "toolbar",
   onCloseAutoFocus,
   onOpenNotes,
+  onOpenResources,
+  onStartWorkflow,
 }: {
   disabled: boolean;
   variant?: "toolbar" | "idle";
   onCloseAutoFocus?: (event: Event) => void;
   onOpenNotes?: () => void;
+  onOpenResources?: () => void;
+  onStartWorkflow?: () => void;
 }) {
   const { openFilePicker, openFolderPicker, allowDirectories } = useFileUploadContext();
   const addLabel = onOpenNotes ? "Add files, folders, or a Note" : "Add files or a folder";
@@ -5395,6 +5457,24 @@ function ComposerAttachMenu({
         className="app-composer-attach-menu"
         onCloseAutoFocus={onCloseAutoFocus}
       >
+        {onOpenResources ? (
+          <DropdownMenuItem onSelect={onOpenResources} data-testid="composer-attach-resources">
+            <Library data-icon="inline-start" aria-hidden="true" />
+            <div className="app-composer-attach-menu-item">
+              <span>From your Resources</span>
+              <span className="app-composer-attach-menu-detail">Files already in your library</span>
+            </div>
+          </DropdownMenuItem>
+        ) : null}
+        {onStartWorkflow ? (
+          <DropdownMenuItem onSelect={onStartWorkflow} data-testid="composer-attach-workflow">
+            <Slash data-icon="inline-start" aria-hidden="true" />
+            <div className="app-composer-attach-menu-item">
+              <span>Start from a workflow</span>
+              <span className="app-composer-attach-menu-detail">The same list as typing /</span>
+            </div>
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuItem onSelect={() => openFilePicker()}>
           <FileUp data-icon="inline-start" aria-hidden="true" />
           <div className="app-composer-attach-menu-item">
@@ -5816,6 +5896,21 @@ export function App() {
     onNoteScopeFailure: () => void;
   } | null>(null);
   const [initialComposerDraftStorage] = useState(readComposerDraftsFromStorage);
+  const [briefTokensByConversationId, setBriefTokensByConversationId] =
+    useState<BriefTokenStorageState>(readBriefTokenStorage);
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(
+          BRIEF_TOKEN_STORAGE_KEY,
+          serializeBriefTokenStorage(briefTokensByConversationId)
+        );
+      } catch {
+        // Storage full or unavailable: the tokens still work for this session.
+      }
+    }, 150);
+    return () => window.clearTimeout(timeoutId);
+  }, [briefTokensByConversationId]);
   // Exact small text fragments observed entering through paste. They remain
   // visible in the composer/model prompt, but can never be interpreted as the
   // user's own authorization to search private Notes. The same fragments are
@@ -9099,6 +9194,34 @@ export function App() {
   const isProModeComposerActive = activeComposerWorkflowPreset?.id === "pro_mode";
   const activeComposerIntelligenceMode: ComposerIntelligenceMode =
     isProModeComposerActive ? "pro" : "high";
+  const activeBriefRegistry: readonly BriefFileToken[] = activeConversation
+    ? briefTokensByConversationId[activeConversation.id] ?? EMPTY_BRIEF_TOKENS
+    : EMPTY_BRIEF_TOKENS;
+  const activeConversationIdForBrief = activeConversation?.id ?? null;
+  const setActiveBriefRegistry = useCallback(
+    (update: (previous: readonly BriefFileToken[]) => readonly BriefFileToken[]): void => {
+      if (!activeConversationIdForBrief) {
+        return;
+      }
+      setBriefTokensByConversationId((previous) => {
+        const current = previous[activeConversationIdForBrief] ?? EMPTY_BRIEF_TOKENS;
+        const next = update(current);
+        if (next === current) {
+          return previous;
+        }
+        if (next.length === 0) {
+          if (!(activeConversationIdForBrief in previous)) {
+            return previous;
+          }
+          const rest = { ...previous };
+          delete rest[activeConversationIdForBrief];
+          return rest;
+        }
+        return { ...previous, [activeConversationIdForBrief]: [...next] };
+      });
+    },
+    [activeConversationIdForBrief]
+  );
   const activeUploadedFiles = useMemo(() => {
     const combinedFileIds = uniqueFileIds([
       ...activeStagedUploadFileIds,
@@ -9498,6 +9621,62 @@ export function App() {
     activePendingFiles.length > 0 ||
     activeStagedUploadFileIds.length > 0 ||
     activeSelectionContextFileIds.length > 0;
+  // Files the brief already names as tokens do not need a preview chip too;
+  // the row stays for uploads still arriving and files the text does not carry.
+  const untokenizedPreviewFiles = useMemo(
+    () =>
+      uploadedPreviewFiles.filter(
+        (file) => !activeBriefRegistry.some((token) => token.fileId === file.id)
+      ),
+    [activeBriefRegistry, uploadedPreviewFiles]
+  );
+  const briefAvailableFileIds = useMemo(
+    () => new Set(activeAvailableUploadedFiles.map((file) => file.file_id)),
+    [activeAvailableUploadedFiles]
+  );
+  /* Tokens whose file left the library since they were typed. They block the
+     send: the model would be pointed at nothing. Nothing is judged gone before
+     the conversation hydrates — its file list is empty until then, and the send
+     is already held by the hydration gate. */
+  const briefGoneFileIds = useMemo(
+    () =>
+      activeConversationHydrated
+        ? activeBriefRegistry
+            .filter((token) => !briefAvailableFileIds.has(token.fileId))
+            .map((token) => token.fileId)
+        : EMPTY_STRING_ARRAY,
+    [activeBriefRegistry, activeConversationHydrated, briefAvailableFileIds]
+  );
+  const briefFileDetails = useCallback(
+    (fileId: string) => {
+      const file = activeAvailableUploadedFiles.find((entry) => entry.file_id === fileId);
+      const token = activeBriefRegistry.find((entry) => entry.fileId === fileId);
+      if (!file) {
+        return { title: `${token?.label ?? "This file"} — no longer in your library`, gone: true };
+      }
+      const kind = resourceMentionKindLabel({
+        original_name: file.original_name,
+        resource_kind: "file",
+      } as ResourceRecord);
+      return { title: `${file.original_name} · ${kind} · ${formatBytes(file.size_bytes)}` };
+    },
+    [activeAvailableUploadedFiles, activeBriefRegistry]
+  );
+  const briefWorkflowLabel =
+    activeComposerWorkflowPreset && activeComposerWorkflowPreset.id !== "pro_mode"
+      ? activeComposerWorkflowPreset.label
+      : null;
+  /* A file-first workflow with nothing attached yet: the whisper says what it
+     needs instead of a second badge row repeating the chip. */
+  const briefWorkflowNeedsFiles =
+    briefWorkflowLabel !== null &&
+    Boolean(activeComposerWorkflowPreset?.requiresAttachedFiles) &&
+    !hasComposerAttachedFiles;
+  const briefSummaryText = briefSummary({
+    fileCount: briefFileTokensInText(activePrompt, activeBriefRegistry).length,
+    workflowLabel: briefWorkflowLabel,
+    modeLabel: isProModeComposerActive ? "Pro" : null,
+  });
   const selectedComposerResourceIds = useMemo(
     () => new Set(Object.keys(composerResourcePickerSelection)),
     [composerResourcePickerSelection]
@@ -9532,7 +9711,10 @@ export function App() {
     activePrompt.startsWith("/") &&
     activePrompt !== dismissedSlashPrompt;
   const composerSubmitDisabled =
-    !activeConversationHydrated || !activePrompt.trim() || slashMenuOpen;
+    !activeConversationHydrated ||
+    !activePrompt.trim() ||
+    slashMenuOpen ||
+    briefGoneFileIds.length > 0;
 
   useEffect(() => {
     if (!slashMenuOpen || composerWorkflows) {
@@ -13197,12 +13379,533 @@ export function App() {
     ]
   );
 
+  /* ---------------------------------------------------------------------
+     The brief: @ mentions, atomic tokens, and the registry's two-way sync
+     with the files staged on the conversation.
+     --------------------------------------------------------------------- */
+  const [briefMention, setBriefMention] = useState<{ start: number; query: string } | null>(null);
+  const [briefMentionResults, setBriefMentionResults] = useState<ResourceRecord[]>([]);
+  const [briefMentionLoading, setBriefMentionLoading] = useState(false);
+  const [briefMentionError, setBriefMentionError] = useState<string | null>(null);
+  const [briefMentionActiveId, setBriefMentionActiveId] = useState<string | null>(null);
+  const [briefMentionAnchor, setBriefMentionAnchor] = useState<{ left: number } | null>(null);
+  const [briefPrefixWidth, setBriefPrefixWidth] = useState(0);
+  const briefMentionListboxId = useId();
+  const briefMentionRequestRef = useRef(0);
+  const briefMentionDismissedStartRef = useRef<number | null>(null);
+
+  /* stageResourcesForConversation is a plain function that is recreated each
+     render; reaching it through a ref keeps pickBriefMention stable instead of
+     re-creating it — and every keystroke's overlay — on every render. */
+  const stageResourcesForConversationRef = useRef(stageResourcesForConversation);
+  stageResourcesForConversationRef.current = stageResourcesForConversation;
+
+  const placeBriefCaret = useCallback((position: number): void => {
+    window.requestAnimationFrame(() => {
+      const node = composerTextareaRef.current;
+      if (!node) {
+        return;
+      }
+      node.focus();
+      const clamped = Math.max(0, Math.min(position, node.value.length));
+      node.setSelectionRange(clamped, clamped);
+    });
+  }, []);
+
+  /* Removing a token removes its file from the run — the exact same edit the
+     preview chip's × made: drop the staged id, and prune the selection context
+     the way that path did (an empty focused list releases the context). */
+  const unstageBriefFiles = useCallback(
+    (fileIds: readonly string[]): void => {
+      const removed = new Set(fileIds.filter((fileId) => fileId.trim().length > 0));
+      if (removed.size === 0) {
+        return;
+      }
+      updateActiveConversation((conversation) => {
+        const currentSelection = conversation.activeSelectionContext;
+        const nextFocusedFileIds =
+          currentSelection?.focused_file_ids?.filter((fileId) => !removed.has(fileId)) ?? [];
+        const touchesSelection =
+          currentSelection &&
+          (currentSelection.focused_file_ids?.some((fileId) => removed.has(fileId)) ||
+            (currentSelection.resource_uris?.length ?? 0) > 0 ||
+            (currentSelection.dataset_uris?.length ?? 0) > 0);
+        return {
+          ...conversation,
+          stagedUploadFileIds: conversation.stagedUploadFileIds.filter(
+            (fileId) => !removed.has(fileId)
+          ),
+          activeSelectionContext: touchesSelection
+            ? nextFocusedFileIds.length > 0
+              ? { ...currentSelection, focused_file_ids: nextFocusedFileIds }
+              : null
+            : currentSelection,
+          updatedAt: Date.now(),
+        };
+      });
+    },
+    [updateActiveConversation]
+  );
+
+  // The registry follows the prose: a token edited away releases its file.
+  useEffect(() => {
+    if (!activeConversationHydrated || activeBriefRegistry.length === 0) {
+      return;
+    }
+    const synced = syncBriefRegistryWithText(activePrompt, activeBriefRegistry);
+    if (synced === activeBriefRegistry) {
+      return;
+    }
+    const droppedFileIds = activeBriefRegistry
+      .filter((token) => !synced.some((kept) => kept.fileId === token.fileId))
+      .map((token) => token.fileId);
+    setActiveBriefRegistry(() => synced);
+    unstageBriefFiles(droppedFileIds);
+  }, [
+    activeBriefRegistry,
+    activeConversationHydrated,
+    activePrompt,
+    setActiveBriefRegistry,
+    unstageBriefFiles,
+  ]);
+
+  // Files that arrive without a token — a drop, an upload, "Use in chat", the
+  // full picker — get one at the caret (or the end), so the brief always says
+  // everything the run will receive. A token whose file is known but no longer
+  // staged is re-staged rather than orphaned. A layout effect, so the token
+  // lands in the same paint as the staging — no preview chip flashes first.
+  useLayoutEffect(() => {
+    if (!activeConversationHydrated || !activeConversation) {
+      return;
+    }
+    const attachedIds = new Set(activeUploadedFiles.map((file) => file.file_id));
+    const missing = activeUploadedFiles.filter(
+      (file) => !activeBriefRegistry.some((token) => token.fileId === file.file_id)
+    );
+    const unattachedTokenIds = activeBriefRegistry
+      .filter((token) => briefAvailableFileIds.has(token.fileId) && !attachedIds.has(token.fileId))
+      .map((token) => token.fileId);
+    if (unattachedTokenIds.length > 0) {
+      updateActiveConversation((conversation) => ({
+        ...conversation,
+        stagedUploadFileIds: uniqueFileIds([
+          ...conversation.stagedUploadFileIds,
+          ...unattachedTokenIds,
+        ]),
+        updatedAt: Date.now(),
+      }));
+    }
+    if (missing.length === 0) {
+      return;
+    }
+    const registry: BriefFileToken[] = [...activeBriefRegistry];
+    let text = activePrompt;
+    const node = composerTextareaRef.current;
+    let caret =
+      node && typeof document !== "undefined" && document.activeElement === node
+        ? Math.min(node.selectionStart, text.length)
+        : text.length;
+    let edited = false;
+    for (const file of missing) {
+      const label = uniqueBriefLabel(file.original_name, file.file_id, registry);
+      const token = { label, fileId: file.file_id };
+      registry.push(token);
+      // A draft written on another device (or before this browser's storage
+      // was cleared) already says @label: recover the pill, add nothing.
+      if (briefFileTokensInText(text, [token]).length > 0) {
+        continue;
+      }
+      const edit = insertBriefToken(text, caret, caret, label);
+      text = edit.text;
+      caret = edit.caret;
+      edited = true;
+    }
+    setActiveBriefRegistry(() => registry);
+    if (!edited) {
+      return;
+    }
+    setActivePromptValue(text);
+    if (node && document.activeElement === node) {
+      placeBriefCaret(caret);
+    }
+  }, [
+    activeBriefRegistry,
+    activeConversation,
+    activeConversationHydrated,
+    activePrompt,
+    activeUploadedFiles,
+    briefAvailableFileIds,
+    placeBriefCaret,
+    setActiveBriefRegistry,
+    setActivePromptValue,
+    updateActiveConversation,
+  ]);
+
+  const refreshBriefMention = useCallback((): void => {
+    const node = composerTextareaRef.current;
+    if (!node || !activeConversationHydrated || node.selectionStart !== node.selectionEnd) {
+      setBriefMention(null);
+      return;
+    }
+    const query = briefMentionQueryAtCaret(node.value, node.selectionStart, activeBriefRegistry);
+    if (!query) {
+      briefMentionDismissedStartRef.current = null;
+      setBriefMention(null);
+      return;
+    }
+    if (briefMentionDismissedStartRef.current === query.start) {
+      setBriefMention(null);
+      return;
+    }
+    setBriefMention((previous) =>
+      previous && previous.start === query.start && previous.query === query.query
+        ? previous
+        : query
+    );
+    if (!isPhoneView) {
+      const caret = measureTextareaCaret(node, query.start);
+      const host = node.offsetParent as HTMLElement | null;
+      const hostWidth = host?.clientWidth ?? node.offsetWidth;
+      const rawLeft = node.offsetLeft + (caret?.left ?? 0);
+      setBriefMentionAnchor({
+        left: Math.max(0, Math.min(rawLeft, hostWidth - 380)),
+      });
+    } else {
+      setBriefMentionAnchor(null);
+    }
+  }, [activeBriefRegistry, activeConversationHydrated, isPhoneView]);
+
+  useEffect(() => {
+    refreshBriefMention();
+  }, [activePrompt, refreshBriefMention]);
+
+  const dismissBriefMention = useCallback((): void => {
+    setBriefMention((current) => {
+      briefMentionDismissedStartRef.current = current?.start ?? null;
+      return null;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!briefMention) {
+      setBriefMentionResults([]);
+      setBriefMentionLoading(false);
+      setBriefMentionError(null);
+      return;
+    }
+    const requestId = briefMentionRequestRef.current + 1;
+    briefMentionRequestRef.current = requestId;
+    const query = briefMention.query.trim();
+    const timer = window.setTimeout(() => {
+      setBriefMentionLoading(true);
+      loadComposerResources(apiClient, {
+        limit: BRIEF_MENTION_RESULT_LIMIT,
+        query: query || undefined,
+      })
+        .then((payload) => {
+          if (requestId !== briefMentionRequestRef.current) {
+            return;
+          }
+          setBriefMentionResults(payload.resources.slice(0, BRIEF_MENTION_RESULT_LIMIT));
+          setBriefMentionError(null);
+        })
+        .catch((error) => {
+          if (requestId !== briefMentionRequestRef.current) {
+            return;
+          }
+          setBriefMentionResults([]);
+          setBriefMentionError(normalizeApiError(error));
+        })
+        .finally(() => {
+          if (requestId === briefMentionRequestRef.current) {
+            setBriefMentionLoading(false);
+          }
+        });
+    }, query ? 120 : 0);
+    return () => window.clearTimeout(timer);
+  }, [apiClient, briefMention]);
+
+  useEffect(() => {
+    if (briefMentionResults.length === 0) {
+      setBriefMentionActiveId(null);
+      return;
+    }
+    setBriefMentionActiveId((current) =>
+      current && briefMentionResults.some((resource) => resource.file_id === current)
+        ? current
+        : briefMentionResults[0].file_id
+    );
+  }, [briefMentionResults]);
+
+  const pickBriefMention = useCallback(
+    (resource: ResourceRecord): void => {
+      const node = composerTextareaRef.current;
+      const mention = briefMention;
+      if (!node || !mention || !activeConversation) {
+        return;
+      }
+      const label = uniqueBriefLabel(
+        resourceDisplayName(resource),
+        resource.file_id,
+        activeBriefRegistry
+      );
+      const end = Math.max(mention.start + 1, Math.min(node.selectionStart, activePrompt.length));
+      const edit = insertBriefToken(activePrompt, mention.start, end, label);
+      setActiveBriefRegistry((previous) => [
+        ...previous.filter((token) => token.fileId !== resource.file_id),
+        { label, fileId: resource.file_id },
+      ]);
+      setActivePromptValue(edit.text);
+      stageResourcesForConversationRef.current(activeConversation.id, [resource]);
+      briefMentionDismissedStartRef.current = null;
+      setBriefMention(null);
+      placeBriefCaret(edit.caret);
+    },
+    [
+      activeBriefRegistry,
+      activeConversation,
+      activePrompt,
+      briefMention,
+      placeBriefCaret,
+      setActiveBriefRegistry,
+      setActivePromptValue,
+    ]
+  );
+
+  const placeCaretAfterBriefToken = useCallback(
+    (segment: { end: number }): void => {
+      placeBriefCaret(segment.end);
+    },
+    [placeBriefCaret]
+  );
+
+  /* A gone token becomes an open @ at the same spot, so the picker reopens
+     right where the missing file was named. */
+  const replaceFirstGoneBriefToken = useCallback((): void => {
+    const gone = briefGoneFileIds[0];
+    if (!gone) {
+      return;
+    }
+    const segment = parseBriefSegments(activePrompt, activeBriefRegistry).find(
+      (entry) => entry.kind === "file" && entry.fileId === gone
+    );
+    const remaining = activeBriefRegistry.filter((token) => token.fileId !== gone);
+    setActiveBriefRegistry(() => remaining);
+    if (!segment || segment.kind !== "file") {
+      return;
+    }
+    const text = `${activePrompt.slice(0, segment.start)}@${activePrompt.slice(segment.end)}`;
+    briefMentionDismissedStartRef.current = null;
+    setActivePromptValue(text);
+    placeBriefCaret(segment.start + 1);
+  }, [activeBriefRegistry, activePrompt, briefGoneFileIds, placeBriefCaret, setActiveBriefRegistry, setActivePromptValue]);
+
+  const startBriefWorkflow = useCallback((): void => {
+    setActivePromptValue((value) => (value.trimStart().startsWith("/") ? value : `/${value}`));
+    setDismissedSlashPrompt(null);
+    focusComposerTextarea();
+  }, [focusComposerTextarea, setActivePromptValue]);
+
+  const removeBriefWorkflow = useCallback((): void => {
+    clearActiveComposerWorkflowPreset();
+    focusComposerTextarea();
+  }, [clearActiveComposerWorkflowPreset, focusComposerTextarea]);
+
+  /* Keys the brief owns. Returns true when it consumed the event so the
+     composer's other branches (slash menu, Enter-to-send, ArrowUp recall)
+     do not also act on it. */
+  const handleBriefKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (event.nativeEvent.isComposing) {
+      return false;
+    }
+    const node = event.currentTarget;
+    if (briefMention) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (briefMentionResults.length === 0) {
+          return false;
+        }
+        event.preventDefault();
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const currentIndex = briefMentionResults.findIndex(
+          (resource) => resource.file_id === briefMentionActiveId
+        );
+        const nextIndex = cycleListIndex(currentIndex, direction, briefMentionResults.length);
+        setBriefMentionActiveId(briefMentionResults[nextIndex]?.file_id ?? null);
+        return true;
+      }
+      const accepts =
+        (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) ||
+        event.key === "Tab";
+      if (accepts) {
+        const chosen =
+          briefMentionResults.find((resource) => resource.file_id === briefMentionActiveId) ??
+          briefMentionResults[0];
+        if (chosen) {
+          event.preventDefault();
+          pickBriefMention(chosen);
+          return true;
+        }
+        if (event.key === "Enter") {
+          // Nothing to bring in: close the picker rather than sending a
+          // half-typed @ as the message.
+          event.preventDefault();
+          dismissBriefMention();
+          return true;
+        }
+        return false;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismissBriefMention();
+        return true;
+      }
+    }
+    if (activeBriefRegistry.length === 0 || node.selectionStart !== node.selectionEnd) {
+      return false;
+    }
+    const caret = node.selectionStart;
+    const segments = parseBriefSegments(activePrompt, activeBriefRegistry);
+    if (event.key === "Backspace" || event.key === "Delete") {
+      const target =
+        event.key === "Backspace"
+          ? briefBackspaceTarget(segments, caret)
+          : briefDeleteTarget(segments, caret);
+      if (!target) {
+        return false;
+      }
+      event.preventDefault();
+      const edit = removeBriefSegment(activePrompt, target);
+      setActiveBriefRegistry((previous) => previous.filter((token) => token.fileId !== target.fileId));
+      unstageBriefFiles([target.fileId]);
+      setActivePromptValue(edit.text);
+      placeBriefCaret(edit.caret);
+      return true;
+    }
+    if (
+      (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      !event.ctrlKey
+    ) {
+      const next = briefCaretAfterArrow(segments, caret, event.key === "ArrowRight" ? 1 : -1);
+      if (next === null) {
+        return false;
+      }
+      event.preventDefault();
+      node.setSelectionRange(next, next);
+      refreshBriefMention();
+      return true;
+    }
+    return false;
+  };
+
+  const briefWhisperVisible =
+    activeConversationHydrated &&
+    (activePrompt.trim().length > 0 || activeBriefRegistry.length > 0 || briefWorkflowLabel !== null);
+  const briefKeysHint =
+    activeSending && activePrompt.trim().length > 0
+      ? "queue for after · ⌘↵ steer"
+      : activeSending
+        ? "steer with ⌘↵ · queue with ↵"
+        : "send · ⇧↵ new line";
+  const briefGoneNotice = (() => {
+    const gone = briefGoneFileIds[0];
+    const token = gone ? activeBriefRegistry.find((entry) => entry.fileId === gone) : null;
+    return token ? `${token.label} is no longer in your library.` : "";
+  })();
+  const briefOverlaySyncKey = `${composerScrolledAway ? 1 : 0}:${activeSending ? 1 : 0}:${briefPrefixWidth}`;
+  const briefPrefix =
+    activeConversationHydrated && (briefWorkflowLabel || isProModeComposerActive) ? (
+      <>
+        {briefWorkflowLabel ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="brief-chip brief-chip-workflow"
+                aria-label={`Workflow: ${briefWorkflowLabel}`}
+                data-testid="brief-workflow-chip"
+                onMouseDown={(event) => event.preventDefault()}
+              >
+                <Slash aria-hidden="true" />
+                <span>{briefWorkflowLabel}</span>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              sideOffset={8}
+              className="app-composer-intelligence-menu"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                composerTextareaRef.current?.focus();
+              }}
+            >
+              <DropdownMenuLabel>Workflow</DropdownMenuLabel>
+              <DropdownMenuGroup>
+                <DropdownMenuItem onClick={startBriefWorkflow}>
+                  <span>Change workflow…</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={removeBriefWorkflow}>
+                  <span>Remove workflow</span>
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+        {isProModeComposerActive ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="brief-chip brief-chip-mode"
+                aria-label="Intelligence: Pro"
+                data-testid="brief-mode-chip"
+                onMouseDown={(event) => event.preventDefault()}
+              >
+                <Gauge aria-hidden="true" />
+                <span>Pro</span>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              sideOffset={8}
+              className="app-composer-intelligence-menu"
+              onCloseAutoFocus={(event) => {
+                event.preventDefault();
+                composerTextareaRef.current?.focus();
+              }}
+            >
+              <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
+              <DropdownMenuGroup>
+                <DropdownMenuItem onClick={() => handleSelectComposerIntelligenceMode("high")}>
+                  <span>High</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  data-active="true"
+                  onClick={() => handleSelectComposerIntelligenceMode("pro")}
+                >
+                  <span>Pro</span>
+                  <Check data-icon="inline-end" aria-hidden="true" />
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </>
+    ) : null;
+
+
   const handleSubmit = async (
     overridePrompt?: string,
     turnOverride?: TurnSubmissionOverride
   ): Promise<void> => {
     const conversation = activeConversation;
     if (!conversation) {
+      return;
+    }
+    if (briefGoneFileIds.length > 0) {
+      showErrorToast("A file in this brief is no longer in your library. Remove it or choose another.");
       return;
     }
 
@@ -15667,7 +16370,7 @@ export function App() {
                 : undefined
             }
             data-composer-menu-open={
-              slashMenuOpen || composerResourcePickerOpen ? "true" : undefined
+              slashMenuOpen || composerResourcePickerOpen || briefMention !== null ? "true" : undefined
             }
           >
             <div className="chat-width-frame mx-auto">
@@ -15753,6 +16456,8 @@ export function App() {
                     <ComposerAttachMenu
                       variant="idle"
                       disabled={!activeConversationHydrated}
+                      onOpenResources={() => openComposerResourcePicker({ clearSelection: false })}
+                      onStartWorkflow={startBriefWorkflow}
                       onOpenNotes={
                         modelNotesReadEnabled
                           ? () => setComposerNotePickerOpen(true)
@@ -15770,6 +16475,20 @@ export function App() {
                     ) : null}
                     <PromptInputTextarea
                       ref={attachComposerTextarea}
+                      style={
+                        briefPrefixWidth > 0
+                          ? { textIndent: `${briefPrefixWidth + BRIEF_PREFIX_GAP_PX}px` }
+                          : undefined
+                      }
+                      onSelect={refreshBriefMention}
+                      aria-autocomplete="list"
+                      aria-expanded={briefMention !== null}
+                      aria-controls={briefMention ? briefMentionListboxId : undefined}
+                      aria-activedescendant={
+                        briefMention && briefMentionActiveId
+                          ? resourceMentionOptionId(briefMentionListboxId, briefMentionActiveId)
+                          : undefined
+                      }
                       /* The collapsed state hides the attach, model and send
                          controls, so the hint changes to say what still works.
                          "Ask Ultra" names the product next to a toolbar; with
@@ -15780,7 +16499,13 @@ export function App() {
                           ? "Loading chat…"
                           : composerScrolledAway && !activeSending
                             ? "Just start typing"
-                            : "Ask Ultra"
+                            : activeSending
+                              ? "Steer this run, or queue for after"
+                              : activeBriefRegistry.length === 0 && !hasComposerAttachedFiles
+                                ? isPhoneView
+                                  ? "Ask Ultra — @ file, / workflow"
+                                  : "Ask Ultra — @ to bring in a file, / for a workflow"
+                                : "Ask Ultra"
                       }
                       /* Explicit name so the field is not relying on its
                          placeholder for one: the placeholder is deliberately
@@ -15813,6 +16538,9 @@ export function App() {
                         }
                       }}
                       onKeyDown={(event) => {
+                        if (handleBriefKeyDown(event)) {
+                          return;
+                        }
                         if (
                           composerResourcePickerOpen &&
                           event.key === "Escape" &&
@@ -15946,6 +16674,18 @@ export function App() {
                         }
                       }}
                     />
+                    {activeConversationHydrated ? (
+                      <BriefOverlay
+                        textareaRef={composerTextareaRef}
+                        text={activePrompt}
+                        registry={activeBriefRegistry}
+                        fileDetails={briefFileDetails}
+                        prefix={briefPrefix}
+                        onPrefixWidthChange={setBriefPrefixWidth}
+                        onTokenPointerDown={placeCaretAfterBriefToken}
+                        syncKey={briefOverlaySyncKey}
+                      />
+                    ) : null}
 
                     {activeConversation?.selectedNotes.length ||
                     (modelNotesReadEnabled &&
@@ -16058,7 +16798,50 @@ export function App() {
                       </div>
                     ) : null}
 
-                    {uploadedPreviewFiles.length > 0 ? (
+                    {briefMention ? (
+                      <BriefMentionPickerHost
+                        variant={isPhoneView ? "sheet" : "popover"}
+                        anchor={briefMentionAnchor}
+                        listboxId={briefMentionListboxId}
+                        query={briefMention.query}
+                        results={briefMentionResults}
+                        loading={briefMentionLoading}
+                        error={briefMentionError}
+                        activeFileId={briefMentionActiveId}
+                        onActivate={setBriefMentionActiveId}
+                        onPick={pickBriefMention}
+                        onBeforeUpload={dismissBriefMention}
+                      />
+                    ) : null}
+                    {briefWhisperVisible ? (
+                      <div className="brief-whisper" data-testid="brief-whisper">
+                        {briefGoneFileIds.length > 0 ? (
+                          <span className="brief-whisper-summary brief-whisper-notice">
+                            {briefGoneNotice}{" "}
+                            <button type="button" onClick={replaceFirstGoneBriefToken}>
+                              choose another
+                            </button>
+                          </span>
+                        ) : briefWorkflowNeedsFiles ? (
+                          <span className="brief-whisper-summary brief-whisper-notice">
+                            {`${briefWorkflowLabel} works on an attached file — @ to bring one in, or `}
+                            <button
+                              type="button"
+                              onClick={() => openComposerResourcePicker({ clearSelection: false })}
+                            >
+                              choose from your library
+                            </button>
+                          </span>
+                        ) : (
+                          <span className="brief-whisper-summary">{briefSummaryText}</span>
+                        )}
+                        <span className="brief-whisper-keys" aria-hidden="true">
+                          <CornerDownLeft />
+                          <span>{briefKeysHint}</span>
+                        </span>
+                      </div>
+                    ) : null}
+                    {untokenizedPreviewFiles.length > 0 ? (
                       <div className="composer-preview-section px-3 pt-2">
                         <div className="composer-preview-header">
                           <span>
@@ -16066,7 +16849,7 @@ export function App() {
                               activeSelectionContextFileIds.length > 0
                                 ? "Active analysis context"
                                 : "Uploaded context"
-                            } · ${uploadedPreviewFiles.length}`}
+                            } · ${untokenizedPreviewFiles.length}`}
                           </span>
                           <Button
                             type="button"
@@ -16083,7 +16866,7 @@ export function App() {
                           </Button>
                         </div>
                         <div className="composer-preview-row">
-                          {uploadedPreviewFiles.map((file) => (
+                          {untokenizedPreviewFiles.map((file) => (
                             <article key={file.id} className="composer-preview-card">
                               {file.previewUrl ? (
                                 <img
@@ -16146,51 +16929,6 @@ export function App() {
                       </div>
                     ) : null}
 
-                    {activeComposerWorkflowPreset &&
-                    activeComposerWorkflowPreset.id !== "pro_mode" ? (
-                      <div className="flex flex-wrap items-center justify-between gap-2 px-3 pt-2">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge
-                            data-testid="composer-workflow-chip"
-                            variant="secondary"
-                            className="rounded-full px-3 py-1 text-[11px]"
-                          >
-                            {activeComposerWorkflowPreset.label}
-                          </Badge>
-                          {activeComposerWorkflowPreset.requiresAttachedFiles &&
-                          !hasComposerAttachedFiles ? (
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="sm"
-                              className="h-7 rounded-full px-2.5 text-[11px]"
-                              onClick={() => openComposerResourcePicker({ clearSelection: false })}
-                            >
-                              Choose resources
-                            </Button>
-                          ) : null}
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 rounded-full px-2 text-[11px]"
-                          onClick={() => {
-                            if (composerResourcePickerOpen) {
-                              setComposerResourcePickerSelection({});
-                              setComposerResourceQuery("");
-                              setComposerResourcePickerOpen(false);
-                            }
-                            clearActiveComposerWorkflowPreset();
-                            focusComposerTextarea();
-                          }}
-                        >
-                          <X className="mr-1 size-3.5" />
-                          Clear workflow
-                        </Button>
-                      </div>
-                    ) : null}
-
                     <PromptInputActions
                       className="app-composer-actions"
                     >
@@ -16202,6 +16940,8 @@ export function App() {
                             funnel, not in which button was pressed. */}
                         <ComposerAttachMenu
                           disabled={!activeConversationHydrated}
+                          onOpenResources={() => openComposerResourcePicker({ clearSelection: false })}
+                          onStartWorkflow={startBriefWorkflow}
                           onOpenNotes={
                             modelNotesReadEnabled
                               ? () => setComposerNotePickerOpen(true)
@@ -16397,9 +17137,10 @@ export function App() {
                               onClick={stopActiveConversation}
                               aria-label="Stop response"
                               title="Stop response"
-                              className="app-composer-stop-button size-11 rounded-full sm:size-10"
+                              className="app-composer-stop-button brief-stop-button size-11 rounded-full sm:size-10"
                             >
                               <Square className="size-3.5 fill-current" />
+                              <span>Stop</span>
                             </Button>
                           </>
                         ) : (

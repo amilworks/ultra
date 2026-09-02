@@ -22,7 +22,7 @@ const cssBlock = (selector: string): string => {
 describe("composer send tooltip contract", () => {
   it("shares the exact existing disabled predicate across one real send button and tooltip", () => {
     expect(appSource).toMatch(
-      /const composerSubmitDisabled =\s*!activeConversationHydrated \|\|\s*!activePrompt\.trim\(\) \|\|\s*slashMenuOpen;/
+      /const composerSubmitDisabled =\s*!activeConversationHydrated \|\|\s*!activePrompt\.trim\(\) \|\|\s*slashMenuOpen \|\|\s*briefGoneFileIds\.length > 0;/
     );
     expect(appSource.match(/disabled=\{composerSubmitDisabled\}/g)).toHaveLength(2);
     expect(appSource.match(/className="app-composer-submit-button/g)).toHaveLength(1);

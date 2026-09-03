@@ -277,7 +277,7 @@ describe("de-boxed chrome — depth by value, edges only where real", () => {
 describe("the composer — calm focus, and a baseline that records", () => {
   it("keeps the read-mode instruction legible at every breakpoint", () => {
     expect(stylesSource).toMatch(
-      /\.composer\[data-read-mode="true"\] \.composer-placeholder,\s*\.composer\[data-read-mode="true"\] textarea\.composer-editor::placeholder\s*\{[^}]*color:\s*var\(--text-muted\);/s
+      /\.composer\[data-read-mode="true"\] \.composer-status\s*\{[^}]*color:\s*var\(--text-muted\);/s
     );
   });
 
@@ -287,10 +287,10 @@ describe("the composer — calm focus, and a baseline that records", () => {
     // every click. Pointer focus now lights nothing; :has(:focus-visible)
     // scopes the WCAG 2.4.11 indicator to keyboard users.
     expect(stylesSource).not.toMatch(
-      /\.composer-surface:focus-within\s*\{[^}]*box-shadow:\s*inset/s
+      /\.composer-card:focus-within\s*\{[^}]*box-shadow:\s*inset/s
     );
     expect(stylesSource).toMatch(
-      /\.composer-surface:has\(\.composer-editor:focus-visible\)\s*\{[^}]*box-shadow:\s*inset 0 1px 0 var\(--text-muted\);/s
+      /\.composer-card:has\(\.composer-editor:focus-visible\)\s*\{[^}]*inset 0 0 0 1px var\(--text-muted\)/s
     );
   });
 
@@ -312,8 +312,8 @@ describe("the composer — calm focus, and a baseline that records", () => {
     // beheaded the wiggle into a flat line with one dip. The wrapper anchors.
     // ...on a surface that clips nothing: the composer's own hairline block is
     // the coordinate system, and it never sets overflow: hidden.
-    expect(stylesSource).toMatch(/\.composer-surface\s*\{\s*position:\s*relative;/s);
-    expect(stylesSource).not.toMatch(/\.composer-surface\s*\{[^}]*overflow:\s*hidden/s);
+    expect(stylesSource).toMatch(/\.composer-card\s*\{\s*position:\s*relative;/s);
+    expect(stylesSource).not.toMatch(/\.composer-card\s*\{[^}]*overflow:\s*hidden/s);
     // The recorder is its OWN geometry, not the compact thinking-bar glyph:
     // its coordinate box begins at the hairline's exact origin, the path
     // leaves and returns to y=5, and its butt caps end exactly at x=0/x=96.
@@ -323,7 +323,7 @@ describe("the composer — calm focus, and a baseline that records", () => {
       /RecorderTraceIcon[\s\S]{0,600}strokeLinecap="butt"[\s\S]{0,300}M0 5H18L21 1\.6L24 7\.6L27 0\.6L30 5\.6L33 3L36 5H96/
     );
     expect(stylesSource).toMatch(
-      /\.composer-recorder\s*\{[^}]*left:\s*0;[^}]*top:\s*0;[^}]*width:\s*6rem;[^}]*height:\s*10px;[^}]*transform:\s*translateY\(-50%\);/s
+      /\.composer-recorder\s*\{[^}]*left:\s*1rem;[^}]*top:\s*0;[^}]*width:\s*6rem;[^}]*height:\s*10px;[^}]*transform:\s*translateY\(-50%\);/s
     );
     expect(stylesSource).toMatch(
       /\.composer-recorder path\s*\{[^}]*animation:\s*trace-write 3\.4s linear infinite;/s

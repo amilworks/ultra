@@ -59,7 +59,8 @@ describe("assistant token usage live display wiring", () => {
       path.join(process.cwd(), "src/components/composer/Composer.tsx"),
       "utf8"
     );
-    expect(composerSource).toMatch(/<div className="composer-eyebrow" title=\{runningTitle\}>/);
+    expect(composerSource).toMatch(/statusClass \+= " composer-eyebrow";/);
+    expect(composerSource).toMatch(/title=\{running \? runningTitle : undefined\}/);
 
     const labelStart = appSource.indexOf("const composerRunningLabel = useMemo");
     expect(labelStart).toBeGreaterThan(-1);

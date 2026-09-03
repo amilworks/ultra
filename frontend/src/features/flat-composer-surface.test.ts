@@ -3,6 +3,9 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+/* The composer is one bar: a sunk well at rest, a raised card while
+   composing, and the same 3rem bar under both. Every control centres on the
+   bar's axis; the text block above it never shares a row with a control. */
 const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 const composerSource = readFileSync(
   path.join(process.cwd(), "src/components/composer/Composer.tsx"),
@@ -15,59 +18,72 @@ const rule = (selector: string): string => {
   return stylesSource.slice(start, stylesSource.indexOf("}", start));
 };
 
-describe("flat composer surface", () => {
-  it("draws the composer as one hairline instead of a floating pill", () => {
-    const surface = rule(".composer-surface");
-    expect(surface).toMatch(/border-top:\s*1px solid color-mix\(in oklab, var\(--line\) 88%, transparent\);/);
-    expect(surface).toMatch(/background:\s*transparent;/);
-    expect(surface).not.toMatch(/border-radius/);
-    // No resting shadow — box-shadow appears only as a transition property.
-    expect(surface).not.toMatch(/\n\s*box-shadow:/);
+describe("the composer bar", () => {
+  it("rests as a sunk well and rises into a raised card — never a bordered box at rest", () => {
+    const card = rule(".composer-card");
+    expect(card).toMatch(/border:\s*1px solid transparent;/);
+    expect(card).toMatch(/border-radius:\s*var\(--radius\);/);
+    expect(card).toMatch(/background:\s*var\(--bg-sunk\);/);
+    expect(card).not.toMatch(/\n\s*box-shadow:/);
+    const raised = rule('.composer[data-stage="composing"] .composer-card,\n.composer[data-stage="running"] .composer-card');
+    expect(raised).toMatch(/background:\s*var\(--bg-raised\);/);
+    expect(raised).toMatch(/border-color:\s*color-mix\(in oklab, var\(--line\) 88%, transparent\);/);
+    expect(raised).toMatch(/box-shadow:\s*var\(--shadow-raised\);/);
     expect(stylesSource).not.toContain("--composer-shell-shadow");
   });
 
-  it("keeps the 2px focus state for the keyboard, and calm for the pointer", () => {
-    expect(stylesSource).not.toMatch(/\.composer-surface:focus-within\s*\{/);
-    const focus = rule(".composer-surface:has(.composer-editor:focus-visible)");
-    expect(focus).toMatch(/border-top-color:\s*var\(--text-muted\);/);
-    expect(focus).toMatch(/box-shadow:\s*inset 0 1px 0 var\(--text-muted\);/);
+  it("keeps one bar as the only vertical unit, identical in every state", () => {
+    expect(rule(".composer")).toMatch(/--composer-bar:\s*3rem;/);
+    const bar = rule(".composer-bar");
+    expect(bar).toMatch(/align-items:\s*center;/);
+    expect(bar).toMatch(/height:\s*var\(--composer-bar\);/);
+    // Controls inset symmetrically: the same distance from the edge as the text.
+    expect(bar).toMatch(/padding:\s*0 calc\(\(var\(--composer-bar\) - var\(--composer-control\)\) \/ 2\);/);
+    expect(rule(".composer-control")).toMatch(/height:\s*var\(--composer-control\);/);
+    // No control ever bottom-anchors to a growing text block.
+    expect(stylesSource).not.toMatch(/\.composer-bar\s*\{[^}]*align-items:\s*flex-end/s);
   });
 
-  it("keeps the drop affordance inside the rule rather than ringing the dock", () => {
-    const drag = rule(".pk-file-upload-drag .composer-surface");
-    expect(drag).toMatch(/border-top-color:\s*color-mix\(in oklab, var\(--text-main\) 40%, transparent\);/);
-    expect(drag).toMatch(/box-shadow:\s*inset 0 2px 0/);
-    expect(drag).not.toMatch(/outline|border-radius/);
-  });
-
-  it("centres a one-line brief on the controls' axis, and grows it upward", () => {
-    // Controls sit on the LAST text line: a one-line brief centres everything
-    // on one optical line; a long one grows above the attach and send buttons.
-    const line = rule(".composer-line");
-    expect(line).toMatch(/align-items:\s*flex-end;/);
-    expect(line).toMatch(/min-height:\s*var\(--composer-control\);/);
-    const field = rule(".composer-field");
-    expect(field).toMatch(
-      /padding:\s*calc\(\(var\(--composer-control\) - 1em \* var\(--composer-line-height\)\) \/ 2\)/
+  it("puts the text above the bar with its own padding, and closes it at rest", () => {
+    const text = rule(".composer-text");
+    expect(text).toMatch(/max-height:\s*240px;/);
+    expect(text).toMatch(/overflow-y:\s*auto;/);
+    expect(text).toMatch(/padding:\s*0\.7rem 1rem 0\.35rem;/);
+    expect(text).toMatch(/font-size:\s*var\(--font-size-body\);/);
+    const closed = rule('.composer[data-stage="rest"] .composer-text,\n.composer[data-read-mode="true"] .composer-text');
+    expect(closed).toMatch(/max-height:\s*0;/);
+    expect(closed).toMatch(/opacity:\s*0;/);
+    expect(composerSource).toMatch(/<div className="composer-text">/);
+    expect(composerSource).toMatch(/<div className="composer-bar">/);
+    // The bar renders after the text block: text above, controls beneath.
+    expect(composerSource.indexOf('<div className="composer-text">')).toBeLessThan(
+      composerSource.indexOf('<div className="composer-bar">')
     );
-    expect(field).toMatch(/max-height:\s*240px;/);
-    expect(field).toMatch(/overflow-y:\s*auto;/);
   });
 
-  it("lets the chips lead only the first line", () => {
-    // The prefix is a float, so the brief's first line starts after the chips
-    // and every later line runs the full width beneath them.
-    const prefix = rule(".composer-prefix");
-    expect(prefix).toMatch(/float:\s*left;/);
-    // The field scrolls, never the editor: an overflow on the editor would
-    // start a new formatting context and stop the float from indenting it.
-    expect(rule(".composer-editor")).not.toMatch(/overflow(-x|-y)?:/);
-    expect(composerSource).toMatch(/<span ref=\{prefixRef\} className="composer-prefix">/);
+  it("keeps the 2px focus line for the keyboard, and calm for the pointer", () => {
+    expect(stylesSource).not.toMatch(/\.composer-card:focus-within\s*\{/);
+    const focus = rule(".composer-card:has(.composer-editor:focus-visible)");
+    expect(focus).toMatch(/border-color:\s*var\(--text-muted\);/);
+    expect(focus).toMatch(/inset 0 0 0 1px var\(--text-muted\)/);
   });
 
-  it("keeps the send button on the ladder and the whole region as the field", () => {
+  it("keeps the drop affordance inside the card rather than ringing the dock", () => {
+    const drag = rule(".pk-file-upload-drag .composer-card");
+    expect(drag).toMatch(/border-color:\s*color-mix\(in oklab, var\(--text-main\) 40%, transparent\);/);
+    expect(drag).toMatch(/box-shadow:\s*inset 0 0 0 2px/);
+    expect(drag).not.toMatch(/outline/);
+  });
+
+  it("carries the workflow and the mode as mono tags in the bar, and the send on the ladder", () => {
+    const tag = rule(".composer-tag");
+    expect(tag).toMatch(/font-family:\s*var\(--font-mono\);/);
+    expect(tag).toMatch(/text-transform:\s*uppercase;/);
+    expect(tag).toMatch(/height:\s*var\(--composer-tag\);/);
+    expect(composerSource).toMatch(/data-testid="composer-mode-tag"/);
+    expect(composerSource).toMatch(/data-testid="composer-workflow-tag"/);
     expect(rule(".composer-send")).toMatch(/background:\s*var\(--primary\);/);
-    expect(rule(".composer-surface")).toMatch(/cursor:\s*text;/);
-    expect(composerSource).toMatch(/onMouseDown=\{handleSurfaceMouseDown\}/);
+    expect(rule(".composer-card")).toMatch(/cursor:\s*text;/);
+    expect(composerSource).toMatch(/onMouseDown=\{handleCardMouseDown\}/);
   });
 });

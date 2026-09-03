@@ -78,7 +78,7 @@ async function captureCommonMetrics(page) {
   return page.evaluate(() => {
     const query = (selector) => document.querySelector(selector);
     const title = query(".app-header-title-text") ?? query(".hero-title");
-    const composer = query(".composer-field");
+    const composer = query(".composer-text");
     const bodyStyles = getComputedStyle(document.body);
     const composerStyles = composer ? getComputedStyle(composer) : null;
     return {

@@ -12,11 +12,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowUp, Check, CornerDownLeft, Gauge, Slash, Square, Zap } from "lucide-react";
+import { ArrowUp, Check, Slash, Square, Zap } from "lucide-react";
 
 import { ResourceMentionPicker } from "@/components/chat/ResourceMentionPicker";
-import { useFileUploadContext } from "@/components/prompt-kit/file-upload";
 import { RecorderTraceIcon } from "@/components/icons/MeridianIcons";
+import { useFileUploadContext } from "@/components/prompt-kit/file-upload";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -29,6 +29,7 @@ import {
 import { OneTimeNotice } from "@/components/ui/one-time-notice";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { resourceMentionOptionId } from "@/features/chat/resource-mention";
+import { cn } from "@/lib/utils";
 import type { ResourceRecord } from "@/types";
 
 import { ComposerAttachMenu } from "./ComposerAttachMenu";
@@ -43,17 +44,25 @@ import type {
 } from "./composerHandle";
 import {
   clampMentionAnchor,
-  composerKeysHint,
   composerPlaceholder,
   composerSummary,
   deriveComposerStage,
 } from "./composerModel";
 
-/* The composer. One sentence that says everything the run will receive: the
-   workflow and the mode lead it as chips, files sit inside it as tokens, and a
-   whisper under it keeps the summary and the key contract. Its geometry is a
-   function of a handful of explicit states (see composerModel) — never of a
-   CSS attribute cascade — so every state is one you can name and test. */
+/* The composer: one bar.
+
+   Its geometry is two heights and nothing else. At rest it is the bar alone,
+   a sunk well: attach, the hint, the mode tag, send. While composing it rises
+   into a card whose text block sits ABOVE that same bar — the bar never
+   changes, so nothing in it ever moves relative to the text. Every control,
+   tag and line of type centres on the bar's axis; the text block has its own
+   padding and never shares a row with a control, so there is nothing to
+   misalign. Files live in the text as tokens; the workflow and the mode live
+   in the bar as mono tags; the bar's middle carries the brief's summary, a
+   notice, or the run's eyebrow.
+
+   States are explicit (see composerModel) and stamped on the form as data
+   attributes; the stylesheet only draws them. */
 
 export const loadComposerEditorModule = () => import("./ComposerEditor");
 
@@ -101,11 +110,11 @@ export type ComposerProps = {
 
   hydrated: boolean;
   running: boolean;
-  /** Scrolled away from the bottom of a long answer: the composer becomes a strip. */
+  /** Scrolled away from the bottom of a long answer: the bar alone, with a hint. */
   readMode: boolean;
   phone: boolean;
   welcomeStage: boolean;
-  /** A slash menu or the library picker is open above the line. */
+  /** A slash menu or the library picker is open above the bar. */
   menuOpen: boolean;
   /** Files attached by paths that do not write tokens (pending uploads, notes). */
   hasFiles: boolean;
@@ -124,12 +133,12 @@ export type ComposerProps = {
   onMentionActivate: (fileId: string) => void;
   onMentionPick: (resource: ResourceRecord) => void;
 
-  /** Slash workflows and the library picker, rendered by the app above the line. */
+  /** Slash workflows and the library picker, rendered by the app above the bar. */
   menus?: ReactNode;
-  /** Notes chips and pending-upload previews, rendered by the app under the line. */
+  /** Notes chips and pending-upload previews, rendered between the text and the bar. */
   extras?: ReactNode;
 
-  runningLabel?: string;
+  runningLabel?: ReactNode;
   runningTitle?: string;
   submitDisabled: boolean;
   /** Steer and Queue show only when there is text to send and no menu is open. */
@@ -151,8 +160,9 @@ export type ComposerProps = {
 
 const isControlTarget = (target: EventTarget | null): boolean =>
   target instanceof Element &&
-  target.closest("button, a, [role='menu'], [role='listbox'], .composer-mention-picker, .composer-menus") !==
-    null;
+  target.closest(
+    "button, a, [role='menu'], [role='listbox'], .composer-mention-picker, .composer-menus"
+  ) !== null;
 
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(props, ref) {
   const {
@@ -180,7 +190,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const editorRef = useRef<ComposerHandle | null>(null);
   const fallbackRef = useRef<ComposerHandle | null>(null);
-  const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const cardRef = useRef<HTMLDivElement | null>(null);
   const propsRef = useRef(props);
   propsRef.current = props;
 
@@ -189,12 +199,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [editorReady, setEditorReady] = useState(false);
   const [dismissedQuery, setDismissedQuery] = useState<string | null>(null);
   const [mentionAnchor, setMentionAnchor] = useState<number | null>(null);
-  const prefixRef = useRef<HTMLSpanElement | null>(null);
-  const [prefixWidth, setPrefixWidth] = useState(0);
   const listboxId = useId();
   const { openFilePicker } = useFileUploadContext();
 
-  const current = useCallback((): ComposerHandle | null => editorRef.current ?? fallbackRef.current, []);
+  const current = useCallback(
+    (): ComposerHandle | null => editorRef.current ?? fallbackRef.current,
+    []
+  );
 
   useImperativeHandle(
     ref,
@@ -222,6 +233,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
 
   const hasText = value.trim().length > 0;
+  const mentionOpen = mention !== null && dismissedQuery !== mention.query;
   const stage = deriveComposerStage({
     running,
     focused,
@@ -229,11 +241,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     hasTokens: tokens.length > 0,
     hasFiles,
     hasWorkflow: workflow !== null,
-    menuOpen,
+    menuOpen: menuOpen || mentionOpen,
     welcomeStage,
   });
   const collapsed = readMode && !running && !focused;
-  const mentionOpen = mention !== null && dismissedQuery !== mention.query;
   const placeholder = composerPlaceholder({
     hydrated,
     welcomeStage,
@@ -251,38 +262,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [mention]);
 
   /* Anchor the picker at the "@": measured after paint from the live editor,
-     relative to the surface, clamped so the popover stays inside it. */
+     relative to the card, clamped so the popover stays inside it. */
   useLayoutEffect(() => {
     if (!mentionOpen || phone) {
       setMentionAnchor(null);
       return;
     }
     const rect = current()?.mentionRect();
-    const surface = surfaceRef.current?.getBoundingClientRect();
-    if (!rect || !surface) {
+    const card = cardRef.current?.getBoundingClientRect();
+    if (!rect || !card) {
       setMentionAnchor(null);
       return;
     }
-    setMentionAnchor(clampMentionAnchor(rect.left - surface.left, surface.width));
+    setMentionAnchor(clampMentionAnchor(rect.left - card.left, card.width));
   }, [mentionOpen, phone, mention?.query, current]);
-
-  /* The placeholder sits on the first line after the chips. Their width is
-     measured, never guessed, and written as a variable the sheet reads. */
-  useLayoutEffect(() => {
-    const node = prefixRef.current;
-    if (!node) {
-      setPrefixWidth(0);
-      return;
-    }
-    const report = () => setPrefixWidth(node.getBoundingClientRect().width);
-    report();
-    if (typeof ResizeObserver === "undefined") {
-      return;
-    }
-    const observer = new ResizeObserver(report);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [workflow?.label, mode, hydrated]);
 
   const handleFocusChange = useCallback((next: boolean) => {
     focusedRef.current = next;
@@ -308,12 +301,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           setDismissedQuery(activeMention.query);
           return true;
         }
-        if ((event.key === "ArrowDown" || event.key === "ArrowUp") && activeMention.results.length > 0) {
+        if (
+          (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+          activeMention.results.length > 0
+        ) {
           event.preventDefault();
           const ids = activeMention.results.map((resource) => resource.file_id);
           const index = ids.indexOf(activeMention.activeFileId ?? "");
           const step = event.key === "ArrowDown" ? 1 : -1;
-          const next = index < 0 ? (step > 0 ? 0 : ids.length - 1) : (index + step + ids.length) % ids.length;
+          const next =
+            index < 0 ? (step > 0 ? 0 : ids.length - 1) : (index + step + ids.length) % ids.length;
           state.onMentionActivate(ids[next]);
           return true;
         }
@@ -327,8 +324,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           if (activeMention.results.length > 0) {
             event.preventDefault();
             const pick =
-              activeMention.results.find((resource) => resource.file_id === activeMention.activeFileId) ??
-              activeMention.results[0];
+              activeMention.results.find(
+                (resource) => resource.file_id === activeMention.activeFileId
+              ) ?? activeMention.results[0];
             state.onMentionPick(pick);
             return true;
           }
@@ -371,7 +369,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     propsRef.current.onTokenRemoved?.(fileId);
   }, []);
 
-  const handleSurfaceMouseDown = useCallback(
+  /* The whole card is the field: a click anywhere that is not a control
+     lands the caret at the end. Clicks inside the editor place it themselves. */
+  const handleCardMouseDown = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       const handle = current();
       const element = handle?.element;
@@ -388,7 +388,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   );
 
   const activeOptionId =
-    mentionOpen && mention?.activeFileId ? resourceMentionOptionId(listboxId, mention.activeFileId) : undefined;
+    mentionOpen && mention?.activeFileId
+      ? resourceMentionOptionId(listboxId, mention.activeFileId)
+      : undefined;
 
   const editorProps: ComposerEditorProps = {
     value,
@@ -421,22 +423,56 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       }),
     [tokens.length, workflow?.label, mode]
   );
-  const whisperVisible =
-    hydrated && !collapsed && (hasText || tokens.length > 0 || workflow !== null || Boolean(notice));
+
+  /* The bar's middle. Priority: a notice that blocks the send, the run's
+     eyebrow, the read-mode instruction, the resting hint (the field's own
+     voice), then the brief's summary once there is something to summarise. */
+  let status: ReactNode = null;
+  let statusClass = "composer-status";
+  if (hydrated && notice) {
+    statusClass += " composer-status-notice";
+    status = (
+      <>
+        {notice.text}
+        {notice.action ? (
+          <>
+            {" "}
+            <button type="button" onClick={notice.action.onClick}>
+              {notice.action.label}
+            </button>
+          </>
+        ) : null}
+      </>
+    );
+  } else if (running) {
+    statusClass += " composer-eyebrow";
+    status = (
+      <>
+        <span className="composer-run-dot" aria-hidden="true" />
+        <span className="composer-status-text">{runningLabel}</span>
+      </>
+    );
+  } else if (collapsed) {
+    status = placeholder;
+  } else if (stage === "rest") {
+    statusClass += " composer-status-hint";
+    status = placeholder;
+  } else if (hasText || tokens.length > 0 || workflow !== null) {
+    status = summary;
+  }
 
   const modeLabel = mode === "pro" ? "Pro" : "High";
-  const modeChip = (
+  const modeTag = (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          className="composer-chip composer-chip-mode"
+          className={cn("composer-tag composer-tag-mode", mode === "pro" && "composer-tag-strong")}
           aria-label={`Intelligence: ${modeLabel}`}
-          data-testid="composer-mode-chip"
+          data-testid="composer-mode-tag"
           disabled={!hydrated}
           onMouseDown={(event) => event.preventDefault()}
         >
-          <Gauge aria-hidden="true" />
           <span>{modeLabel}</span>
         </button>
       </DropdownMenuTrigger>
@@ -471,6 +507,26 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     </DropdownMenu>
   );
 
+  const picker =
+    mentionOpen && mention ? (
+      <ResourceMentionPicker
+        variant={phone ? "sheet" : "popover"}
+        anchor={mentionAnchor === null ? undefined : { left: mentionAnchor }}
+        listboxId={listboxId}
+        query={mention.query}
+        results={mention.results}
+        loading={mention.loading}
+        error={mention.error ?? null}
+        activeFileId={mention.activeFileId}
+        onActivate={props.onMentionActivate}
+        onPick={props.onMentionPick}
+        onUploadInstead={() => {
+          setDismissedQuery(mention.query);
+          openFilePicker();
+        }}
+      />
+    ) : null;
+
   return (
     <TooltipProvider>
       <form
@@ -490,15 +546,21 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         }}
       >
         {menus ? <div className="composer-menus">{menus}</div> : null}
-        <div ref={surfaceRef} className="composer-surface" onMouseDown={handleSurfaceMouseDown}>
+        <div ref={cardRef} className="composer-card" onMouseDown={handleCardMouseDown}>
           {running ? <RecorderTraceIcon className="composer-recorder" /> : null}
-          {running && runningLabel ? (
-            <div className="composer-eyebrow" title={runningTitle}>
-              <span className="composer-run-dot" aria-hidden="true" />
-              <span className="composer-eyebrow-status">{runningLabel}</span>
-            </div>
-          ) : null}
-          <div className="composer-line">
+          <div className="composer-text">
+            {value.length === 0 ? (
+              <span className="composer-placeholder" aria-hidden="true">
+                {placeholder}
+              </span>
+            ) : null}
+            <Suspense fallback={<ComposerFallbackEditor ref={fallbackRef} {...editorProps} />}>
+              <LazyComposerEditor ref={editorRef} {...editorProps} />
+            </Suspense>
+          </div>
+          {extras}
+          {phone ? picker : null}
+          <div className="composer-bar">
             <ComposerAttachMenu
               disabled={!hydrated}
               onOpenResources={props.onOpenResources}
@@ -509,63 +571,51 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 current()?.focus();
               }}
             />
-            <div
-              className="composer-field"
-              style={{ "--composer-prefix-width": `${prefixWidth}px` } as React.CSSProperties}
-            >
-              {value.length === 0 ? (
-                <span className="composer-placeholder" aria-hidden="true">
-                  {placeholder}
-                </span>
-              ) : null}
-              <span ref={prefixRef} className="composer-prefix">
-                {workflow ? (
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        type="button"
-                        className="composer-chip composer-chip-workflow"
-                        aria-label={`Workflow: ${workflow.label}`}
-                        data-testid="composer-workflow-chip"
-                        onMouseDown={(event) => event.preventDefault()}
-                      >
-                        <Slash aria-hidden="true" />
-                        <span>{workflow.label}</span>
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      align="start"
-                      sideOffset={8}
-                      onCloseAutoFocus={(event) => {
-                        event.preventDefault();
-                        current()?.focus();
-                      }}
-                    >
-                      <DropdownMenuItem onSelect={props.onChangeWorkflow}>Change workflow…</DropdownMenuItem>
-                      <DropdownMenuItem onSelect={props.onRemoveWorkflow}>Remove workflow</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                ) : null}
-                {props.proIntro ? (
-                  <OneTimeNotice
-                    noticeId={props.proIntro.noticeId}
-                    audienceId={props.proIntro.audienceId}
-                    enabled={props.proIntro.enabled}
-                    title={props.proIntro.title}
-                    description={props.proIntro.description}
-                    side="top"
-                    align="start"
-                    sideOffset={10}
+            {workflow ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="composer-tag composer-tag-workflow"
+                    aria-label={`Workflow: ${workflow.label}`}
+                    data-testid="composer-workflow-tag"
+                    onMouseDown={(event) => event.preventDefault()}
                   >
-                    {modeChip}
-                  </OneTimeNotice>
-                ) : (
-                  modeChip
-                )}
-              </span>
-              <Suspense fallback={<ComposerFallbackEditor ref={fallbackRef} {...editorProps} />}>
-                <LazyComposerEditor ref={editorRef} {...editorProps} />
-              </Suspense>
+                    <Slash aria-hidden="true" />
+                    <span>{workflow.label}</span>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align="start"
+                  sideOffset={8}
+                  onCloseAutoFocus={(event) => {
+                    event.preventDefault();
+                    current()?.focus();
+                  }}
+                >
+                  <DropdownMenuItem onSelect={props.onChangeWorkflow}>Change workflow…</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={props.onRemoveWorkflow}>Remove workflow</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
+            {props.proIntro ? (
+              <OneTimeNotice
+                noticeId={props.proIntro.noticeId}
+                audienceId={props.proIntro.audienceId}
+                enabled={props.proIntro.enabled}
+                title={props.proIntro.title}
+                description={props.proIntro.description}
+                side="top"
+                align="start"
+                sideOffset={10}
+              >
+                {modeTag}
+              </OneTimeNotice>
+            ) : (
+              modeTag
+            )}
+            <div className={statusClass} title={running ? runningTitle : undefined}>
+              {status}
             </div>
             <div className="composer-end">
               {running ? (
@@ -623,7 +673,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                       <span className="app-composer-submit-tooltip-key" aria-hidden="true">
                         ↵
                       </span>
-                      <span className="sr-only">Press Enter to send. Shift+Enter starts a new line.</span>
+                      <span className="sr-only">
+                        Press Enter to send. Shift+Enter starts a new line.
+                      </span>
                     </span>
                   }
                 >
@@ -640,48 +692,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               )}
             </div>
           </div>
-          {whisperVisible ? (
-            <div className="composer-whisper" data-testid="composer-whisper">
-              {notice ? (
-                <span className="composer-whisper-summary composer-whisper-notice">
-                  {notice.text}
-                  {notice.action ? (
-                    <>
-                      {" "}
-                      <button type="button" onClick={notice.action.onClick}>
-                        {notice.action.label}
-                      </button>
-                    </>
-                  ) : null}
-                </span>
-              ) : (
-                <span className="composer-whisper-summary">{summary}</span>
-              )}
-              <span className="composer-whisper-keys" aria-hidden="true">
-                <CornerDownLeft />
-                <span>{composerKeysHint(running)}</span>
-              </span>
-            </div>
-          ) : null}
-          {extras}
-          {mentionOpen && mention ? (
-            <ResourceMentionPicker
-              variant={phone ? "sheet" : "popover"}
-              anchor={mentionAnchor === null ? undefined : { left: mentionAnchor }}
-              listboxId={listboxId}
-              query={mention.query}
-              results={mention.results}
-              loading={mention.loading}
-              error={mention.error ?? null}
-              activeFileId={mention.activeFileId}
-              onActivate={props.onMentionActivate}
-              onPick={props.onMentionPick}
-              onUploadInstead={() => {
-                setDismissedQuery(mention.query);
-                openFilePicker();
-              }}
-            />
-          ) : null}
+          {phone ? null : picker}
         </div>
       </form>
     </TooltipProvider>

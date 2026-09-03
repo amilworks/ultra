@@ -606,7 +606,7 @@ for (const [token, value] of [
   );
 }
 check(
-  /\.composer-field\s*\{[^}]*letter-spacing:\s*0;/s.test(stylesCss),
+  /\.composer-text\s*\{[^}]*letter-spacing:\s*0;/s.test(stylesCss),
   "Composer must use Ultra Sans native tracking at its rendered 15px size"
 );
 check(

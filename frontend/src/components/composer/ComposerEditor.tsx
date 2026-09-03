@@ -336,20 +336,6 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
         }
         return true;
       },
-      handleDOMEvents: {
-        focus: () => {
-          propsRef.current.onFocusChange(true);
-          return false;
-        },
-        blur: () => {
-          propsRef.current.onFocusChange(false);
-          if (lastMention.current !== null) {
-            lastMention.current = null;
-            propsRef.current.onMentionChange(null);
-          }
-          return false;
-        },
-      },
       nodeViews: {
         fileToken: (node, editorView, getPos) =>
           new TokenView(
@@ -364,8 +350,25 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
     viewRef.current = view;
     lastText.current = initial.value;
     lastTokens.current = tokensInDoc(state.doc);
+    /* Focus is listened for on the element itself, not through ProseMirror's
+       handleDOMEvents: the composer's stage (rest → composing) hangs off it,
+       and a listener of our own cannot be skipped by the view's plumbing. */
+    const handleFocus = () => {
+      propsRef.current.onFocusChange(true);
+    };
+    const handleBlur = () => {
+      propsRef.current.onFocusChange(false);
+      if (lastMention.current !== null) {
+        lastMention.current = null;
+        propsRef.current.onMentionChange(null);
+      }
+    };
+    view.dom.addEventListener("focus", handleFocus);
+    view.dom.addEventListener("blur", handleBlur);
     initial.onReady?.();
     return () => {
+      view.dom.removeEventListener("focus", handleFocus);
+      view.dom.removeEventListener("blur", handleBlur);
       view.destroy();
       viewRef.current = null;
     };

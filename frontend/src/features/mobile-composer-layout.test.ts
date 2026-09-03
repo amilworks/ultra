@@ -18,12 +18,10 @@ describe("mobile composer layout", () => {
     expect(appSource).toMatch(/phone=\{isPhoneView\}/);
   });
 
-  it("gives phones 44px controls and a tappable collapsed strip", () => {
-    const phone = stylesSource.slice(stylesSource.indexOf("/* Phones: 44px targets"));
-    expect(phone).toMatch(/@media \(max-width:\s*640px\)\s*\{[\s\S]*--composer-control:\s*2\.75rem;/);
-    expect(stylesSource).toMatch(
-      /@media \(max-width:\s*640px\)\s*\{\s*\.composer\[data-read-mode="true"\] \.composer-line\s*\{\s*min-height:\s*2\.55rem;/
-    );
+  it("gives phones a taller bar with 44px controls", () => {
+    const phone = stylesSource.slice(stylesSource.indexOf("/* Phones: a taller bar"));
+    expect(phone).toMatch(/@media \(max-width:\s*640px\)\s*\{[\s\S]*--composer-bar:\s*3\.25rem;/);
+    expect(phone).toMatch(/--composer-control:\s*2\.75rem;/);
     expect(composerSource).toMatch(/data-layout=\{phone \? "phone" : "desktop"\}/);
   });
 
@@ -33,8 +31,9 @@ describe("mobile composer layout", () => {
     expect(stylesSource).toMatch(/\.composer\[data-menu-open="true"\]\s*\{\s*z-index:\s*40;/);
   });
 
-  it("lays the @ picker under the line as a sheet on phones", () => {
+  it("lays the @ picker inside the card as a sheet on phones", () => {
     expect(composerSource).toMatch(/variant=\{phone \? "sheet" : "popover"\}/);
+    expect(composerSource).toMatch(/\{phone \? picker : null\}\s*<div className="composer-bar">/);
     expect(stylesSource).toMatch(/\.composer-mention-picker-sheet\s*\{\s*position:\s*relative;/);
   });
 });

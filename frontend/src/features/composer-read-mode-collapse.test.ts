@@ -3,10 +3,9 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-/* Read mode: scrolled away from the end of a long answer, the composer drops to
-   a strip and a hint — at every width — and comes back on focus, at the bottom,
-   or when a run starts. The composer decides (one explicit state), the sheet
-   draws it. */
+/* Read mode: scrolled away from the end of a long answer, the composer closes
+   to the bare bar and an instruction — at every width — and comes back on
+   focus, at the bottom, or when a run starts. The bar never changes height. */
 const read = (relativePath: string): string =>
   readFileSync(path.join(process.cwd(), relativePath), "utf8");
 
@@ -23,14 +22,12 @@ const rule = (selector: string): string => {
 
 describe("composer read-mode collapse", () => {
   it("collapses at every width, not just on phones", () => {
-    // The strip rule is top-level: no media query gates it.
-    const start = stylesSource.indexOf('.composer[data-read-mode="true"] .composer-line {');
+    const start = stylesSource.indexOf('.composer[data-read-mode="true"] .composer-attach,');
     expect(start).toBeGreaterThan(-1);
     const before = stylesSource.slice(0, start);
     const lastMedia = before.lastIndexOf("@media");
     const lastClose = before.lastIndexOf("\n}\n");
     expect(lastMedia === -1 || lastClose > lastMedia).toBe(true);
-    expect(rule('.composer[data-read-mode="true"] .composer-line')).toMatch(/min-height:\s*1\.8rem;/);
   });
 
   it("drives off scrolled-AWAY, not actively-scrolling, through one explicit prop", () => {
@@ -41,34 +38,26 @@ describe("composer read-mode collapse", () => {
   });
 
   it("hides the controls, and hides them properly", () => {
-    // visibility, not just opacity: a 0-opacity button is still tabbable and
-    // still announced. Exactly one set of composer controls is ever in the tree.
     const start = stylesSource.indexOf('.composer[data-read-mode="true"] .composer-attach,');
-    expect(start).toBeGreaterThan(-1);
     const block = stylesSource.slice(start, stylesSource.indexOf("}", start));
-    for (const control of [".composer-attach", ".composer-end", ".composer-prefix", ".composer-whisper"]) {
+    for (const control of [".composer-attach", ".composer-tag", ".composer-end"]) {
       expect(block).toContain(control);
     }
     expect(block).toMatch(/visibility:\s*hidden;/);
     expect(block).toMatch(/pointer-events:\s*none;/);
   });
 
-  it("halves the strip and takes the run-meta line's type", () => {
-    const field = rule('.composer[data-read-mode="true"] .composer-field');
-    expect(field).toMatch(/max-height:\s*1\.8rem;/);
-    expect(field).toMatch(/font-size:\s*0\.75rem;/);
-    expect(field).toMatch(/line-height:\s*20px;/);
-    expect(field).toMatch(/padding-top:\s*calc\(\(1\.8rem - 20px\) \/ 2\);/);
-  });
-
-  it("keeps phones on a tappable strip rather than the 30px desktop one", () => {
-    const phone = stylesSource.slice(
-      stylesSource.indexOf("/* Phones keep a tappable strip"),
-      stylesSource.indexOf("/* The @ picker.")
+  it("closes the text block and keeps the bar at its one height", () => {
+    const closed = rule('.composer[data-stage="rest"] .composer-text,\n.composer[data-read-mode="true"] .composer-text');
+    expect(closed).toMatch(/max-height:\s*0;/);
+    // No strip: nothing in the composer's own section restates the bar's height.
+    const section = stylesSource.slice(
+      stylesSource.indexOf("The composer: one bar."),
+      stylesSource.indexOf(".welcome-starters {")
     );
-    expect(phone).toMatch(/@media \(max-width:\s*640px\)/);
-    expect(phone).toMatch(/min-height:\s*2\.55rem;/);
-    expect(phone).not.toMatch(/min-height:\s*1\.8rem;/);
+    expect(section).not.toMatch(/min-height:\s*(1\.8|2\.55)rem/);
+    // The closed text block sets max-height; no read-mode rule sets a height.
+    expect(section).not.toMatch(/data-read-mode="true"\][^{]*\{[^}]*\n\s*height:/);
   });
 
   it("restores the full composer on focus and during a run", () => {
@@ -76,9 +65,8 @@ describe("composer read-mode collapse", () => {
     expect(modelSource).toMatch(/if \(inputs\.readMode && !inputs\.running\) \{\s*return "Just start typing";/);
   });
 
-  it("keeps the hint legible while collapsed", () => {
-    expect(stylesSource).toMatch(
-      /\.composer\[data-read-mode="true"\] \.composer-placeholder,\s*\.composer\[data-read-mode="true"\] textarea\.composer-editor::placeholder\s*\{[^}]*color:\s*var\(--text-muted\);/s
-    );
+  it("swaps the status to the instruction and keeps it legible", () => {
+    expect(composerSource).toMatch(/\} else if \(collapsed\) \{\s*status = placeholder;/);
+    expect(rule('.composer[data-read-mode="true"] .composer-status')).toMatch(/color:\s*var\(--text-muted\);/);
   });
 });

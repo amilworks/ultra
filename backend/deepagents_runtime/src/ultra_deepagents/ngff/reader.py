@@ -74,6 +74,32 @@ _INTENSITY_RANGE_MAX_ELEMENTS = int(
 _INTENSITY_RANGE_MAX_BYTES = int(
     os.environ.get("ULTRA_NGFF_INTENSITY_RANGE_MAX_BYTES", str(64 * 1024 * 1024))
 )
+# Full-plane reads back the direct 2D/scrub endpoints. Large images are advertised through
+# the bounded tile path, so a direct read must never materialize an unbounded level-0 plane.
+# Elements and source bytes are capped independently because dtype width varies.
+_MAX_PLANE_READ_ELEMENTS = int(
+    os.environ.get("ULTRA_NGFF_MAX_PLANE_READ_ELEMENTS", str(64 * 1024 * 1024))
+)
+_MAX_PLANE_READ_BYTES = int(
+    os.environ.get("ULTRA_NGFF_MAX_PLANE_READ_BYTES", str(256 * 1024 * 1024))
+)
+# Zarr decodes a complete logical chunk before applying an array slice. This cap prevents a
+# hostile or accidental chunk declaration from turning one bounded tile into a multi-GB decode.
+_MAX_CHUNK_DECODED_BYTES = int(
+    os.environ.get("ULTRA_NGFF_MAX_CHUNK_DECODED_BYTES", str(256 * 1024 * 1024))
+)
+# Chunk-file validation is proportional to the exact read. Tiny-chunk stores that exceed this
+# budget are rejected for that read instead of causing an unbounded filesystem walk.
+_MAX_CHUNK_FILES_PER_READ = int(os.environ.get("ULTRA_NGFF_MAX_CHUNK_FILES_PER_READ", str(1 << 16)))
+# Root metadata is upload-controlled. Bound bytes and nesting before json.loads so malformed
+# attributes fail as a domain error instead of exhausting memory or Python recursion.
+_MAX_METADATA_JSON_BYTES = int(
+    os.environ.get("ULTRA_NGFF_MAX_METADATA_BYTES", str(8 * 1024 * 1024))
+)
+_MAX_METADATA_JSON_DEPTH = int(os.environ.get("ULTRA_NGFF_MAX_METADATA_DEPTH", "200"))
+# The current display renderer is defined only for real scalar samples. Rejecting other kinds
+# avoids silently dropping the imaginary component or misinterpreting structured values.
+_RENDERABLE_DTYPE_KINDS = frozenset("biuf")
 
 
 class NgffError(RuntimeError):
@@ -278,6 +304,135 @@ class NgffImage:
                 index.append(0)  # an unexpected extra axis: take its first element
         return tuple(index)
 
+    def _validate_full_plane_read(self, level: int) -> None:
+        height, width = self.level_yx(level)
+        elements = height * width
+        if elements > _MAX_PLANE_READ_ELEMENTS:
+            raise NgffError(
+                f"plane {width}x{height} at level {level} exceeds the "
+                f"{_MAX_PLANE_READ_ELEMENTS}-element full-plane read budget; request a "
+                "coarser multiscale level or use the tile path"
+            )
+        source_bytes = elements * int(self.dtype.itemsize)
+        if source_bytes > _MAX_PLANE_READ_BYTES:
+            raise NgffError(
+                f"plane {width}x{height} at level {level} requires {source_bytes} source "
+                f"bytes, exceeding the {_MAX_PLANE_READ_BYTES}-byte source-byte budget; "
+                "request a coarser multiscale level or use the tile path"
+            )
+
+    def _local_chunk_paths(
+        self,
+        *,
+        level: int,
+        t: int,
+        c: int,
+        z: int,
+        y_range: tuple[int, int] | None = None,
+        x_range: tuple[int, int] | None = None,
+    ) -> tuple[str, ...] | None:
+        """Resolve local chunk files that cover one exact read, when cheaply enumerable.
+
+        Sharded or non-local stores do not expose a one-logical-chunk/one-file mapping and
+        return ``None``. Managed bundle ingestion independently rejects symlinks for those
+        stores. Ordinary local v2/v3 chunk layouts are screened here as defense in depth.
+        """
+
+        array = self.levels[level].array
+        chunks = getattr(array, "chunks", None)
+        metadata = getattr(array, "metadata", None)
+        encode_chunk_key = getattr(metadata, "encode_chunk_key", None)
+        store_root = getattr(getattr(array, "store", None), "root", None)
+        if (
+            not isinstance(chunks, tuple)
+            or len(chunks) != len(self.axes)
+            or not callable(encode_chunk_key)
+            or not isinstance(store_root, (str, os.PathLike))
+        ):
+            return None
+        codecs = getattr(metadata, "codecs", ())
+        if any("sharding" in type(codec).__name__.lower() for codec in codecs or ()):
+            return None
+
+        fixed = {"t": t, "c": c, "z": z}
+        coordinate_ranges: list[range] = []
+        chunk_count = 1
+        for axis, size, chunk_size in zip(self.axes, self.levels[level].shape, chunks, strict=True):
+            if not isinstance(chunk_size, int) or chunk_size <= 0:
+                return None
+            if axis == "y" and y_range is not None:
+                axis_range = range(
+                    y_range[0] // chunk_size,
+                    (y_range[1] - 1) // chunk_size + 1,
+                )
+            elif axis == "x" and x_range is not None:
+                axis_range = range(
+                    x_range[0] // chunk_size,
+                    (x_range[1] - 1) // chunk_size + 1,
+                )
+            elif axis in ("y", "x"):
+                axis_range = range((int(size) + chunk_size - 1) // chunk_size)
+            else:
+                index = fixed.get(axis, 0)
+                axis_range = range(index // chunk_size, index // chunk_size + 1)
+            chunk_count *= len(axis_range)
+            if chunk_count > _MAX_CHUNK_FILES_PER_READ:
+                raise NgffError(
+                    f"pixel read spans {chunk_count} chunk files, exceeding the "
+                    f"{_MAX_CHUNK_FILES_PER_READ}-file chunk-file budget; use a coarser "
+                    "multiscale level or a larger source chunk layout"
+                )
+            coordinate_ranges.append(axis_range)
+
+        root = os.fspath(store_root)
+        array_path = str(getattr(array, "path", ""))
+        base = os.path.join(root, *array_path.split("/")) if array_path else root
+        paths: list[str] = []
+        for coordinates in product(*coordinate_ranges):
+            try:
+                encoded = encode_chunk_key(coordinates)
+            except Exception:  # Unsupported encodings use managed-ingestion guarantees.
+                return None
+            if not isinstance(encoded, str) or not encoded or os.path.isabs(encoded):
+                return None
+            parts = encoded.split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                return None
+            paths.append(os.path.join(base, *parts))
+        return tuple(paths)
+
+    def _validate_local_chunk_files(
+        self,
+        *,
+        level: int,
+        t: int,
+        c: int,
+        z: int,
+        y_range: tuple[int, int] | None = None,
+        x_range: tuple[int, int] | None = None,
+    ) -> None:
+        paths = self._local_chunk_paths(
+            level=level,
+            t=t,
+            c=c,
+            z=z,
+            y_range=y_range,
+            x_range=x_range,
+        )
+        if paths is None:
+            return
+        for chunk_path in paths:
+            try:
+                info = os.lstat(chunk_path)
+            except FileNotFoundError:
+                continue  # unwritten chunks legitimately resolve to the array fill value
+            except OSError as exc:
+                raise NgffError(f"cannot inspect a chunk file before pixel decode: {exc}") from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise NgffError("refusing to decode a chunk file that is a symbolic link")
+            if not stat.S_ISREG(info.st_mode):
+                raise NgffError("refusing to decode a chunk path that is not a regular file")
+
     def read_plane(self, *, t: int = 0, c: int = 0, z: int = 0, level: int = 0) -> np.ndarray:
         """Read one full 2D (Y, X) plane for the given t/c/z at a multiscale level.
         Only the chunks covering that plane are fetched. Sub-threshold planes are cached
@@ -289,6 +444,7 @@ class NgffImage:
             pos = self._axis_pos(axis)
             size = int(self.levels[level].shape[pos]) if pos is not None else 1
             self._validated_axis_index(axis, value, size)
+        self._validate_full_plane_read(level)
         key = (level, int(t), int(c), int(z))
         with self._plane_cache_lock:
             cached = self._plane_cache.get(key)
@@ -381,6 +537,12 @@ class NgffImage:
                 index = fixed.get(axis, 0)
                 axis_range = range(index // chunk_size, index // chunk_size + 1)
             dependency_count *= len(axis_range)
+            if dependency_count > _MAX_CHUNK_FILES_PER_READ:
+                raise NgffError(
+                    f"pixel read spans {dependency_count} chunk files, exceeding the "
+                    f"{_MAX_CHUNK_FILES_PER_READ}-file chunk-file budget; use a coarser "
+                    "multiscale level or a larger source chunk layout"
+                )
             if dependency_count > _PLANE_CACHE_MAX_DEPENDENCY_FILES:
                 return None
             coordinate_ranges.append(axis_range)
@@ -410,6 +572,8 @@ class NgffImage:
                 continue
             except OSError:
                 return None
+            if stat.S_ISLNK(info.st_mode):
+                raise NgffError("refusing to decode a chunk file that is a symbolic link")
             if not stat.S_ISREG(info.st_mode):
                 return None
             stamps.append(
@@ -485,6 +649,14 @@ class NgffImage:
         if not (0 <= y0 < y1 <= h and 0 <= x0 < x1 <= w):
             raise NgffError(f"region [{y0}:{y1}, {x0}:{x1}] is outside level geometry ({h}, {w})")
         idx = self._index_tuple(level, t=t, c=c, z=z, y=slice(y0, y1), x=slice(x0, x1))
+        self._validate_local_chunk_files(
+            level=level,
+            t=int(t),
+            c=int(c),
+            z=int(z),
+            y_range=(y0, y1),
+            x_range=(x0, x1),
+        )
         return _as_2d_yx(
             np.asarray(self.levels[level].array[idx]),
             stored_spatial_order=self._spatial_axis_order(),
@@ -605,20 +777,112 @@ def _as_2d_yx(plane: np.ndarray, *, stored_spatial_order: tuple[str, str]) -> np
 # --------------------------------------------------------------------------- #
 
 
+def _json_depth_within_limit(text: str) -> bool:
+    """Check JSON bracket depth without recursing and without counting quoted brackets."""
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > _MAX_METADATA_JSON_DEPTH:
+                return False
+        elif character in "]}":
+            depth -= 1
+    return True
+
+
+def _load_bounded_json(path: str) -> Any:
+    """Load one local metadata document through byte, nesting, and no-follow guards."""
+
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise NgffError(
+            f"cannot inspect OME-NGFF metadata {os.path.basename(path)!r}: {exc}"
+        ) from exc
+    if stat.S_ISLNK(before.st_mode):
+        raise NgffError(
+            f"refusing OME-NGFF metadata {os.path.basename(path)!r} that is a symbolic link"
+        )
+    if not stat.S_ISREG(before.st_mode):
+        raise NgffError(f"OME-NGFF metadata {os.path.basename(path)!r} is not a regular file")
+    if before.st_size > _MAX_METADATA_JSON_BYTES:
+        raise NgffError(
+            f"OME-NGFF metadata {os.path.basename(path)!r} exceeds the "
+            f"{_MAX_METADATA_JSON_BYTES}-byte metadata byte budget"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise NgffError(f"cannot open OME-NGFF metadata {os.path.basename(path)!r}: {exc}") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+        ):
+            raise NgffError(
+                f"OME-NGFF metadata {os.path.basename(path)!r} changed during validation"
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            payload = handle.read(_MAX_METADATA_JSON_BYTES + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(payload) > _MAX_METADATA_JSON_BYTES:
+        raise NgffError(
+            f"OME-NGFF metadata {os.path.basename(path)!r} exceeds the "
+            f"{_MAX_METADATA_JSON_BYTES}-byte metadata byte budget"
+        )
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise NgffError(f"OME-NGFF metadata {os.path.basename(path)!r} is not valid UTF-8") from exc
+    if not _json_depth_within_limit(text):
+        raise NgffError(
+            f"OME-NGFF metadata nesting exceeds the depth limit of {_MAX_METADATA_JSON_DEPTH}"
+        )
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError) as exc:
+        raise NgffError(
+            f"invalid OME-NGFF metadata JSON in {os.path.basename(path)!r}: {exc}"
+        ) from exc
+
+
 def _read_attrs(path: str) -> dict[str, Any]:
     """Read the group attributes (.zattrs for v2, attributes in zarr.json for v3)
     directly from disk — robust to zarr version quirks."""
+    zgroup = os.path.join(path, ".zgroup")
+    if os.path.lexists(zgroup):
+        marker = _load_bounded_json(zgroup)
+        if not isinstance(marker, dict):
+            raise NgffError("Zarr v2 group metadata must be a JSON object")
     zattrs = os.path.join(path, ".zattrs")
-    if os.path.isfile(zattrs):
-        with open(zattrs, encoding="utf-8") as fh:
-            loaded = json.load(fh)
+    if os.path.lexists(zattrs):
+        loaded = _load_bounded_json(zattrs)
         if not isinstance(loaded, dict):
             raise NgffError("OME-NGFF group attributes must be a JSON object")
         return loaded
     zjson = os.path.join(path, "zarr.json")  # zarr v3 group metadata
-    if os.path.isfile(zjson):
-        with open(zjson, encoding="utf-8") as fh:
-            meta = json.load(fh)
+    if os.path.lexists(zjson):
+        meta = _load_bounded_json(zjson)
         if not isinstance(meta, dict):
             raise NgffError("Zarr v3 group metadata must be a JSON object")
         raw_attrs = meta.get("attributes", {})
@@ -1147,6 +1411,24 @@ def open_ngff(path: str, *, multiscale: int | str | None = None) -> NgffImage:
                 f"multiscale level {dpath!r} dimensionality {len(shape)} does not match {ndim}"
             )
         current_dtype = np.dtype(arr.dtype)
+        if current_dtype.kind not in _RENDERABLE_DTYPE_KINDS:
+            raise NgffError(
+                f"unsupported pixel dtype {current_dtype!r}: the OME-Zarr viewer renders "
+                "only real scalar bool, integer, and floating-point arrays"
+            )
+        chunk_shape = getattr(arr, "chunks", None)
+        if (
+            isinstance(chunk_shape, tuple)
+            and len(chunk_shape) == len(shape)
+            and all(isinstance(chunk_size, int) and chunk_size > 0 for chunk_size in chunk_shape)
+        ):
+            decoded_chunk_bytes = math.prod(chunk_shape) * int(current_dtype.itemsize)
+            if decoded_chunk_bytes > _MAX_CHUNK_DECODED_BYTES:
+                raise NgffError(
+                    f"multiscale level {dpath!r} declares {decoded_chunk_bytes} decoded bytes "
+                    f"per chunk (chunks={chunk_shape}, dtype={current_dtype}), exceeding the "
+                    f"{_MAX_CHUNK_DECODED_BYTES}-byte decoded chunk budget"
+                )
         if dtype is None:
             dtype = current_dtype
         elif current_dtype != dtype:

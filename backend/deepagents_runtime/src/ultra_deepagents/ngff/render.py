@@ -9,17 +9,25 @@ napari/vizarr render OME-Zarr.
 from __future__ import annotations
 
 import io
+import os
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS
+from ultra_deepagents.imaging.constants import MAX_COMPOSITE_CHANNELS, MAX_TILE_EDGE
 from ultra_deepagents.ngff.reader import NgffChannel, NgffError, NgffImage
 
 if TYPE_CHECKING:
     from PIL import Image
 
 __all__ = ["render_slice_png", "render_thumbnail_png", "render_tile_png"]
+
+# The source planes, float working buffers, and RGB accumulator coexist during a full-plane
+# composite. Keep that aggregate bounded; large images use the tile path instead.
+_MAX_FULL_RENDER_WORKING_BYTES = int(
+    os.environ.get("ULTRA_NGFF_MAX_FULL_RENDER_BYTES", str(256 * 1024 * 1024))
+)
+_FULL_RENDER_INTERMEDIATE_BYTES_PER_PIXEL = 32
 
 
 def _hex_to_rgb(color: str) -> tuple[float, float, float]:
@@ -113,6 +121,20 @@ def _selected_channels(img: NgffImage, channels: list[int] | None) -> list[int]:
     return defaults[:MAX_COMPOSITE_CHANNELS]
 
 
+def _validate_full_render_budget(img: NgffImage, level: int, channel_count: int) -> None:
+    height, width = img.level_yx(level)
+    pixels = height * width
+    source_bytes = pixels * int(img.dtype.itemsize) * channel_count
+    estimated_working_bytes = source_bytes + pixels * _FULL_RENDER_INTERMEDIATE_BYTES_PER_PIXEL
+    if estimated_working_bytes > _MAX_FULL_RENDER_WORKING_BYTES:
+        raise NgffError(
+            f"full-plane composite at level {level} requires an estimated "
+            f"{estimated_working_bytes} bytes, exceeding the "
+            f"{_MAX_FULL_RENDER_WORKING_BYTES}-byte render working-set budget; request a "
+            "coarser multiscale level or use the tile path"
+        )
+
+
 def _compose_channels(
     img: NgffImage,
     planes: dict[int, np.ndarray],
@@ -170,6 +192,7 @@ def _render(
     selected = _selected_channels(img, channels)
     if channel_colors is not None and len(channel_colors) != len(selected):
         raise NgffError("channel colors must match the selected channel count")
+    _validate_full_render_budget(img, level, len(selected))
     planes = {ci: img.read_plane(t=t, c=ci, z=z, level=level) for ci in selected}
     return _compose_channels(img, planes, selected, channel_colors)
 
@@ -225,7 +248,14 @@ def render_tile_png(
     (the tile_scheme advertises the same level list). Edge tiles return the cropped region."""
     from PIL import Image
 
-    tile_size = max(1, int(tile_size))
+    if (
+        isinstance(tile_size, (bool, np.bool_))
+        or not isinstance(tile_size, (int, np.integer))
+        or tile_size <= 0
+        or tile_size > MAX_TILE_EDGE
+    ):
+        raise NgffError(f"tile size must be an integer between 1 and {MAX_TILE_EDGE} pixels")
+    tile_size = int(tile_size)
     h, w = img.level_yx(level)
     y0, x0 = int(row) * tile_size, int(col) * tile_size
     if y0 >= h or x0 >= w or y0 < 0 or x0 < 0:

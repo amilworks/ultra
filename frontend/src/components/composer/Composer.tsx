@@ -133,7 +133,7 @@ export type ComposerProps = {
   onMentionActivate: (fileId: string) => void;
   onMentionPick: (resource: ResourceRecord) => void;
 
-  /** Slash workflows and the library picker, rendered by the app above the bar. */
+  /** Slash workflows and the library picker, rendered by the app inside the card. */
   menus?: ReactNode;
   /** Notes chips and pending-upload previews, rendered between the text and the bar. */
   extras?: ReactNode;
@@ -545,7 +545,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           props.onSubmit();
         }}
       >
-        {menus ? <div className="composer-menus">{menus}</div> : null}
         <div ref={cardRef} className="composer-card" onMouseDown={handleCardMouseDown}>
           {running ? <RecorderTraceIcon className="composer-recorder" /> : null}
           <div className="composer-text">
@@ -559,6 +558,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             </Suspense>
           </div>
           {extras}
+          {/* The / workflows and the library picker open INSIDE the card, between
+              the text and the bar — one surface, nothing over the transcript. */}
+          {menus ? <div className="composer-menus">{menus}</div> : null}
           {phone ? picker : null}
           <div className="composer-bar">
             <ComposerAttachMenu

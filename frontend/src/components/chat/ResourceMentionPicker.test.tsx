@@ -37,7 +37,7 @@ describe("ResourceMentionPicker", () => {
     expect(options[0].getAttribute("aria-selected")).toBe("true");
     expect(options[0].id).toBe(resourceMentionOptionId("mention-list", "f1"));
     expect(container.querySelector(".composer-mention-match")?.textContent).toBe("fus");
-    expect(container.querySelector(".composer-mention-kind")?.textContent).toBe("PLY");
+    expect(container.querySelector(".composer-menu-kind")?.textContent).toBe("PLY");
     // Anchored at the caret on desktop.
     const picker = container.querySelector(".composer-mention-picker") as HTMLElement;
     expect(picker.style.left).toBe("40px");

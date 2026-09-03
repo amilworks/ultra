@@ -2672,12 +2672,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   z-index: 40;
 }
 
-.composer-menus {
-  position: relative;
-  height: 0;
-  z-index: 30;
-}
-
 /* THE CARD. At rest a sunk well — the search-well rule: sunk, never bordered.
    While composing it rises one value step: raised ground, hairline, the house
    radius, the house shadow (none in Night, where the hairline carries it). */
@@ -3174,6 +3168,8 @@ textarea.composer-editor::placeholder {
   overflow: hidden;
 }
 
+/* The in-card slot for the / workflows and the library picker: in normal flow,
+   so the card grows around the menu and the bar stays beneath it. */
 .composer-menus {
   padding: 0.3rem 0.375rem 0.25rem;
 }
@@ -3200,7 +3196,9 @@ textarea.composer-editor::placeholder {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 328px;
+  /* Never more than the mockup's eight rows, and never so tall on a short
+     viewport that the card crowds out the transcript. */
+  max-height: min(328px, 40dvh);
   overflow-y: auto;
   overscroll-behavior: contain;
 }

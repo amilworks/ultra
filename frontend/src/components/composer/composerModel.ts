@@ -62,10 +62,11 @@ export const composerPlaceholder = (inputs: ComposerPlaceholderInputs): string =
   if (inputs.running) {
     return "Steer this run, or queue for after";
   }
-  if (!inputs.hasTokens && !inputs.hasFiles) {
-    return inputs.phone
-      ? "Ask Ultra — @ file, / workflow"
-      : "Ask Ultra — @ to bring in a file, / for a workflow";
+  // The grammar cues ride along only where they fit: a phone bar's status box
+  // is ~186px beside the mode tag, and a truncated cue reads as a defect. On
+  // phones the + menu carries the same two routes.
+  if (!inputs.phone && !inputs.hasTokens && !inputs.hasFiles) {
+    return "Ask Ultra — @ to bring in a file, / for a workflow";
   }
   return "Ask Ultra";
 };

@@ -36,4 +36,17 @@ describe("mobile composer layout", () => {
     expect(composerSource).toMatch(/\{phone \? picker : null\}\s*<div className="composer-bar">/);
     expect(stylesSource).toMatch(/\.composer-mention-picker-sheet\s*\{\s*position:\s*relative;/);
   });
+
+  it("keeps the in-card menu slot in normal flow — one rule, no zero height", () => {
+    // A stale `height: 0` on the slot once let a 376px menu overflow the card
+    // and run off the bottom of the viewport in a docked conversation.
+    const section = stylesSource.slice(
+      stylesSource.indexOf("The composer: one bar."),
+      stylesSource.indexOf(".welcome-starters {")
+    );
+    const slotRules = section.match(/\n\.composer-menus\s*\{[^}]*\}/g) ?? [];
+    expect(slotRules).toHaveLength(1);
+    expect(slotRules[0]).not.toMatch(/height:\s*0|position:\s*absolute/);
+    expect(section).toMatch(/\.composer-menu-list\s*\{[^}]*max-height:\s*min\(328px, 40dvh\);/s);
+  });
 });

@@ -677,6 +677,14 @@ The chat renders Markdown with KaTeX, so mathematics must be delimited or it sho
 - Inside display math use `\\\\` for row breaks (matrices, `aligned`, `cases`), and do not begin a line of the math body with `-`, `*`, `#`, or a blank line — those collide with Markdown block syntax and split the equation. Write subtractions on one line (`a - b - c`) or use an `aligned` block with `&`/`\\\\`.
 - Keep a whole equation in one delimited block rather than breaking it across paragraphs or list items.
 
+Mathematical typesetting follows textbook practice: inline `$ ... $` is for symbols and short expressions woven into a sentence; anything derived, tall, or worth finding again is displayed.
+
+- Put every matrix, multi-step derivation, and stated result in its own `$$ ... $$` display block. Never put a `\\begin{...}` environment inside single `$ ... $`, and never shrink display-worthy material to fit inline — reaching for `\\tfrac` or `smallmatrix` is the sign that the expression belongs in a display.
+- Set a chain of equalities as a display using `\\begin{aligned}`, one step per line, aligned on the relation (`&=`), with the justification for the non-obvious steps in prose before or after the block — never as a run of `=` signs wrapping through a paragraph.
+- When a later step refers back to a displayed equation, give that display `\\tag{1}` and cite it as (1) in prose.
+- Displayed equations are part of the sentence: keep the trailing comma or period inside the delimiters, and keep a line of connective prose between consecutive displays saying what the next one shows.
+- Batteries of numeric checks — norms, tolerances, singular values, verification results — go in a small table (claim, computed value, tolerance), not run inline through a paragraph.
+
 ## Tables
 
 The chat renders GitHub-Flavored-Markdown pipe tables, which only display when the header, the `---` delimiter row, and every data row have the SAME number of columns.

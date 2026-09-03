@@ -2139,6 +2139,70 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   gap: 0.18rem;
 }
 
+/* Skip link. Off-screen until it takes keyboard focus, then it lands as a
+   normal small control in the top-left — the one piece of chrome that is
+   allowed to appear from nowhere, because it only ever appears for the person
+   who needs it. Pointer users never see it. */
+.app-skip-link {
+  position: fixed;
+  top: 0.6rem;
+  left: 0.6rem;
+  z-index: 60;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel-strong);
+  color: var(--text-main);
+  font-size: var(--font-size-nav);
+  font-weight: var(--font-weight-action);
+  box-shadow: var(--shadow-raised);
+  /* Not `display: none` and not `visibility: hidden` — either would take it
+     out of the tab order, which is the one thing it must stay in. */
+  transform: translateY(-200%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* `:focus`, not `:focus-visible`: the control is off-screen and
+   pointer-events:none, so the only way to reach it at all is the keyboard —
+   and gating on focus-visible would leave it invisible for any focus the
+   browser declines to call keyboard-initiated. */
+.app-skip-link:focus {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+/* Keyboard focus in the sidebar.
+
+   The vendored sidebar button ships Tailwind's `outline-hidden` (which removes
+   the browser's own focus ring) paired with `focus-visible:ring-2` to replace
+   it — and Tailwind paints that ring THROUGH box-shadow. Every flat sidebar
+   control here then states `box-shadow: none` for its resting look, which
+   silently erased the replacement: measured under real keyboard focus on a
+   conversation row, `:focus-visible` matched and `--tw-ring-shadow` resolved
+   to a real `0 0 0 2px` ring, while the composed `box-shadow` stayed `none`
+   and `outline-style` stayed `none`. The result was no visible focus at all on
+   the app's most-travelled controls — the conversation list, the brand button,
+   and the collapsed-rail actions — which fails WCAG 2.4.7 and makes the
+   sidebar unusable without a mouse.
+
+   Stated as an outline rather than a box-shadow so it cannot be erased again
+   by a resting `box-shadow: none`, and inset by its own width so the ring hugs
+   the row's rounded rect instead of colliding with the sidebar edge. Keyboard
+   users only — `:focus-visible` never fires for a pointer click, so the
+   resting sidebar stays flat. */
+.app-history-button:focus-visible,
+.app-sidebar-brand-button[data-slot="button"]:focus-visible,
+.app-collapsed-sidebar-toggle:focus-visible,
+.app-collapsed-sidebar-action:focus-visible,
+.app-sidebar-header-trigger[data-slot="sidebar-trigger"]:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: -2px;
+}
+
 .app-history-button {
   border-radius: var(--sidebar-radius-row);
   min-height: 2.18rem;
@@ -4052,7 +4116,12 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .resource-browser-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  grid-auto-rows: 1fr;
+  /* `auto`, not `1fr`: cards carry a fixed height, so card rows come out
+     identical either way — but `1fr` sizes EVERY implicit row to the tallest
+     row in the grid, which blew the calendar section labels up to full card
+     height (measured 284px for a 29px eyebrow). Content-sized rows keep the
+     labels at label height and change nothing for the fixed-height cards. */
+  grid-auto-rows: auto;
   gap: 0.9rem;
 }
 
@@ -4186,6 +4255,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-main);
   font-size: 0.82rem;
   font-weight: var(--font-weight-action);
+  /* Same digit discipline as the card names: machine-stamped siblings differ
+     only in a digit run, and equal-width digits make a column of them
+     scannable top-to-bottom. */
+  font-variant-numeric: tabular-nums;
   line-height: 1.35;
 }
 
@@ -4220,6 +4293,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   height: 17.75rem;
   display: grid;
   grid-template-rows: 10.75rem minmax(0, 1fr);
+  /* The implicit column must be pinned too. Left implicit, it sizes to the
+     widest item's min-content — and the text-preview snippet is `white-space:
+     pre`, so one long source line inflated the inner column to the snippet's
+     longest line (measured 1877px inside a 365px card). The meta row then
+     stretched to that phantom track and filenames laid out on a giant single
+     line: the 2-line clamp never engaged and the card edge hard-clipped the
+     name with no ellipsis — while cards without text previews stayed fine,
+     which made the bug look intermittent. */
+  grid-template-columns: minmax(0, 1fr);
   transition: border-color 160ms var(--motion-ease), box-shadow 160ms var(--motion-ease), transform 160ms var(--motion-ease);
 }
 
@@ -4358,6 +4440,13 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
   white-space: pre;
   overflow: hidden;
+  /* Source lines run far past the card (measured ~1600px of overflow), so the
+     crop is inevitable — but a hard mid-glyph cut reads as broken. The mask
+     fades the last stretch of every line into the card ground instead, which
+     reads as "the text continues", not "the text is damaged". Mask, not a
+     gradient overlay: it works over any ground in both themes without naming
+     a color. */
+  mask-image: linear-gradient(to right, black calc(100% - 1.5rem), transparent);
 }
 
 .resource-thumb-snippet > div {
@@ -4774,6 +4863,34 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   padding: 0.72rem 2.95rem 0.68rem 0.15rem;
 }
 
+/* Calendar eyebrows over the card grid — the sidebar history's exact recipe
+   (size, weight, tracking, muted ink, sentence case) so both surfaces group
+   time in one voice. Spans the full grid row; the first one leans on the
+   grid's own top spacing instead of adding its own. */
+.resource-browser-section-label {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.68rem;
+  font-weight: var(--font-weight-panel-heading);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  line-height: 1.25;
+  padding: 0.6rem 0.15rem 0;
+}
+
+.resource-browser-grid > .resource-browser-section-label:first-child {
+  padding-top: 0;
+}
+
+/* Search matches in resource names: ink emphasis, not pigment. The amber
+   highlighter wash stays reserved for content marking in rendered markdown;
+   a transient filter echo brightens by weight alone. */
+.resource-name-match {
+  background: transparent;
+  color: inherit;
+  font-weight: var(--font-weight-strong);
+}
+
 .resource-browser-name {
   margin: 0;
   min-height: 2.64em;
@@ -4785,8 +4902,17 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  font-size: var(--font-size-body);
+  /* The nav rung, not body: a filename is an object label the eye sweeps past
+     at scroll speed, and the label rung fits a full machine-stamped name
+     (30+ chars) in fewer wraps at the 240px column minimum. The nav token is
+     also regime-stable — body inflates on mobile, which blew two-line names
+     to three on 180px phone columns. Tabular figures because sibling files
+     differ only in a digit run (upload stamps, tile indices, counters):
+     equal-width digits put the differing characters at the same x position
+     on every card, so adjacent names diff at a glance instead of a read. */
+  font-size: var(--font-size-nav);
   font-weight: var(--font-weight-action);
+  font-variant-numeric: tabular-nums;
   line-height: 1.32;
   color: var(--text-main);
   overflow: hidden;
@@ -4801,6 +4927,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* Same digit discipline as the name row: sizes and timestamps column-align
+     across a row of cards instead of jittering per-card. */
+  font-variant-numeric: tabular-nums;
 }
 
 .resource-browser-share-status-chips {
@@ -9331,6 +9460,411 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-composer-textarea::placeholder {
   color: var(--composer-placeholder);
   opacity: 1;
+}
+
+/* ============================================================================
+   The brief: tokens in the prose.
+
+   The composer is still one <textarea>. Files the user brings in are runs of
+   ordinary text (`@scan.tif`) and the layer below paints a translucent pill
+   under each run — translucent so the textarea's own glyphs show through and
+   nothing is drawn twice. Prose in the layer is transparent: it exists only to
+   put the pills in the right place. The workflow and the intelligence mode are
+   not text at all; they sit as chips at the head of the first line, and the
+   textarea indents its first line by their measured width so both layers share
+   one grid. See components/chat/BriefOverlay.tsx and features/chat/brief-tokens.ts.
+   ========================================================================== */
+.app-composer-shell {
+  --brief-token-bg: color-mix(in oklab, var(--text-main) 7%, transparent);
+  --brief-token-bg-strong: color-mix(in oklab, var(--text-main) 11%, transparent);
+  --brief-whisper: var(--text-muted);
+  --brief-whisper-faint: color-mix(in oklab, var(--text-muted) 62%, transparent);
+}
+
+.dark .app-composer-shell {
+  --brief-token-bg: color-mix(in oklab, var(--text-main) 10%, transparent);
+  --brief-token-bg-strong: color-mix(in oklab, var(--text-main) 16%, transparent);
+}
+
+.app-composer-card-body {
+  position: relative;
+}
+
+.brief-overlay {
+  position: absolute;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.brief-overlay-content {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 100%;
+  color: transparent;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  /* The textarea's own scrollbar gutter, if it ever shows, is not mirrored;
+     the difference is one line wrap at the very end of a 240px-tall draft. */
+}
+
+.brief-overlay-text {
+  color: transparent;
+}
+
+/* Inline horizontal padding would shift the text that follows; the equal
+   negative margin cancels it, so the pill reaches 0.18em into the padding
+   spaces on either side while the glyphs stay exactly where the textarea
+   draws them. Vertical padding is free — it never moves an inline line box.
+   box-decoration-break clone keeps rounded ends when a token wraps. */
+.brief-token {
+  color: transparent;
+  background: var(--brief-token-bg);
+  border-radius: 0.38em;
+  padding: 0.1em 0.18em;
+  margin: 0 -0.18em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  pointer-events: auto;
+  cursor: text;
+  transition: background-color 160ms var(--motion-ease);
+}
+
+.brief-token:hover {
+  background: var(--brief-token-bg-strong);
+}
+
+/* Deleted from the library since it was typed: the pill empties to a dashed
+   frame and the run is struck through in the muted ink, so the eye reads
+   "this one is gone" before the whisper says so. The strike colour is stated
+   because the span's own colour is transparent. */
+.brief-token-gone {
+  background: transparent;
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+  text-decoration-thickness: 1px;
+}
+
+/* Chips at the head of the line: the workflow and the mode. Real controls
+   (they open their menus), so they take pointer events even though the layer
+   around them does not. Height stays inside the line box — 1.45em of the
+   composer's 17px is 24.7px against a 25.9px line — so the first line of the
+   overlay never grows taller than the textarea's. */
+.brief-overlay-prefix {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  vertical-align: baseline;
+  margin-right: 0.45rem;
+  pointer-events: auto;
+  line-height: 1;
+}
+
+.brief-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  height: 1.45em;
+  padding: 0 0.55em 0 0.45em;
+  border: 0;
+  border-radius: 0.42em;
+  background: var(--brief-token-bg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-action);
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.brief-chip:hover,
+.brief-chip[aria-expanded="true"] {
+  background: var(--brief-token-bg-strong);
+  color: var(--text-main);
+}
+
+.brief-chip:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+.brief-chip svg {
+  width: 0.95em;
+  height: 0.95em;
+  flex: 0 0 auto;
+}
+
+/* The workflow leads the sentence in the one filled treatment the composer
+   owns — the same ink as the send button, inverted in Night by the tokens. */
+.brief-chip-workflow {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.brief-chip-workflow:hover,
+.brief-chip-workflow[aria-expanded="true"] {
+  background: var(--brand-strong);
+  color: var(--primary-foreground);
+}
+
+/* The @ picker. Desktop floats it at the caret inside the card body; phones
+   lay it under the line as a sheet. One popover language with the rest of the
+   product: raised ground, hairline, 12px radius, 44px rows. */
+.brief-mention-picker {
+  position: absolute;
+  z-index: 45;
+  box-sizing: border-box;
+  width: min(380px, calc(100% - 1rem));
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-main);
+}
+
+.brief-mention-picker-popover {
+  bottom: calc(100% + 0.5rem);
+}
+
+.brief-mention-picker-sheet {
+  position: relative;
+  width: auto;
+  margin: 0.3rem 0.75rem 0.5rem;
+}
+
+.brief-mention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 232px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.brief-mention-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.brief-mention-option-active {
+  background: var(--brief-token-bg);
+}
+
+.brief-mention-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: var(--brief-token-bg);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.brief-mention-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.brief-mention-name {
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: var(--font-weight-action);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-mention-match {
+  font-weight: var(--font-weight-strong);
+}
+
+.brief-mention-meta {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-mention-empty {
+  padding: 12px 10px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.brief-mention-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border-top: 1px solid color-mix(in oklab, var(--line) 66%, transparent);
+  font-size: 12px;
+  color: var(--brief-whisper-faint);
+}
+
+.brief-mention-upload {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.brief-mention-upload:hover {
+  color: var(--text-main);
+}
+
+/* The whisper under a ready brief and the eyebrow above a running one. Both
+   speak in the run-meta voice (12px, muted, tabular) — marginalia about the
+   control, never the control's own voice. */
+.brief-whisper,
+.brief-run-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--brief-whisper);
+  font-variant-numeric: tabular-nums;
+}
+
+.brief-whisper {
+  padding: 0 1rem 0.2rem 1.35rem;
+}
+
+.brief-run-eyebrow {
+  padding: 0.55rem 1rem 0 1.35rem;
+}
+
+.brief-whisper-keys,
+.brief-run-eyebrow-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+  color: var(--brief-whisper-faint);
+  white-space: nowrap;
+}
+
+.brief-whisper-keys svg {
+  width: 13px;
+  height: 13px;
+}
+
+.brief-whisper-summary,
+.brief-run-eyebrow-status {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.brief-run-eyebrow-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brief-run-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--text-main);
+  animation: brief-run-dot 1.6s var(--motion-ease) infinite;
+}
+
+@keyframes brief-run-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* A gone file blocks sending: the whisper turns into the notice and offers
+   the one action that repairs it. */
+.brief-whisper-notice {
+  color: var(--text-main);
+}
+
+.brief-whisper-notice button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+/* Stop carries its word. A destructive verb on a pill that fits the same
+   36–44px row as the icon buttons beside it. */
+.app-composer-stop-button.brief-stop-button {
+  width: auto;
+  padding: 0 0.85rem 0 0.7rem;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: var(--font-weight-action);
+}
+
+/* The slim pill and the read-mode collapse hide the whisper: while the line is
+   at rest there is nothing to summarise, and while it is collapsed the strip
+   has no room for marginalia. */
+.app-composer-shell[data-composer-slim="true"] .brief-whisper,
+.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-whisper,
+.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-run-eyebrow {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  /* Phones: no keyboard to whisper about, and 44px targets. */
+  .brief-whisper-keys {
+    display: none;
+  }
+  .brief-mention-option {
+    min-height: 52px;
+  }
+  .brief-mention-picker {
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brief-run-dot {
+    animation: none;
+  }
+  .brief-token,
+  .brief-chip {
+    transition: none;
+  }
 }
 
 .app-composer-actions {
@@ -14060,6 +14594,20 @@ details {
    overflow-y stays hidden because a horizontal scrollport would otherwise report
    a fractional vertical overflow from KaTeX's negative struts and show a useless
    vertical scrollbar on tall math. Height is content-driven, so nothing clips. */
+/* KaTeX's stock 1.21em factor lifts a low-x-height serif math face up to the
+   x-height of a typical text face. Ultra Sans is a high-x-height grotesk, so
+   the same factor overshoots on the extenders instead: caps, parentheses and
+   superscripts tower over the line and inflate every line box an inline
+   formula touches — most of them, in a math-heavy answer. 1.13em pulls the
+   extenders back inside the line's rhythm (measured: re-wraps settle and row
+   heights even out) while math lowercase stays optically near the prose.
+   KaTeX's own stylesheet loads lazily after this one but loses on
+   specificity, deliberately. */
+.pk-markdown .katex,
+.pk-message-content-plain .katex {
+  font-size: 1.13em;
+}
+
 .pk-markdown .katex-display,
 .pk-message-content-plain .katex-display {
   overflow-x: auto;
@@ -14072,6 +14620,87 @@ details {
      gesture at the ends of the scroll. */
   -webkit-overflow-scrolling: touch;
   overscroll-behavior-x: contain;
+}
+
+/* Copy-LaTeX on display equations. The shell sits OUTSIDE the equation's own
+   horizontal scrollport, so the button holds the block's corner while a wide
+   formula scrolls under it. Ghost ink treatment: invisible until the block is
+   hovered or the button holds keyboard focus; pointers that cannot hover get
+   a quiet constant presence instead of an unreachable affordance. */
+.pk-math-display-shell {
+  position: relative;
+  display: block;
+}
+
+/* The button needs a lane of its own. Floating it over the equation put it on
+   top of the glyphs — measured 27x13px of overlap on EVERY display block, at
+   both widths: on desktop it covered the tail of the formula at exactly the
+   moment you hovered to read or copy it, and on touch (where it is
+   permanently visible) it sat on the math permanently. Symmetric inline
+   padding on the scrollport reserves that lane without breaking the optical
+   centering display math depends on: the equation is centered inside the
+   remaining width, and a wide one now starts and ends its scroll clear of
+   the button instead of underneath it. Padding on a horizontal scrollport is
+   part of the scrollable extent, so the glyphs cannot reach the gutter at
+   either end of the scroll. */
+.pk-markdown .pk-math-display-shell .katex-display,
+.pk-message-content-plain .pk-math-display-shell .katex-display {
+  padding-inline: 2.1rem;
+}
+
+.pk-math-copy {
+  position: absolute;
+  top: 0.1rem;
+  right: 0.1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  border: 0;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
+}
+
+/* A 27px visual box is right for a ghost affordance and wrong for a finger.
+   The pseudo-element grows the HIT area to ~44px (the house touch minimum)
+   without growing the ink. */
+.pk-math-copy::after {
+  content: "";
+  position: absolute;
+  inset: -0.53rem;
+}
+
+.pk-math-display-shell:hover .pk-math-copy,
+.pk-math-copy:focus-visible {
+  opacity: 1;
+}
+
+.pk-math-copy:hover {
+  background: color-mix(in oklab, var(--foreground) 7%, transparent);
+  color: var(--text-main);
+}
+
+.pk-math-copy svg {
+  width: 0.95rem;
+  height: 0.95rem;
+}
+
+@media (hover: none) {
+  .pk-math-copy {
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pk-math-copy {
+    transition: none;
+  }
 }
 
 /* Queued follow-up ("send when this run finishes"): a user-bubble-shaped card
@@ -15490,6 +16119,15 @@ details {
   border-left: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
   max-height: 22rem;
   overflow-y: auto;
+  /* A reasoning trace can hold thousands of lines (measured 19,029px of
+     content in a 352px window) sitting directly in the transcript's reading
+     path. Without containment, a wheel or trackpad gesture that happens to
+     start over one is swallowed by it, and then — once it bottoms out —
+     chains back to the transcript mid-gesture. The reader experiences it as
+     the page randomly refusing to scroll and then lurching. Containment keeps
+     the gesture wherever it started: the trace scrolls only while it has
+     somewhere to go, and never hands the momentum onward. */
+  overscroll-behavior: contain;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: 0.8125rem;

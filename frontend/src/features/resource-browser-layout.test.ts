@@ -70,16 +70,39 @@ describe("resource browser responsive layout", () => {
     expect(stylesSource).toMatch(
       /\.resource-browser-card\s*\{[^}]*height:\s*17\.75rem;[^}]*grid-template-rows:\s*10\.75rem minmax\(0, 1fr\);/s
     );
+    // The implicit column must be pinned to the card width: a `white-space: pre`
+    // preview snippet's longest line otherwise inflates the inner track (1877px
+    // measured in a 365px card), and filenames hard-clip on one giant line
+    // instead of clamping to two. Never let this column go implicit again.
+    expect(stylesSource).toMatch(
+      /\.resource-browser-card\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);/s
+    );
     // Content-sized meta rows are what stop a chip from crushing the type/size and
     // date lines. Never silently revert this.
     expect(stylesSource).toMatch(
       /\.resource-browser-meta\s*\{[^}]*grid-auto-rows:\s*min-content;/s
     );
+    // The desktop grid's implicit rows must be content-sized too: `1fr` sizes
+    // every row to the tallest row in the grid, which stretched the calendar
+    // section eyebrows to full card height (284px for a 29px label). Cards
+    // carry a fixed height, so `auto` keeps card rows identical anyway.
+    expect(stylesSource).toMatch(
+      /\.resource-browser-grid\s*\{[^}]*grid-auto-rows:\s*auto;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.resource-browser-section-label\s*\{[^}]*grid-column:\s*1 \/ -1;/s
+    );
   });
 
   it("treats filenames as scan text instead of dense mini-headings", () => {
+    // The label rung (nav token, regime-stable — body inflates on mobile) with
+    // tabular figures: machine-stamped siblings differ only in a digit run, and
+    // equal-width digits let adjacent cards diff at a glance while scrolling.
     expect(stylesSource).toMatch(
-      /\.resource-browser-name\s*\{[^}]*-webkit-line-clamp:\s*2;[^}]*font-size:\s*var\(--font-size-body\);[^}]*font-weight:\s*var\(--font-weight-action\);[^}]*line-height:\s*1\.32;/s
+      /\.resource-browser-name\s*\{[^}]*-webkit-line-clamp:\s*2;[^}]*font-size:\s*var\(--font-size-nav\);[^}]*font-weight:\s*var\(--font-weight-action\);[^}]*font-variant-numeric:\s*tabular-nums;[^}]*line-height:\s*1\.32;/s
+    );
+    expect(stylesSource).toMatch(
+      /\.resource-browser-details,\s*\.resource-browser-date\s*\{[^}]*font-variant-numeric:\s*tabular-nums;/s
     );
     expect(stylesSource).toMatch(
       /\.resource-browser-card\[data-preview="false"\]\s*\.resource-browser-meta\s*\{[^}]*justify-content:\s*stretch;/s

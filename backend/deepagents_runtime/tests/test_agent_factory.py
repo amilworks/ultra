@@ -189,6 +189,15 @@ def test_build_research_agent_passes_current_deepagents_contract(monkeypatch):
     assert "sandbox execution" in captured["system_prompt"].lower()
     assert "caption immediately after each figure" in captured["system_prompt"].lower()
     assert "do not call read_file on image" in captured["system_prompt"].lower()
+    # Math presentation contract: display discipline, aligned derivations, and
+    # the never-an-environment-inside-inline-$ rule (a live desync failure).
+    assert (
+        "matrix, multi-step derivation, and stated result"
+        in captured["system_prompt"].lower()
+    )
+    assert "never put a `\\begin{...}` environment inside single" in captured["system_prompt"].lower()
+    assert "one step per line" in captured["system_prompt"].lower()
+    assert "trailing comma or period inside the delimiters" in captured["system_prompt"].lower()
     assert any(isinstance(item, TextOnlyMultimodalMiddleware) for item in captured["middleware"])
 
     assert captured["subagents"] == []

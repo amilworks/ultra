@@ -1,6 +1,17 @@
 import { marked } from "marked";
-import { ExternalLink, Layers3 } from "lucide-react";
-import { lazy, memo, type ReactNode, Suspense, useEffect, useId, useMemo, useState } from "react";
+import { Check, Copy, ExternalLink, Layers3 } from "lucide-react";
+import {
+  type HTMLAttributes,
+  lazy,
+  memo,
+  type ReactNode,
+  Suspense,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import ReactMarkdown, { defaultUrlTransform, type Components } from "react-markdown";
 
 // First-party scheme: `ultra://resource/<id>/<name>` lets markdown reference
@@ -286,45 +297,277 @@ const MATH_ENVIRONMENTS =
   "bmatrix|pmatrix|vmatrix|Vmatrix|Bmatrix|smallmatrix|matrix|" +
   "cases|aligned|alignedat|align\\*?|alignat\\*?|gather\\*?|gathered|" +
   "equation\\*?|multline\\*?|split|array|eqnarray\\*?";
+// The optional trailing group captures sentence punctuation sitting right
+// after the environment (followed by whitespace or end): fencing pulls it
+// INSIDE the display, where print mathematics sets it — otherwise the `.` of
+// "The vector is \begin{bmatrix}…\end{bmatrix}." is stranded between the two
+// inserted blank lines and renders as a one-character orphan paragraph.
 const BARE_ENVIRONMENT_PATTERN = new RegExp(
-  String.raw`(?<![$\\])\\begin\{(${MATH_ENVIRONMENTS})\}([\s\S]*?)\\end\{\1\}`,
+  String.raw`(?<![$\\])(\\begin\{(${MATH_ENVIRONMENTS})\}[\s\S]*?\\end\{\2\})(?:[ \t]*([.,;:!?])(?=\s|$))?`,
   "g"
 );
 
-export const normalizeMathMarkdown = (source: string): string => {
-  let normalized = source;
+// Fenced code blocks are opaque to every math transform: their dollars and
+// TeX-lookalike text are literal. CommonMark, approximated: a fence is 0–3
+// spaces of indent plus three or more backticks/tildes; a backtick fence's
+// info string cannot itself contain a backtick; the closing fence uses the
+// same character, at least as long, alone on its line. An unclosed fence
+// (mid-stream) swallows the rest of the source as code, which matches how
+// the markdown parser will treat it.
+type SourceSegment = { text: string; isCode: boolean };
+
+const FENCE_CLOSE_PATTERN = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const FENCE_OPEN_PATTERN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+const splitFencedCode = (source: string): SourceSegment[] => {
+  const segments: SourceSegment[] = [];
+  let buffer: string[] = [];
+  let bufferIsCode = false;
+  let openFence: { char: string; length: number } | null = null;
+  const flush = () => {
+    if (buffer.length > 0) {
+      segments.push({ text: buffer.join("\n"), isCode: bufferIsCode });
+      buffer = [];
+    }
+  };
+  for (const line of source.split("\n")) {
+    if (openFence) {
+      buffer.push(line);
+      const close = FENCE_CLOSE_PATTERN.exec(line);
+      if (
+        close &&
+        close[1][0] === openFence.char &&
+        close[1].length >= openFence.length
+      ) {
+        openFence = null;
+        flush();
+        bufferIsCode = false;
+      }
+      continue;
+    }
+    const open = FENCE_OPEN_PATTERN.exec(line);
+    if (open && !(open[1][0] === "`" && open[2].includes("`"))) {
+      flush();
+      bufferIsCode = true;
+      openFence = { char: open[1][0], length: open[1].length };
+      buffer.push(line);
+      continue;
+    }
+    buffer.push(line);
+  }
+  flush();
+  return segments;
+};
+
+// Inline code spans keep their contents literal too. Masking them to
+// same-length blanks (newlines kept, so offsets AND paragraph boundaries stay
+// aligned) lets each transform test, by offset, whether its match overlaps a
+// span — and keeps their dollars (`echo $PATH`) out of the delimiter parity
+// counts below. Runs of 1–2 backticks cover real model output; a span that
+// needs longer runs to escape inner backticks is not modeled.
+const INLINE_CODE_SPAN_PATTERN =
+  /(?<!`)(`{1,2})(?!`)(?:[^`\n]|\n(?![ \t]*\n))+?\1(?!`)/g;
+
+const maskInlineCode = (text: string): string =>
+  text.replace(INLINE_CODE_SPAN_PATTERN, (span) => span.replace(/[^\n]/g, " "));
+
+// `\$` never delimits math; `$$` pairs delimit display blocks (which may span
+// blank lines); lone `$` pairs delimit inline spans (which never cross one).
+const countDollarDelimiters = (
+  text: string
+): { singles: number; doubles: number } => {
+  let singles = 0;
+  let doubles = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch !== "$") {
+      continue;
+    }
+    if (text[i + 1] === "$") {
+      doubles += 1;
+      i += 1;
+    } else {
+      singles += 1;
+    }
+  }
+  return { singles, doubles };
+};
+
+// Whether `maskedPrefix` (everything before a candidate match, inline code
+// already masked) ends inside an open math span. Display parity is counted
+// over the whole prefix; inline parity only within the current paragraph,
+// since a `$…$` span cannot cross a blank line — so a stray currency dollar
+// in an earlier paragraph cannot poison later fencing. Getting this wrong is
+// worse than leaving raw LaTeX visible: fencing a matrix that sits INSIDE an
+// open `$…$` span severs the span and re-pairs every later dollar in the
+// paragraph — prose lands in math mode with its spaces collapsed, and real
+// math falls out as raw text (observed live with a smallmatrix inside an
+// inline span, which garbled the entire rest of its paragraph).
+const isInsideMathSpan = (maskedPrefix: string): boolean => {
+  if (countDollarDelimiters(maskedPrefix).doubles % 2 === 1) {
+    return true;
+  }
+  const paragraphBreaks = /\n[ \t]*\n/g;
+  let paragraphStart = 0;
+  for (
+    let breakMatch = paragraphBreaks.exec(maskedPrefix);
+    breakMatch;
+    breakMatch = paragraphBreaks.exec(maskedPrefix)
+  ) {
+    paragraphStart = breakMatch.index + breakMatch[0].length;
+  }
+  return (
+    countDollarDelimiters(maskedPrefix.slice(paragraphStart)).singles % 2 === 1
+  );
+};
+
+// Applies `pattern` to `text`, rewriting only matches that land wholly outside
+// inline code: the mask is offset-aligned, so a match whose masked slice
+// differs from itself overlaps a code span and must stay literal.
+const replaceOutsideInlineCode = (
+  text: string,
+  pattern: RegExp,
+  build: (context: {
+    match: string;
+    groups: Array<string | undefined>;
+    offset: number;
+    masked: string;
+  }) => string
+): string => {
+  const masked = maskInlineCode(text);
+  return text.replace(pattern, (...args) => {
+    const match = args[0] as string;
+    const offset = args[args.length - 2] as number;
+    if (masked.slice(offset, offset + match.length) !== match) {
+      return match;
+    }
+    const groups = args.slice(1, -2) as Array<string | undefined>;
+    return build({ match, groups, offset, masked });
+  });
+};
+
+// A paragraph that is exactly one inline formula is a display equation the
+// model failed to mark up: it renders left-aligned at inline size (side-set
+// limits, `\tfrac`/`smallmatrix` contortions) and never gets the
+// `.katex-display` centering, displaystyle sizing, or overflow scrollport.
+// Promote it to a real `$$` flow block. The single-line `$$…$$` form needs
+// the same lift: remark-math parses it as INLINE math (math-text with a
+// two-dollar run), not display. Trailing sentence punctuation moves inside
+// the display, where print mathematics sets it. During streaming the tail
+// paragraph may promote and then demote when more of the sentence arrives —
+// the same class of one-delta settle as raw→rendered math.
+const LONE_DISPLAY_MATH_PARAGRAPH =
+  /^\$\$((?:\\[\s\S]|[^$\\])+)\$\$([.,;:!?])?$/;
+const LONE_INLINE_MATH_PARAGRAPH = /^\$((?:\\[\s\S]|[^$\\])+)\$([.,;:!?])?$/;
+
+const promoteParagraph = (paragraph: string): string => {
+  if (/^(?: {4,}|\t)/.test(paragraph)) {
+    return paragraph; // indented code block, not prose
+  }
+  const trimmed = paragraph.trim();
+  const match =
+    LONE_DISPLAY_MATH_PARAGRAPH.exec(trimmed) ??
+    LONE_INLINE_MATH_PARAGRAPH.exec(trimmed);
+  if (!match) {
+    return paragraph;
+  }
+  const body = (match[1] ?? "").trim();
+  if (!body) {
+    return paragraph;
+  }
+  return `$$\n${body}${match[2] ?? ""}\n$$`;
+};
+
+const promoteLoneMathParagraphs = (
+  prose: string,
+  holdFinalParagraph: boolean
+): string => {
+  const parts = prose.split(/(\n[ \t]*\n+)/);
+  for (let i = 0; i < parts.length; i += 2) {
+    // The captured-separator split always ends on a paragraph slot (empty when
+    // the source ends with a blank line, in which case skipping is a no-op and
+    // the real final paragraph — already closed by that blank line — promotes).
+    if (holdFinalParagraph && i === parts.length - 1) {
+      continue;
+    }
+    parts[i] = promoteParagraph(parts[i]);
+  }
+  return parts.join("");
+};
+
+const normalizeProseMath = (
+  prose: string,
+  holdFinalParagraph: boolean
+): string => {
+  let normalized = prose;
 
   // Normalize only explicit TeX delimiters so we do not accidentally turn
   // ordinary bracketed prose into math. Strip leading blockquote markers from the
   // captured display body: models frequently emit `> \[ ... > \]`, and leaving the
   // `> ` prefixes inside the converted `$$ ... $$` block makes remark-math fail to
   // parse it, so the equation renders as raw LaTeX instead of math.
-  normalized = normalized.replace(
+  normalized = replaceOutsideInlineCode(
+    normalized,
     /\\\[([\s\S]*?)\\\]/g,
-    (_match, expr: string) =>
-      `\n$$\n${String(expr).replace(/^[ \t]*>[ \t]?/gm, "").trim()}\n$$\n`
+    ({ groups }) =>
+      `\n$$\n${String(groups[0] ?? "")
+        .replace(/^[ \t]*>[ \t]?/gm, "")
+        .trim()}\n$$\n`
   );
-  normalized = normalized.replace(
+  normalized = replaceOutsideInlineCode(
+    normalized,
     /\\\((.+?)\\\)/g,
-    (_match, expr: string) => `$${String(expr).replace(/^[ \t]*>[ \t]?/gm, "").trim()}$`
+    ({ groups }) =>
+      `$${String(groups[0] ?? "")
+        .replace(/^[ \t]*>[ \t]?/gm, "")
+        .trim()}$`
   );
 
-  // Auto-fence bare display environments, but skip any that already sit inside
-  // an open `$$ ... $$` block (an odd number of `$$` before the match means we
-  // are inside one) so we never double-wrap already-delimited math.
-  normalized = normalized.replace(
+  // Auto-fence bare display environments — except inside an already-open math
+  // span (`$$` block or inline `$…$`, see isInsideMathSpan), where the
+  // environment is already delimited and fencing would sever the span. Trailing
+  // sentence punctuation (group 3) folds inside the display; the prose after it
+  // resumes as its own paragraph, which is exactly how print sets it.
+  normalized = replaceOutsideInlineCode(
+    normalized,
     BARE_ENVIRONMENT_PATTERN,
-    (match, _env: string, _body: string, offset: number, full: string) => {
-      const dollarDollarBefore = (full.slice(0, offset).match(/\$\$/g) ?? [])
-        .length;
-      if (dollarDollarBefore % 2 === 1) {
-        return match;
-      }
-      return `\n\n$$\n${match}\n$$\n\n`;
-    }
+    ({ match, groups, offset, masked }) =>
+      isInsideMathSpan(masked.slice(0, offset))
+        ? match
+        : `\n\n$$\n${groups[0] ?? match}${groups[2] ?? ""}\n$$\n\n`
   );
 
-  return normalized;
+  return promoteLoneMathParagraphs(normalized, holdFinalParagraph);
+};
+
+export type NormalizeMathOptions = {
+  /** True while the message is still streaming. The final paragraph may be an
+   *  unfinished sentence, so lone-formula promotion holds off on it: a span
+   *  promoted to a display and demoted one delta later is a visible layout
+   *  jump, while promoting once at completion is the same settle the
+   *  raw→rendered math swap already has. */
+  streamingTail?: boolean;
+};
+
+export const normalizeMathMarkdown = (
+  source: string,
+  options?: NormalizeMathOptions
+): string => {
+  const segments = splitFencedCode(source);
+  return segments
+    .map((segment, index) =>
+      segment.isCode
+        ? segment.text
+        : normalizeProseMath(
+            segment.text,
+            options?.streamingTail === true && index === segments.length - 1
+          )
+    )
+    .join("\n");
 };
 
 const hasMathMarkdownSyntax = (source: string): boolean => {
@@ -561,7 +804,80 @@ function LensMarkdownLink({
   );
 }
 
+// Copy-LaTeX affordance on display equations. KaTeX keeps the source in a
+// hidden MathML <annotation encoding="application/x-tex">, so the button reads
+// it from its own subtree — no state threading through the markdown pipeline.
+// The shell wraps the KaTeX block so the button does not ride the equation's
+// own horizontal scrollport, and so a wide equation scrolls under it.
+const MATH_TEX_ANNOTATION_SELECTOR = 'annotation[encoding="application/x-tex"]';
+
+function MathDisplayBlock({
+  className,
+  children,
+  ...props
+}: HTMLAttributes<HTMLSpanElement>) {
+  const shellRef = useRef<HTMLSpanElement>(null);
+  const resetTimerRef = useRef<number | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(
+    () => () => {
+      if (resetTimerRef.current !== null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    },
+    []
+  );
+  const copySource = () => {
+    const tex =
+      shellRef.current?.querySelector(MATH_TEX_ANNOTATION_SELECTOR)
+        ?.textContent ?? "";
+    if (!tex || !navigator.clipboard) {
+      return;
+    }
+    navigator.clipboard
+      .writeText(tex)
+      .then(() => {
+        setCopied(true);
+        if (resetTimerRef.current !== null) {
+          window.clearTimeout(resetTimerRef.current);
+        }
+        resetTimerRef.current = window.setTimeout(
+          () => setCopied(false),
+          1600
+        );
+      })
+      .catch(() => {
+        // Clipboard permission denied: the button simply stays quiet.
+      });
+  };
+  return (
+    <span className="pk-math-display-shell" ref={shellRef}>
+      <span className={className} {...props}>
+        {children}
+      </span>
+      <button
+        type="button"
+        className="pk-math-copy"
+        aria-label={copied ? "Copied LaTeX source" : "Copy LaTeX source"}
+        title="Copy LaTeX source"
+        onClick={copySource}
+      >
+        {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+      </button>
+    </span>
+  );
+}
+
 const BASE_COMPONENTS: Partial<Components> = {
+  // Display math is the only span variety that gets intercepted: rehype-katex
+  // emits `<span class="katex-display">` for block math, and every other span
+  // (including KaTeX's thousands of internal ones) passes straight through.
+  span: function SpanComponent({ className, ...props }) {
+    if (className?.includes("katex-display")) {
+      return <MathDisplayBlock className={className} {...props} />;
+    }
+    return <span className={className} {...props} />;
+  },
   code: function CodeComponent({ className, children, ...props }) {
     const isInline =
       !props.node?.position?.start.line ||
@@ -728,8 +1044,8 @@ function MarkdownComponent({
   const generatedId = useId();
   const blockId = id ?? generatedId;
   const normalizedMarkdown = useMemo(
-    () => normalizeMathMarkdown(children),
-    [children]
+    () => normalizeMathMarkdown(children, { streamingTail: streamingReveal }),
+    [children, streamingReveal]
   );
   const needsMathEnhancement = useMemo(
     () => hasMathMarkdownSyntax(normalizedMarkdown),

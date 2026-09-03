@@ -6,7 +6,12 @@ const distAssetsDir = path.join(repoRoot, "dist", "assets");
 const manifestPath = path.join(repoRoot, "dist", ".vite", "manifest.json");
 
 const budgets = [
-  { label: "app-shell", pattern: /^index-.*\.js$/, maxBytes: 490_000 },
+  // 2026-09-02: the composer brief (inline @tokens, prefix chips, whisper) is
+  // first-paint UI and lives in the shell; the @ picker is its own chunk below.
+  // Shell measured 475.1 KiB before it and 488.4 KiB after (+13.3 KiB):
+  // budget 490_000 → 505_000, keeping the same ~5 KiB of headroom.
+  { label: "app-shell", pattern: /^index-.*\.js$/, maxBytes: 505_000 },
+  { label: "resource-mention-picker", pattern: /^ResourceMentionPicker-.*\.js$/, maxBytes: 20_000 },
   { label: "auth-screen", pattern: /^AuthScreen-.*\.js$/, maxBytes: 25_000 },
   { label: "composer-slash-menu", pattern: /^ComposerSlashMenu-.*\.js$/, maxBytes: 20_000 },
   { label: "composer-workflows", pattern: /^composer-workflows-.*\.js$/, maxBytes: 20_000 },

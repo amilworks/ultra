@@ -2812,6 +2812,7 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 /* The field holds the chips and the editor. It — not the editor — scrolls past
    the cap, so the editor's block keeps flowing around the floated chips. */
 .composer-field {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   max-height: 240px;
@@ -2947,10 +2948,25 @@ textarea.composer-editor::placeholder {
   cursor: default;
 }
 
+/* Drawn beside the editor, on its first line, after the chips (their measured
+   width comes in as --composer-prefix-width). Absolute, so it adds no line
+   box of its own: an empty editor is exactly one line tall. */
 .composer-placeholder {
+  position: absolute;
+  top: calc((var(--composer-control) - 1em * var(--composer-line-height)) / 2);
+  left: calc(0.35rem + var(--composer-prefix-width, 0px) + var(--composer-prefix-gap, 0px));
+  right: 0.35rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: var(--composer-line-height);
   color: var(--composer-placeholder);
   pointer-events: none;
   user-select: none;
+}
+
+.composer-field:has(.composer-prefix:not(:empty)) {
+  --composer-prefix-gap: 0.45rem;
 }
 
 /* A file token: kind chip, name, and a remove that appears on hover. It is a

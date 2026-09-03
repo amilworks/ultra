@@ -67,10 +67,16 @@ describe("composer contract", () => {
     expect(appSource).toMatch(/const handleComposerKeyDown = \(event: KeyboardEvent\): boolean => \{/);
   });
 
+  it("draws the placeholder beside the editor, never inside it", () => {
+    expect(composerSource).toMatch(/\{value\.length === 0 \? \(\s*<span className="composer-placeholder" aria-hidden="true">/);
+    expect(editorSource).not.toMatch(/Decoration\.widget/);
+    expect(editorSource).toMatch(/"aria-placeholder": props\.placeholder/);
+  });
+
   it("only the mirrored text of a token is decoration; the chips are real controls", () => {
     expect(editorSource).toMatch(/this\.dom\.setAttribute\("contenteditable", "false"\);/);
     expect(editorSource).toMatch(/this\.remove\.setAttribute\("aria-label", `Remove \$\{label\}`\);/);
-    expect(composerSource).toMatch(/<span className="composer-prefix">/);
-    expect(composerSource).not.toMatch(/aria-hidden="true">\s*<span className="composer-prefix"/);
+    expect(composerSource).toMatch(/<span ref=\{prefixRef\} className="composer-prefix">/);
+    expect(composerSource).not.toMatch(/aria-hidden="true">\s*<span ref=\{prefixRef\} className="composer-prefix"/);
   });
 });

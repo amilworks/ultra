@@ -62,7 +62,7 @@ describe("flat composer surface", () => {
     // The field scrolls, never the editor: an overflow on the editor would
     // start a new formatting context and stop the float from indenting it.
     expect(rule(".composer-editor")).not.toMatch(/overflow(-x|-y)?:/);
-    expect(composerSource).toMatch(/<span className="composer-prefix">/);
+    expect(composerSource).toMatch(/<span ref=\{prefixRef\} className="composer-prefix">/);
   });
 
   it("keeps the send button on the ladder and the whole region as the field", () => {

@@ -74,17 +74,21 @@ describe("hdf5 viewer layout regimes", () => {
     );
   });
 
-  it("drops the desktop scroll floors inside the capped navigator card", () => {
-    /* Desktop floors these scrollports at 260px and the command primitive
-       caps its list at 320px; inside the min(420px, 46dvh) navigator card
-       the floor + toolbar + header exceed the cap on phones, which clipped
-       the search input in half. The bounded track governs in this regime. */
+  it("lets the dataset list fill its rail and drops desktop scroll floors inside the capped card", () => {
+    /* CardContent renders one Command child. The single bounded base track and
+       the local max-height reset let that command/list consume the desktop
+       rail instead of leaving an empty 1fr track below a 320px primitive. */
+    expect(css).toMatch(
+      /\n\.viewer-hdf-navigator-content\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);/
+    );
+    expect(css).toMatch(
+      /\n\.viewer-hdf-search-results\s*\{[^}]*max-height:\s*none;/
+    );
+    /* Inside the min(420px, 46dvh) navigator card, the desktop 260px floor
+       plus the toolbar and header exceed the cap on phones and can clip the
+       search input. The bounded track governs in this regime. */
     expect(stackedBlock).toMatch(
       /\.viewer-hdf-tree-scroll,\s*\.viewer-hdf-detail-scroll,\s*\.viewer-hdf-search-results\s*\{[^}]*min-height:\s*120px;/
-    );
-    expect(stackedBlock).toMatch(/\.viewer-hdf-search-results\s*\{[^}]*max-height:\s*none;/);
-    expect(stackedBlock).toMatch(
-      /\.viewer-hdf-navigator-content\s*\{[^}]*grid-template-rows:\s*minmax\(0,\s*1fr\);/
     );
     /* Two-pane keeps its floors. */
     expect(css).toMatch(
@@ -129,10 +133,26 @@ describe("hdf5 viewer layout regimes", () => {
     expect(inspectorSource).not.toMatch(/Dataset details/);
     expect(previewSource).not.toMatch(/Use Volume for 3D preview inspection/);
     expect(previewSource).not.toMatch(/uses bounded atlas data/);
+    expect(previewSource).not.toMatch(/Use charts for a quick read/);
+    expect(previewSource).not.toMatch(/<strong>Table preview<\/strong>/);
     expect(previewSource).not.toMatch(/viewer-hdf-preview-toolbar-copy/);
     /* The one explanatory survivor is the quiet caption voice. */
     expect(previewSource).toMatch(/viewer-hdf-detail-caption/);
     expect(inspectorSource).toMatch(/viewer-hdf-detail-caption/);
+  });
+
+  it("uses the neutral Meridian ladder for dataset selection", () => {
+    const selectedStart = css.indexOf(".viewer-hdf-command-item.is-selected {");
+    expect(selectedStart).toBeGreaterThan(-1);
+    const selectedRule = css.slice(selectedStart, css.indexOf("}", selectedStart) + 1);
+
+    expect(selectedRule).toMatch(/background-color:\s*var\(--bg-sunk\);/);
+    expect(selectedRule).toMatch(/border-color:\s*transparent;/);
+    expect(selectedRule).toMatch(/box-shadow:\s*none;/);
+    expect(selectedRule).not.toMatch(/--accent/);
+    expect(css).toMatch(
+      /\.viewer-hdf-command-item:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--ring\);/
+    );
   });
 
   it("gives the hero filename the house title voice", () => {

@@ -18,11 +18,12 @@
      the measure belongs to the column, not each element's font size. */
   --reading-measure: 45rem;
   /* Compact UI uses Ultra Sans's measured 430 grade. Reading steps down to
-     Regular 400 at 16px to reduce dark texture and Night-mode bloom, while the
-     welcome invitation is quieter still because it is orientation rather than
-     document structure. */
+     Regular 400 at 16px to reduce dark texture and Night-mode bloom. New Chat
+     is quieter still because it is orientation rather than document structure:
+     300 on the larger desktop invitation, 350 on the smaller mobile title. */
   --font-weight-body: 430;
   --font-weight-reading-body: 400;
+  --font-weight-desktop-invitation: 300;
   --font-weight-invitation: 350;
   /* 690 is the display-axis solve, not a renamed conventional weight. Retired
      Inter at opsz 24 / w670 measured a 0.26255 lowercase stem/x-height ratio;
@@ -171,8 +172,12 @@
   --line-strong: rgba(23, 27, 29, 0.22);
   --brand: #171b1d;
   --brand-strong: #0b0e0f;
-  /* Future launch-only, non-text signal; intentionally has no var() consumers. */
+  /* Launch-only signal. The brighter source blue remains available for dots
+     and hairlines; text-bearing launch bubbles use the darker surface solve so
+     their white labels clear WCAG AA. Product chrome stays monochrome. */
   --ultra-launch-signal: #1994ff;
+  --ultra-launch-surface: #006fd6;
+  --ultra-launch-foreground: #ffffff;
   --account-avatar-fill: #171b1d;
   --account-avatar-foreground: #f2f3f3;
   /* The heatmap is a sequential ramp, so it runs the ladder in reverse:
@@ -1093,6 +1098,26 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding-bottom: 0.95rem;
+  opacity: 1;
+  transition: opacity 200ms var(--motion-ease);
+}
+
+/* New Chat is an instrument-ready state, so the long archive recedes until
+   the reader reaches for it. Nothing disappears or becomes noninteractive:
+   hover and keyboard focus restore full ink before selection. */
+.app-sidebar[data-welcome-stage="true"] .app-sidebar-history-scroll {
+  opacity: 0.62;
+}
+
+.app-sidebar[data-welcome-stage="true"] .app-sidebar-history-scroll:hover,
+.app-sidebar[data-welcome-stage="true"] .app-sidebar-history-scroll:focus-within {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar-history-scroll {
+    transition: none;
+  }
 }
 
 /* The first history group ("Recents") reads as the start of a new region.
@@ -1956,6 +1981,113 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: var(--sidebar-item-active-bg);
 }
 
+/* Sidebar navigation carries its meaning in the drawing, not in extra colour.
+   Resources exchanges a closed and open silhouette; Notes writes one short
+   normalized stroke. The shared easing keeps both marks in the same family. */
+.meridian-nav-icon {
+  overflow: visible;
+}
+
+.meridian-folder-closed,
+.meridian-folder-open {
+  transform-box: fill-box;
+  transform-origin: center;
+  transition: opacity 180ms var(--motion-ease), transform 220ms var(--motion-ease);
+}
+
+.meridian-folder-closed {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.meridian-folder-open {
+  opacity: 0;
+  transform: translateY(0.65px) scale(0.975);
+}
+
+:is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+  .meridian-folder-closed {
+  opacity: 0;
+  transform: translateY(-0.45px) scale(0.985);
+}
+
+:is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+  .meridian-folder-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.meridian-notes-pen {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.meridian-notes-ink {
+  opacity: 0;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+}
+
+:is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+  .meridian-notes-pen {
+  animation: meridian-notes-pen-write 280ms var(--motion-ease) both;
+}
+
+:is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+  .meridian-notes-ink {
+  animation: meridian-notes-ink-write 280ms var(--motion-ease) both;
+}
+
+@keyframes meridian-notes-pen-write {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  38% {
+    transform: translate(-0.62px, 0.34px) rotate(-1.2deg);
+  }
+  70% {
+    transform: translate(-1.05px, 0.62px) rotate(-0.45deg);
+  }
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+}
+
+@keyframes meridian-notes-ink-write {
+  0%,
+  18% {
+    opacity: 0;
+    stroke-dashoffset: 1;
+  }
+  34% {
+    opacity: 0.62;
+  }
+  100% {
+    opacity: 0.58;
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meridian-folder-closed,
+  .meridian-folder-open {
+    transition: none;
+  }
+
+  :is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+    .meridian-notes-pen,
+  :is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+    .meridian-notes-ink {
+    animation: none;
+  }
+
+  :is(.app-resource-browser-button, .app-collapsed-sidebar-action):is(:hover, :focus-visible)
+    .meridian-notes-ink {
+    opacity: 0.58;
+    stroke-dashoffset: 0;
+  }
+}
+
 .app-lens-sidebar-icon[data-lens-icon="active"] > path:first-of-type {
   fill: transparent;
   transition: fill 160ms var(--motion-ease);
@@ -2664,10 +2796,10 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .welcome-starters {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 1.1rem 1.5rem 2.4rem;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.9rem 1.5rem 1.9rem;
 }
 
 /* Quiet ghost pills: hairline border, label at full ink, icon one voice
@@ -2700,6 +2832,15 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   background: color-mix(in oklab, var(--accent) 80%, transparent);
 }
 
+.welcome-starter-chip[data-kind="resume"] {
+  border-color: transparent;
+  background: var(--bg-sunk);
+}
+
+.welcome-starter-chip[data-kind="resume"]:hover {
+  background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
+}
+
 .welcome-starter-chip:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--ring);
@@ -2712,9 +2853,114 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   text-overflow: ellipsis;
 }
 
+.welcome-starter-meta {
+  border-left: 1px solid var(--line);
+  padding-left: 0.55rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* Generic launch paths stay available without forming a second CTA row. At
+   rest this is one quiet label; opening it reveals text actions whose chrome
+   never competes with the composer. */
+.welcome-starting-points {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-top: 0;
+  padding-top: 0;
+}
+
+.welcome-starting-points-summary {
+  display: inline-flex;
+  min-height: 1.9rem;
+  align-items: center;
+  gap: 0.3rem;
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.3;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.welcome-starting-points-summary::-webkit-details-marker {
+  display: none;
+}
+
+.welcome-starting-points-summary:hover,
+.welcome-starting-points[open] .welcome-starting-points-summary {
+  background: color-mix(in oklab, var(--text-main) 5%, transparent);
+  color: var(--text-main);
+}
+
+.welcome-starting-points-summary:focus-visible,
+.welcome-starting-point:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.welcome-starting-points-chevron {
+  width: 0.78rem;
+  height: 0.78rem;
+  transition: transform 160ms var(--motion-ease);
+}
+
+.welcome-starting-points[open] .welcome-starting-points-chevron {
+  transform: rotate(180deg);
+}
+
+.welcome-starting-points-body {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.welcome-starting-point {
+  display: inline-flex;
+  min-height: 1.9rem;
+  align-items: center;
+  gap: 0.38rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 0.25rem 0.65rem;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.welcome-starting-point svg {
+  width: 0.78rem;
+  height: 0.78rem;
+  flex: none;
+}
+
+.welcome-starting-point:hover {
+  background: color-mix(in oklab, var(--text-main) 5%, transparent);
+  color: var(--text-main);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .welcome-starting-points-chevron {
+    transition: none;
+  }
+}
+
 /* Mobile composer-forward empty-chat hero: a calm greeting fills the space
-   above the docked composer; usage analytics are tucked into a quiet,
-   tap-to-expand disclosure below. Phone-only (rendered only when isPhoneView). */
+   above the docked composer. Phone-only (rendered only when isPhoneView). */
 .mobile-chat-hero {
   width: 100%;
   display: flex;
@@ -2746,57 +2992,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--text-muted);
 }
 
-.mobile-usage-disclosure {
-  margin-top: 1.5rem;
-  width: 100%;
-}
-
-.mobile-usage-summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 0.5rem 0.95rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  -webkit-tap-highlight-color: transparent;
-  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
-}
-
-.mobile-usage-summary::-webkit-details-marker {
-  display: none;
-}
-
-.mobile-usage-summary:active {
-  background: color-mix(in oklab, var(--text-main) 6%, transparent);
-  color: var(--text-main);
-}
-
-.mobile-usage-chevron {
-  transition: transform 160ms var(--motion-ease);
-}
-
-.mobile-usage-disclosure[open] .mobile-usage-chevron {
-  transform: rotate(180deg);
-}
-
-.mobile-usage-body {
-  margin-top: 1rem;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mobile-usage-chevron {
-    transition: none;
-  }
-}
-
 /* Desktop empty/new-chat welcome: a quiet personal eyebrow over a rotating,
-   composer-forward invitation, centered in the canvas above the docked composer.
-   Usage recedes into a one-line strip that expands to the full panel on demand
-   (data leads, chrome recedes). Rendered only when !isPhoneView. */
+   composer-forward invitation, centered in the canvas above the composer.
+   Rendered only when !isPhoneView. */
 .blank-chat-welcome {
   width: 100%;
   min-height: min(80vh, 52rem);
@@ -2819,8 +3017,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      by area (MeridianField.tsx), while the coordinate relationships remain
      exact. Height leans on viewport height so short laptop windows give the
      field back to the greeting. */
-  width: min(46rem, 100%);
-  height: clamp(96px, 16vh, 172px);
+  width: min(39rem, 88%);
+  height: clamp(82px, 13vh, 142px);
+  opacity: 0.82;
   color: var(--text-main);
   display: block;
   pointer-events: none;
@@ -2843,121 +3042,16 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .blank-chat-welcome-hero {
   margin: 0;
   max-width: 24rem;
-  font-size: clamp(1.7rem, 1.4rem + 1.1vw, 2.15rem);
-  /* An invitation rather than a document heading: the light 350 role, pinned
-     reference proportions, and the regular shaped-width tracking role. DM Sans
-     covers this size natively, but the pin is intentional identity — opsz 13
-     holds the x-height/cap-height ratio shared by the reference grotesques
-     instead of letting the welcome phrase narrow with viewport size. */
-  font-weight: var(--font-weight-invitation);
+  font-size: 1.625rem;
+  /* A quiet invitation rather than a document heading. The desktop welcome
+     stage uses its own 26px/300 role; the shared 350 invitation token remains
+     on the smaller mobile hero, where the extra weight protects legibility. */
+  font-weight: var(--font-weight-desktop-invitation);
   font-optical-sizing: none;
   font-variation-settings: "opsz" var(--display-optical-size);
   line-height: 1.2;
   letter-spacing: var(--tracking-display-regular);
   color: var(--text-main);
-}
-
-/* One whisper below the starter chips: "View usage" opens the full panel on
-   demand. The resting welcome shows NO numbers — a lifetime token count with
-   no denominator reads as noise, and the chips already answer "what now".
-   border-top:0 fends off the legacy global `details` hairline rule. */
-.welcome-usage-disclosure {
-  width: min(100%, var(--user-chat-width));
-  margin-inline: auto;
-  border-top: 0;
-  padding-top: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.welcome-usage-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  padding: 0.35rem 0.75rem;
-  border-radius: 999px;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  -webkit-tap-highlight-color: transparent;
-  transition: color 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
-}
-
-.welcome-usage-link::-webkit-details-marker {
-  display: none;
-}
-
-.welcome-usage-link:hover,
-.welcome-usage-disclosure[open] .welcome-usage-link {
-  background: color-mix(in oklab, var(--text-main) 6%, transparent);
-  color: var(--text-main);
-}
-
-.welcome-usage-chevron {
-  transition: transform 160ms var(--motion-ease);
-}
-
-.welcome-usage-disclosure[open] .welcome-usage-chevron {
-  transform: rotate(180deg);
-}
-
-.welcome-usage-body {
-  margin-top: 1.1rem;
-  width: 100%;
-  text-align: left;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .welcome-usage-chevron {
-    transition: none;
-  }
-}
-
-.blank-chat-usage-panel {
-  width: min(100%, var(--user-chat-width));
-  text-align: left;
-}
-
-.blank-chat-usage-panel .user-token-usage-stat {
-  border-color: var(--line);
-  background: color-mix(in oklab, var(--bg-panel) 68%, transparent);
-}
-
-.blank-chat-usage-panel .token-heatmap {
-  --token-heatmap-cell-size: clamp(10px, 1.1vw, 14px);
-  --token-heatmap-gap: clamp(2px, 0.24vw, 3px);
-  --token-heatmap-legend-cell-size: clamp(8px, 0.76vw, 10px);
-  gap: 0.55rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-visual {
-  gap: 0.58rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-toolbar {
-  width: 100%;
-  gap: 0.5rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-mode {
-  padding: 0.16rem 0.55rem;
-  font-size: 0.68rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-peak {
-  font-size: 0.68rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-grid {
-  padding-bottom: 0.06rem;
-}
-
-.blank-chat-usage-panel .token-heatmap-legend {
-  gap: 0.25rem;
-  font-size: 0.68rem;
 }
 
 @media (max-width: 980px) {
@@ -10069,6 +10163,130 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   box-shadow: none;
 }
 
+/* Release notices are the reusable product-launch exception to Ultra's
+   monochrome chrome. They attach to the control that changed and persist a
+   versioned receipt so returning users are not repeatedly interrupted. */
+.one-time-notice-anchor {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.one-time-notice {
+  z-index: 70;
+  width: min(21.5rem, calc(100vw - 1.5rem));
+  border: 0;
+  border-radius: 1.15rem;
+  background: var(--ultra-launch-surface);
+  color: var(--ultra-launch-foreground);
+  padding: 1rem 1.05rem 1.08rem;
+  box-shadow:
+    0 18px 48px color-mix(in oklab, var(--text-main) 15%, transparent),
+    0 5px 18px color-mix(in oklab, var(--ultra-launch-surface) 18%, transparent);
+  outline: none;
+  transform-origin: var(--radix-popover-content-transform-origin);
+}
+
+.one-time-notice-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.85rem;
+}
+
+.one-time-notice-title {
+  margin: 0;
+  max-width: 17rem;
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.34;
+  letter-spacing: -0.01em;
+}
+
+.one-time-notice-description {
+  margin: 0.62rem 0 0;
+  max-width: 19rem;
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.52;
+  letter-spacing: 0;
+  text-wrap: pretty;
+}
+
+.one-time-notice-dismiss,
+.one-time-notice-action {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-family: var(--font-sans);
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.one-time-notice-dismiss {
+  display: inline-flex;
+  width: 1.8rem;
+  height: 1.8rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin: -0.35rem -0.38rem 0 0;
+  border-radius: 999px;
+}
+
+.one-time-notice-dismiss svg {
+  width: 0.86rem;
+  height: 0.86rem;
+  stroke-width: 1.7;
+}
+
+.one-time-notice-action {
+  min-height: 2rem;
+  margin-top: 0.82rem;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ultra-launch-foreground) 14%, transparent);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.one-time-notice-dismiss:hover,
+.one-time-notice-action:hover {
+  background: color-mix(in oklab, var(--ultra-launch-foreground) 14%, transparent);
+}
+
+.one-time-notice-dismiss:focus-visible,
+.one-time-notice-action:focus-visible {
+  outline: 2px solid var(--ultra-launch-foreground);
+  outline-offset: 2px;
+}
+
+.one-time-notice-arrow {
+  fill: var(--ultra-launch-surface);
+}
+
+.one-time-notice[data-state="open"] {
+  animation: one-time-notice-enter 220ms var(--motion-ease);
+}
+
+@keyframes one-time-notice-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-0.2rem) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .one-time-notice[data-state="open"] {
+    animation: none;
+  }
+}
+
 .app-composer-intelligence-menu[data-slot="dropdown-menu-content"] {
   min-width: 10.75rem;
   padding: 0.5rem;
@@ -10096,6 +10314,56 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--popover-foreground);
   font-size: 0.9375rem;
   font-weight: 400;
+}
+
+.app-composer-intelligence-menu [data-intelligence-mode="pro"] {
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Pro gets one quiet interaction signature: an adaptive ink glint that crosses
+   the row once on pointer hover or keyboard highlight. It never loops. */
+.app-composer-intelligence-menu [data-intelligence-mode="pro"]::before {
+  content: "";
+  position: absolute;
+  inset-block: -35%;
+  left: -46%;
+  width: 38%;
+  background: linear-gradient(
+    104deg,
+    transparent 0%,
+    color-mix(in oklab, var(--popover-foreground) 13%, transparent) 50%,
+    transparent 100%
+  );
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-160%) skewX(-14deg);
+}
+
+.app-composer-intelligence-menu
+  [data-intelligence-mode="pro"]:is(:hover, [data-highlighted])::before {
+  animation: app-composer-pro-sheen 560ms var(--motion-ease) both;
+}
+
+@keyframes app-composer-pro-sheen {
+  0% {
+    opacity: 0;
+    transform: translateX(-160%) skewX(-14deg);
+  }
+  24% {
+    opacity: 0.72;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(430%) skewX(-14deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-composer-intelligence-menu [data-intelligence-mode="pro"]::before {
+    animation: none;
+    opacity: 0;
+  }
 }
 
 .app-composer-intelligence-menu [data-slot="dropdown-menu-item"][data-active="true"] {
@@ -16626,7 +16894,6 @@ summary:hover,
 .token-heatmap-mode:hover,
 .figure-lightbox-thumb:hover,
 .viewer-channel-chip:hover,
-.welcome-usage-link:hover,
 .resource-quick-peek-trigger:hover,
 .viewer-chrome-fade:hover {
   transition-duration: 60ms;

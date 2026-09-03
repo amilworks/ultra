@@ -51,6 +51,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { OneTimeNotice } from "@/components/ui/one-time-notice";
 import {
   Sidebar,
   SidebarContent,
@@ -255,6 +256,10 @@ import {
 } from "./features/chat/conversation-draft";
 import { createConversationSnapshotWriter } from "./features/chat/conversation-snapshot-writer";
 import {
+  findAuthenticatedLandingResumeTarget,
+  findOrphanComposerDraft,
+} from "./features/chat/authenticated-landing";
+import {
   resolveConversationTitle,
 } from "./features/chat/conversation-title";
 import {
@@ -291,7 +296,6 @@ import {
 } from "./features/resources/uploadProgressBatcher";
 import { DEFAULT_THINKING_TEXT } from "./lib/runStepCopy";
 import { useLocalStorageState } from "./lib/useLocalStorageState";
-import { UserTokenUsagePanel } from "./components/UserTokenUsagePanel";
 import type {
   AdminCreateOrganizationRequest,
   AdminCreateUserRequest,
@@ -316,13 +320,16 @@ import type {
   ShareTargetRecord,
   RunEvent,
   SelectionContext,
-  TokenUsageResponse,
   UploadedFileRecord,
 } from "./types";
 import type { SettingsTab } from "./components/AppSettingsDialog";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
-import { RecorderTraceIcon } from "./components/icons/MeridianIcons";
+import {
+  MeridianFolderIcon,
+  MeridianNotesIcon,
+  RecorderTraceIcon,
+} from "./components/icons/MeridianIcons";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
 import { ReasoningTrace } from "./components/chat/ReasoningTrace";
@@ -370,7 +377,6 @@ import {
   ChevronDown,
   Copy,
   Database,
-  FolderOpen,
   FileUp,
   FolderUp,
   History,
@@ -411,7 +417,6 @@ import {
   type HistoryItem,
   type HistoryPeriod,
 } from "./features/chat/history";
-import { useBlankChatTokenUsage } from "./features/chat/useBlankChatTokenUsage";
 import { DeferredToaster } from "./components/DeferredToaster";
 import { PanelLoadingState } from "./components/PanelLoadingState";
 import { UploadFlightChip } from "./components/UploadFlightChip";
@@ -1469,9 +1474,7 @@ const createConversationState = (): ConversationState => {
     noteSearchScopeOverride: null,
     failedUploadPreviewIds: {},
     bisqueLinksByFileId: {},
-    composerWorkflowPreset: toComposerWorkflowPresetState(
-      PRO_MODE_COMPOSER_WORKFLOW_PRESET
-    ),
+    composerWorkflowPreset: null,
     selectionImportPending: false,
     sending: false,
     chatError: null,
@@ -2740,9 +2743,6 @@ type ConversationTranscriptProps = {
   welcomeName: string | null;
   welcomeNonce: number;
   messages: UiMessage[];
-  blankChatTokenUsage: TokenUsageResponse | null;
-  blankChatUsageLoading: boolean;
-  blankChatUsageError: string | null;
   streamingMessageId: string | null;
   copiedMessageId: string | null;
   uploadedFiles: UploadedFileRecord[];
@@ -2764,9 +2764,6 @@ const ConversationTranscript = memo(
     welcomeName,
     welcomeNonce,
     messages,
-    blankChatTokenUsage,
-    blankChatUsageLoading,
-    blankChatUsageError,
     streamingMessageId,
     copiedMessageId,
     uploadedFiles,
@@ -2894,21 +2891,6 @@ const ConversationTranscript = memo(
                 <p className="mobile-chat-hero-subtitle">
                   Ask anything below — add an image or a resource whenever you like.
                 </p>
-                <details className="mobile-usage-disclosure">
-                  <summary className="mobile-usage-summary">
-                    <span>Your usage</span>
-                    <ChevronDown className="mobile-usage-chevron size-4" aria-hidden />
-                  </summary>
-                  <div className="mobile-usage-body">
-                    <UserTokenUsagePanel
-                      tokenUsage={blankChatTokenUsage}
-                      loading={blankChatUsageLoading}
-                      error={blankChatUsageError}
-                      className="blank-chat-usage-panel"
-                      density="compact"
-                    />
-                  </div>
-                </details>
               </div>
             ) : (
               <div className="blank-chat-welcome">
@@ -2974,9 +2956,6 @@ const ConversationTranscript = memo(
     previousProps.welcomeNonce === nextProps.welcomeNonce &&
     previousProps.messages === nextProps.messages &&
     previousProps.findTarget === nextProps.findTarget &&
-    previousProps.blankChatTokenUsage === nextProps.blankChatTokenUsage &&
-    previousProps.blankChatUsageLoading === nextProps.blankChatUsageLoading &&
-    previousProps.blankChatUsageError === nextProps.blankChatUsageError &&
     previousProps.streamingMessageId === nextProps.streamingMessageId &&
     previousProps.copiedMessageId === nextProps.copiedMessageId &&
     previousProps.uploadedFiles === nextProps.uploadedFiles &&
@@ -6443,6 +6422,7 @@ export function App() {
     });
     void (async () => {
       const targetConversationId = readConversationIdFromLocation();
+      const shouldOpenNewChat = !targetConversationId;
       try {
         const payload = await listSessionConversations(apiClient, {
           limit: CONVERSATION_PAGE_SIZE,
@@ -6457,6 +6437,7 @@ export function App() {
         setConversationListHasMore(payload.has_more);
 
         let missingRequestedConversationId: string | null = null;
+        let resolvedTargetConversationId = targetConversationId;
         if (
           targetConversationId &&
           !restored.some((conversation) => conversation.id === targetConversationId)
@@ -6470,7 +6451,9 @@ export function App() {
             // resolved id (the URL can reference it by thread id while the list
             // holds it under the local conversation id). Dedupe by resolved id
             // so we never render two history rows with the same React key.
-            restored = prependResolvedConversation(conversationFromRecord(targetRecord), restored);
+            const resolvedTarget = conversationFromRecord(targetRecord);
+            resolvedTargetConversationId = resolvedTarget.id;
+            restored = prependResolvedConversation(resolvedTarget, restored);
             setUiErrorBanner(null);
           } catch (error) {
             if (isCancelled) {
@@ -6484,10 +6467,34 @@ export function App() {
           }
         }
 
+        const restoredIds = new Set(restored.map((conversation) => conversation.id));
+        const orphanDraft = shouldOpenNewChat
+          ? findOrphanComposerDraft(readComposerDraftsFromStorage().drafts, restoredIds)
+          : null;
+        const recoveredDraftConversation = orphanDraft
+          ? {
+              ...createConversationState(),
+              id: orphanDraft.conversationId,
+              title: "Unsent draft",
+              prompt: orphanDraft.prompt,
+            }
+          : null;
+        const landingConversation = shouldOpenNewChat ? createConversationState() : null;
+        if (recoveredDraftConversation) {
+          optimisticConversationIdsRef.current.add(recoveredDraftConversation.id);
+        }
+        if (landingConversation) {
+          optimisticConversationIdsRef.current.add(landingConversation.id);
+        }
+
         if (restored.length === 0) {
-          const seed = createConversationState();
+          const seed = landingConversation ?? createConversationState();
           optimisticConversationIdsRef.current.add(seed.id);
-          setConversations([seed]);
+          setConversations(
+            recoveredDraftConversation && recoveredDraftConversation.id !== seed.id
+              ? [seed, recoveredDraftConversation]
+              : [seed]
+          );
           setActiveConversationId(seed.id);
           if (missingRequestedConversationId) {
             replaceConversationIdInLocation(null);
@@ -6499,7 +6506,6 @@ export function App() {
         }
         let mergedConversations = restored;
         setConversations((current) => {
-          const restoredIds = new Set(restored.map((conversation) => conversation.id));
           const optimisticLocals = current.filter(
             (conversation) =>
               optimisticConversationIdsRef.current.has(conversation.id) &&
@@ -6509,7 +6515,15 @@ export function App() {
                 missingRequestedConversationId,
               })
           );
-          mergedConversations = mergeConversationPage(optimisticLocals, restored);
+          const localCandidates = [
+            ...(landingConversation ? [landingConversation] : []),
+            ...(recoveredDraftConversation ? [recoveredDraftConversation] : []),
+            ...optimisticLocals,
+          ].filter(
+            (conversation, index, all) =>
+              all.findIndex((candidate) => candidate.id === conversation.id) === index
+          );
+          mergedConversations = mergeConversationPage(localCandidates, restored);
           return mergedConversations;
         });
         const hydratedHashes = hashHydratedConversations(mergedConversations);
@@ -6534,10 +6548,15 @@ export function App() {
             return missingConversationFallback.id;
           }
           if (
-            targetConversationId &&
-            mergedConversations.some((conversation) => conversation.id === targetConversationId)
+            resolvedTargetConversationId &&
+            mergedConversations.some(
+              (conversation) => conversation.id === resolvedTargetConversationId
+            )
           ) {
-            return targetConversationId;
+            return resolvedTargetConversationId;
+          }
+          if (landingConversation) {
+            return landingConversation.id;
           }
           if (current && mergedConversations.some((conversation) => conversation.id === current)) {
             return current;
@@ -9229,6 +9248,13 @@ export function App() {
     },
     [activeConversationIdForBrief]
   );
+  const proModeIntroIdentity =
+    String(authUser || authMode || "signed-in-user").trim() || "signed-in-user";
+  const proModeIntroEligible =
+    authStatus === "authenticated" &&
+    activePanel === "chat" &&
+    activeConversationHydrated &&
+    activeComposerIntelligenceMode === "high";
   const activeUploadedFiles = useMemo(() => {
     const combinedFileIds = uniqueFileIds([
       ...activeStagedUploadFileIds,
@@ -9328,26 +9354,6 @@ export function App() {
         : undefined,
     [activeStreamingTokenUsage]
   );
-  const shouldShowBlankChatUsage =
-    authStatus === "authenticated" &&
-    activePanel === "chat" &&
-    activeConversationHydrated &&
-    activeMessages.length === 0;
-  const blankChatUsageKey = `${authMode ?? ""}:${authUser ?? ""}`;
-  const loadBlankChatUsage = useCallback(
-    () => loadCurrentUserTokenUsage(365),
-    [loadCurrentUserTokenUsage]
-  );
-  const {
-    usage: blankChatTokenUsage,
-    loading: blankChatUsageLoading,
-    error: blankChatUsageError,
-  } = useBlankChatTokenUsage({
-    enabled: shouldShowBlankChatUsage,
-    key: blankChatUsageKey,
-    load: loadBlankChatUsage,
-    normalizeError: normalizeApiError,
-  });
   const requestChatScrollToBottom = useCallback((): void => {
     setChatScrollRequestKey((current) => current + 1);
   }, []);
@@ -15295,16 +15301,22 @@ export function App() {
       });
   }, [conversations]);
   const collapsedRecentItems = useMemo(() => historyItems.slice(0, 10), [historyItems]);
-  const openHistoryItem = useCallback(
-    (conversation: HistoryItem): void => {
+  const openConversationById = useCallback(
+    (conversationId: string): void => {
       rememberActiveConversationScrollPosition();
       setActivePanel("chat");
-      setActiveConversationId(conversation.id);
+      setActiveConversationId(conversationId);
       setViewerOpen(false);
       setResourceViewerContext(null);
-      void ensureConversationHydrated(conversation.id);
+      void ensureConversationHydrated(conversationId);
     },
     [ensureConversationHydrated, rememberActiveConversationScrollPosition]
+  );
+  const openHistoryItem = useCallback(
+    (conversation: HistoryItem): void => {
+      openConversationById(conversation.id);
+    },
+    [openConversationById]
   );
   // Memoized so typing in the composer (which re-runs the App body) doesn't
   // re-allocate/re-group the history, and so the sidebar history list keeps a
@@ -15323,11 +15335,11 @@ export function App() {
      flag flips off the instant the optimistic user message lands — that
      reflow IS the composer re-docking; one composer instance, no remount,
      draft and focus survive. */
-  const welcomeStageActive =
+  const newChatLandingActive =
     activePanel === "chat" &&
-    !isPhoneView &&
     activeConversationHydrated &&
     activeMessages.length === 0;
+  const welcomeStageActive = newChatLandingActive && !isPhoneView;
   const welcomeStarterConversation = useMemo(
     () =>
       historyItems.find(
@@ -15335,6 +15347,53 @@ export function App() {
       ) ?? null,
     [historyItems, activeConversationId]
   );
+  const welcomeResumeTarget = useMemo(
+    () =>
+      findAuthenticatedLandingResumeTarget(
+        conversations,
+        composerDraftsByConversationId,
+        activeConversationId
+      ),
+    [activeConversationId, composerDraftsByConversationId, conversations]
+  );
+  const welcomePrimaryAction = useMemo(() => {
+    if (welcomeResumeTarget) {
+      const conversation = conversations.find(
+        (item) => item.id === welcomeResumeTarget.conversationId
+      );
+      const title = conversation?.title?.trim() ?? "";
+      const isGenericDraftTitle =
+        !title || title === "New conversation" || title === "Unsent draft";
+      return {
+        conversationId: welcomeResumeTarget.conversationId,
+        kind: "resume" as const,
+        label:
+          welcomeResumeTarget.kind === "active-run"
+            ? title && title !== "New conversation"
+              ? `Resume “${title}”`
+              : "Resume active run"
+            : isGenericDraftTitle
+              ? "Resume unsent draft"
+              : `Resume draft in “${title}”`,
+        meta: welcomeResumeTarget.kind === "active-run" ? "Run in progress" : "Unsent",
+      };
+    }
+    return welcomeStarterConversation
+      ? {
+          conversationId: welcomeStarterConversation.id,
+          kind: "continue" as const,
+          label: `Continue “${welcomeStarterConversation.title}”`,
+          meta: null,
+        }
+      : null;
+  }, [conversations, welcomeResumeTarget, welcomeStarterConversation]);
+  const [welcomeStartingPointsOpen, setWelcomeStartingPointsOpen] = useState(false);
+  useEffect(() => {
+    if (!welcomeStageActive) {
+      return;
+    }
+    setWelcomeStartingPointsOpen(historyItems.length === 0);
+  }, [activeConversationId, historyItems.length, welcomeStageActive]);
   const startDashboardDraft = useCallback((): void => {
     setActivePromptValue("Build an interactive dashboard from my data: ");
     focusComposerTextarea();
@@ -15431,7 +15490,11 @@ export function App() {
       >
         Skip to chat
       </button>
-      <Sidebar collapsible="icon" className="app-sidebar">
+      <Sidebar
+        collapsible="icon"
+        className="app-sidebar"
+        data-welcome-stage={welcomeStageActive ? "true" : undefined}
+      >
         <CollapsedSidebarRail
           recentItems={collapsedRecentItems}
           activeConversationId={activeConversation?.id ?? null}
@@ -15504,7 +15567,7 @@ export function App() {
                 {...mobileSidebarCloseProps}
               >
                 <span className="flex items-center gap-2">
-                  <FolderOpen className="size-4" />
+                  <MeridianFolderIcon className="size-4" />
                   <span>Resources</span>
                 </span>
                 <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/resources:opacity-100">
@@ -15528,7 +15591,7 @@ export function App() {
                 {...mobileSidebarCloseProps}
               >
                 <span className="flex items-center gap-2">
-                  <NotebookPen className="size-4" />
+                  <MeridianNotesIcon className="size-4" />
                   <span>Notes</span>
                 </span>
                 <span className="app-sidebar-shortcut-hint text-muted-foreground pointer-events-none ml-auto inline-flex items-center gap-1 text-[10px] opacity-0 transition-opacity duration-150 group-hover/notes:opacity-100">
@@ -15814,6 +15877,7 @@ export function App() {
             authIsAdmin={authIsAdmin}
             themePreference={themePreference}
             onThemePreferenceChange={setThemePreference}
+            onOpenUsage={() => openSettings("usage")}
             onOpenSettings={() => openSettings("general")}
             onLogout={logoutBisque}
           />
@@ -16241,9 +16305,6 @@ export function App() {
                   welcomeName={deriveFirstName(authUser)}
                   welcomeNonce={welcomeNonce}
                   messages={activeMessages}
-                  blankChatTokenUsage={blankChatTokenUsage}
-                  blankChatUsageLoading={blankChatUsageLoading}
-                  blankChatUsageError={blankChatUsageError}
                   streamingMessageId={activeStreamingMessageId}
                   copiedMessageId={copiedMessageId}
                   uploadedFiles={activeAvailableUploadedFiles}
@@ -16504,15 +16565,17 @@ export function App() {
                       placeholder={
                         !activeConversationHydrated
                           ? "Loading chat…"
-                          : composerScrolledAway && !activeSending
-                            ? "Just start typing"
-                            : activeSending
-                              ? "Steer this run, or queue for after"
-                              : activeBriefRegistry.length === 0 && !hasComposerAttachedFiles
-                                ? isPhoneView
-                                  ? "Ask Ultra — @ file, / workflow"
-                                  : "Ask Ultra — @ to bring in a file, / for a workflow"
-                                : "Ask Ultra"
+                          : welcomeStageActive
+                            ? "Describe a question, dataset, or experiment…"
+                            : composerScrolledAway && !activeSending
+                              ? "Just start typing"
+                              : activeSending
+                                ? "Steer this run, or queue for after"
+                                : activeBriefRegistry.length === 0 && !hasComposerAttachedFiles
+                                  ? isPhoneView
+                                    ? "Ask Ultra — @ file, / workflow"
+                                    : "Ask Ultra — @ to bring in a file, / for a workflow"
+                                  : "Ask Ultra"
                       }
                       /* Explicit name so the field is not relying on its
                          placeholder for one: the placeholder is deliberately
@@ -16959,7 +17022,14 @@ export function App() {
                             composerTextareaRef.current?.focus();
                           }}
                         />
-                        <DropdownMenu>
+                        <OneTimeNotice
+                          noticeId="pro-mode-launch-2026-08-20"
+                          audienceId={proModeIntroIdentity}
+                          enabled={proModeIntroEligible && newChatLandingActive}
+                          title="Pro mode is now available"
+                          description="Choose Pro when a scientific question benefits from more deliberate reasoning, longer tool use, and added verification."
+                        >
+                          <DropdownMenu>
                           <PromptInputAction
                             tooltip="Intelligence mode"
                             disabled={!activeConversationHydrated}
@@ -17006,6 +17076,7 @@ export function App() {
                                 ) : null}
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                data-intelligence-mode="pro"
                                 data-active={
                                   activeComposerIntelligenceMode === "pro" ? "true" : undefined
                                 }
@@ -17017,8 +17088,9 @@ export function App() {
                                 ) : null}
                               </DropdownMenuItem>
                             </DropdownMenuGroup>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </OneTimeNotice>
                       </div>
                       <div className="app-composer-actions-end">
                         {/* The slim pill's mode control: a REAL button —
@@ -17075,6 +17147,7 @@ export function App() {
                                 ) : null}
                               </DropdownMenuItem>
                               <DropdownMenuItem
+                                data-intelligence-mode="pro"
                                 data-active={
                                   activeComposerIntelligenceMode === "pro" ? "true" : undefined
                                 }
@@ -17192,49 +17265,60 @@ export function App() {
           </div>
           {welcomeStageActive ? (
             <div className="welcome-starters">
-              {welcomeStarterConversation ? (
+              {welcomePrimaryAction ? (
                 <button
                   type="button"
                   className="welcome-starter-chip"
-                  onClick={() => openHistoryItem(welcomeStarterConversation)}
+                  data-kind={welcomePrimaryAction.kind}
+                  onClick={() => openConversationById(welcomePrimaryAction.conversationId)}
                 >
                   <History aria-hidden="true" />
                   <span className="welcome-starter-label">
-                    Continue “{welcomeStarterConversation.title}”
+                    {welcomePrimaryAction.label}
                   </span>
+                  {welcomePrimaryAction.meta ? (
+                    <span className="welcome-starter-meta">{welcomePrimaryAction.meta}</span>
+                  ) : null}
                 </button>
               ) : null}
-              <button
-                type="button"
-                className="welcome-starter-chip"
-                onClick={startDashboardDraft}
+              <details
+                className="welcome-starting-points"
+                open={welcomeStartingPointsOpen}
+                onToggle={(event) => {
+                  setWelcomeStartingPointsOpen(event.currentTarget.open);
+                }}
               >
-                <Table2 aria-hidden="true" />
-                <span className="welcome-starter-label">
-                  Build a dashboard from your data
-                </span>
-              </button>
-              <button
-                type="button"
-                className="welcome-starter-chip"
-                onClick={openScientificViewerPanel}
-              >
-                <Layers aria-hidden="true" />
-                <span className="welcome-starter-label">Open an image in Lens</span>
-              </button>
-              <details className="welcome-usage-disclosure">
-                <summary className="welcome-usage-link">
-                  View usage
-                  <ChevronDown className="welcome-usage-chevron size-4" aria-hidden />
+                <summary className="welcome-starting-points-summary">
+                  Starting points
+                  <ChevronDown className="welcome-starting-points-chevron" aria-hidden />
                 </summary>
-                <div className="welcome-usage-body">
-                  <UserTokenUsagePanel
-                    tokenUsage={blankChatTokenUsage}
-                    loading={blankChatUsageLoading}
-                    error={blankChatUsageError}
-                    className="blank-chat-usage-panel"
-                    density="compact"
-                  />
+                <div className="welcome-starting-points-body">
+                  <button
+                    type="button"
+                    className="welcome-starting-point"
+                    onClick={startDashboardDraft}
+                  >
+                    <Table2 aria-hidden="true" />
+                    <span>Draft a dashboard from my data</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="welcome-starting-point"
+                    onClick={openScientificViewerPanel}
+                  >
+                    <Layers aria-hidden="true" />
+                    <span>Inspect an image in Lens</span>
+                  </button>
+                  {!bisqueCredentialsLinked ? (
+                    <button
+                      type="button"
+                      className="welcome-starting-point"
+                      onClick={() => openSettings("bisque")}
+                    >
+                      <Link2 aria-hidden="true" />
+                      <span>Connect my BisQue library</span>
+                    </button>
+                  ) : null}
                 </div>
               </details>
             </div>

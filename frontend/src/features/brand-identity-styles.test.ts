@@ -83,13 +83,15 @@ const typographyDarkTokens = new Map([
 ]);
 
 describe("Ultra monochrome identity contract", () => {
-  it("defines exact monochrome identity tokens and leaves launch blue unused", () => {
+  it("defines exact monochrome identity tokens and scopes launch blue to release notices", () => {
     // Meridian Drift. Identity is still monochrome — the heatmap is now the
     // magnitude ladder run in reverse (m4 -> m1, quiet to loud), so density
     // reads as brightness on the same scale the rest of the hierarchy uses,
     // rather than as a second set of greys.
     expect(Object.fromEntries(lightTokens)).toMatchObject({
       "--ultra-launch-signal": "#1994ff",
+      "--ultra-launch-surface": "#006fd6",
+      "--ultra-launch-foreground": "#ffffff",
       "--account-avatar-fill": "#171b1d",
       "--account-avatar-foreground": "#f2f3f3",
       "--activity-heatmap-1": "#c8c9ca",
@@ -108,11 +110,16 @@ describe("Ultra monochrome identity contract", () => {
       "--status-success": "#6ee7b7",
     });
     expect(darkTokenOverrides.has("--ultra-launch-signal")).toBe(false);
+    expect(darkTokenOverrides.has("--ultra-launch-surface")).toBe(false);
+    expect(darkTokenOverrides.has("--ultra-launch-foreground")).toBe(false);
     expect(stylesSource).toMatch(
-      /\/\*\s*Future launch-only, non-text signal; intentionally has no var\(\) consumers\.\s*\*\/\s*--ultra-launch-signal:\s*#1994ff;/
+      /\/\*\s*Launch-only signal\.[\s\S]*?Product chrome stays monochrome\.\s*\*\/\s*--ultra-launch-signal:\s*#1994ff;\s*--ultra-launch-surface:\s*#006fd6;\s*--ultra-launch-foreground:\s*#ffffff;/
     );
     expect(stylesSource.match(/--ultra-launch-signal/g)).toHaveLength(1);
     expect(stylesSource).not.toContain("var(--ultra-launch-signal)");
+    expect(stylesSource.match(/var\(--ultra-launch-surface\)/g)).toHaveLength(3);
+    expect(stylesSource.match(/var\(--ultra-launch-foreground\)/g)).toHaveLength(4);
+    expect(contrastRatio("#ffffff", "#006fd6")).toBeGreaterThanOrEqual(4.5);
     expect(stylesSource).not.toMatch(/--ultra-accent-/);
   });
 
@@ -270,7 +277,7 @@ describe("Ultra monochrome identity contract", () => {
     expect(bisqueRules).toContain("font-weight: 400");
     const ultraRules = blockBody(typographySource, ".brand-wordmark__ultra");
     expect(ultraRules).toContain("color: var(--brand-wordmark-emphasis)");
-    expect(ultraRules).toContain("font-weight: 600");
+    expect(ultraRules).toContain("font-weight: 500");
 
     const authRules = blockBody(typographySource, ".auth-screen-logo");
     expect(authRules).toContain(

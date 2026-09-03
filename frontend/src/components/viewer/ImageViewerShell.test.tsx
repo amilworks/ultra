@@ -1078,6 +1078,9 @@ describe("ImageViewerShell", () => {
     expect(screen.getByRole("combobox", { name: "Scalar rendering" })).toHaveTextContent(
       "Auto · Mask"
     );
+    expect(
+      screen.queryByRole("button", { name: "About scalar rendering" })
+    ).not.toBeInTheDocument();
     await chooseSelectOption("Scalar rendering", "Mask");
     await waitFor(() =>
       expect(apiClient.getUploadHistogram).toHaveBeenCalledWith(

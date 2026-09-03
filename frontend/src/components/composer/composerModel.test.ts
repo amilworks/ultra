@@ -43,7 +43,8 @@ describe("composerPlaceholder", () => {
   const base = { hydrated: true, welcomeStage: false, readMode: false, running: false, hasTokens: false, hasFiles: false, phone: false };
   it("teaches the grammar once working, and keeps the welcome invitation on the welcome stage", () => {
     expect(composerPlaceholder(base)).toBe("Ask Ultra — @ to bring in a file, / for a workflow");
-    expect(composerPlaceholder({ ...base, phone: true })).toBe("Ask Ultra — @ file, / workflow");
+    // Phones drop the cues: the bar's status box cannot hold them untruncated.
+    expect(composerPlaceholder({ ...base, phone: true })).toBe("Ask Ultra");
     expect(composerPlaceholder({ ...base, welcomeStage: true })).toBe("Describe a question, dataset, or experiment…");
   });
   it("names what still works while collapsed, and what a run accepts", () => {

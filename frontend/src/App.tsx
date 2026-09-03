@@ -13378,7 +13378,7 @@ export function App() {
       ? { text: briefGoneNotice, action: { label: "choose another", onClick: replaceFirstGoneBriefToken } }
       : briefWorkflowNeedsFiles && briefWorkflowLabel
         ? {
-            text: `${briefWorkflowLabel} works on an attached file — @ to bring one in, or`,
+            text: `${briefWorkflowLabel} needs a file — @ to bring one in, or`,
             action: {
               label: "choose from your library",
               onClick: () => openComposerResourcePicker({ clearSelection: false }),

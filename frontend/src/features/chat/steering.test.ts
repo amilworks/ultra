@@ -17,6 +17,21 @@ import { describe, expect, it } from "vitest";
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
 const apiSource = readFileSync(path.join(process.cwd(), "src/lib/api.ts"), "utf8");
 const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
+const composerSource = readFileSync(
+  path.join(process.cwd(), "src/components/composer/Composer.tsx"),
+  "utf8"
+);
+const editorSource = readFileSync(
+  path.join(process.cwd(), "src/components/composer/ComposerEditor.tsx"),
+  "utf8"
+);
+const blockFromComposer = (start: string, end: string): string => {
+  const startIndex = composerSource.indexOf(start);
+  expect(startIndex, `missing composer block: ${start.slice(0, 60)}`).toBeGreaterThan(-1);
+  const endIndex = composerSource.indexOf(end, startIndex);
+  expect(endIndex, `unterminated composer block: ${start.slice(0, 60)}`).toBeGreaterThan(startIndex);
+  return composerSource.slice(startIndex, endIndex + end.length);
+};
 
 const blockFrom = (start: string, end: string): string => {
   const startIndex = appSource.indexOf(start);
@@ -28,18 +43,20 @@ const blockFrom = (start: string, end: string): string => {
 
 describe("entering a steer", () => {
   it("⌘Enter steers, in its own branch ABOVE the plain-Enter queue branch", () => {
-    const steerBranch = appSource.indexOf("// ⌘Enter during a run STEERS");
-    const queueBranch = appSource.indexOf("// Enter during a run queues the draft as a follow-up");
+    // Enter belongs to the composer now: the editor gates it (never during IME
+    // composition, never with Shift) and the composer decides steer / queue /
+    // send from its `running` prop. The ⌘Enter branch comes first.
+    const enter = blockFromComposer("const handleEnter = useCallback", "}, []);");
+    const steerBranch = enter.indexOf("if (event.metaKey || event.ctrlKey) {");
+    const queueBranch = enter.indexOf("state.onQueue();");
     expect(steerBranch).toBeGreaterThan(-1);
     expect(steerBranch).toBeLessThan(queueBranch);
-    const branch = blockFrom("// ⌘Enter during a run STEERS", "steerFollowup();");
-    expect(branch).toMatch(/\(event\.metaKey \|\| event\.ctrlKey\)/);
-    expect(branch).toMatch(/!event\.nativeEvent\.isComposing/);
-    expect(branch).toMatch(/activeSending/);
+    expect(enter.slice(steerBranch, queueBranch)).toMatch(/if \(state\.running\) \{\s*state\.onSteer\(\);/);
+    expect(editorSource).toMatch(/event\.key === "Enter" &&\s*!event\.shiftKey &&\s*!event\.altKey &&\s*!event\.isComposing/);
   });
 
   it("offers a visible Steer button left of Queue, with Stop still anchored last", () => {
-    const running = blockFrom("{activeSending ? (", 'aria-label="Stop response"');
+    const running = blockFromComposer("{running ? (", 'aria-label="Stop response"');
     const steer = running.indexOf('aria-label="Steer this run"');
     const queue = running.indexOf('aria-label="Queue follow-up"');
     expect(steer).toBeGreaterThan(-1);

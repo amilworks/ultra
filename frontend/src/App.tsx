@@ -6,7 +6,6 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
-  useId,
   useRef,
   useState,
 } from "react";
@@ -16,16 +15,10 @@ import {
   ChatContainerRoot,
   ChatContainerScrollAnchor,
   FileUpload,
-  useFileUploadContext,
-  Loader,
   Message,
   MessageAction,
   MessageActions,
   MessageContent,
-  PromptInput,
-  PromptInputAction,
-  PromptInputActions,
-  PromptInputTextarea,
   ScrollButton,
   SystemMessage,
   ThinkingBar,
@@ -43,15 +36,16 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { OneTimeNotice } from "@/components/ui/one-time-notice";
+  Composer,
+  type ComposerMentionState,
+  type ComposerNotice,
+  type ComposerWorkflowChip,
+} from "./components/composer/Composer";
+import type {
+  ComposerFileToken,
+  ComposerHandle,
+  ComposerMention,
+} from "./components/composer/composerHandle";
 import {
   Sidebar,
   SidebarContent,
@@ -69,24 +63,12 @@ import {
 import { useBreakpoint } from "@/hooks/use-breakpoint";
 import { cn } from "@/lib/utils";
 import {
+  sameBriefTokens,
   type BriefFileToken,
-  briefBackspaceTarget,
-  briefCaretAfterArrow,
-  briefDeleteTarget,
-  briefFileTokensInText,
-  briefMentionQueryAtCaret,
-  briefSummary,
-  insertBriefToken,
-  parseBriefSegments,
-  removeBriefSegment,
-  syncBriefRegistryWithText,
   uniqueBriefLabel,
 } from "./features/chat/brief-tokens";
 import { resourceDisplayName } from "./features/resources/presentation";
-import { BriefOverlay } from "./components/chat/BriefOverlay";
-import type { ResourceMentionPickerProps } from "./components/chat/ResourceMentionPicker";
-import { resourceMentionKindLabel, resourceMentionOptionId } from "./features/chat/resource-mention";
-import { measureTextareaCaret } from "./lib/textareaCaret";
+import { resourceMentionKindLabel } from "./features/chat/resource-mention";
 import {
   BRIEF_TOKEN_STORAGE_KEY,
   readBriefTokenStorage,
@@ -328,7 +310,6 @@ import { BisqueMarkIcon } from "./components/icons/BisqueMarkIcon";
 import {
   MeridianFolderIcon,
   MeridianNotesIcon,
-  RecorderTraceIcon,
 } from "./components/icons/MeridianIcons";
 import { LensSidebarIcon } from "./components/icons/LensSidebarIcon";
 import { LiveStreamRegion } from "./components/chat/LiveStreamRegion";
@@ -368,17 +349,10 @@ import type {
   ResourceSourceFilter,
 } from "./components/ResourceBrowser";
 import {
-  ArrowUp,
-  Slash,
-  Library,
-  Gauge,
-  CornerDownLeft,
   Check,
   ChevronDown,
   Copy,
   Database,
-  FileUp,
-  FolderUp,
   History,
   ImageIcon,
   Images,
@@ -386,17 +360,14 @@ import {
   Link2,
   NotebookPen,
   Pencil,
-  Plus,
   PlusIcon,
   Search,
   Shield,
-  Square,
   SquarePen,
   Table2,
   TextQuote,
   Trash,
   X,
-  Zap,
 } from "lucide-react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import { toNumber, toRecord } from "./lib/coerce";
@@ -572,8 +543,6 @@ const loadResourceBrowserModule = () => import("./components/ResourceBrowser");
 const loadNoteContextPickerModule = () => import("./components/chat/NoteContextPicker");
 const loadNoteRunContextModule = () => import("./components/chat/NoteRunContext");
 const loadComposerSlashMenuModule = () => import("./components/chat/ComposerSlashMenu");
-const loadResourceMentionPickerModule = () =>
-  import("./components/chat/ResourceMentionPicker");
 const loadChatRunStepsModule = () => import("./components/chat/ChatRunSteps");
 const loadInlineDataQuickPreviewModule = () =>
   import("./components/chat/InlineDataQuickPreview");
@@ -668,11 +637,6 @@ const LazyComposerSlashMenu = lazyNamed(
   "ComposerSlashMenu"
 );
 const LazyChatRunSteps = lazyNamed(loadChatRunStepsModule, "ChatRunSteps");
-// The @ picker is only needed once a mention starts; the idle preloader warms it.
-const LazyResourceMentionPicker = lazyNamed(
-  loadResourceMentionPickerModule,
-  "ResourceMentionPicker"
-);
 const LazyInlineDataQuickPreview = lazyNamed(
   loadInlineDataQuickPreviewModule,
   "InlineDataQuickPreview"
@@ -709,7 +673,6 @@ const preloadSecondaryPanelModules = ({
     loadTrainingDashboardModule(),
     loadAppSettingsDialogModule(),
     loadUploadViewerSheetModule(),
-    loadResourceMentionPickerModule(),
   ]).catch((error: unknown) => {
     secondaryPanelPreloadPromise = null;
     throw error;
@@ -831,7 +794,6 @@ const EMPTY_UI_MESSAGES: UiMessage[] = [];
 const EMPTY_BRIEF_TOKENS: BriefFileToken[] = [];
 /* The overlay prefix's own margin-right (0.45rem) — the textarea's first-line
    indent has to cover the chips AND the gap after them. */
-const BRIEF_PREFIX_GAP_PX = 7.2;
 const BRIEF_MENTION_RESULT_LIMIT = 8;
 const EMPTY_PROGRESS_EVENTS: ProgressEvent[] = [];
 const EMPTY_RUN_EVENTS: RunEvent[] = [];
@@ -5360,141 +5322,7 @@ const resourceToBisqueLink = (resource: ResourceRecord): BisqueViewerLink | null
 /* The @ picker's "Upload instead…" needs the file dialog, which only the
    FileUpload context can open, and App renders that provider — so a child
    component under it hosts the picker and hands the dialog opener down. */
-function BriefMentionPickerHost(
-  props: Omit<ResourceMentionPickerProps, "onUploadInstead"> & {
-    onBeforeUpload: () => void;
-  }
-) {
-  const { openFilePicker } = useFileUploadContext();
-  const { onBeforeUpload, ...pickerProps } = props;
-  return (
-    <Suspense fallback={null}>
-      <LazyResourceMentionPicker
-        {...pickerProps}
-        onUploadInstead={() => {
-          onBeforeUpload();
-          openFilePicker();
-        }}
-      />
-    </Suspense>
-  );
-}
 
-function ComposerAttachMenu({
-  disabled,
-  variant = "toolbar",
-  onCloseAutoFocus,
-  onOpenNotes,
-  onOpenResources,
-  onStartWorkflow,
-}: {
-  disabled: boolean;
-  variant?: "toolbar" | "idle";
-  onCloseAutoFocus?: (event: Event) => void;
-  onOpenNotes?: () => void;
-  onOpenResources?: () => void;
-  onStartWorkflow?: () => void;
-}) {
-  const { openFilePicker, openFolderPicker, allowDirectories } = useFileUploadContext();
-  const addLabel = onOpenNotes ? "Add files, folders, or a Note" : "Add files or a folder";
-  // The idle variant is the slim pill's left affordance. It stays a real tab
-  // stop (attach is a primary action and, while slim, the toolbar's + is
-  // visibility:hidden — so this is the only keyboard path to it); its slim CSS
-  // gates it out of the tab order + a11y tree when the toolbar + takes over.
-  // mousedown preventDefault only stops a MOUSE click from blurring the caret.
-  // Both variants carry the tooltip: a bare + is the least self-evident control
-  // on the bar, and the tip is where "this also takes folders" is discoverable
-  // without opening the menu.
-  const trigger = (
-    <DropdownMenuTrigger asChild>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        aria-label={addLabel}
-        data-testid={variant === "idle" ? "composer-idle-attach-menu" : "composer-attach-menu"}
-        onMouseDown={variant === "idle" ? (event) => event.preventDefault() : undefined}
-        className={
-          variant === "idle"
-            ? "app-composer-idle-attach app-composer-icon-button size-10 rounded-full"
-            : "app-composer-icon-button composer-attach-button size-11 rounded-full sm:size-10"
-        }
-        disabled={disabled}
-      >
-        <Plus size={18} />
-      </Button>
-    </DropdownMenuTrigger>
-  );
-  return (
-    <DropdownMenu>
-      <PromptInputAction
-        tooltip={addLabel}
-        disabled={disabled}
-        side="top"
-        sideOffset={8}
-        delayDuration={350}
-        className="app-composer-tooltip"
-      >
-        {trigger}
-      </PromptInputAction>
-      <DropdownMenuContent
-        align="start"
-        sideOffset={8}
-        className="app-composer-attach-menu"
-        onCloseAutoFocus={onCloseAutoFocus}
-      >
-        {onOpenResources ? (
-          <DropdownMenuItem onSelect={onOpenResources} data-testid="composer-attach-resources">
-            <Library data-icon="inline-start" aria-hidden="true" />
-            <div className="app-composer-attach-menu-item">
-              <span>From your Resources</span>
-              <span className="app-composer-attach-menu-detail">Files already in your library</span>
-            </div>
-          </DropdownMenuItem>
-        ) : null}
-        {onStartWorkflow ? (
-          <DropdownMenuItem onSelect={onStartWorkflow} data-testid="composer-attach-workflow">
-            <Slash data-icon="inline-start" aria-hidden="true" />
-            <div className="app-composer-attach-menu-item">
-              <span>Start from a workflow</span>
-              <span className="app-composer-attach-menu-detail">The same list as typing /</span>
-            </div>
-          </DropdownMenuItem>
-        ) : null}
-        <DropdownMenuItem onSelect={() => openFilePicker()}>
-          <FileUp data-icon="inline-start" aria-hidden="true" />
-          <div className="app-composer-attach-menu-item">
-            <span>Files</span>
-            <span className="app-composer-attach-menu-detail">Images, tables, documents</span>
-          </div>
-        </DropdownMenuItem>
-        {allowDirectories ? (
-          <DropdownMenuItem onSelect={() => openFolderPicker()}>
-            <FolderUp data-icon="inline-start" aria-hidden="true" />
-            <div className="app-composer-attach-menu-item">
-              <span>Folder</span>
-              <span className="app-composer-attach-menu-detail">
-                OME-Zarr uploads as one dataset
-              </span>
-            </div>
-          </DropdownMenuItem>
-        ) : null}
-        {onOpenNotes ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onOpenNotes}>
-              <NotebookPen data-icon="inline-start" aria-hidden="true" />
-              <div className="app-composer-attach-menu-item">
-                <span>Use a note</span>
-                <span className="app-composer-attach-menu-detail">Use for this message</span>
-              </div>
-            </DropdownMenuItem>
-          </>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
 
 export function App() {
   const apiBaseUrl = DEFAULT_API_BASE_URL;
@@ -5954,7 +5782,7 @@ export function App() {
     []
   );
 
-  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerRef = useRef<ComposerHandle | null>(null);
   const activeChatScrollElementRef = useRef<HTMLElement | null>(null);
   const conversationScrollMemoryRef = useRef<Record<string, ConversationScrollMemory>>({});
   const conversationScrollWriteBlockRef = useRef<string | null>(null);
@@ -7385,7 +7213,7 @@ export function App() {
               });
               setComposerNotePickerOpen(false);
               setActivePanel("chat");
-              window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+              window.requestAnimationFrame(() => composerRef.current?.focus());
             },
           },
         });
@@ -7421,7 +7249,7 @@ export function App() {
       setActivePanel("chat");
       setViewerOpen(false);
       setResourceViewerContext(null);
-      window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+      window.requestAnimationFrame(() => composerRef.current?.focus());
     },
     [activeConversation, updateConversation]
   );
@@ -7648,14 +7476,9 @@ export function App() {
   }, [setPastedComposerTextForConversation]);
 
   const focusComposerTextarea = useCallback((): void => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) {
-      return;
-    }
+    // rAF: runs after React commits a new draft, so the caret lands at the true end.
     window.requestAnimationFrame(() => {
-      textarea.focus();
-      const selectionEnd = textarea.value.length;
-      textarea.setSelectionRange(selectionEnd, selectionEnd);
+      composerRef.current?.focus({ caret: "end" });
     });
   }, []);
 
@@ -7861,8 +7684,8 @@ export function App() {
       if (!shouldTypingFocusComposer(event)) {
         return;
       }
-      const textarea = composerTextareaRef.current;
-      if (!textarea || textarea.disabled || textarea === document.activeElement) {
+      const composer = composerRef.current;
+      if (!composer || composer.disabled || composer.isFocused()) {
         return;
       }
       if (isEditableEventTarget(event.target) || hasBlockingOverlay()) {
@@ -7877,9 +7700,7 @@ export function App() {
       // would either drop the character or type it twice. This is also why
       // focusComposerTextarea is not reused — it focuses inside a
       // requestAnimationFrame, a whole frame too late to catch the keystroke.
-      textarea.focus({ preventScroll: true });
-      const caret = textarea.value.length;
-      textarea.setSelectionRange(caret, caret);
+      composer.focus({ preventScroll: true, caret: "end" });
     };
     window.addEventListener("keydown", handleTypeToFocus);
     return () => window.removeEventListener("keydown", handleTypeToFocus);
@@ -9098,7 +8919,7 @@ export function App() {
         updatedAt: Date.now(),
         noteSearchScopeOverride: value,
       }));
-      window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+      window.requestAnimationFrame(() => composerRef.current?.focus());
     },
     [updateActiveConversation]
   );
@@ -9115,98 +8936,6 @@ export function App() {
   // settles back when the prompt shortens. Measured with a hidden mirror
   // element — the textarea's own scrollHeight is floored by whichever
   // geometry state it is currently in, which would ratchet the composer open.
-  const [composerPromptOverflows, setComposerPromptOverflows] = useState(false);
-  const composerMirrorRef = useRef<HTMLDivElement | null>(null);
-  const composerResizeObserverRef = useRef<ResizeObserver | null>(null);
-  const measureComposerOverflow = useCallback((prompt: string) => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) {
-      setComposerPromptOverflows(false);
-      return;
-    }
-    if (prompt.includes("\n")) {
-      setComposerPromptOverflows(true);
-      return;
-    }
-    if (prompt.trim() === "") {
-      setComposerPromptOverflows(false);
-      return;
-    }
-    let mirror = composerMirrorRef.current;
-    if (!mirror) {
-      mirror = document.createElement("div");
-      mirror.setAttribute("aria-hidden", "true");
-      mirror.style.position = "absolute";
-      mirror.style.visibility = "hidden";
-      mirror.style.pointerEvents = "none";
-      mirror.style.whiteSpace = "pre-wrap";
-      mirror.style.top = "-9999px";
-      document.body.appendChild(mirror);
-      composerMirrorRef.current = mirror;
-    }
-    const computed = window.getComputedStyle(textarea);
-    // Always measure against the SLIM content width, never the live padding.
-    // Padding-left/right differ between slim and expanded, so measuring against
-    // the current state would feed the decision back into its own geometry and
-    // oscillate at the 1↔2-line boundary. The slim insets come from the shared
-    // --composer-slim-pad-* vars (styles.css) so CSS and JS can't drift, and
-    // clientWidth (content+padding) stays ~constant across states.
-    const rootFontSize =
-      Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) || 16;
-    const toPx = (value: string, fallbackPx: number) => {
-      const trimmed = value.trim();
-      const parsed = Number.parseFloat(trimmed);
-      if (!Number.isFinite(parsed)) {
-        return fallbackPx;
-      }
-      return trimmed.endsWith("rem") ? parsed * rootFontSize : parsed;
-    };
-    const slimPadLeft = toPx(computed.getPropertyValue("--composer-slim-pad-left"), 3.4 * rootFontSize);
-    const slimPadRight = toPx(computed.getPropertyValue("--composer-slim-pad-right"), 7.5 * rootFontSize);
-    mirror.style.width = `${Math.max(0, textarea.clientWidth - slimPadLeft - slimPadRight)}px`;
-    mirror.style.font = computed.font;
-    mirror.style.letterSpacing = computed.letterSpacing;
-    mirror.style.lineHeight = computed.lineHeight;
-    mirror.style.wordBreak = computed.wordBreak;
-    mirror.style.overflowWrap = computed.overflowWrap;
-    mirror.textContent = prompt;
-    const lineHeight = Number.parseFloat(computed.lineHeight) || 22;
-    setComposerPromptOverflows(mirror.offsetHeight / lineHeight >= 1.9);
-  }, []);
-  useEffect(() => {
-    measureComposerOverflow(activePrompt);
-  }, [activePrompt, measureComposerOverflow]);
-  // Callback ref for the composer textarea: keeps composerTextareaRef in sync AND
-  // (re)binds a ResizeObserver to the live node. Width changes (viewport resize,
-  // sidebar collapse, side panel) move where a single line wraps; without a
-  // re-measure the slim decision goes stale and slim's max-height:3rem clamp
-  // would clip the now-wrapped second line until the next keystroke. A callback
-  // ref binds exactly when the node mounts — a mount-time effect could run
-  // before the textarea exists and, with stable deps, never re-subscribe.
-  const attachComposerTextarea = useCallback(
-    (node: HTMLTextAreaElement | null) => {
-      composerTextareaRef.current = node;
-      composerResizeObserverRef.current?.disconnect();
-      composerResizeObserverRef.current = null;
-      if (node && typeof ResizeObserver !== "undefined") {
-        const observer = new ResizeObserver(() => {
-          // Live textarea value, never a stale prompt closure.
-          measureComposerOverflow(composerTextareaRef.current?.value ?? "");
-        });
-        observer.observe(node);
-        composerResizeObserverRef.current = observer;
-      }
-    },
-    [measureComposerOverflow]
-  );
-  useEffect(() => {
-    return () => {
-      composerResizeObserverRef.current?.disconnect();
-      composerResizeObserverRef.current = null;
-      composerMirrorRef.current?.remove();
-      composerMirrorRef.current = null;
-    };
-  }, []);
 
   const activePendingFiles = activeConversation?.pendingFiles ?? EMPTY_FILES;
   const activeAvailableUploadedFiles =
@@ -9232,7 +8961,7 @@ export function App() {
       setBriefTokensByConversationId((previous) => {
         const current = previous[activeConversationIdForBrief] ?? EMPTY_BRIEF_TOKENS;
         const next = update(current);
-        if (next === current) {
+        if (next === current || sameBriefTokens(next, current)) {
           return previous;
         }
         if (next.length === 0) {
@@ -9665,13 +9394,17 @@ export function App() {
       const file = activeAvailableUploadedFiles.find((entry) => entry.file_id === fileId);
       const token = activeBriefRegistry.find((entry) => entry.fileId === fileId);
       if (!file) {
-        return { title: `${token?.label ?? "This file"} — no longer in your library`, gone: true };
+        return {
+          title: `${token?.label ?? "This file"} — no longer in your library`,
+          kind: "",
+          gone: true,
+        };
       }
       const kind = resourceMentionKindLabel({
         original_name: file.original_name,
         resource_kind: "file",
       } as ResourceRecord);
-      return { title: `${file.original_name} · ${kind} · ${formatBytes(file.size_bytes)}` };
+      return { title: `${file.original_name} · ${kind} · ${formatBytes(file.size_bytes)}`, kind };
     },
     [activeAvailableUploadedFiles, activeBriefRegistry]
   );
@@ -9685,11 +9418,6 @@ export function App() {
     briefWorkflowLabel !== null &&
     Boolean(activeComposerWorkflowPreset?.requiresAttachedFiles) &&
     !hasComposerAttachedFiles;
-  const briefSummaryText = briefSummary({
-    fileCount: briefFileTokensInText(activePrompt, activeBriefRegistry).length,
-    workflowLabel: briefWorkflowLabel,
-    modeLabel: isProModeComposerActive ? "Pro" : null,
-  });
   const selectedComposerResourceIds = useMemo(
     () => new Set(Object.keys(composerResourcePickerSelection)),
     [composerResourcePickerSelection]
@@ -12393,8 +12121,8 @@ export function App() {
       return;
     }
     const handleChatPaste = (event: ClipboardEvent): void => {
-      const textarea = composerTextareaRef.current;
-      if (!textarea || textarea.disabled || !event.clipboardData) {
+      const composer = composerRef.current;
+      if (!composer || composer.disabled || !event.clipboardData) {
         return;
       }
       if (isEditableEventTarget(event.target) || hasBlockingOverlay()) {
@@ -12651,7 +12379,7 @@ export function App() {
     const measureSelection = (): { text: string; x: number; y: number } | null => {
       // A dialog above the transcript, or a composer that cannot accept a
       // quote yet (conversation still hydrating), means no offer.
-      if (hasBlockingOverlay() || composerTextareaRef.current?.disabled) {
+      if (hasBlockingOverlay() || composerRef.current?.disabled) {
         return null;
       }
       const selection = window.getSelection();
@@ -13396,34 +13124,19 @@ export function App() {
      The brief: @ mentions, atomic tokens, and the registry's two-way sync
      with the files staged on the conversation.
      --------------------------------------------------------------------- */
-  const [briefMention, setBriefMention] = useState<{ start: number; query: string } | null>(null);
+  /* ---- The composer's app-side wiring: tokens ⇄ staging, the @ picker's data,
+     gone files, the whisper's notices, and the keys the app still owns. ---- */
+  const [briefMention, setBriefMention] = useState<ComposerMention | null>(null);
   const [briefMentionResults, setBriefMentionResults] = useState<ResourceRecord[]>([]);
   const [briefMentionLoading, setBriefMentionLoading] = useState(false);
   const [briefMentionError, setBriefMentionError] = useState<string | null>(null);
   const [briefMentionActiveId, setBriefMentionActiveId] = useState<string | null>(null);
-  const [briefMentionAnchor, setBriefMentionAnchor] = useState<{ left: number } | null>(null);
-  const [briefPrefixWidth, setBriefPrefixWidth] = useState(0);
-  const briefMentionListboxId = useId();
   const briefMentionRequestRef = useRef(0);
-  const briefMentionDismissedStartRef = useRef<number | null>(null);
 
   /* stageResourcesForConversation is a plain function that is recreated each
-     render; reaching it through a ref keeps pickBriefMention stable instead of
-     re-creating it — and every keystroke's overlay — on every render. */
+     render; reaching it through a ref keeps pickBriefMention stable. */
   const stageResourcesForConversationRef = useRef(stageResourcesForConversation);
   stageResourcesForConversationRef.current = stageResourcesForConversation;
-
-  const placeBriefCaret = useCallback((position: number): void => {
-    window.requestAnimationFrame(() => {
-      const node = composerTextareaRef.current;
-      if (!node) {
-        return;
-      }
-      node.focus();
-      const clamped = Math.max(0, Math.min(position, node.value.length));
-      node.setSelectionRange(clamped, clamped);
-    });
-  }, []);
 
   /* Removing a token removes its file from the run — the exact same edit the
      preview chip's × made: drop the staged id, and prune the selection context
@@ -13460,34 +13173,31 @@ export function App() {
     [updateActiveConversation]
   );
 
-  // The registry follows the prose: a token edited away releases its file.
-  useEffect(() => {
-    if (!activeConversationHydrated || activeBriefRegistry.length === 0) {
-      return;
-    }
-    const synced = syncBriefRegistryWithText(activePrompt, activeBriefRegistry);
-    if (synced === activeBriefRegistry) {
-      return;
-    }
-    const droppedFileIds = activeBriefRegistry
-      .filter((token) => !synced.some((kept) => kept.fileId === token.fileId))
-      .map((token) => token.fileId);
-    setActiveBriefRegistry(() => synced);
-    unstageBriefFiles(droppedFileIds);
-  }, [
-    activeBriefRegistry,
-    activeConversationHydrated,
-    activePrompt,
-    setActiveBriefRegistry,
-    unstageBriefFiles,
-  ]);
+  /* The registry follows the prose. The editor reports the tokens its text
+     holds whenever that set changes; a token edited away releases its file. */
+  const handleComposerTokensChange = useCallback(
+    (tokens: ComposerFileToken[]): void => {
+      const present = new Set(tokens.map((token) => token.fileId));
+      const dropped = activeBriefRegistry
+        .filter((token) => !present.has(token.fileId))
+        .map((token) => token.fileId);
+      setActiveBriefRegistry((previous) =>
+        tokens.map((token) => previous.find((entry) => entry.fileId === token.fileId) ?? token)
+      );
+      if (dropped.length > 0) {
+        unstageBriefFiles(dropped);
+      }
+    },
+    [activeBriefRegistry, setActiveBriefRegistry, unstageBriefFiles]
+  );
 
   // Files that arrive without a token — a drop, an upload, "Use in chat", the
   // full picker — get one at the caret (or the end), so the brief always says
   // everything the run will receive. A token whose file is known but no longer
-  // staged is re-staged rather than orphaned. A layout effect, so the token
-  // lands in the same paint as the staging — no preview chip flashes first.
-  useLayoutEffect(() => {
+  // staged is re-staged rather than orphaned. appendToken is idempotent, so a
+  // draft that already says @label (another device, cleared storage) keeps its
+  // pill and nothing is written twice.
+  useEffect(() => {
     if (!activeConversationHydrated || !activeConversation) {
       return;
     }
@@ -13512,93 +13222,24 @@ export function App() {
       return;
     }
     const registry: BriefFileToken[] = [...activeBriefRegistry];
-    let text = activePrompt;
-    const node = composerTextareaRef.current;
-    let caret =
-      node && typeof document !== "undefined" && document.activeElement === node
-        ? Math.min(node.selectionStart, text.length)
-        : text.length;
-    let edited = false;
     for (const file of missing) {
       const label = uniqueBriefLabel(file.original_name, file.file_id, registry);
       const token = { label, fileId: file.file_id };
       registry.push(token);
-      // A draft written on another device (or before this browser's storage
-      // was cleared) already says @label: recover the pill, add nothing.
-      if (briefFileTokensInText(text, [token]).length > 0) {
-        continue;
-      }
-      const edit = insertBriefToken(text, caret, caret, label);
-      text = edit.text;
-      caret = edit.caret;
-      edited = true;
+      composerRef.current?.appendToken(token);
     }
     setActiveBriefRegistry(() => registry);
-    if (!edited) {
-      return;
-    }
-    setActivePromptValue(text);
-    if (node && document.activeElement === node) {
-      placeBriefCaret(caret);
-    }
   }, [
     activeBriefRegistry,
     activeConversation,
     activeConversationHydrated,
-    activePrompt,
     activeUploadedFiles,
     briefAvailableFileIds,
-    placeBriefCaret,
     setActiveBriefRegistry,
-    setActivePromptValue,
     updateActiveConversation,
   ]);
 
-  const refreshBriefMention = useCallback((): void => {
-    const node = composerTextareaRef.current;
-    if (!node || !activeConversationHydrated || node.selectionStart !== node.selectionEnd) {
-      setBriefMention(null);
-      return;
-    }
-    const query = briefMentionQueryAtCaret(node.value, node.selectionStart, activeBriefRegistry);
-    if (!query) {
-      briefMentionDismissedStartRef.current = null;
-      setBriefMention(null);
-      return;
-    }
-    if (briefMentionDismissedStartRef.current === query.start) {
-      setBriefMention(null);
-      return;
-    }
-    setBriefMention((previous) =>
-      previous && previous.start === query.start && previous.query === query.query
-        ? previous
-        : query
-    );
-    if (!isPhoneView) {
-      const caret = measureTextareaCaret(node, query.start);
-      const host = node.offsetParent as HTMLElement | null;
-      const hostWidth = host?.clientWidth ?? node.offsetWidth;
-      const rawLeft = node.offsetLeft + (caret?.left ?? 0);
-      setBriefMentionAnchor({
-        left: Math.max(0, Math.min(rawLeft, hostWidth - 380)),
-      });
-    } else {
-      setBriefMentionAnchor(null);
-    }
-  }, [activeBriefRegistry, activeConversationHydrated, isPhoneView]);
-
-  useEffect(() => {
-    refreshBriefMention();
-  }, [activePrompt, refreshBriefMention]);
-
-  const dismissBriefMention = useCallback((): void => {
-    setBriefMention((current) => {
-      briefMentionDismissedStartRef.current = current?.start ?? null;
-      return null;
-    });
-  }, []);
-
+  // The @ picker's data: the library, searched as the query changes.
   useEffect(() => {
     if (!briefMention) {
       setBriefMentionResults([]);
@@ -13609,8 +13250,11 @@ export function App() {
     const requestId = briefMentionRequestRef.current + 1;
     briefMentionRequestRef.current = requestId;
     const query = briefMention.query.trim();
+    // Loading from the first keystroke, not from the debounce: the composer
+    // holds Enter while this is true, so a fast Enter cannot send the brief
+    // before the picker has had its 120ms.
+    setBriefMentionLoading(true);
     const timer = window.setTimeout(() => {
-      setBriefMentionLoading(true);
       loadComposerResources(apiClient, {
         limit: BRIEF_MENTION_RESULT_LIMIT,
         query: query || undefined,
@@ -13652,9 +13296,8 @@ export function App() {
 
   const pickBriefMention = useCallback(
     (resource: ResourceRecord): void => {
-      const node = composerTextareaRef.current;
-      const mention = briefMention;
-      if (!node || !mention || !activeConversation) {
+      const handle = composerRef.current;
+      if (!handle || !activeConversation) {
         return;
       }
       const label = uniqueBriefLabel(
@@ -13662,34 +13305,16 @@ export function App() {
         resource.file_id,
         activeBriefRegistry
       );
-      const end = Math.max(mention.start + 1, Math.min(node.selectionStart, activePrompt.length));
-      const edit = insertBriefToken(activePrompt, mention.start, end, label);
+      const token = { label, fileId: resource.file_id };
       setActiveBriefRegistry((previous) => [
-        ...previous.filter((token) => token.fileId !== resource.file_id),
-        { label, fileId: resource.file_id },
+        ...previous.filter((entry) => entry.fileId !== resource.file_id),
+        token,
       ]);
-      setActivePromptValue(edit.text);
+      handle.acceptMention(token);
       stageResourcesForConversationRef.current(activeConversation.id, [resource]);
-      briefMentionDismissedStartRef.current = null;
       setBriefMention(null);
-      placeBriefCaret(edit.caret);
     },
-    [
-      activeBriefRegistry,
-      activeConversation,
-      activePrompt,
-      briefMention,
-      placeBriefCaret,
-      setActiveBriefRegistry,
-      setActivePromptValue,
-    ]
-  );
-
-  const placeCaretAfterBriefToken = useCallback(
-    (segment: { end: number }): void => {
-      placeBriefCaret(segment.end);
-    },
-    [placeBriefCaret]
+    [activeBriefRegistry, activeConversation, setActiveBriefRegistry]
   );
 
   /* A gone token becomes an open @ at the same spot, so the picker reopens
@@ -13699,19 +13324,9 @@ export function App() {
     if (!gone) {
       return;
     }
-    const segment = parseBriefSegments(activePrompt, activeBriefRegistry).find(
-      (entry) => entry.kind === "file" && entry.fileId === gone
-    );
-    const remaining = activeBriefRegistry.filter((token) => token.fileId !== gone);
-    setActiveBriefRegistry(() => remaining);
-    if (!segment || segment.kind !== "file") {
-      return;
-    }
-    const text = `${activePrompt.slice(0, segment.start)}@${activePrompt.slice(segment.end)}`;
-    briefMentionDismissedStartRef.current = null;
-    setActivePromptValue(text);
-    placeBriefCaret(segment.start + 1);
-  }, [activeBriefRegistry, activePrompt, briefGoneFileIds, placeBriefCaret, setActiveBriefRegistry, setActivePromptValue]);
+    setActiveBriefRegistry((previous) => previous.filter((token) => token.fileId !== gone));
+    composerRef.current?.reopenMentionFor(gone);
+  }, [briefGoneFileIds, setActiveBriefRegistry]);
 
   const startBriefWorkflow = useCallback((): void => {
     setActivePromptValue((value) => (value.trimStart().startsWith("/") ? value : `/${value}`));
@@ -13724,190 +13339,74 @@ export function App() {
     focusComposerTextarea();
   }, [clearActiveComposerWorkflowPreset, focusComposerTextarea]);
 
-  /* Keys the brief owns. Returns true when it consumed the event so the
-     composer's other branches (slash menu, Enter-to-send, ArrowUp recall)
-     do not also act on it. */
-  const handleBriefKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
-    if (event.nativeEvent.isComposing) {
-      return false;
-    }
-    const node = event.currentTarget;
-    if (briefMention) {
-      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-        if (briefMentionResults.length === 0) {
-          return false;
-        }
+  // File-bearing pastes (screenshots, Finder-copied files) attach instead of
+  // pasting; text that reads as data (logs, tables, sequences — see
+  // shouldAttachPastedText) becomes an attachment chip instead of burying the
+  // prompt; ordinary text falls through to the editor untouched.
+  const handleComposerPaste = useCallback(
+    (event: ClipboardEvent): boolean => {
+      if (!event.clipboardData) {
+        return false;
+      }
+      const pastedFiles = filesFromClipboard(event.clipboardData);
+      if (pastedFiles.length > 0) {
         event.preventDefault();
-        const direction = event.key === "ArrowDown" ? 1 : -1;
-        const currentIndex = briefMentionResults.findIndex(
-          (resource) => resource.file_id === briefMentionActiveId
-        );
-        const nextIndex = cycleListIndex(currentIndex, direction, briefMentionResults.length);
-        setBriefMentionActiveId(briefMentionResults[nextIndex]?.file_id ?? null);
+        attachFilesToActiveConversation(pastedFiles);
         return true;
       }
-      const accepts =
-        (event.key === "Enter" && !event.shiftKey && !event.metaKey && !event.ctrlKey) ||
-        event.key === "Tab";
-      if (accepts) {
-        const chosen =
-          briefMentionResults.find((resource) => resource.file_id === briefMentionActiveId) ??
-          briefMentionResults[0];
-        if (chosen) {
-          event.preventDefault();
-          pickBriefMention(chosen);
-          return true;
-        }
-        if (event.key === "Enter") {
-          // Nothing to bring in: close the picker rather than sending a
-          // half-typed @ as the message.
-          event.preventDefault();
-          dismissBriefMention();
-          return true;
-        }
-        return false;
-      }
-      if (event.key === "Escape") {
+      const pastedText = event.clipboardData.getData("text/plain");
+      if (pastedText && shouldAttachPastedText(pastedText)) {
         event.preventDefault();
-        dismissBriefMention();
+        attachPastedText(pastedText);
         return true;
       }
-    }
-    if (activeBriefRegistry.length === 0 || node.selectionStart !== node.selectionEnd) {
+      if (pastedText) {
+        recordInlinePastedText(pastedText);
+      }
       return false;
-    }
-    const caret = node.selectionStart;
-    const segments = parseBriefSegments(activePrompt, activeBriefRegistry);
-    if (event.key === "Backspace" || event.key === "Delete") {
-      const target =
-        event.key === "Backspace"
-          ? briefBackspaceTarget(segments, caret)
-          : briefDeleteTarget(segments, caret);
-      if (!target) {
-        return false;
-      }
-      event.preventDefault();
-      const edit = removeBriefSegment(activePrompt, target);
-      setActiveBriefRegistry((previous) => previous.filter((token) => token.fileId !== target.fileId));
-      unstageBriefFiles([target.fileId]);
-      setActivePromptValue(edit.text);
-      placeBriefCaret(edit.caret);
-      return true;
-    }
-    if (
-      (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
-      !event.shiftKey &&
-      !event.metaKey &&
-      !event.altKey &&
-      !event.ctrlKey
-    ) {
-      const next = briefCaretAfterArrow(segments, caret, event.key === "ArrowRight" ? 1 : -1);
-      if (next === null) {
-        return false;
-      }
-      event.preventDefault();
-      node.setSelectionRange(next, next);
-      refreshBriefMention();
-      return true;
-    }
-    return false;
-  };
+    },
+    [attachFilesToActiveConversation, attachPastedText, recordInlinePastedText]
+  );
 
-  const briefWhisperVisible =
-    activeConversationHydrated &&
-    (activePrompt.trim().length > 0 || activeBriefRegistry.length > 0 || briefWorkflowLabel !== null);
-  const briefKeysHint =
-    activeSending && activePrompt.trim().length > 0
-      ? "queue for after · ⌘↵ steer"
-      : activeSending
-        ? "steer with ⌘↵ · queue with ↵"
-        : "send · ⇧↵ new line";
   const briefGoneNotice = (() => {
     const gone = briefGoneFileIds[0];
     const token = gone ? activeBriefRegistry.find((entry) => entry.fileId === gone) : null;
     return token ? `${token.label} is no longer in your library.` : "";
   })();
-  const briefOverlaySyncKey = `${composerScrolledAway ? 1 : 0}:${activeSending ? 1 : 0}:${briefPrefixWidth}`;
-  const briefPrefix =
-    activeConversationHydrated && (briefWorkflowLabel || isProModeComposerActive) ? (
-      <>
-        {briefWorkflowLabel ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="brief-chip brief-chip-workflow"
-                aria-label={`Workflow: ${briefWorkflowLabel}`}
-                data-testid="brief-workflow-chip"
-                onMouseDown={(event) => event.preventDefault()}
-              >
-                <Slash aria-hidden="true" />
-                <span>{briefWorkflowLabel}</span>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              sideOffset={8}
-              className="app-composer-intelligence-menu"
-              onCloseAutoFocus={(event) => {
-                event.preventDefault();
-                composerTextareaRef.current?.focus();
-              }}
-            >
-              <DropdownMenuLabel>Workflow</DropdownMenuLabel>
-              <DropdownMenuGroup>
-                <DropdownMenuItem onClick={startBriefWorkflow}>
-                  <span>Change workflow…</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem onClick={removeBriefWorkflow}>
-                  <span>Remove workflow</span>
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-        {isProModeComposerActive ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="brief-chip brief-chip-mode"
-                aria-label="Intelligence: Pro"
-                data-testid="brief-mode-chip"
-                onMouseDown={(event) => event.preventDefault()}
-              >
-                <Gauge aria-hidden="true" />
-                <span>Pro</span>
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              sideOffset={8}
-              className="app-composer-intelligence-menu"
-              onCloseAutoFocus={(event) => {
-                event.preventDefault();
-                composerTextareaRef.current?.focus();
-              }}
-            >
-              <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
-              <DropdownMenuGroup>
-                <DropdownMenuItem onClick={() => handleSelectComposerIntelligenceMode("high")}>
-                  <span>High</span>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  data-active="true"
-                  onClick={() => handleSelectComposerIntelligenceMode("pro")}
-                >
-                  <span>Pro</span>
-                  <Check data-icon="inline-end" aria-hidden="true" />
-                </DropdownMenuItem>
-              </DropdownMenuGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        ) : null}
-      </>
-    ) : null;
-
+  const composerNotice: ComposerNotice | null =
+    briefGoneFileIds.length > 0
+      ? { text: briefGoneNotice, action: { label: "choose another", onClick: replaceFirstGoneBriefToken } }
+      : briefWorkflowNeedsFiles && briefWorkflowLabel
+        ? {
+            text: `${briefWorkflowLabel} works on an attached file — @ to bring one in, or`,
+            action: {
+              label: "choose from your library",
+              onClick: () => openComposerResourcePicker({ clearSelection: false }),
+            },
+          }
+        : null;
+  const composerWorkflow: ComposerWorkflowChip | null =
+    activeComposerWorkflowPreset && activeComposerWorkflowPreset.id !== "pro_mode"
+      ? {
+          id: activeComposerWorkflowPreset.id,
+          label: activeComposerWorkflowPreset.label,
+          requiresFiles: activeComposerWorkflowPreset.requiresAttachedFiles,
+        }
+      : null;
+  const composerMentionState: ComposerMentionState | null = briefMention
+    ? {
+        query: briefMention.query,
+        results: briefMentionResults,
+        loading: briefMentionLoading,
+        error: briefMentionError,
+        activeFileId: briefMentionActiveId,
+      }
+    : null;
+  const composerCanSteer =
+    activePrompt.trim().length > 0 &&
+    !slashMenuOpen &&
+    !composerResourcePickerOpen &&
+    !composerNotePickerOpen;
 
   const handleSubmit = async (
     overridePrompt?: string,
@@ -15144,6 +14643,85 @@ export function App() {
     uploadPendingFiles,
   ]);
 
+  /* Keys the app still owns: the slash menu, the library picker's Escape, and
+     the ArrowUp recall. Returns true when consumed. Enter, ⌘Enter and the @
+     picker's keys belong to the composer itself. */
+  const handleComposerKeyDown = (event: KeyboardEvent): boolean => {
+      if (event.isComposing) {
+        return false;
+      }
+      if (composerResourcePickerOpen && event.key === "Escape") {
+        event.preventDefault();
+        cancelComposerResourcePicker();
+        return true;
+      }
+      if (slashMenuOpen) {
+        if ((event.key === "ArrowDown" || event.key === "ArrowUp") && filteredSlashWorkflows.length > 0) {
+          event.preventDefault();
+          const direction = event.key === "ArrowDown" ? 1 : -1;
+          const currentIndex = filteredSlashWorkflows.findIndex(
+            (workflow) => workflow.id === resolvedActiveSlashWorkflowId
+          );
+          const nextIndex = cycleListIndex(currentIndex, direction, filteredSlashWorkflows.length);
+          setActiveSlashWorkflowId(filteredSlashWorkflows[nextIndex]?.id ?? null);
+          return true;
+        }
+        if (event.key === "Enter") {
+          const selectedWorkflow =
+            filteredSlashWorkflows.find((workflow) => workflow.id === resolvedActiveSlashWorkflowId) ??
+            filteredSlashWorkflows[0];
+          event.preventDefault();
+          if (selectedWorkflow) {
+            handleSelectComposerWorkflow(selectedWorkflow);
+          }
+          return true;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setDismissedSlashPrompt(activePrompt);
+          setActiveSlashWorkflowId(null);
+          return true;
+        }
+      }
+      // ArrowUp in an EMPTY composer recalls the last prompt for refinement —
+      // shell/Slack/Discord muscle memory. Recall only, never edit: the
+      // message-level Edit removes a turn and its reply, which is far too much
+      // consequence to hang off an arrow key. Any drafted text disables it, so
+      // cursoring around a multi-line draft is untouched.
+      if (
+        event.key === "ArrowUp" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !composerResourcePickerOpen &&
+        !activePrompt.trim()
+      ) {
+        // A pending queue outranks history: recalling the OLDER sent message
+        // while a queue exists invites queueing a duplicate. ArrowUp un-queues.
+        if (activeConversation?.queuedFollowup) {
+          event.preventDefault();
+          cancelQueuedFollowup();
+          return true;
+        }
+        let lastPrompt = "";
+        for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
+          if (activeMessages[index].role === "user") {
+            lastPrompt = activeMessages[index].content;
+            break;
+          }
+        }
+        if (lastPrompt.trim()) {
+          event.preventDefault();
+          setActivePromptValue(lastPrompt);
+          focusComposerTextarea();
+        }
+        return true;
+      }
+      return false;
+  };
+
+
   /* Dispatch: the enqueue contract. Fires the queued follow-up as the next turn
      when the active conversation settles — but ONLY on clean completion. After
      Stop or a failure the queued text returns to the draft instead: the user
@@ -15484,8 +15062,12 @@ export function App() {
         type="button"
         className="app-skip-link"
         onClick={() => {
-          const target = composerTextareaRef.current ?? mainShellElement;
-          target?.focus();
+          const composer = composerRef.current;
+          if (composer) {
+            composer.focus({ caret: "end" });
+          } else {
+            mainShellElement?.focus();
+          }
         }}
       >
         Skip to chat
@@ -16403,43 +15985,6 @@ export function App() {
 
           <div
             className="app-composer-shell bg-background z-10 shrink-0 px-3 pb-3 md:px-5 md:pb-5"
-            /* Every width, not just phones. Reading back through a long answer
-               is when the toolbar is pure distraction, and that is as true on a
-               1440px screen as on a 390px one.
-               Driven by scrolled-AWAY rather than actively-scrolling on purpose:
-               an is-scrolling trigger would re-expand the composer the instant
-               you stop to actually read a paragraph, which is exactly when you
-               want it out of the way. The signal already carries hysteresis
-               (collapse past 160px from the bottom, expand again within 48px),
-               so it does not flutter on small scrolls. */
-            data-composer-compact={
-              composerScrolledAway && !activeSending ? "true" : undefined
-            }
-            data-composer-slim={
-              !welcomeStageActive &&
-              activeConversationHydrated &&
-              !activeSending &&
-              !composerPromptOverflows &&
-              !hasComposerAttachedFiles &&
-              !slashMenuOpen &&
-              !composerResourcePickerOpen
-                ? "true"
-                : undefined
-            }
-            data-composer-idle={
-              !welcomeStageActive &&
-              activeConversationHydrated &&
-              !activeSending &&
-              activePrompt.trim().length === 0 &&
-              !hasComposerAttachedFiles &&
-              !slashMenuOpen &&
-              !composerResourcePickerOpen
-                ? "true"
-                : undefined
-            }
-            data-composer-menu-open={
-              slashMenuOpen || composerResourcePickerOpen || briefMention !== null ? "true" : undefined
-            }
           >
             <div className="chat-width-frame mx-auto">
               {activeChatError ? (
@@ -16458,808 +16003,295 @@ export function App() {
                 multiple
                 allowDirectories
               >
-                {/* The recorder: while the instrument runs, the composer's
-                    baseline carries the trace — the one moment brass may touch
-                    this control. It lives on the FileUpload wrapper, NOT inside
-                    the card: the card clips (overflow: hidden), and a trace
-                    centred on the border loses every upward peak to that clip —
-                    it shipped once as a flat line with a single dip. */}
-                {activeSending ? (
-                  <RecorderTraceIcon className="app-composer-recorder" />
-                ) : null}
-                <PromptInput
-                  /* Hydration is the ONLY thing that disables typing. Folding
-                     activeSending in here disabled the textarea for the whole
-                     run — which made mid-run follow-ups unreachable for real
-                     keyboards (review-confirmed live: disabled=true, focus() a
-                     no-op; only script-dispatched events ever "worked").
-                     Mid-run SUBMISSION stays blocked elsewhere: Stop replaces
-                     the submit button, and handleSubmit guards sending. */
-                  isLoading={!activeConversationHydrated}
+                <Composer
+                  ref={composerRef}
                   value={activePrompt}
-                  onValueChange={(value) => setActivePromptValue(value)}
+                  onValueChange={setActivePromptValue}
+                  tokens={activeBriefRegistry}
+                  goneFileIds={briefGoneFileIds}
+                  onTokensChange={handleComposerTokensChange}
+                  tokenDetails={briefFileDetails}
+                  hydrated={activeConversationHydrated}
+                  running={activeSending}
+                  readMode={composerScrolledAway}
+                  phone={isPhoneView}
+                  welcomeStage={welcomeStageActive}
+                  menuOpen={slashMenuOpen || composerResourcePickerOpen}
+                  hasFiles={pendingPreviewFiles.length > 0 || untokenizedPreviewFiles.length > 0}
+                  workflow={composerWorkflow}
+                  onChangeWorkflow={startBriefWorkflow}
+                  onRemoveWorkflow={removeBriefWorkflow}
+                  mode={activeComposerIntelligenceMode}
+                  onChangeMode={handleSelectComposerIntelligenceMode}
+                  proIntro={{
+                    noticeId: "pro-mode-launch-2026-08-20",
+                    audienceId: proModeIntroIdentity,
+                    enabled: proModeIntroEligible && newChatLandingActive,
+                    title: "Pro mode is now available",
+                    description:
+                      "Choose Pro when a scientific question benefits from more deliberate reasoning, longer tool use, and added verification.",
+                  }}
+                  notice={composerNotice}
+                  mention={composerMentionState}
+                  onMentionChange={setBriefMention}
+                  onMentionActivate={setBriefMentionActiveId}
+                  onMentionPick={pickBriefMention}
+                  menus={
+                    slashMenuOpen || composerResourcePickerOpen ? (
+                      <>
+                {slashMenuOpen ? (
+                  <Suspense fallback={null}>
+                    <LazyComposerSlashMenu
+                      mode="workflow"
+                      workflowGroups={slashWorkflowGroups}
+                      activeWorkflowId={resolvedActiveSlashWorkflowId}
+                      onSelectWorkflow={handleSelectComposerWorkflow}
+                    />
+                  </Suspense>
+                ) : null}
+                {composerResourcePickerOpen ? (
+                  <Suspense fallback={null}>
+                    <LazyComposerSlashMenu
+                      mode="resource_picker"
+                      preset={activeComposerWorkflowPreset}
+                      resourceQuery={composerResourceQuery}
+                      onResourceQueryChange={setComposerResourceQuery}
+                      resources={composerResources}
+                      resourcesLoading={composerResourcesLoading}
+                      resourcesError={composerResourcesError}
+                      activeResourceId={resolvedActiveComposerResourceId}
+                      selectedResourceIds={selectedComposerResourceIds}
+                      onResourceInputKeyDown={handleComposerResourceInputKeyDown}
+                      onToggleResource={toggleComposerResourceSelection}
+                      onConfirmResources={confirmComposerResourceSelection}
+                      onCancelResourcePicker={cancelComposerResourcePicker}
+                    />
+                  </Suspense>
+                ) : null}
+                      </>
+                    ) : null
+                  }
+                  extras={
+                    <>
+                  {activeConversation?.selectedNotes.length ||
+                  (modelNotesReadEnabled &&
+                    (activeNoteSearchScope.active ||
+                      activeNoteSearchScope.recoverableFromReferenceText)) ? (
+                    <div className="flex flex-wrap gap-1.5 px-3 pt-2" aria-label="Notes for this message">
+                      {modelNotesReadEnabled && activeNoteSearchScope.active ? (
+                        <span className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8">
+                          <Search className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
+                          <span>Search Notes <span className="text-muted-foreground">· this message</span></span>
+                          <button
+                            type="button"
+                            className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
+                            aria-label="Don’t search Notes for this message"
+                            onClick={removeActiveNoteSearchScope}
+                          >
+                            <X className="size-3" aria-hidden="true" />
+                          </button>
+                        </span>
+                      ) : modelNotesReadEnabled &&
+                        activeNoteSearchScope.recoverableFromReferenceText ? (
+                        <button
+                          type="button"
+                          className="border-border hover:bg-accent focus-visible:ring-ring inline-flex min-h-11 items-center gap-1.5 rounded-full border bg-transparent px-2.5 text-xs focus-visible:ring-2 focus-visible:outline-none sm:min-h-8"
+                          aria-label="Allow Ultra to search Notes for this pasted request"
+                          onClick={() => setActiveNoteSearchScopeOverride(true)}
+                        >
+                          <Search className="text-muted-foreground size-3.5" aria-hidden="true" />
+                          Search Notes <span className="text-muted-foreground">· this message</span>
+                        </button>
+                      ) : null}
+                      {activeConversation?.selectedNotes.map((note) => (
+                        <span
+                          key={note.note_id}
+                          className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8"
+                        >
+                          <NotebookPen className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
+                          <span className="max-w-48 truncate">{note.title}</span>
+                          <button
+                            type="button"
+                            className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
+                            aria-label={`Remove Note ${note.title}`}
+                            onClick={() => removeNoteFromActiveConversation(note.note_id)}
+                          >
+                            <X className="size-3" aria-hidden="true" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {pendingPreviewFiles.length > 0 ? (
+                    <div className="composer-preview-section px-3 pt-2">
+                      <div className="composer-preview-header">
+                        <span>{`Selected files · ${pendingPreviewFiles.length}`}</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 rounded-full px-2 text-[11px]"
+                          onClick={() =>
+                            updateActiveConversation((conversation) => ({
+                              ...conversation,
+                              pendingFiles: [],
+                            }))
+                          }
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                      <div className="composer-preview-row">
+                        {pendingPreviewFiles.map((file) => (
+                          <article key={file.key} className="composer-preview-card">
+                            {file.objectUrl ? (
+                              <img
+                                src={file.objectUrl}
+                                alt={file.name}
+                                className="composer-preview-image"
+                              />
+                            ) : (
+                              <div className="composer-preview-fallback">
+                                {file.isBundle ? "ZARR" : file.isScientific ? "BIO" : "FILE"}
+                              </div>
+                            )}
+                            <div className="composer-preview-meta">
+                              <p className="composer-preview-name">{file.name}</p>
+                              <p className="composer-preview-size">{file.sizeLabel}</p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              className="composer-preview-remove"
+                              aria-label={`Remove ${file.name}`}
+                              onClick={() => {
+                                const removeIndices = new Set(file.indices);
+                                updateActiveConversation((conversation) => ({
+                                  ...conversation,
+                                  pendingFiles: conversation.pendingFiles.filter(
+                                    (_, itemIndex) => !removeIndices.has(itemIndex)
+                                  ),
+                                }));
+                              }}
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {untokenizedPreviewFiles.length > 0 ? (
+                    <div className="composer-preview-section px-3 pt-2">
+                      <div className="composer-preview-header">
+                        <span>
+                          {`${
+                            activeSelectionContextFileIds.length > 0
+                              ? "Active analysis context"
+                              : "Uploaded context"
+                          } · ${untokenizedPreviewFiles.length}`}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-6 rounded-full px-2 text-[11px]"
+                          onClick={() => {
+                            setResourceViewerContext(null);
+                            setViewerOpen(true);
+                          }}
+                        >
+                          <ImageIcon className="mr-1 size-3.5" />
+                          View
+                        </Button>
+                      </div>
+                      <div className="composer-preview-row">
+                        {untokenizedPreviewFiles.map((file) => (
+                          <article key={file.id} className="composer-preview-card">
+                            {file.previewUrl ? (
+                              <img
+                                src={file.previewUrl}
+                                alt={file.name}
+                                className="composer-preview-image"
+                                loading="lazy"
+                                onError={() => handlePreviewError(file.id)}
+                              />
+                            ) : (
+                              <div className="composer-preview-fallback">
+                                {file.isScientific ? "BIO" : "FILE"}
+                              </div>
+                            )}
+                            <div className="composer-preview-meta">
+                              <p className="composer-preview-name">{file.name}</p>
+                              <p className="composer-preview-size">{file.sizeLabel}</p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-xs"
+                              className="composer-preview-remove"
+                              aria-label={`Exclude ${file.name}`}
+                              onClick={() =>
+                                updateActiveConversation((conversation) => {
+                                  const currentSelection = conversation.activeSelectionContext;
+                                  const nextFocusedFileIds = currentSelection?.focused_file_ids?.filter(
+                                    (currentFileId) => currentFileId !== file.id
+                                  ) ?? [];
+                                  return {
+                                    ...conversation,
+                                    stagedUploadFileIds:
+                                      conversation.stagedUploadFileIds.filter(
+                                        (fileId) => fileId !== file.id
+                                      ),
+                                    activeSelectionContext:
+                                      currentSelection && (
+                                        currentSelection.focused_file_ids?.includes(file.id) ||
+                                        (currentSelection.resource_uris?.length ?? 0) > 0 ||
+                                        (currentSelection.dataset_uris?.length ?? 0) > 0
+                                      )
+                                        ? nextFocusedFileIds.length > 0
+                                          ? {
+                                              ...currentSelection,
+                                              focused_file_ids: nextFocusedFileIds,
+                                            }
+                                          : null
+                                        : currentSelection,
+                                    updatedAt: Date.now(),
+                                  };
+                                })
+                              }
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                    </>
+                  }
+                  runningLabel={composerRunningLabel}
+                  runningTitle={composerRunningTitle}
+                  submitDisabled={composerSubmitDisabled}
+                  canSteer={composerCanSteer}
                   onSubmit={() => {
                     void handleSubmit();
                   }}
-                  className="app-composer-card relative z-10 w-full"
-                >
-                  {slashMenuOpen ? (
-                    <Suspense fallback={null}>
-                      <LazyComposerSlashMenu
-                        mode="workflow"
-                        workflowGroups={slashWorkflowGroups}
-                        activeWorkflowId={resolvedActiveSlashWorkflowId}
-                        onSelectWorkflow={handleSelectComposerWorkflow}
-                      />
-                    </Suspense>
-                  ) : null}
-                  {composerResourcePickerOpen ? (
-                    <Suspense fallback={null}>
-                      <LazyComposerSlashMenu
-                        mode="resource_picker"
-                        preset={activeComposerWorkflowPreset}
-                        resourceQuery={composerResourceQuery}
-                        onResourceQueryChange={setComposerResourceQuery}
-                        resources={composerResources}
-                        resourcesLoading={composerResourcesLoading}
-                        resourcesError={composerResourcesError}
-                        activeResourceId={resolvedActiveComposerResourceId}
-                        selectedResourceIds={selectedComposerResourceIds}
-                        onResourceInputKeyDown={handleComposerResourceInputKeyDown}
-                        onToggleResource={toggleComposerResourceSelection}
-                        onConfirmResources={confirmComposerResourceSelection}
-                        onCancelResourcePicker={cancelComposerResourcePicker}
-                      />
-                    </Suspense>
-                  ) : null}
-                  <div className="app-composer-card-body">
-                    {/* Slim-only attach affordance: the toolbar's + collapses
-                        away inside actions-start (whose opacity fade would
-                        swallow any child), so the slim pill gets its own
-                        trigger anchored to the card, like the idle mode echo.
-                        Same Files/Folder menu as the toolbar + — one glyph,
-                        one behavior. Keyboard-reachable (it IS the attach path
-                        while slim); mousedown preventDefault only stops a mouse
-                        click from blurring the caret. */}
-                    <ComposerAttachMenu
-                      variant="idle"
-                      disabled={!activeConversationHydrated}
-                      onOpenResources={() => openComposerResourcePicker({ clearSelection: false })}
-                      onStartWorkflow={startBriefWorkflow}
-                      onOpenNotes={
-                        modelNotesReadEnabled
-                          ? () => setComposerNotePickerOpen(true)
-                          : undefined
-                      }
-                      onCloseAutoFocus={(event) => {
-                        event.preventDefault();
-                        composerTextareaRef.current?.focus();
-                      }}
-                    />
-                    {activeSending ? (
-                      <div className="composer-running" title={composerRunningTitle}>
-                        <Loader size="sm" text={composerRunningLabel} />
-                      </div>
-                    ) : null}
-                    <PromptInputTextarea
-                      ref={attachComposerTextarea}
-                      style={
-                        briefPrefixWidth > 0
-                          ? { textIndent: `${briefPrefixWidth + BRIEF_PREFIX_GAP_PX}px` }
-                          : undefined
-                      }
-                      onSelect={refreshBriefMention}
-                      aria-autocomplete="list"
-                      aria-expanded={briefMention !== null}
-                      aria-controls={briefMention ? briefMentionListboxId : undefined}
-                      aria-activedescendant={
-                        briefMention && briefMentionActiveId
-                          ? resourceMentionOptionId(briefMentionListboxId, briefMentionActiveId)
-                          : undefined
-                      }
-                      /* The collapsed state hides the attach, model and send
-                         controls, so the hint changes to say what still works.
-                         "Ask Ultra" names the product next to a toolbar; with
-                         the toolbar gone, an instruction is more use than a
-                         label. Swaps once on collapse, not per scroll event. */
-                      placeholder={
-                        !activeConversationHydrated
-                          ? "Loading chat…"
-                          : welcomeStageActive
-                            ? "Describe a question, dataset, or experiment…"
-                            : composerScrolledAway && !activeSending
-                              ? "Just start typing"
-                              : activeSending
-                                ? "Steer this run, or queue for after"
-                                : activeBriefRegistry.length === 0 && !hasComposerAttachedFiles
-                                  ? isPhoneView
-                                    ? "Ask Ultra — @ file, / workflow"
-                                    : "Ask Ultra — @ to bring in a file, / for a workflow"
-                                  : "Ask Ultra"
-                      }
-                      /* Explicit name so the field is not relying on its
-                         placeholder for one: the placeholder is deliberately
-                         ghost-weight (~2.1:1) and a control's accessible name
-                         should not depend on how faint its hint is drawn. */
-                      aria-label="Ask Ultra"
-                      className="app-composer-textarea"
-                      disabled={!activeConversationHydrated}
-                      onPaste={(event) => {
-                        // File-bearing pastes (screenshots, Finder-copied
-                        // files) attach instead of pasting; ordinary text
-                        // pastes fall through untouched. Files win over rich
-                        // text — paste-without-formatting is the text escape
-                        // hatch.
-                        const pastedFiles = filesFromClipboard(event.clipboardData);
-                        if (pastedFiles.length > 0) {
-                          event.preventDefault();
-                          attachFilesToActiveConversation(pastedFiles);
-                          return;
-                        }
-                        // Text that reads as data (logs, tables, sequences —
-                        // see shouldAttachPastedText) becomes an attachment
-                        // chip instead of burying the prompt.
-                        const pastedText = event.clipboardData.getData("text/plain");
-                        if (pastedText && shouldAttachPastedText(pastedText)) {
-                          event.preventDefault();
-                          attachPastedText(pastedText);
-                        } else if (pastedText) {
-                          recordInlinePastedText(pastedText);
-                        }
-                      }}
-                      onKeyDown={(event) => {
-                        if (handleBriefKeyDown(event)) {
-                          return;
-                        }
-                        if (
-                          composerResourcePickerOpen &&
-                          event.key === "Escape" &&
-                          !event.nativeEvent.isComposing
-                        ) {
-                          event.preventDefault();
-                          cancelComposerResourcePicker();
-                          return;
-                        }
-                        if (slashMenuOpen && !event.nativeEvent.isComposing) {
-                          if (
-                            (event.key === "ArrowDown" || event.key === "ArrowUp") &&
-                            filteredSlashWorkflows.length > 0
-                          ) {
-                            event.preventDefault();
-                            const direction = event.key === "ArrowDown" ? 1 : -1;
-                            const currentIndex = filteredSlashWorkflows.findIndex(
-                              (workflow) => workflow.id === resolvedActiveSlashWorkflowId
-                            );
-                            const nextIndex = cycleListIndex(
-                              currentIndex,
-                              direction,
-                              filteredSlashWorkflows.length
-                            );
-                            setActiveSlashWorkflowId(
-                              filteredSlashWorkflows[nextIndex]?.id ?? null
-                            );
-                            return;
-                          }
-	                          if (event.key === "Enter") {
-	                            const selectedWorkflow =
-	                              filteredSlashWorkflows.find(
-	                                (workflow) => workflow.id === resolvedActiveSlashWorkflowId
-	                              ) ?? filteredSlashWorkflows[0];
-                            if (selectedWorkflow) {
-                              event.preventDefault();
-                              handleSelectComposerWorkflow(selectedWorkflow);
-                            }
-                            return;
-                          }
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            setDismissedSlashPrompt(activePrompt);
-                            setActiveSlashWorkflowId(null);
-                            return;
-                          }
-                        }
-                        // ArrowUp in an EMPTY composer recalls the last prompt
-                        // for refinement — shell/Slack/Discord muscle memory.
-                        // Recall only, never edit: the message-level Edit
-                        // removes a turn and its reply, which is far too much
-                        // consequence to hang off an arrow key. Any drafted
-                        // text disables it, so cursoring around a multi-line
-                        // draft is untouched.
-                        if (
-                          event.key === "ArrowUp" &&
-                          !event.nativeEvent.isComposing &&
-                          !event.metaKey &&
-                          !event.ctrlKey &&
-                          !event.altKey &&
-                          !event.shiftKey &&
-                          !composerResourcePickerOpen &&
-                          !activePrompt.trim()
-                        ) {
-                          // A pending queue outranks history: recalling the
-                          // OLDER sent message while a queue exists invites
-                          // queueing a duplicate. ArrowUp un-queues instead.
-                          if (activeConversation?.queuedFollowup) {
-                            event.preventDefault();
-                            cancelQueuedFollowup();
-                            return;
-                          }
-                          let lastPrompt = "";
-                          for (let index = activeMessages.length - 1; index >= 0; index -= 1) {
-                            if (activeMessages[index].role === "user") {
-                              lastPrompt = activeMessages[index].content;
-                              break;
-                            }
-                          }
-                          if (lastPrompt.trim()) {
-                            event.preventDefault();
-                            setActivePromptValue(lastPrompt);
-                            // Caret to the end once the value commits; the
-                            // rAF inside runs after React paints.
-                            focusComposerTextarea();
-                          }
-                          return;
-                        }
-                        // ⌘Enter during a run STEERS: the text reaches the
-                        // running agent at its next model-call boundary
-                        // instead of waiting out the turn (Phase 1).
-                        if (
-                          event.key === "Enter" &&
-                          !event.shiftKey &&
-                          (event.metaKey || event.ctrlKey) &&
-                          !event.altKey &&
-                          !event.nativeEvent.isComposing &&
-                          activeSending
-                        ) {
-                          event.preventDefault();
-                          steerFollowup();
-                          return;
-                        }
-                        // Enter during a run queues the draft as a follow-up
-                        // instead of dying against handleSubmit's sending
-                        // guard. A SEPARATE branch, deliberately: the plain
-                        // Enter-to-send path below is contract-pinned.
-                        if (
-                          event.key === "Enter" &&
-                          !event.shiftKey &&
-                          !event.metaKey &&
-                          !event.ctrlKey &&
-                          !event.altKey &&
-                          !event.nativeEvent.isComposing &&
-                          activeSending
-                        ) {
-                          event.preventDefault();
-                          queueFollowup();
-                          return;
-                        }
-                        if (
-                          event.key === "Enter" &&
-                          !event.shiftKey &&
-                          !event.metaKey &&
-                          !event.ctrlKey &&
-                          !event.altKey &&
-                          !event.nativeEvent.isComposing
-                        ) {
-                          event.preventDefault();
-                          void handleSubmit();
-                        }
-                      }}
-                    />
-                    {activeConversationHydrated ? (
-                      <BriefOverlay
-                        textareaRef={composerTextareaRef}
-                        text={activePrompt}
-                        registry={activeBriefRegistry}
-                        fileDetails={briefFileDetails}
-                        prefix={briefPrefix}
-                        onPrefixWidthChange={setBriefPrefixWidth}
-                        onTokenPointerDown={placeCaretAfterBriefToken}
-                        syncKey={briefOverlaySyncKey}
-                      />
-                    ) : null}
-
-                    {activeConversation?.selectedNotes.length ||
-                    (modelNotesReadEnabled &&
-                      (activeNoteSearchScope.active ||
-                        activeNoteSearchScope.recoverableFromReferenceText)) ? (
-                      <div className="flex flex-wrap gap-1.5 px-3 pt-2" aria-label="Notes for this message">
-                        {modelNotesReadEnabled && activeNoteSearchScope.active ? (
-                          <span className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8">
-                            <Search className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
-                            <span>Search Notes <span className="text-muted-foreground">· this message</span></span>
-                            <button
-                              type="button"
-                              className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
-                              aria-label="Don’t search Notes for this message"
-                              onClick={removeActiveNoteSearchScope}
-                            >
-                              <X className="size-3" aria-hidden="true" />
-                            </button>
-                          </span>
-                        ) : modelNotesReadEnabled &&
-                          activeNoteSearchScope.recoverableFromReferenceText ? (
-                          <button
-                            type="button"
-                            className="border-border hover:bg-accent focus-visible:ring-ring inline-flex min-h-11 items-center gap-1.5 rounded-full border bg-transparent px-2.5 text-xs focus-visible:ring-2 focus-visible:outline-none sm:min-h-8"
-                            aria-label="Allow Ultra to search Notes for this pasted request"
-                            onClick={() => setActiveNoteSearchScopeOverride(true)}
-                          >
-                            <Search className="text-muted-foreground size-3.5" aria-hidden="true" />
-                            Search Notes <span className="text-muted-foreground">· this message</span>
-                          </button>
-                        ) : null}
-                        {activeConversation?.selectedNotes.map((note) => (
-                          <span
-                            key={note.note_id}
-                            className="border-border bg-muted/55 inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full border py-1 pr-1 pl-2.5 text-xs sm:min-h-8"
-                          >
-                            <NotebookPen className="text-muted-foreground size-3.5 shrink-0" aria-hidden="true" />
-                            <span className="max-w-48 truncate">{note.title}</span>
-                            <button
-                              type="button"
-                              className="hover:bg-accent focus-visible:ring-ring inline-flex size-11 items-center justify-center rounded-full focus-visible:ring-2 focus-visible:outline-none sm:size-6"
-                              aria-label={`Remove Note ${note.title}`}
-                              onClick={() => removeNoteFromActiveConversation(note.note_id)}
-                            >
-                              <X className="size-3" aria-hidden="true" />
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    {pendingPreviewFiles.length > 0 ? (
-                      <div className="composer-preview-section px-3 pt-2">
-                        <div className="composer-preview-header">
-                          <span>{`Selected files · ${pendingPreviewFiles.length}`}</span>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 rounded-full px-2 text-[11px]"
-                            onClick={() =>
-                              updateActiveConversation((conversation) => ({
-                                ...conversation,
-                                pendingFiles: [],
-                              }))
-                            }
-                          >
-                            Clear
-                          </Button>
-                        </div>
-                        <div className="composer-preview-row">
-                          {pendingPreviewFiles.map((file) => (
-                            <article key={file.key} className="composer-preview-card">
-                              {file.objectUrl ? (
-                                <img
-                                  src={file.objectUrl}
-                                  alt={file.name}
-                                  className="composer-preview-image"
-                                />
-                              ) : (
-                                <div className="composer-preview-fallback">
-                                  {file.isBundle ? "ZARR" : file.isScientific ? "BIO" : "FILE"}
-                                </div>
-                              )}
-                              <div className="composer-preview-meta">
-                                <p className="composer-preview-name">{file.name}</p>
-                                <p className="composer-preview-size">{file.sizeLabel}</p>
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-xs"
-                                className="composer-preview-remove"
-                                aria-label={`Remove ${file.name}`}
-                                onClick={() => {
-                                  const removeIndices = new Set(file.indices);
-                                  updateActiveConversation((conversation) => ({
-                                    ...conversation,
-                                    pendingFiles: conversation.pendingFiles.filter(
-                                      (_, itemIndex) => !removeIndices.has(itemIndex)
-                                    ),
-                                  }));
-                                }}
-                              >
-                                <X className="size-3.5" />
-                              </Button>
-                            </article>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    {briefMention ? (
-                      <BriefMentionPickerHost
-                        variant={isPhoneView ? "sheet" : "popover"}
-                        anchor={briefMentionAnchor}
-                        listboxId={briefMentionListboxId}
-                        query={briefMention.query}
-                        results={briefMentionResults}
-                        loading={briefMentionLoading}
-                        error={briefMentionError}
-                        activeFileId={briefMentionActiveId}
-                        onActivate={setBriefMentionActiveId}
-                        onPick={pickBriefMention}
-                        onBeforeUpload={dismissBriefMention}
-                      />
-                    ) : null}
-                    {briefWhisperVisible ? (
-                      <div className="brief-whisper" data-testid="brief-whisper">
-                        {briefGoneFileIds.length > 0 ? (
-                          <span className="brief-whisper-summary brief-whisper-notice">
-                            {briefGoneNotice}{" "}
-                            <button type="button" onClick={replaceFirstGoneBriefToken}>
-                              choose another
-                            </button>
-                          </span>
-                        ) : briefWorkflowNeedsFiles ? (
-                          <span className="brief-whisper-summary brief-whisper-notice">
-                            {`${briefWorkflowLabel} works on an attached file — @ to bring one in, or `}
-                            <button
-                              type="button"
-                              onClick={() => openComposerResourcePicker({ clearSelection: false })}
-                            >
-                              choose from your library
-                            </button>
-                          </span>
-                        ) : (
-                          <span className="brief-whisper-summary">{briefSummaryText}</span>
-                        )}
-                        <span className="brief-whisper-keys" aria-hidden="true">
-                          <CornerDownLeft />
-                          <span>{briefKeysHint}</span>
-                        </span>
-                      </div>
-                    ) : null}
-                    {untokenizedPreviewFiles.length > 0 ? (
-                      <div className="composer-preview-section px-3 pt-2">
-                        <div className="composer-preview-header">
-                          <span>
-                            {`${
-                              activeSelectionContextFileIds.length > 0
-                                ? "Active analysis context"
-                                : "Uploaded context"
-                            } · ${untokenizedPreviewFiles.length}`}
-                          </span>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="h-6 rounded-full px-2 text-[11px]"
-                            onClick={() => {
-                              setResourceViewerContext(null);
-                              setViewerOpen(true);
-                            }}
-                          >
-                            <ImageIcon className="mr-1 size-3.5" />
-                            View
-                          </Button>
-                        </div>
-                        <div className="composer-preview-row">
-                          {untokenizedPreviewFiles.map((file) => (
-                            <article key={file.id} className="composer-preview-card">
-                              {file.previewUrl ? (
-                                <img
-                                  src={file.previewUrl}
-                                  alt={file.name}
-                                  className="composer-preview-image"
-                                  loading="lazy"
-                                  onError={() => handlePreviewError(file.id)}
-                                />
-                              ) : (
-                                <div className="composer-preview-fallback">
-                                  {file.isScientific ? "BIO" : "FILE"}
-                                </div>
-                              )}
-                              <div className="composer-preview-meta">
-                                <p className="composer-preview-name">{file.name}</p>
-                                <p className="composer-preview-size">{file.sizeLabel}</p>
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-xs"
-                                className="composer-preview-remove"
-                                aria-label={`Exclude ${file.name}`}
-                                onClick={() =>
-                                  updateActiveConversation((conversation) => {
-                                    const currentSelection = conversation.activeSelectionContext;
-                                    const nextFocusedFileIds = currentSelection?.focused_file_ids?.filter(
-                                      (currentFileId) => currentFileId !== file.id
-                                    ) ?? [];
-                                    return {
-                                      ...conversation,
-                                      stagedUploadFileIds:
-                                        conversation.stagedUploadFileIds.filter(
-                                          (fileId) => fileId !== file.id
-                                        ),
-                                      activeSelectionContext:
-                                        currentSelection && (
-                                          currentSelection.focused_file_ids?.includes(file.id) ||
-                                          (currentSelection.resource_uris?.length ?? 0) > 0 ||
-                                          (currentSelection.dataset_uris?.length ?? 0) > 0
-                                        )
-                                          ? nextFocusedFileIds.length > 0
-                                            ? {
-                                                ...currentSelection,
-                                                focused_file_ids: nextFocusedFileIds,
-                                              }
-                                            : null
-                                          : currentSelection,
-                                      updatedAt: Date.now(),
-                                    };
-                                  })
-                                }
-                              >
-                                <X className="size-3.5" />
-                              </Button>
-                            </article>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <PromptInputActions
-                      className="app-composer-actions"
-                    >
-                      <div className="app-composer-actions-start">
-                        {/* ONE attach affordance: the browser forces two
-                            hidden inputs (webkitdirectory is exclusive), but
-                            the user sees a single + — format intelligence
-                            (zarr re-rooting, junk, caps) lives in the shared
-                            funnel, not in which button was pressed. */}
-                        <ComposerAttachMenu
-                          disabled={!activeConversationHydrated}
-                          onOpenResources={() => openComposerResourcePicker({ clearSelection: false })}
-                          onStartWorkflow={startBriefWorkflow}
-                          onOpenNotes={
-                            modelNotesReadEnabled
-                              ? () => setComposerNotePickerOpen(true)
-                              : undefined
-                          }
-                          onCloseAutoFocus={(event) => {
-                            event.preventDefault();
-                            composerTextareaRef.current?.focus();
-                          }}
-                        />
-                        <OneTimeNotice
-                          noticeId="pro-mode-launch-2026-08-20"
-                          audienceId={proModeIntroIdentity}
-                          enabled={proModeIntroEligible && newChatLandingActive}
-                          title="Pro mode is now available"
-                          description="Choose Pro when a scientific question benefits from more deliberate reasoning, longer tool use, and added verification."
-                        >
-                          <DropdownMenu>
-                          <PromptInputAction
-                            tooltip="Intelligence mode"
-                            disabled={!activeConversationHydrated}
-                            side="top"
-                            sideOffset={8}
-                            delayDuration={350}
-                            className="app-composer-tooltip"
-                          >
-                            <DropdownMenuTrigger asChild>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                data-testid="composer-intelligence-selector"
-                                aria-label={`Intelligence: ${
-                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                                }`}
-                                className="app-composer-intelligence-trigger"
-                                disabled={!activeConversationHydrated}
-                              >
-                                <span>
-                                  {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                                </span>
-                                <ChevronDown data-icon="inline-end" aria-hidden="true" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                          </PromptInputAction>
-                          <DropdownMenuContent
-                            align="end"
-                            sideOffset={8}
-                            className="app-composer-intelligence-menu"
-                          >
-                            <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
-                            <DropdownMenuGroup>
-                              <DropdownMenuItem
-                                data-active={
-                                  activeComposerIntelligenceMode === "high" ? "true" : undefined
-                                }
-                                onClick={() => handleSelectComposerIntelligenceMode("high")}
-                              >
-                                <span>High</span>
-                                {activeComposerIntelligenceMode === "high" ? (
-                                  <Check data-icon="inline-end" aria-hidden="true" />
-                                ) : null}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                data-intelligence-mode="pro"
-                                data-active={
-                                  activeComposerIntelligenceMode === "pro" ? "true" : undefined
-                                }
-                                onClick={() => handleSelectComposerIntelligenceMode("pro")}
-                              >
-                                <span>Pro</span>
-                                {activeComposerIntelligenceMode === "pro" ? (
-                                  <Check data-icon="inline-end" aria-hidden="true" />
-                                ) : null}
-                              </DropdownMenuItem>
-                            </DropdownMenuGroup>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        </OneTimeNotice>
-                      </div>
-                      <div className="app-composer-actions-end">
-                        {/* The slim pill's mode control: a REAL button —
-                            with the pill staying slim while typing, this is
-                            the only VISIBLE mode selector (the toolbar one is
-                            visibility:hidden while slim), so it must be
-                            keyboard-reachable: it is a normal tab stop and its
-                            slim CSS gates it out of the tab order + a11y tree
-                            when the toolbar selector takes over. mousedown
-                            preventDefault keeps a MOUSE click from blurring the
-                            textarea; keyboard focus is unaffected. */}
-                        <DropdownMenu>
-                          <PromptInputAction
-                            tooltip="Intelligence mode"
-                            side="top"
-                            sideOffset={8}
-                            delayDuration={350}
-                            className="app-composer-tooltip"
-                          >
-                            <DropdownMenuTrigger asChild>
-                              <button
-                                type="button"
-                                className="app-composer-idle-mode"
-                                data-testid="composer-slim-intelligence-trigger"
-                                aria-label={`Intelligence: ${
-                                  activeComposerIntelligenceMode === "pro" ? "Pro" : "High"
-                                }`}
-                                onMouseDown={(event) => event.preventDefault()}
-                              >
-                                {activeComposerIntelligenceMode === "pro" ? "Pro" : "High"}
-                              </button>
-                            </DropdownMenuTrigger>
-                          </PromptInputAction>
-                          <DropdownMenuContent
-                            align="end"
-                            sideOffset={8}
-                            className="app-composer-intelligence-menu"
-                            onCloseAutoFocus={(event) => {
-                              event.preventDefault();
-                              composerTextareaRef.current?.focus();
-                            }}
-                          >
-                            <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
-                            <DropdownMenuGroup>
-                              <DropdownMenuItem
-                                data-active={
-                                  activeComposerIntelligenceMode === "high" ? "true" : undefined
-                                }
-                                onClick={() => handleSelectComposerIntelligenceMode("high")}
-                              >
-                                <span>High</span>
-                                {activeComposerIntelligenceMode === "high" ? (
-                                  <Check data-icon="inline-end" aria-hidden="true" />
-                                ) : null}
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                data-intelligence-mode="pro"
-                                data-active={
-                                  activeComposerIntelligenceMode === "pro" ? "true" : undefined
-                                }
-                                onClick={() => handleSelectComposerIntelligenceMode("pro")}
-                              >
-                                <span>Pro</span>
-                                {activeComposerIntelligenceMode === "pro" ? (
-                                  <Check data-icon="inline-end" aria-hidden="true" />
-                                ) : null}
-                              </DropdownMenuItem>
-                            </DropdownMenuGroup>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                        {activeSending ? (
-                          <>
-                            {/* Steer, then Queue, then Stop; Stop never moves
-                                (the send-position jump was a bug once
-                                already). Steer reaches the RUNNING agent at
-                                its next step; Queue waits the run out. */}
-                            {activePrompt.trim() &&
-                            !slashMenuOpen &&
-                            !composerResourcePickerOpen &&
-                            !composerNotePickerOpen ? (
-                              <>
-                                <PromptInputAction
-                                  tooltip="Steer this run now — ⌘↵"
-                                  side="top"
-                                  sideOffset={8}
-                                  delayDuration={350}
-                                  className="app-composer-tooltip"
-                                >
-                                  <Button
-                                    size="icon"
-                                    type="button"
-                                    variant="ghost"
-                                    onClick={steerFollowup}
-                                    aria-label="Steer this run"
-                                    className="app-composer-steer-button size-11 rounded-full sm:size-10"
-                                  >
-                                    <Zap size={18} />
-                                  </Button>
-                                </PromptInputAction>
-                                <PromptInputAction
-                                  tooltip="Queue for after this run"
-                                  side="top"
-                                  sideOffset={8}
-                                  delayDuration={350}
-                                  className="app-composer-tooltip"
-                                >
-                                  <Button
-                                    size="icon"
-                                    type="button"
-                                    variant="ghost"
-                                    onClick={queueFollowup}
-                                    aria-label="Queue follow-up"
-                                    className="app-composer-queue-button size-11 rounded-full sm:size-10"
-                                  >
-                                    <ArrowUp size={18} />
-                                  </Button>
-                                </PromptInputAction>
-                              </>
-                            ) : null}
-                            <Button
-                              size="icon"
-                              type="button"
-                              variant="destructive"
-                              onClick={stopActiveConversation}
-                              aria-label="Stop response"
-                              title="Stop response"
-                              className="app-composer-stop-button brief-stop-button size-11 rounded-full sm:size-10"
-                            >
-                              <Square className="size-3.5 fill-current" />
-                              <span>Stop</span>
-                            </Button>
-                          </>
-                        ) : (
-                          <PromptInputAction
-                            tooltip={
-                              <span className="app-composer-submit-tooltip-row">
-                                <span>Send prompt</span>
-                                <span
-                                  className="app-composer-submit-tooltip-key"
-                                  aria-hidden="true"
-                                >
-                                  ↵
-                                </span>
-                                <span className="sr-only">
-                                  Press Enter to send. Shift+Enter starts a new line.
-                                </span>
-                              </span>
-                            }
-                            disabled={composerSubmitDisabled}
-                            side="top"
-                            sideOffset={8}
-                            delayDuration={350}
-                            className="app-composer-submit-tooltip"
-                          >
-                            <Button
-                              size="icon"
-                              type="submit"
-                              disabled={composerSubmitDisabled}
-                              aria-label="Send prompt"
-                              className="app-composer-submit-button size-11 rounded-full sm:size-10"
-                            >
-                              <ArrowUp size={18} />
-                            </Button>
-                          </PromptInputAction>
-                        )}
-                      </div>
-                    </PromptInputActions>
-                  </div>
-                </PromptInput>
+                  onSteer={steerFollowup}
+                  onQueue={queueFollowup}
+                  onStop={stopActiveConversation}
+                  onKeyDown={handleComposerKeyDown}
+                  onPaste={handleComposerPaste}
+                  onOpenResources={() => openComposerResourcePicker({ clearSelection: false })}
+                  onStartWorkflow={startBriefWorkflow}
+                  onOpenNotes={
+                    modelNotesReadEnabled ? () => setComposerNotePickerOpen(true) : undefined
+                  }
+                />
               </FileUpload>
             </div>
           </div>

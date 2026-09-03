@@ -40,7 +40,9 @@ describe("sidebar collapse layout", () => {
     ).toBe(true);
     expect(appSource.includes("<UserTokenUsagePanel")).toBe(false);
     expect(appSource.includes('onOpenUsage={() => openSettings("usage")}')).toBe(true);
-    expect(appSource.includes("Describe a question, dataset, or experiment…")).toBe(true);
+    expect(
+      readFileSync(path.join(process.cwd(), "src/components/composer/composerModel.ts"), "utf8")
+    ).toContain("Describe a question, dataset, or experiment…");
     expect(appSource.includes('className="welcome-starting-points"')).toBe(true);
     expect(appSource.includes('const welcomeHeadline = "What are you working on?";')).toBe(false);
     expect(appSource.includes("Santa Barbara weather")).toBe(false);

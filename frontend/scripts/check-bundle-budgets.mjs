@@ -11,7 +11,9 @@ const budgets = [
   // Shell measured 475.1 KiB before it and 488.4 KiB after (+13.3 KiB):
   // budget 490_000 → 505_000, keeping the same ~5 KiB of headroom.
   { label: "app-shell", pattern: /^index-.*\.js$/, maxBytes: 505_000 },
-  { label: "resource-mention-picker", pattern: /^ResourceMentionPicker-.*\.js$/, maxBytes: 20_000 },
+  // The composer's editor is its own chunk; ProseMirror core is shared with Notes.
+  { label: "composer-editor", pattern: /^ComposerEditor-.*\.js$/, maxBytes: 30_000 },
+  { label: "vendor-prosemirror", pattern: /^vendor-prosemirror-.*\.js$/, maxBytes: 420_000 },
   { label: "auth-screen", pattern: /^AuthScreen-.*\.js$/, maxBytes: 25_000 },
   { label: "composer-slash-menu", pattern: /^ComposerSlashMenu-.*\.js$/, maxBytes: 20_000 },
   { label: "composer-workflows", pattern: /^composer-workflows-.*\.js$/, maxBytes: 20_000 },
@@ -105,6 +107,11 @@ for (const budget of budgets) {
 // 5 MB of Gaussian-splat runtime. Assert the dependency direction, not just the bytes.
 const isolationRules = [
   {
+    from: /^index-.*\.js$/,
+    mustNotImport: "vendor-prosemirror",
+    why: "the app shell must not pull the editor runtime; the composer loads it lazily",
+  },
+  {
     from: /^SliceStackVolumeCanvas-.*\.js$/,
     mustNotImport: "vendor-spark",
     why: "the volume viewer must not pull the Gaussian-splat runtime",
@@ -123,7 +130,11 @@ for (const rule of isolationRules) {
     continue;
   }
   const source = fs.readFileSync(path.join(distAssetsDir, match.file), "utf8");
-  if (source.includes(rule.mustNotImport)) {
+  // A STATIC import is the violation. Vite also lists a lazy chunk's own
+  // dependencies as preload strings in whoever imports it dynamically — that
+  // string names the chunk without loading it, and is not a dependency edge.
+  const staticImport = new RegExp(`(?:from|import)\\s*["']\\./${rule.mustNotImport}`);
+  if (staticImport.test(source)) {
     failures.push(
       `${match.file} must not import ${rule.mustNotImport}: ${rule.why}. ` +
         `Check the advancedChunks group priorities in vite.config.ts.`

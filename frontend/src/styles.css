@@ -450,8 +450,7 @@ body {
    the chrome controls. Scoped to coarse pointers so desktop is untouched. */
 @media (pointer: coarse) {
   .app-mobile-sidebar-trigger,
-  .pk-prompt-input button,
-  .app-mobile-shell-bar button {
+.app-mobile-shell-bar button {
     min-height: 44px;
     min-width: 44px;
   }
@@ -2395,10 +2394,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   z-index: 40;
 }
 
-.app-composer-shell[data-composer-menu-open="true"] .app-composer-card {
-  overflow: visible;
-}
-
 /* Desktop half of the read-mode collapse. Reading back through a long answer is
    when the toolbar is pure distraction, so the composer drops to a hairline and
    a hint — no attach, no model chip, no send — and comes back the moment you
@@ -2413,90 +2408,24 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    down instead of also sliding sideways, and a hint that moves in two axes while
    you scroll is the distraction this is meant to remove. */
 @media (min-width: 641px) {
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-card-body {
-    min-height: 1.8rem;
-    /* The expanded row's 0.6rem block padding is 19.2px of the 49px it was still
-       measuring — zeroing it is what actually gets the strip to ~30px. The
-       textarea's own padding still centres the line inside the box. */
-    padding-block: 0;
-  }
   /* Half the resting strip: the card goes 77px -> ~30px. The hint takes the
      run-meta line's type (12px / 400 / 20px — the "487K tokens · 1m 6s" footer)
      rather than the composer's 15px reading size, because while collapsed it is
      marginalia about a control, not the control's own voice. */
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-textarea {
-    min-height: 1.8rem;
-    max-height: 1.8rem;
-    font-size: 0.75rem;
-    line-height: 20px;
-    /* Centres the 20px line box in the 1.8rem strip; stated in px against a rem
-       box on purpose, so the hint stays centred if the reading size moves. */
-    padding-top: calc((1.8rem - 20px) / 2);
-    padding-bottom: calc((1.8rem - 20px) / 2);
-  }
   /* visibility, not just opacity: these are real controls, and a 0-opacity
      button is still tabbable and still announced. Exactly one set of composer
      controls should ever be in the a11y tree. */
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-idle-attach,
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-idle-mode,
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-    .app-composer-actions-end {
-    opacity: 0;
-    visibility: hidden;
-    pointer-events: none;
-    transition: opacity 160ms var(--motion-ease), visibility 0s linear 160ms;
-  }
 }
 
 /* Read mode removes every other composer cue, so its placeholder is an
    instruction rather than inactive chrome. Keep it on the final text rung at
    every width: the default ghost token is only a hairline rung in Day and is
    visibly lost on both mobile themes. */
-.app-composer-shell[data-composer-compact="true"]:not(:focus-within)
-  .app-composer-textarea::placeholder {
-  color: var(--text-muted);
-}
 
 /* Phone-only: collapse the composer to a slim line while the user reads back
    through a long answer (data-composer-compact set when scrolled away). It
    re-expands instantly on focus (keyboard up) via :focus-within, and when
    scrolled back to the bottom or a run starts (attribute cleared in JS). */
-@media (max-width: 640px) {
-  .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms var(--motion-ease), max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
-  }
-  .app-composer-shell .app-composer-actions {
-    max-height: 5rem;
-    overflow: hidden;
-    transition: max-height 220ms var(--motion-ease), opacity 160ms var(--motion-ease), padding 220ms var(--motion-ease),
-      margin-top 220ms var(--motion-ease);
-  }
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-textarea {
-    min-height: 2.55rem;
-    max-height: 3rem;
-    padding-top: 0.7rem;
-    padding-bottom: 0.7rem;
-  }
-  .app-composer-shell[data-composer-compact="true"]:not(:focus-within) .app-composer-actions {
-    max-height: 0;
-    margin-top: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-    opacity: 0;
-    pointer-events: none;
-  }
-}
-
-@media (max-width: 640px) and (prefers-reduced-motion: reduce) {
-  .app-composer-shell .app-composer-textarea,
-  .app-composer-shell .app-composer-actions {
-    transition: none;
-  }
-}
 
 /* Desktop/tablet: the composer stays a slim single line while the prompt
    FITS one line — focusing alone no longer expands it. It grows smoothly the
@@ -2506,47 +2435,21 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    (empty + not busy) still exists for the purely decorative empty-state bits. Reuses the exact collapse tokens proven in
    the phone-only block above; mobile keeps its own scroll-away behavior. */
 @media (min-width: 641px) {
-  .app-composer-shell .app-composer-textarea {
-    transition: min-height 220ms var(--motion-ease),
-      max-height 220ms var(--motion-ease), padding 220ms var(--motion-ease);
-  }
-  .app-composer-shell .app-composer-actions {
-    transition: padding 220ms var(--motion-ease),
-      margin-top 220ms var(--motion-ease);
-  }
   /* the collapse mechanism lives on the +/model group (not the whole row) so the
      send button in .app-composer-actions-end can stay visible at idle.
      2.5rem = the row's actual content height (sm:size-10 buttons), so the
      reveal/collapse rides the full 220ms instead of dead time past the cap. */
-  .app-composer-shell .app-composer-actions-start {
-    max-height: 2.5rem;
-    overflow: hidden;
-    transition: max-height 220ms var(--motion-ease),
-      opacity 160ms var(--motion-ease);
-  }
   /* The send/stop group is ALWAYS absolutely positioned against the card on
      desktop — position cannot animate, so toggling absolute↔flow on the slim
      flip teleported the send button mid-transition. Instead it glides between
      two anchors on animatable offsets: the toolbar spot (card pad 10px + row
      pad 1rem = 1.625rem) and the slim spot (right 1rem, vertically centered
      in the 3rem pill). Pure CSS motion, synced to the 220ms height ride. */
-  .app-composer-shell .app-composer-actions-end {
-    position: absolute;
-    right: 1.625rem;
-    bottom: 1.625rem;
-    margin: 0;
-    z-index: 2;
-    transition: right 220ms var(--motion-ease), bottom 220ms var(--motion-ease);
-  }
   /* animate the card's own padding so the idle padding trim collapses in sync
      with the textarea/action-row (overrides the base 160ms card transition).
      The radius no longer animates because there is no radius: the flat surface
      is the same shape at rest and expanded, so height is the only thing that
      rides the 220ms. */
-  .app-composer-shell .app-composer-card {
-    transition: border-color 160ms var(--motion-ease),
-      box-shadow 160ms var(--motion-ease), padding 220ms var(--motion-ease);
-  }
 
   /* Room, and one optical line. The resting row is 77px (was 49px), and the
      placeholder's first text line, the attach +, the model echo and the send
@@ -2555,17 +2458,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      axis: justify-content is what centres the field in the taller row.
      align-items would only centre it horizontally, and would shrink it off
      full width. */
-  .app-composer-shell .app-composer-card-body {
-    justify-content: center;
-    min-height: 4.75rem;
-    padding-block: 0.6rem;
-  }
 
   /* The field keeps its own padding: its height is set inline by the auto-resize
      JS, and that padding is what centres the line inside its own box. */
-  .app-composer-shell .app-composer-textarea {
-    flex: 0 0 auto;
-  }
   /* max-height clamps the autosize inline height (which min-height cannot beat)
      so the field collapses to one line even if autosize last ran while the box
      was expanded; releases back to the pk max-height on focus. */
@@ -2576,31 +2471,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      pill and its text land identically every time. padding-left clears the
      idle attach button; padding-right reserves the floating Pro/High + send.
      Both come from the shared --composer-slim-pad-* vars the JS mirror reads. */
-  .app-composer-shell[data-composer-slim="true"] .app-composer-textarea {
-    min-height: 3rem;
-    max-height: 3rem;
-    padding-top: calc((3rem - 1em * var(--composer-line-height)) / 2);
-    padding-bottom: calc((3rem - 1em * var(--composer-line-height)) / 2);
-    padding-left: var(--composer-slim-pad-left);
-    padding-right: var(--composer-slim-pad-right);
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-actions {
-    margin-top: 0;
-    padding-top: 0;
-    padding-bottom: 0;
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-start {
-    max-height: 0;
-    opacity: 0;
-    pointer-events: none;
-    /* visibility flips INSTANTLY (no delay): it removes the real toolbar attach +
-       intelligence from the tab order and a11y tree, and the slim replacements
-       reveal instantly too, so exactly one set is ever exposed. A delayed hide
-       would leave both sets in the a11y tree for the transition window. */
-    visibility: hidden;
-    transition: max-height 220ms var(--motion-ease),
-      opacity 160ms var(--motion-ease);
-  }
   /* keep the submit affordance on the slim line to balance the placeholder.
      Offsets ONLY — the positioning model never changes, so the button glides
      to/from the toolbar anchor instead of jumping when slim flips mid-type.
@@ -2610,35 +2480,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
      `bottom` so the glide survives. `top: 50%; bottom: auto` would centre it too,
      but `auto` is not animatable, so the button would jump. The "Pro" echo is
      already centred inside this cluster, so both move together. */
-  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-end {
-    right: 1rem;
-    bottom: 1.125rem;
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-card {
-    padding-top: 0;
-    padding-bottom: 0;
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    transition: opacity 160ms var(--motion-ease);
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode:hover {
-    color: var(--text-main);
-  }
-}
-
-@media (min-width: 641px) and (prefers-reduced-motion: reduce) {
-  .app-composer-shell .app-composer-textarea,
-  .app-composer-shell .app-composer-actions,
-  .app-composer-shell .app-composer-actions-start,
-  .app-composer-shell .app-composer-actions-end,
-  .app-composer-shell .app-composer-card,
-  .app-composer-shell .app-composer-idle-attach,
-  .app-composer-shell .app-composer-idle-mode {
-    transition: none;
-  }
 }
 
 .app-history-button:hover {
@@ -2792,6 +2633,718 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 
 .app-main-shell[data-welcome-stage="true"] .app-composer-shell {
   padding-bottom: 0;
+}
+
+/* ============================================================================
+   The composer.
+
+   One sentence that says everything the run will receive. Its geometry is a
+   function of a few explicit states, stamped on the form as data attributes
+   by Composer.tsx: data-stage (rest | composing | running), data-layout
+   (desktop | phone), data-read-mode (scrolled away, collapsed to a strip),
+   data-menu-open, data-editor (prosemirror | fallback). Nothing below reads
+   focus or emptiness on its own — the component decides, the sheet draws.
+   ========================================================================== */
+
+.composer {
+  --composer-line-height: 1.5;
+  --composer-control: 2.5rem;
+  --composer-token-bg: color-mix(in oklab, var(--text-main) 7%, transparent);
+  --composer-token-bg-strong: color-mix(in oklab, var(--text-main) 11%, transparent);
+  --composer-whisper: var(--text-muted);
+  --composer-whisper-faint: color-mix(in oklab, var(--text-muted) 62%, transparent);
+  position: relative;
+  width: 100%;
+  margin: 0;
+}
+
+.dark .composer {
+  --composer-token-bg: color-mix(in oklab, var(--text-main) 10%, transparent);
+  --composer-token-bg-strong: color-mix(in oklab, var(--text-main) 16%, transparent);
+}
+
+/* A menu above the line must clear the transcript's own controls. */
+.composer[data-menu-open="true"] {
+  z-index: 40;
+}
+
+.composer-menus {
+  position: absolute;
+  inset: auto 0 100% 0;
+  z-index: 30;
+}
+
+/* The surface is one hairline; the whole region reads as the field. */
+.composer-surface {
+  position: relative;
+  padding: 0.3rem 0 0.45rem;
+  border-top: 1px solid color-mix(in oklab, var(--line) 88%, transparent);
+  background: transparent;
+  cursor: text;
+  transition: border-color 160ms var(--motion-ease), box-shadow 160ms var(--motion-ease);
+}
+
+/* Keyboard focus doubles the hairline to a visible 2px without moving the row;
+   pointer focus lights nothing — the caret already announces it. */
+.composer-surface:has(.composer-editor:focus-visible) {
+  border-top-color: var(--text-muted);
+  box-shadow: inset 0 1px 0 var(--text-muted);
+}
+
+/* A drag over the dock: the weight moves inside the top rule — 3px of it, one
+   step louder than focus's 2px — never a rectangle around the whole dock. */
+.pk-file-upload-drag .composer-surface {
+  border-top-color: color-mix(in oklab, var(--text-main) 40%, transparent);
+  box-shadow: inset 0 2px 0 color-mix(in oklab, var(--text-main) 40%, transparent);
+}
+
+/* THE RECORDER — while the instrument runs, the baseline records. Brass touches
+   the composer only while a run is genuinely live. */
+.composer-recorder {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 6rem;
+  height: 10px;
+  transform: translateY(-50%);
+  color: var(--accent-live);
+  overflow: visible;
+  pointer-events: none;
+}
+
+.composer-recorder path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: trace-write 3.4s linear infinite;
+}
+
+/* The line: attach, then the field, then the send or run cluster. Controls sit
+   on the LAST text line (align-items: flex-end), so a one-line brief centres
+   everything on one optical line and a long one grows upward above them. */
+.composer-line {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.3rem;
+  min-height: var(--composer-control);
+  padding: 0 0.55rem 0 0.45rem;
+}
+
+.composer-control {
+  flex: 0 0 auto;
+  width: var(--composer-control);
+  height: var(--composer-control);
+  border-radius: 999px;
+  transition:
+    transform 160ms var(--motion-ease),
+    background-color 160ms var(--motion-ease),
+    border-color 160ms var(--motion-ease),
+    color 160ms var(--motion-ease),
+    box-shadow 160ms var(--motion-ease);
+}
+
+.composer-attach {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.composer-attach:hover,
+.composer-attach:focus-visible,
+.composer-attach[aria-expanded="true"] {
+  background: var(--composer-control-hover-bg);
+  color: var(--text-main);
+}
+
+.composer-end {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
+.composer-send {
+  border: 0;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: var(--composer-submit-shadow);
+}
+
+.composer-send:not(:disabled):hover,
+.composer-send:not(:disabled):focus-visible,
+.composer-stop:hover,
+.composer-stop:focus-visible {
+  transform: translateY(-1px);
+}
+
+.composer-send:not(:disabled):hover,
+.composer-send:not(:disabled):focus-visible {
+  background: var(--brand-strong);
+}
+
+.composer-send:disabled {
+  background: color-mix(in oklab, var(--bg-main) 84%, var(--bg-panel-strong) 16%);
+  color: var(--text-muted);
+  box-shadow: none;
+}
+
+.composer-steer,
+.composer-queue {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.composer-steer:hover,
+.composer-steer:focus-visible,
+.composer-queue:hover,
+.composer-queue:focus-visible {
+  background: var(--composer-control-hover-bg);
+  color: var(--text-main);
+}
+
+/* Stop carries its word: a destructive verb on a pill that fits the row. */
+.composer-stop {
+  width: auto;
+  padding: 0 0.85rem 0 0.7rem;
+  gap: 0.4rem;
+  font-size: 0.875rem;
+  font-weight: var(--font-weight-action);
+}
+
+/* The field holds the chips and the editor. It — not the editor — scrolls past
+   the cap, so the editor's block keeps flowing around the floated chips. */
+.composer-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* (control − one line box) / 2: a one-line brief sits on the controls' axis. */
+  padding: calc((var(--composer-control) - 1em * var(--composer-line-height)) / 2) 0.35rem;
+  font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
+  line-height: var(--composer-line-height);
+  letter-spacing: 0;
+  color: var(--text-main);
+}
+
+/* The chips lead the sentence: a float, so only the FIRST line of the brief
+   starts after them and every later line runs the full width beneath. */
+.composer-prefix {
+  float: left;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  height: calc(1em * var(--composer-line-height));
+  margin-right: 0.45rem;
+  vertical-align: baseline;
+}
+
+.composer-prefix:empty {
+  display: none;
+}
+
+.composer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  height: 1.45em;
+  padding: 0 0.55em 0 0.45em;
+  border: 0;
+  border-radius: 0.42em;
+  background: var(--composer-token-bg);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: 0.8em;
+  font-weight: var(--font-weight-action);
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
+}
+
+.composer-chip:hover,
+.composer-chip[aria-expanded="true"] {
+  background: var(--composer-token-bg-strong);
+  color: var(--text-main);
+}
+
+.composer-chip:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+.composer-chip:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.composer-chip svg {
+  width: 0.95em;
+  height: 0.95em;
+  flex: 0 0 auto;
+}
+
+/* The mode chip stays in the muted register: it states the mode, it does not
+   compete with the brief. */
+.composer-chip-mode {
+  color: var(--text-muted);
+}
+
+/* The workflow leads in the one filled treatment the composer owns — the same
+   ink as the send button, inverted in Night by the tokens. */
+.composer-chip-workflow {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.composer-chip-workflow:hover,
+.composer-chip-workflow[aria-expanded="true"] {
+  background: var(--brand-strong);
+  color: var(--primary-foreground);
+}
+
+/* The editor: ProseMirror's contenteditable, or the fallback textarea. Both
+   inherit the field's type; neither draws a box of its own. */
+.composer-editor-mount {
+  display: block;
+  min-width: 0;
+}
+
+.composer-editor {
+  display: block;
+  width: 100%;
+  min-height: calc(1em * var(--composer-line-height));
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  letter-spacing: 0;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.composer-editor p {
+  margin: 0;
+}
+
+textarea.composer-editor {
+  resize: none;
+  overflow: hidden;
+}
+
+textarea.composer-editor::placeholder {
+  color: var(--composer-placeholder);
+  opacity: 1;
+}
+
+.composer-editor:disabled,
+.composer-editor[aria-disabled="true"] {
+  cursor: default;
+}
+
+.composer-placeholder {
+  color: var(--composer-placeholder);
+  pointer-events: none;
+  user-select: none;
+}
+
+/* A file token: kind chip, name, and a remove that appears on hover. It is a
+   real node the caret steps over and Backspace removes whole. */
+.composer-token {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32em;
+  max-width: 100%;
+  height: 1.45em;
+  padding: 0 0.2em 0 0.45em;
+  border-radius: 0.42em;
+  background: var(--composer-token-bg);
+  color: var(--text-main);
+  font-size: 0.92em;
+  line-height: 1;
+  vertical-align: -0.28em;
+  white-space: nowrap;
+  cursor: default;
+  transition: background-color 160ms var(--motion-ease);
+}
+
+.composer-token:hover,
+.composer-token-selected {
+  background: var(--composer-token-bg-strong);
+}
+
+.composer-token-kind {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.62em;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.composer-token-kind[hidden] {
+  display: none;
+}
+
+.composer-token-name {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-token-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15em;
+  height: 1.15em;
+  margin-left: -0.05em;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 160ms var(--motion-ease), background-color 160ms var(--motion-ease);
+}
+
+.composer-token:hover .composer-token-remove,
+.composer-token-remove:hover {
+  opacity: 1;
+}
+
+.composer-token-remove:hover {
+  background: var(--composer-control-hover-bg);
+  color: var(--text-main);
+}
+
+/* Deleted from the library since it was written: dashed, struck, muted. */
+.composer-token-gone {
+  background: transparent;
+  outline: 1px dashed var(--line-strong);
+  outline-offset: -1px;
+  color: var(--text-muted);
+}
+
+.composer-token-gone .composer-token-name {
+  text-decoration: line-through;
+}
+
+/* The whisper: the summary of the brief and the key contract, in the corner. */
+.composer-whisper {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 0.1rem 1rem 0.15rem 3.05rem;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--composer-whisper);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The running eyebrow: the status line behind a live turn. Muted, small, and in
+   tabular figures — the elapsed seconds and the token total tick while it
+   runs, and proportional digits would reflow the line on every update. */
+.composer-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 0.35rem 1rem 0.1rem 3.05rem;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-whisper-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+  color: var(--composer-whisper-faint);
+  white-space: nowrap;
+}
+
+.composer-whisper-keys svg {
+  width: 13px;
+  height: 13px;
+}
+
+.composer-whisper-summary,
+.composer-eyebrow-status {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.composer-eyebrow-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-run-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--text-main);
+  animation: composer-run-dot 1.6s var(--motion-ease) infinite;
+}
+
+@keyframes composer-run-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* A gone file or a file-first workflow with nothing attached: the whisper turns
+   into the notice and offers the one action that repairs it. */
+.composer-whisper-notice {
+  color: var(--text-main);
+}
+
+.composer-whisper-notice button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-main);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  cursor: pointer;
+}
+
+/* READ MODE — scrolled away from the end of a long answer, at every width. The
+   composer drops to a strip and a hint: no attach, no chips, no send. It comes
+   back the moment it is focused, the bottom is reached, or a run starts. The
+   strip takes the run-meta line's type (12px / 20px): marginalia about a
+   control, not the control's own voice. */
+.composer[data-read-mode="true"] .composer-line {
+  min-height: 1.8rem;
+}
+
+.composer[data-read-mode="true"] .composer-field {
+  max-height: 1.8rem;
+  overflow: hidden;
+  padding-top: calc((1.8rem - 20px) / 2);
+  padding-bottom: calc((1.8rem - 20px) / 2);
+  font-size: 0.75rem;
+  line-height: 20px;
+}
+
+.composer[data-read-mode="true"] .composer-placeholder,
+.composer[data-read-mode="true"] textarea.composer-editor::placeholder {
+  color: var(--text-muted);
+}
+
+/* visibility, not just opacity: these are real controls, and a 0-opacity
+   button is still tabbable and still announced. */
+.composer[data-read-mode="true"] .composer-attach,
+.composer[data-read-mode="true"] .composer-end,
+.composer[data-read-mode="true"] .composer-prefix,
+.composer[data-read-mode="true"] .composer-whisper {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 160ms var(--motion-ease), visibility 0s linear 160ms;
+}
+
+.composer[data-read-mode="true"] .composer-attach,
+.composer[data-read-mode="true"] .composer-end {
+  height: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Phones keep a tappable strip rather than the 30px desktop one. */
+@media (max-width: 640px) {
+  .composer[data-read-mode="true"] .composer-line {
+    min-height: 2.55rem;
+  }
+  .composer[data-read-mode="true"] .composer-field {
+    max-height: 2.55rem;
+    padding-top: calc((2.55rem - 20px) / 2);
+    padding-bottom: calc((2.55rem - 20px) / 2);
+  }
+}
+
+/* The @ picker. Desktop floats it at the caret above the line; phones lay it
+   under the line as a sheet. One popover language with the rest of the
+   product: raised ground, hairline, 12px radius, 44px rows. */
+.composer-mention-picker {
+  position: absolute;
+  z-index: 35;
+  width: 380px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-raised);
+  overflow: hidden;
+}
+
+.composer-mention-picker-popover {
+  bottom: calc(100% + 0.5rem);
+  left: 0;
+}
+
+.composer-mention-picker-sheet {
+  position: relative;
+  width: auto;
+  margin: 0.35rem 0.55rem 0.2rem;
+}
+
+.composer-mention-list {
+  max-height: 264px;
+  margin: 0;
+  padding: 0.35rem;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.composer-mention-option {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-height: 44px;
+  padding: 0.35rem 0.6rem;
+  border-radius: calc(var(--radius) - 4px);
+  cursor: pointer;
+}
+
+.composer-mention-option-active {
+  background: var(--composer-token-bg);
+}
+
+.composer-mention-kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 2.35rem;
+  height: 1.55rem;
+  padding: 0 0.4rem;
+  border-radius: calc(var(--radius) - 6px);
+  background: var(--composer-token-bg);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.composer-mention-body {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.composer-mention-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.875rem;
+  font-weight: var(--font-weight-action);
+  color: var(--text-main);
+}
+
+.composer-mention-match {
+  font-weight: var(--font-weight-strong);
+}
+
+.composer-mention-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-mention-empty {
+  padding: 0.9rem 0.95rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.composer-mention-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.95rem;
+  border-top: 1px solid color-mix(in oklab, var(--line) 88%, transparent);
+  font-size: 0.75rem;
+  color: var(--composer-whisper-faint);
+}
+
+.composer-mention-upload {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-mention-upload:hover {
+  color: var(--text-main);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+/* Phones: 44px targets, no keyboard to whisper about, a sheet not a popover. */
+@media (max-width: 640px) {
+  .composer {
+    --composer-control: 2.75rem;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .composer-whisper-keys,
+  .composer-mention-hint {
+    display: none;
+  }
+  .composer-whisper,
+  .composer-eyebrow {
+    padding-left: 3.3rem;
+  }
+  .composer-mention-option {
+    min-height: 52px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-recorder path {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-run-dot {
+    animation: none;
+  }
+  .composer-token,
+  .composer-chip,
+  .composer-control,
+  .composer-surface {
+    transition: none;
+  }
 }
 
 .welcome-starters {
@@ -9350,20 +9903,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    background ~4300 lines LATER at equal specificity — a bare .app-composer-card
    loses to it, and the background is the dangerous one: it paints a visible
    panel block in dark theme instead of reading as the page edge. */
-.app-composer-shell .app-composer-card {
-  position: relative;
-  overflow: hidden;
-  padding: 0;
-  border: 0;
-  border-top: 1px solid color-mix(in oklab, var(--line) 88%, transparent);
-  border-radius: 0;
-  background: transparent;
-  /* No visible boundary any more, so the whole region has to read as the field. */
-  cursor: text;
-  transition:
-    border-color 160ms var(--motion-ease),
-    box-shadow 160ms var(--motion-ease);
-}
 
 /* CALM POINTER FOCUS — the search-well rule, applied to the control that
    needs it most. Clicking a text field is self-announcing (the caret), and
@@ -9377,10 +9916,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    3:1 and 2px WCAG 2.4.11 asks of a focus indicator with margin.
    :has(:focus-visible) scopes it to exactly the users who need it. Re-measure
    if --text-muted moves: the indicator borrows the token. */
-.app-composer-shell .app-composer-card:has(.app-composer-textarea:focus-visible) {
-  border-top-color: var(--text-muted);
-  box-shadow: inset 0 1px 0 var(--text-muted);
-}
 
 /* THE RECORDER — while the instrument runs, the baseline records. The brass
    trace lies ON the composer's top hairline, writing from the left: the most
@@ -9396,58 +9931,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   position: relative;
 }
 
-.app-composer-recorder {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: 6rem;
-  height: 10px;
-  transform: translateY(-50%);
-  color: var(--accent-live);
-  overflow: visible;
-  pointer-events: none;
-}
-
-.app-composer-recorder path {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  /* A recorder advances at constant path velocity, then holds its reading. */
-  animation: trace-write 3.4s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .app-composer-recorder path {
-    animation: none;
-    stroke-dashoffset: 0;
-  }
-}
-
-.app-composer-card-body {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-.app-composer-textarea {
-  min-height: 78px;
-  /* 0.85rem, not 1.1rem: the pill used to supply the top inset, so without it
-     the first line would start hard against the hairline. */
-  padding: 0.85rem 1.35rem 0.35rem;
-  font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
-  line-height: 1.45;
-  /* The field actually renders at the inherited 15px because
-     .pk-prompt-input-textarea's later `font: inherit` wins. Ultra Sans's native
-     text spacing is the measured match at this size; no external correction. */
-  letter-spacing: 0;
-  /* Slim horizontal insets, defined here (unconditionally) so the JS overflow
-     mirror can read the SAME values it measures against — see the composer
-     measurement effect in App.tsx. Left clears the floating + attach; right
-     reserves room for the floating Pro/High label and send, so a long single
-     line wraps (and the pill expands) before it could slide under them. */
-  --composer-slim-pad-left: 3.4rem;
-  --composer-slim-pad-right: 7.5rem;
-}
-
 /* The line-height the composer text ACTUALLY renders at. The `line-height: 1.45`
    above is dead — `.pk-prompt-input-textarea { font: inherit }` is declared later
    at equal specificity, so the field inherits 1.5 (same trap that kills the
@@ -9455,11 +9938,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    value, not the dead one, or it lands half a pixel off. */
 .app-composer-shell {
   --composer-line-height: 1.5;
-}
-
-.app-composer-textarea::placeholder {
-  color: var(--composer-placeholder);
-  opacity: 1;
 }
 
 /* ============================================================================
@@ -9486,407 +9964,46 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   --brief-token-bg-strong: color-mix(in oklab, var(--text-main) 16%, transparent);
 }
 
-.app-composer-card-body {
-  position: relative;
-}
-
-.brief-overlay {
-  position: absolute;
-  overflow: hidden;
-  pointer-events: none;
-  z-index: 1;
-}
-
-.brief-overlay-content {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: 100%;
-  color: transparent;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  word-break: normal;
-  /* The textarea's own scrollbar gutter, if it ever shows, is not mirrored;
-     the difference is one line wrap at the very end of a 240px-tall draft. */
-}
-
-.brief-overlay-text {
-  color: transparent;
-}
-
 /* Inline horizontal padding would shift the text that follows; the equal
    negative margin cancels it, so the pill reaches 0.18em into the padding
    spaces on either side while the glyphs stay exactly where the textarea
    draws them. Vertical padding is free — it never moves an inline line box.
    box-decoration-break clone keeps rounded ends when a token wraps. */
-.brief-token {
-  color: transparent;
-  background: var(--brief-token-bg);
-  border-radius: 0.38em;
-  padding: 0.1em 0.18em;
-  margin: 0 -0.18em;
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-  pointer-events: auto;
-  cursor: text;
-  transition: background-color 160ms var(--motion-ease);
-}
-
-.brief-token:hover {
-  background: var(--brief-token-bg-strong);
-}
 
 /* Deleted from the library since it was typed: the pill empties to a dashed
    frame and the run is struck through in the muted ink, so the eye reads
    "this one is gone" before the whisper says so. The strike colour is stated
    because the span's own colour is transparent. */
-.brief-token-gone {
-  background: transparent;
-  outline: 1px dashed var(--line-strong);
-  outline-offset: -1px;
-  text-decoration: line-through;
-  text-decoration-color: var(--text-muted);
-  text-decoration-thickness: 1px;
-}
 
 /* Chips at the head of the line: the workflow and the mode. Real controls
    (they open their menus), so they take pointer events even though the layer
    around them does not. Height stays inside the line box — 1.45em of the
    composer's 17px is 24.7px against a 25.9px line — so the first line of the
    overlay never grows taller than the textarea's. */
-.brief-overlay-prefix {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.32rem;
-  vertical-align: baseline;
-  margin-right: 0.45rem;
-  pointer-events: auto;
-  line-height: 1;
-}
-
-.brief-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3em;
-  height: 1.45em;
-  padding: 0 0.55em 0 0.45em;
-  border: 0;
-  border-radius: 0.42em;
-  background: var(--brief-token-bg);
-  color: var(--text-muted);
-  font-family: var(--font-sans);
-  font-size: 0.8em;
-  font-weight: var(--font-weight-action);
-  letter-spacing: 0;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background-color 160ms var(--motion-ease), color 160ms var(--motion-ease);
-}
-
-.brief-chip:hover,
-.brief-chip[aria-expanded="true"] {
-  background: var(--brief-token-bg-strong);
-  color: var(--text-main);
-}
-
-.brief-chip:focus-visible {
-  outline: 2px solid var(--sidebar-ring);
-  outline-offset: 2px;
-}
-
-.brief-chip svg {
-  width: 0.95em;
-  height: 0.95em;
-  flex: 0 0 auto;
-}
 
 /* The workflow leads the sentence in the one filled treatment the composer
    owns — the same ink as the send button, inverted in Night by the tokens. */
-.brief-chip-workflow {
-  background: var(--primary);
-  color: var(--primary-foreground);
-}
-
-.brief-chip-workflow:hover,
-.brief-chip-workflow[aria-expanded="true"] {
-  background: var(--brand-strong);
-  color: var(--primary-foreground);
-}
 
 /* The @ picker. Desktop floats it at the caret inside the card body; phones
    lay it under the line as a sheet. One popover language with the rest of the
    product: raised ground, hairline, 12px radius, 44px rows. */
-.brief-mention-picker {
-  position: absolute;
-  z-index: 45;
-  box-sizing: border-box;
-  width: min(380px, calc(100% - 1rem));
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: var(--bg-raised);
-  box-shadow: var(--shadow-raised);
-  color: var(--text-main);
-}
-
-.brief-mention-picker-popover {
-  bottom: calc(100% + 0.5rem);
-}
-
-.brief-mention-picker-sheet {
-  position: relative;
-  width: auto;
-  margin: 0.3rem 0.75rem 0.5rem;
-}
-
-.brief-mention-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 232px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.brief-mention-option {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 44px;
-  padding: 0 10px;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-.brief-mention-option-active {
-  background: var(--brief-token-bg);
-}
-
-.brief-mention-kind {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  border-radius: 8px;
-  background: var(--brief-token-bg);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-}
-
-.brief-mention-body {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.brief-mention-name {
-  overflow: hidden;
-  font-size: 14px;
-  font-weight: var(--font-weight-action);
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-variant-numeric: tabular-nums;
-}
-
-.brief-mention-match {
-  font-weight: var(--font-weight-strong);
-}
-
-.brief-mention-meta {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.brief-mention-empty {
-  padding: 12px 10px;
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-.brief-mention-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 30px;
-  margin-top: 4px;
-  padding: 0 10px;
-  border-top: 1px solid color-mix(in oklab, var(--line) 66%, transparent);
-  font-size: 12px;
-  color: var(--brief-whisper-faint);
-}
-
-.brief-mention-upload {
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  cursor: pointer;
-}
-
-.brief-mention-upload:hover {
-  color: var(--text-main);
-}
 
 /* The whisper under a ready brief and the eyebrow above a running one. Both
    speak in the run-meta voice (12px, muted, tabular) — marginalia about the
    control, never the control's own voice. */
-.brief-whisper,
-.brief-run-eyebrow {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--brief-whisper);
-  font-variant-numeric: tabular-nums;
-}
-
-.brief-whisper {
-  padding: 0 1rem 0.2rem 1.35rem;
-}
-
-.brief-run-eyebrow {
-  padding: 0.55rem 1rem 0 1.35rem;
-}
-
-.brief-whisper-keys,
-.brief-run-eyebrow-context {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  flex: 0 0 auto;
-  color: var(--brief-whisper-faint);
-  white-space: nowrap;
-}
-
-.brief-whisper-keys svg {
-  width: 13px;
-  height: 13px;
-}
-
-.brief-whisper-summary,
-.brief-run-eyebrow-status {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.brief-run-eyebrow-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.brief-run-dot {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--text-main);
-  animation: brief-run-dot 1.6s var(--motion-ease) infinite;
-}
-
-@keyframes brief-run-dot {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
 
 /* A gone file blocks sending: the whisper turns into the notice and offers
    the one action that repairs it. */
-.brief-whisper-notice {
-  color: var(--text-main);
-}
-
-.brief-whisper-notice button {
-  border: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--text-main);
-  font: inherit;
-  text-decoration: underline;
-  text-underline-offset: 0.15em;
-  cursor: pointer;
-}
 
 /* Stop carries its word. A destructive verb on a pill that fits the same
    36–44px row as the icon buttons beside it. */
-.app-composer-stop-button.brief-stop-button {
-  width: auto;
-  padding: 0 0.85rem 0 0.7rem;
-  gap: 0.4rem;
-  font-size: 0.875rem;
-  font-weight: var(--font-weight-action);
-}
 
 /* The slim pill and the read-mode collapse hide the whisper: while the line is
    at rest there is nothing to summarise, and while it is collapsed the strip
    has no room for marginalia. */
-.app-composer-shell[data-composer-slim="true"] .brief-whisper,
-.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-whisper,
-.app-composer-shell[data-composer-compact="true"]:not(:focus-within) .brief-run-eyebrow {
-  display: none;
-}
 
 @media (max-width: 640px) {
   /* Phones: no keyboard to whisper about, and 44px targets. */
-  .brief-whisper-keys {
-    display: none;
-  }
-  .brief-mention-option {
-    min-height: 52px;
-  }
-  .brief-mention-picker {
-    width: auto;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .brief-run-dot {
-    animation: none;
-  }
-  .brief-token,
-  .brief-chip {
-    transition: none;
-  }
-}
-
-.app-composer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  margin-top: 0.4rem;
-  padding: 0.45rem 1rem 1rem;
-}
-
-.app-composer-actions-start,
-.app-composer-actions-end {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 0.65rem;
-}
-
-.app-composer-actions-end {
-  position: relative;
-  margin-left: auto;
 }
 
 /* Idle-only mode echo (see App.tsx actions-end): anchored off the send button
@@ -9896,56 +10013,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    --composer-placeholder) so the idle line reads as one quiet layer:
    "Ask anything … Pro". Hidden below 641px; the phone composer keeps its own
    behavior. */
-.app-composer-idle-mode {
-  position: absolute;
-  right: calc(100% + 1rem);
-  top: 50%;
-  transform: translateY(-50%);
-  opacity: 0;
-  /* visibility (not just opacity) so the button leaves the tab order AND the
-     a11y tree when the expanded toolbar owns the real intelligence selector —
-     otherwise screen readers announce two identical mode controls. Revealed
-     with the slim state below. */
-  visibility: hidden;
-  pointer-events: none;
-  border: 0;
-  background: none;
-  /* Hit-target padding with margins compensating ONLY horizontally: for an
-     absolutely positioned box, top:50% anchors the MARGIN edge, so a negative
-     top margin leaks into the anchor and translateY(-50%) can't recover it —
-     the label rode ~5.6px high of true center. The horizontal pair is kept
-     because right + negative margin-right cancel exactly, holding the text's
-     1rem gap to the send button. */
-  padding: 0.35rem 0.45rem;
-  margin: 0 -0.45rem;
-  border-radius: 999px;
-  cursor: pointer;
-  /* inherit, not the .app-composer-textarea clamp: .pk-prompt-input-textarea's
-     `font: inherit` out-orders that clamp, so the field actually renders at the
-     card's inherited size — inheriting here matches the real placeholder;
-     line-height matches the field's REAL line box (--composer-line-height) so
-     the two boxes are metric-identical and their baselines coincide exactly
-     when both are centered in the pill. */
-  font-size: inherit;
-  line-height: var(--composer-line-height);
-  font-weight: 400;
-  /* Tracks the placeholder exactly — same 15px and native spacing — so the slim
-     line still reads as one layer: "Ask anything … Pro". */
-  letter-spacing: 0;
-  color: var(--composer-placeholder);
-  white-space: nowrap;
-  /* visibility flips instantly (no hide-delay) so it leaves the a11y tree the
-     moment the toolbar's real selector takes over — see the actions-start note.
-     Only opacity animates; the fade-out is cut, which is imperceptible on this
-     small chrome and buys the "exactly one control" invariant. */
-  transition: opacity 160ms var(--motion-ease);
-}
-
-.app-composer-idle-mode:focus-visible {
-  outline: 2px solid var(--ring, currentColor);
-  outline-offset: 2px;
-  color: var(--text-main);
-}
 
 /* Idle-only attach button (see App.tsx card-body): the pill's left affordance,
    anchored to the position:relative card so the collapsed toolbar's clipping
@@ -9953,33 +10020,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    IS interactive at idle — attaching is a first-class idle action — so it
    gates with visibility (out of the a11y tree when the full toolbar owns the
    attach affordance). Desktop-only, like the rest of the idle treatment. */
-.app-composer-idle-attach {
-  display: none;
-}
-
-@media (min-width: 641px) {
-  .app-composer-idle-attach {
-    display: inline-flex;
-    position: absolute;
-    left: 0.5rem;
-    top: 50%;
-    transform: translateY(-50%);
-    z-index: 2;
-    opacity: 0;
-    /* instant visibility hide (no delay), matching idle-mode/actions-start, so
-       exactly one attach control is in the tab order + a11y tree at any moment. */
-    visibility: hidden;
-    transition: opacity 160ms var(--motion-ease);
-  }
-  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach {
-    opacity: 1;
-    visibility: visible;
-    /* re-arm clicks: the collapsed toolbar (its DOM parent) is pointer-events:
-       none, and pointer-events inherits — without this the pill's + is inert. */
-    pointer-events: auto;
-    transition: opacity 160ms var(--motion-ease);
-  }
-}
 
 /* Reduced-motion for the slim reveal: the earlier reduced-motion block (in the
    min-width:641 group above) is out-specified by the slim rules (attribute
@@ -9987,13 +10027,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    the slim rules so equal specificity resolves in this block's favor.
    actions-start is included because its slim rule declares its own (0,3,0)
    transition that likewise out-specifies the earlier override. */
-@media (min-width: 641px) and (prefers-reduced-motion: reduce) {
-  .app-composer-shell[data-composer-slim="true"] .app-composer-actions-start,
-  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-attach,
-  .app-composer-shell[data-composer-slim="true"] .app-composer-idle-mode {
-    transition: none;
-  }
-}
 
 /* Composer drop affordance: pk-file-upload-drag lands on the FileUpload
    wrapper while an OS file drag is over the composer card. Ink, not color —
@@ -10002,10 +10035,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
    `0 0 0 3px` ring traced the pill; on a flat full-width surface it drew a
    rectangle around the whole dock, so the weight moves inside the top rule —
    3px of it, one step louder than focus's 2px. */
-.pk-file-upload-drag .app-composer-card {
-  border-top-color: color-mix(in oklab, var(--text-main) 40%, transparent);
-  box-shadow: inset 0 2px 0 color-mix(in oklab, var(--text-main) 40%, transparent);
-}
 
 /* Chat drop overlay ("dump files anywhere"): viewport scrim + one quiet card.
    The overlay itself is the drop target; the card ignores pointer events so
@@ -10086,82 +10115,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   }
 }
 
-.app-composer-icon-button,
-.app-composer-submit-button,
-.app-composer-stop-button {
-  transition:
-    transform 160ms var(--motion-ease),
-    background-color 160ms var(--motion-ease),
-    border-color 160ms var(--motion-ease),
-    color 160ms var(--motion-ease),
-    box-shadow 160ms var(--motion-ease);
-}
-
-.composer textarea {
-  width: 100%;
-  resize: none;
-  min-height: 64px;
-  max-height: 260px;
-  border: none;
-  border-radius: 0;
-  padding: 8px 14px 4px;
-  background: transparent;
-  font: inherit;
-  color: var(--text-main);
-}
-
-.composer-attach-button {
-  position: relative;
-  border: 1px solid transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-  transition:
-    background-color 160ms var(--motion-ease),
-    color 160ms var(--motion-ease),
-    border-color 160ms var(--motion-ease);
-}
-
-.app-composer-icon-button {
-  background: transparent;
-  color: var(--text-muted);
-}
-
-.composer-attach-button:hover,
-.composer-attach-button:focus-visible {
-  background: var(--composer-control-hover-bg);
-  border-color: transparent;
-  color: var(--text-main);
-}
-
-.app-composer-intelligence-trigger {
-  min-height: 2.35rem;
-  padding-inline: 0.55rem;
-  background: transparent;
-  border: 0;
-  border-radius: var(--sidebar-radius-row);
-  color: var(--text-muted);
-  box-shadow: none;
-  font-size: 0.94rem;
-  font-weight: 400;
-  letter-spacing: 0;
-  transition:
-    background-color 160ms var(--motion-ease),
-    color 160ms var(--motion-ease);
-}
-
 /* Keyed on aria-expanded, NOT data-state: this button is now both a tooltip
    trigger and a menu trigger, and Radix writes `data-state` from BOTH — the
    tooltip's value ("closed" while you are not hovering) wins the merge, so a
    [data-state="open"] selector silently stops matching while the menu is open.
    aria-expanded is set only by the menu trigger, so it is uncontested. */
-.app-composer-intelligence-trigger:hover,
-.app-composer-intelligence-trigger:focus-visible,
-.app-composer-intelligence-trigger[aria-expanded="true"] {
-  background: var(--composer-control-hover-bg);
-  color: var(--text-main);
-  box-shadow: none;
-}
 
 /* Release notices are the reusable product-launch exception to Ultra's
    monochrome chrome. They attach to the control that changed and persist a
@@ -10375,31 +10333,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--accent-foreground);
 }
 
-.app-composer-submit-button {
-  border: 0;
-  background: var(--primary);
-  color: var(--primary-foreground);
-  box-shadow: var(--composer-submit-shadow);
-}
-
-.app-composer-submit-button:not(:disabled):hover,
-.app-composer-submit-button:not(:disabled):focus-visible,
-.app-composer-stop-button:hover,
-.app-composer-stop-button:focus-visible {
-  transform: translateY(-1px);
-}
-
-.app-composer-submit-button:not(:disabled):hover,
-.app-composer-submit-button:not(:disabled):focus-visible {
-  background: var(--brand-strong);
-}
-
-.app-composer-submit-button:disabled {
-  background: color-mix(in oklab, var(--bg-main) 84%, var(--bg-panel-strong) 16%);
-  color: var(--text-muted);
-  box-shadow: none;
-}
-
 .app-composer-submit-tooltip {
   border-radius: 0.625rem;
   padding: 0.5rem 0.625rem;
@@ -10440,13 +10373,6 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 .app-composer-submit-tooltip-key {
   color: currentColor;
   opacity: 0.6;
-}
-
-.app-composer-stop-button {
-  border: 0;
-  background: color-mix(in oklab, var(--danger) 86%, #7f1d1d 14%);
-  color: #ffffff;
-  box-shadow: 0 10px 22px rgba(146, 37, 37, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 /* The point of light. Brass themes itself through --accent-live, so the old
@@ -10575,13 +10501,6 @@ details {
 
    tabular-nums matters here: the elapsed seconds and token total both tick
    while running, and proportional digits reflow the line on every update. */
-.composer-running {
-  padding: 0.8rem 1.15rem 0.2rem;
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  letter-spacing: 0.01em;
-  font-variant-numeric: tabular-nums;
-}
 
 .composer-preview-section {
   margin-top: 6px;
@@ -15335,8 +15254,6 @@ details {
   word-break: break-word;
 }
 
-
-
 .pk-table-cell .bisque-link-wrap,
 .pk-table-head-cell .bisque-link-wrap,
 .pk-table-cell .ultra-link-wrap,
@@ -15458,25 +15375,6 @@ details {
   background: color-mix(in oklab, var(--brand) 16%, transparent);
 }
 
-.pk-prompt-input {
-  border: 1px solid var(--line);
-  border-radius: calc(var(--radius) + 0.65rem);
-  background: var(--bg-panel-strong);
-  padding: 10px;
-}
-
-.pk-prompt-input-textarea {
-  width: 100%;
-  border: none;
-  outline: none;
-  resize: none;
-  min-height: 54px;
-  max-height: 240px;
-  font: inherit;
-  color: var(--text-main);
-  background: transparent;
-}
-
 .pk-file-upload {
   width: 100%;
 }
@@ -15590,36 +15488,6 @@ details {
      The phone composer keeps its own two-row rhythm (field above, toolbar
      below) — only the surface is shared with desktop. */
 
-  .app-composer-textarea {
-    min-height: 72px;
-    padding: 0.85rem 1rem 0.24rem;
-    font-size: 1rem;
-  }
-
-  .app-composer-actions {
-    gap: 0.55rem;
-    margin-top: 0.2rem;
-    padding: 0.3rem 0.82rem 0.92rem;
-  }
-
-  .app-composer-actions-start,
-  .app-composer-actions-end {
-    gap: 0.5rem;
-  }
-
-  .app-composer-icon-button,
-  .app-composer-submit-button,
-  .app-composer-stop-button {
-    width: 2.75rem;
-    height: 2.75rem;
-  }
-
-  .app-composer-intelligence-trigger {
-    min-height: 2.5rem;
-    padding-inline: 0.5rem;
-    font-size: 0.92rem;
-  }
-
   .hero-state {
     padding: clamp(2rem, 9vh, 3.75rem) 0.25rem 1.5rem;
   }
@@ -15660,10 +15528,6 @@ details {
 
   .user-token-usage-stat-label {
     font-size: 0.78rem;
-  }
-
-  .composer-running {
-    padding: 0.65rem 0.95rem 0.15rem;
   }
 
   /* The Resources toolbar rules that used to live here were duplicates of the

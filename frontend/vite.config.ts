@@ -64,6 +64,14 @@ export default defineConfig({
               test: (id: string) => id.replace(/\\/g, "/").includes("/@sparkjsdev/"),
             },
             {
+              // ProseMirror serves two lazy surfaces — the Notes editor (via
+              // Milkdown) and the chat composer's editor — so it is one shared
+              // chunk rather than a copy inside each. Neither is in the shell.
+              name: "vendor-prosemirror",
+              priority: 85,
+              test: (id: string) => /[\\/]prosemirror-[a-z]+[\\/]/.test(id),
+            },
+            {
               name: "vendor-ui",
               priority: 80,
               test: (id: string) => {

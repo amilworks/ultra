@@ -102,6 +102,16 @@ export const uniqueBriefLabel = (
 
 export const briefTokenText = (label: string): string => `${BRIEF_TOKEN_PREFIX}${label}`;
 
+/** Same tokens in the same order — the registry's identity is its content. */
+export const sameBriefTokens = (
+  left: readonly BriefFileToken[],
+  right: readonly BriefFileToken[]
+): boolean =>
+  left.length === right.length &&
+  left.every(
+    (token, index) => token.fileId === right[index].fileId && token.label === right[index].label
+  );
+
 /** Split the draft into prose and file tokens. Labels are tried longest first
  *  at every `@` that sits on a token boundary; anything that does not match a
  *  registered label is prose, including a bare `@` mid-sentence. */

@@ -42,7 +42,10 @@ describe("model Notes release gates", () => {
     expect(appSource).toContain(
       'const loadNoteContextPickerModule = () => import("./components/chat/NoteContextPicker")'
     );
-    const attachMenu = blockFrom("function ComposerAttachMenu", "export function App()");
+    const attachMenu = readFileSync(
+      path.join(process.cwd(), "src/components/composer/ComposerAttachMenu.tsx"),
+      "utf8"
+    );
     expect(attachMenu).toMatch(/onOpenNotes\?: \(\) => void/);
     expect(attachMenu).toMatch(/\{onOpenNotes \? \(/);
   });

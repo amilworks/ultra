@@ -1,98 +1,84 @@
-/// <reference types="node" />
-
 import { readFileSync } from "node:fs";
 import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-const stylesSource = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
-const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
+/* Read mode: scrolled away from the end of a long answer, the composer drops to
+   a strip and a hint — at every width — and comes back on focus, at the bottom,
+   or when a run starts. The composer decides (one explicit state), the sheet
+   draws it. */
+const read = (relativePath: string): string =>
+  readFileSync(path.join(process.cwd(), relativePath), "utf8");
 
-const desktopCompactBlock = stylesSource.slice(
-  stylesSource.indexOf("Desktop half of the read-mode collapse"),
-  stylesSource.indexOf("Phone-only: collapse the composer to a slim line")
-);
-// Bounded to the media block itself. Slicing to end-of-file swept in unrelated
-// later rules and made the "phones keep their own sizing" guard pass for the
-// wrong reason.
-const phoneCompactBlock = (() => {
-  const start = stylesSource.indexOf("Phone-only: collapse the composer to a slim line");
-  const end = stylesSource.indexOf("\n}\n", stylesSource.indexOf("@media (max-width: 640px)", start));
-  return stylesSource.slice(start, end);
-})();
+const appSource = read("src/App.tsx");
+const composerSource = read("src/components/composer/Composer.tsx");
+const modelSource = read("src/components/composer/composerModel.ts");
+const stylesSource = read("src/styles.css");
+
+const rule = (selector: string): string => {
+  const start = stylesSource.indexOf(`${selector} {`);
+  expect(start, `missing rule ${selector}`).toBeGreaterThan(-1);
+  return stylesSource.slice(start, stylesSource.indexOf("}", start));
+};
 
 describe("composer read-mode collapse", () => {
   it("collapses at every width, not just on phones", () => {
-    expect(appSource).toMatch(
-      /data-composer-compact=\{\s*composerScrolledAway && !activeSending \? "true" : undefined\s*\}/s
-    );
-    expect(appSource).not.toMatch(
-      /data-composer-compact=\{\s*isPhoneView && composerScrolledAway/s
-    );
+    // The strip rule is top-level: no media query gates it.
+    const start = stylesSource.indexOf('.composer[data-read-mode="true"] .composer-line {');
+    expect(start).toBeGreaterThan(-1);
+    const before = stylesSource.slice(0, start);
+    const lastMedia = before.lastIndexOf("@media");
+    const lastClose = before.lastIndexOf("\n}\n");
+    expect(lastMedia === -1 || lastClose > lastMedia).toBe(true);
+    expect(rule('.composer[data-read-mode="true"] .composer-line')).toMatch(/min-height:\s*1\.8rem;/);
   });
 
-  it("drives off scrolled-AWAY, not actively-scrolling", () => {
-    // An is-scrolling trigger re-expands the composer the instant you stop to
-    // read a paragraph — exactly when you want it gone. The scrolled-away signal
-    // already carries hysteresis (160px out, 48px back) so it will not flutter.
+  it("drives off scrolled-AWAY, not actively-scrolling, through one explicit prop", () => {
     expect(appSource).toMatch(/onScrolledAwayChange=\{setComposerScrolledAway\}/);
-    expect(appSource).not.toMatch(/onScrollActivityChange/);
+    expect(appSource).toMatch(/readMode=\{composerScrolledAway\}/);
+    expect(composerSource).toMatch(/const collapsed = readMode && !running && !focused;/);
+    expect(composerSource).toMatch(/data-read-mode=\{collapsed \? "true" : undefined\}/);
   });
 
-  it("hides the three desktop idle controls, and hides them properly", () => {
-    // Desktop cannot reuse the phone approach: in the slim state
-    // .app-composer-actions is ALREADY max-height 0, and the visible controls are
-    // the idle attach, the idle model echo and the absolute send cluster.
-    for (const control of [
-      "app-composer-idle-attach",
-      "app-composer-idle-mode",
-      "app-composer-actions-end",
-    ]) {
-      expect(desktopCompactBlock).toContain(control);
+  it("hides the controls, and hides them properly", () => {
+    // visibility, not just opacity: a 0-opacity button is still tabbable and
+    // still announced. Exactly one set of composer controls is ever in the tree.
+    const start = stylesSource.indexOf('.composer[data-read-mode="true"] .composer-attach,');
+    expect(start).toBeGreaterThan(-1);
+    const block = stylesSource.slice(start, stylesSource.indexOf("}", start));
+    for (const control of [".composer-attach", ".composer-end", ".composer-prefix", ".composer-whisper"]) {
+      expect(block).toContain(control);
     }
-    // visibility, not opacity alone: a 0-opacity button is still tabbable and
-    // still announced, so both control sets would sit in the a11y tree at once.
-    expect(desktopCompactBlock).toMatch(/visibility:\s*hidden;/);
-    expect(desktopCompactBlock).toMatch(/pointer-events:\s*none;/);
+    expect(block).toMatch(/visibility:\s*hidden;/);
+    expect(block).toMatch(/pointer-events:\s*none;/);
   });
 
   it("halves the strip and takes the run-meta line's type", () => {
-    // 77px -> ~30px. Zeroing the body's block padding is what actually gets it
-    // there: the expanded row's 0.6rem was 19.2px of the 49px it still measured.
-    expect(desktopCompactBlock).toMatch(
-      /\.app-composer-card-body\s*\{[^}]*min-height:\s*1\.8rem;[^}]*padding-block:\s*0;/s
-    );
-    // 12px / 400 / 20px — the "487K tokens · 1m 6s" footer.
-    expect(desktopCompactBlock).toMatch(
-      /\.app-composer-textarea\s*\{[^}]*font-size:\s*0\.75rem;[^}]*line-height:\s*20px;/s
-    );
-    expect(desktopCompactBlock).toMatch(/padding-top:\s*calc\(\(1\.8rem - 20px\) \/ 2\);/);
+    const field = rule('.composer[data-read-mode="true"] .composer-field');
+    expect(field).toMatch(/max-height:\s*1\.8rem;/);
+    expect(field).toMatch(/font-size:\s*0\.75rem;/);
+    expect(field).toMatch(/line-height:\s*20px;/);
+    expect(field).toMatch(/padding-top:\s*calc\(\(1\.8rem - 20px\) \/ 2\);/);
   });
 
   it("keeps phones on a tappable strip rather than the 30px desktop one", () => {
-    // 30px is below the 44px touch-target floor, and while collapsed the field is
-    // the ONLY route back to typing — so phones keep their own larger sizing.
-    expect(phoneCompactBlock).toMatch(/min-height:\s*2\.55rem;/);
-    expect(phoneCompactBlock).not.toMatch(/min-height:\s*1\.8rem;/);
-    expect(desktopCompactBlock).toMatch(/@media \(min-width:\s*641px\)/);
+    const phone = stylesSource.slice(
+      stylesSource.indexOf("/* Phones keep a tappable strip"),
+      stylesSource.indexOf("/* The @ picker.")
+    );
+    expect(phone).toMatch(/@media \(max-width:\s*640px\)/);
+    expect(phone).toMatch(/min-height:\s*2\.55rem;/);
+    expect(phone).not.toMatch(/min-height:\s*1\.8rem;/);
   });
 
-  it("restores the full composer on focus", () => {
-    // Without :not(:focus-within) the user would be typing into a 30px strip with
-    // no send button.
-    const compactSelectors =
-      desktopCompactBlock.match(/\[data-composer-compact="true"\][^{]*\{/g) ?? [];
-    expect(compactSelectors.length).toBeGreaterThan(0);
-    for (const selector of compactSelectors) {
-      expect(selector).toContain(":not(:focus-within)");
-    }
+  it("restores the full composer on focus and during a run", () => {
+    expect(composerSource).toMatch(/const collapsed = readMode && !running && !focused;/);
+    expect(modelSource).toMatch(/if \(inputs\.readMode && !inputs\.running\) \{\s*return "Just start typing";/);
   });
 
-  it("swaps the hint to say what still works", () => {
-    // With the attach, model and send controls gone, an instruction is more use
-    // than the product's name.
-    expect(appSource).toMatch(/\? "Just start typing"/);
-    expect(appSource).toMatch(/: "Ask Ultra"/);
-    // The accessible name must NOT follow the placeholder — it stays stable.
-    expect(appSource).toMatch(/aria-label="Ask Ultra"/);
+  it("keeps the hint legible while collapsed", () => {
+    expect(stylesSource).toMatch(
+      /\.composer\[data-read-mode="true"\] \.composer-placeholder,\s*\.composer\[data-read-mode="true"\] textarea\.composer-editor::placeholder\s*\{[^}]*color:\s*var\(--text-muted\);/s
+    );
   });
 });

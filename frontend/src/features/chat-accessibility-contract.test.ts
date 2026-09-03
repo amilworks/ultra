@@ -49,7 +49,9 @@ describe("skip link", () => {
     // history — precedes the transcript and composer in the DOM, so reaching
     // the thing you came to use meant tabbing past dozens of controls.
     expect(appSource).toMatch(/className="app-skip-link"/);
-    expect(appSource).toMatch(/composerTextareaRef\.current \?\? mainShellElement/);
+    expect(appSource).toMatch(
+      /const composer = composerRef\.current;\s*if \(composer\) \{\s*composer\.focus\(\{ caret: "end" \}\);\s*\} else \{\s*mainShellElement\?\.focus\(\);/
+    );
     // A button, not an href="#..." anchor: this app keeps navigation state in
     // the query string with no router, and a hash would write a phantom entry.
     expect(appSource).not.toMatch(/className="app-skip-link"[\s\S]{0,80}href=/);

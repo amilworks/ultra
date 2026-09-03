@@ -113,6 +113,15 @@ describe("ComposerEditor", () => {
     expect(ref.current?.value).toBe("use @scan.tif here");
   });
 
+  it("reports focus and blur — the composer's stage hangs off them", () => {
+    const { container, props } = setup();
+    const editor = container.querySelector<HTMLElement>(".ProseMirror")!;
+    act(() => editor.focus());
+    expect(props.onFocusChange).toHaveBeenLastCalledWith(true);
+    act(() => editor.blur());
+    expect(props.onFocusChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("turns a gone token back into an open mention", () => {
     const { ref, props } = setup({ value: "fix @scan.tif now" });
     act(() => ref.current?.reopenMentionFor("f1"));

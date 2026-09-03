@@ -54,7 +54,7 @@ describe("composer contract", () => {
     expect(appSource).toMatch(/briefWorkflowNeedsFiles && briefWorkflowLabel/);
     expect(appSource).toMatch(/label: "choose from your library"/);
     expect(appSource).not.toMatch(/data-testid="composer-workflow-chip"/);
-    expect(composerSource).toMatch(/data-testid="composer-workflow-chip"/);
+    expect(composerSource).toMatch(/data-testid="composer-workflow-tag"/);
   });
 
   it("keys: the composer owns Enter and the @ picker, the app keeps the slash menu and recall", () => {
@@ -76,7 +76,7 @@ describe("composer contract", () => {
   it("only the mirrored text of a token is decoration; the chips are real controls", () => {
     expect(editorSource).toMatch(/this\.dom\.setAttribute\("contenteditable", "false"\);/);
     expect(editorSource).toMatch(/this\.remove\.setAttribute\("aria-label", `Remove \$\{label\}`\);/);
-    expect(composerSource).toMatch(/<span ref=\{prefixRef\} className="composer-prefix">/);
-    expect(composerSource).not.toMatch(/aria-hidden="true">\s*<span ref=\{prefixRef\} className="composer-prefix"/);
+    expect(composerSource).toMatch(/className="composer-tag composer-tag-workflow"/);
+    expect(composerSource).not.toMatch(/aria-hidden="true">\s*<button[^>]*composer-tag/);
   });
 });

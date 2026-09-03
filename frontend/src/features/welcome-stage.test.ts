@@ -26,12 +26,15 @@ const blockFrom = (start: string, end: string): string => {
 };
 
 describe("the welcome stage flag", () => {
-  it("is desktop-only, chat-only, and drops the moment a message exists", () => {
-    const flag = blockFrom("const welcomeStageActive =", ";");
-    expect(flag).toContain('activePanel === "chat"');
-    expect(flag).toContain("!isPhoneView");
-    expect(flag).toContain("activeConversationHydrated");
-    expect(flag).toContain("activeMessages.length === 0");
+  it("shares empty-chat identity across layouts while the centered stage stays desktop-only", () => {
+    const landingFlag = blockFrom("const newChatLandingActive =", ";");
+    expect(landingFlag).toContain('activePanel === "chat"');
+    expect(landingFlag).toContain("activeConversationHydrated");
+    expect(landingFlag).toContain("activeMessages.length === 0");
+
+    const welcomeFlag = blockFrom("const welcomeStageActive =", ";");
+    expect(welcomeFlag).toContain("newChatLandingActive");
+    expect(welcomeFlag).toContain("!isPhoneView");
   });
 
   it("rides the main shell as a data attribute the CSS keys on", () => {
@@ -71,17 +74,48 @@ describe("the centered-cluster layout", () => {
     // Keyboard users get a visible ring.
     expect(styles).toMatch(/\.welcome-starter-chip:focus-visible\s*\{[^}]*var\(--ring\)/s);
   });
+
+  it("keeps the scientific field subordinate to the question", () => {
+    expect(styles).toMatch(
+      /\.meridian-field\s*\{[^}]*width:\s*min\(39rem, 88%\);[^}]*height:\s*clamp\(82px, 13vh, 142px\);[^}]*opacity:\s*0\.82;/s
+    );
+  });
+
+  it("uses a restrained typographic hierarchy for the welcome prompt", () => {
+    expect(styles).toMatch(
+      /\.blank-chat-welcome-hero\s*\{[^}]*font-size:\s*1\.625rem;[^}]*font-weight:\s*var\(--font-weight-desktop-invitation\);/s
+    );
+    expect(styles).toMatch(
+      /\.welcome-starting-points-summary\s*\{[^}]*font-weight:\s*400;/s
+    );
+  });
+
+  it("quiets history only while the desktop welcome stage is resting", () => {
+    expect(appSource).toContain(
+      'data-welcome-stage={welcomeStageActive ? "true" : undefined}'
+    );
+    expect(styles).toMatch(
+      /\.app-sidebar\[data-welcome-stage="true"\]\s+\.app-sidebar-history-scroll\s*\{[^}]*opacity:\s*0\.62;/s
+    );
+    expect(styles).toMatch(
+      /\.app-sidebar\[data-welcome-stage="true"\]\s+\.app-sidebar-history-scroll:(?:hover|focus-within)/s
+    );
+  });
 });
 
 describe("starter chips", () => {
-  it("renders only on the welcome stage, capped at three quiet suggestions", () => {
+  it("shows one contextual resume-or-continue action and tucks generic starts behind disclosure", () => {
     const starters = blockFrom(
       "{welcomeStageActive ? (\n            <div className=\"welcome-starters\">",
       "\n          ) : null}"
     );
     const chipCount = (starters.match(/className="welcome-starter-chip"/g) || []).length;
-    expect(chipCount).toBeGreaterThanOrEqual(2);
-    expect(chipCount).toBeLessThanOrEqual(3);
+    expect(chipCount).toBe(1);
+    expect(starters).toContain("welcomePrimaryAction");
+    expect(starters).toContain('data-kind={welcomePrimaryAction.kind}');
+    expect(starters).toContain('className="welcome-starting-points"');
+    expect(starters).toContain('className="welcome-starting-points-summary"');
+    expect(starters.match(/className="welcome-starting-point"/g)).toHaveLength(3);
   });
 
   it("wires every chip to a REAL destination — live state, not canned copy", () => {
@@ -89,20 +123,34 @@ describe("starter chips", () => {
       "{welcomeStageActive ? (\n            <div className=\"welcome-starters\">",
       "\n          ) : null}"
     );
-    // Continue <most recent real conversation> — same handler the sidebar uses.
-    expect(starters).toContain("openHistoryItem(welcomeStarterConversation)");
+    // Resume or Continue uses the same conversation-opening path as history.
+    expect(starters).toContain("openConversationById(welcomePrimaryAction.conversationId)");
     // Dashboard chip drafts into the composer and focuses it.
     expect(starters).toContain("startDashboardDraft");
     // Lens chip is the same navigation the sidebar performs.
     expect(starters).toContain("openScientificViewerPanel");
+    // First-use accounts can connect their scientific library in place.
+    expect(starters).toContain('openSettings("bisque")');
   });
 
   it("only offers Continue when a real prior conversation exists", () => {
     const source = blockFrom("const welcomeStarterConversation = useMemo(", ");");
     expect(source).toContain("item.id !== activeConversationId");
     expect(source).toContain("item.title.trim().length > 0");
-    // The chip itself is conditional on the lookup.
-    expect(appSource).toContain("{welcomeStarterConversation ? (");
+    // Continue is the fallback only when no resumable run or draft outranks it.
+    const primary = blockFrom(
+      "const welcomePrimaryAction = useMemo(",
+      ");\n  const [welcomeStartingPointsOpen"
+    );
+    expect(primary).toContain("if (welcomeResumeTarget)");
+    expect(primary).toContain("return welcomeStarterConversation");
+    expect(primary).toContain('kind: "continue" as const');
+  });
+
+  it("expands first-use starting points without an onboarding modal", () => {
+    expect(appSource).toContain("setWelcomeStartingPointsOpen(historyItems.length === 0)");
+    expect(appSource).toContain("open={welcomeStartingPointsOpen}");
+    expect(appSource).not.toContain("WelcomeOnboardingDialog");
   });
 
   it("drafts the dashboard prompt instead of auto-sending anything", () => {
@@ -113,29 +161,22 @@ describe("starter chips", () => {
   });
 });
 
-describe("the quiet-usage contract", () => {
-  it("shows no statistics in the resting welcome — usage is one whisper below the chips", () => {
-    // The old stats strip (230M tokens · 3-day streak) and its hairline are
-    // gone from the greeting; the desktop welcome block is greeting-only.
+describe("the task-first welcome contract", () => {
+  it("keeps account analytics out of the New Chat canvas", () => {
     const welcome = blockFrom('<div className="blank-chat-welcome">', "\n          </div>");
-    expect(welcome).not.toContain("blank-chat-usage-strip");
-    expect(welcome).not.toContain("lifetime_total_tokens");
-    expect(welcome).not.toContain("<details");
-    // The whisper lives in the starters cluster and opens the SAME full panel.
     const starters = blockFrom(
       "{welcomeStageActive ? (\n            <div className=\"welcome-starters\">",
       "\n          ) : null}"
     );
-    expect(starters).toContain('className="welcome-usage-link"');
-    expect(starters).toContain("<UserTokenUsagePanel");
-    expect(starters).not.toMatch(/tokens\b.*streak/s);
+    expect(welcome).not.toContain("UserTokenUsagePanel");
+    expect(starters).not.toContain("welcome-usage");
+    expect(starters).not.toContain("<UserTokenUsagePanel");
+    expect(appSource).not.toContain("useBlankChatTokenUsage");
   });
 
-  it("keeps the legacy global details hairline off the whisper", () => {
-    const disclosure = styles.match(/\.welcome-usage-disclosure\s*\{[^}]*\}/s)?.[0];
-    expect(disclosure).toContain("border-top: 0;");
-    // And the dead strip styles are actually dead.
-    expect(styles).not.toContain(".blank-chat-usage-strip");
-    expect(styles).not.toContain(".blank-chat-usage-disclosure ");
+  it("does not retain dead welcome-usage chrome", () => {
+    expect(styles).not.toContain(".welcome-usage-disclosure");
+    expect(styles).not.toContain(".welcome-usage-link");
+    expect(styles).not.toContain(".blank-chat-usage-panel");
   });
 });

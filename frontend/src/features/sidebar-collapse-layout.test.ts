@@ -25,7 +25,7 @@ describe("sidebar collapse layout", () => {
     expect(appSource.includes("const collapsedRecentItems")).toBe(true);
   });
 
-  it("keeps the reference rail motion and usage-first blank chat", () => {
+  it("keeps the reference rail motion and task-first blank chat", () => {
     expect(stylesSource.includes("--sidebar-motion-duration: 280ms;")).toBe(true);
     expect(stylesSource.includes(".app-collapsed-sidebar-rail")).toBe(true);
     expect(
@@ -38,11 +38,16 @@ describe("sidebar collapse layout", () => {
         '[data-slot="sidebar"][data-collapsible="icon"] + [data-slot="sidebar-inset"] .app-sidebar-trigger'
       )
     ).toBe(true);
-    expect(appSource.includes("<UserTokenUsagePanel")).toBe(true);
+    expect(appSource.includes("<UserTokenUsagePanel")).toBe(false);
+    expect(appSource.includes('onOpenUsage={() => openSettings("usage")}')).toBe(true);
+    expect(appSource.includes("Describe a question, dataset, or experiment…")).toBe(true);
+    expect(appSource.includes('className="welcome-starting-points"')).toBe(true);
     expect(appSource.includes('const welcomeHeadline = "What are you working on?";')).toBe(false);
     expect(appSource.includes("Santa Barbara weather")).toBe(false);
     expect(stylesSource).toMatch(/\.blank-chat-usage-state\s*\{/);
-    expect(stylesSource).toMatch(/\.user-token-usage-stats\s*\{[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\);/s);
+    expect(stylesSource).toMatch(
+      /\.app-sidebar\[data-welcome-stage="true"\]\s+\.app-sidebar-history-scroll\s*\{[^}]*opacity:\s*0\.62;/s
+    );
     expect(stylesSource).toMatch(/\.app-shell-brand\s*\{[^}]*font-weight:\s*400;/s);
   });
 

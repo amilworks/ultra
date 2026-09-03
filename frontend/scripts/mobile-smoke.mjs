@@ -374,12 +374,12 @@ function assertTypographyMetrics(typography, testCase) {
 
   const expectedWeights = {
     // Compact UI stays at Ultra Sans 430. The 16px long-form reading register
-    // uses Regular 400 for a lighter sustained-reading texture, and the welcome
-    // invitation is quieter still. Keep these browser assertions aligned with
-    // check-typography-contract.mjs and light-theme-ink.test.ts.
+    // uses Regular 400 for a lighter sustained-reading texture. The welcome
+    // invitation is 300 at desktop scale and 350 on the smaller phone title.
+    // Keep these assertions aligned with the source typography contract.
     body: "430",
     composer: "430",
-    invitation: "350",
+    invitation: testCase.mobile ? "350" : "300",
     action: "500",
     reading: "400",
     readingItalic: "400",
@@ -390,7 +390,7 @@ function assertTypographyMetrics(typography, testCase) {
     // check-typography-contract.mjs.
     readingStrong: "600",
     brandBisque: "400",
-    brandUltra: "600",
+    brandUltra: "500",
     resourcePageHeading: "600",
     resourceData: "500",
     resourceLabel: "600",

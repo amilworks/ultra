@@ -44,10 +44,10 @@ describe("type-to-focus captures the keystroke", () => {
     // synchronous focus means the character lands in the composer by itself.
     // preventDefault would drop it; manually inserting would type it twice.
     const effect = effectBody();
-    expect(effect).toMatch(/textarea\.focus\(\{ preventScroll: true \}\)/);
+    expect(effect).toMatch(/composer\.focus\(\{ preventScroll: true, caret: "end" \}\)/);
     const code = stripComments(effect);
     expect(code).not.toMatch(/preventDefault/);
-    expect(code).not.toMatch(/textarea\.value\s*[+]?=/);
+    expect(code).not.toMatch(/insertText|setValue/);
   });
 
   it("does not route through focusComposerTextarea", () => {
@@ -57,7 +57,7 @@ describe("type-to-focus captures the keystroke", () => {
   });
 
   it("puts the caret at the end so it appends to an existing draft", () => {
-    expect(effectBody()).toMatch(/setSelectionRange\(caret, caret\)/);
+    expect(effectBody()).toMatch(/caret: "end"/);
   });
 });
 
@@ -91,7 +91,7 @@ describe("type-to-focus keeps its hands off everything else", () => {
   it("never steals from another field, or from itself", () => {
     const effect = effectBody();
     expect(effect).toMatch(/isEditableEventTarget\(event\.target\)/);
-    expect(effect).toMatch(/textarea === document\.activeElement/);
+    expect(effect).toMatch(/composer\.isFocused\(\)/);
   });
 
   it("stands down while a dialog, menu or popover is open", () => {
@@ -106,7 +106,7 @@ describe("type-to-focus keeps its hands off everything else", () => {
 
   it("does not fire on a disabled composer", () => {
     // A conversation that has not hydrated yet.
-    expect(effectBody()).toMatch(/textarea\.disabled/);
+    expect(effectBody()).toMatch(/composer\.disabled/);
   });
 
   it("only runs on the chat panel, when signed in", () => {

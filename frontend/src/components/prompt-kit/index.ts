@@ -11,7 +11,6 @@ export {
   MessageActions,
   MessageContent,
 } from "./message";
-export { PromptInput, PromptInputAction, PromptInputActions, PromptInputTextarea } from "./prompt-input";
 export { ScrollButton } from "./scroll-button";
 export { SystemMessage } from "./system-message";
 export { ThinkingBar } from "./thinking-bar";

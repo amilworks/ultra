@@ -16,6 +16,21 @@ import { mergeQueuedNoteSearchScopeOverride } from "./queued-followup";
 
 const appSource = readFileSync(path.join(process.cwd(), "src/App.tsx"), "utf8");
 const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
+const composerSource = readFileSync(
+  path.join(process.cwd(), "src/components/composer/Composer.tsx"),
+  "utf8"
+);
+const editorSource = readFileSync(
+  path.join(process.cwd(), "src/components/composer/ComposerEditor.tsx"),
+  "utf8"
+);
+const blockFromComposer = (start: string, end: string): string => {
+  const startIndex = composerSource.indexOf(start);
+  expect(startIndex, `missing composer block: ${start.slice(0, 60)}`).toBeGreaterThan(-1);
+  const endIndex = composerSource.indexOf(end, startIndex);
+  expect(endIndex, `unterminated composer block: ${start.slice(0, 60)}`).toBeGreaterThan(startIndex);
+  return composerSource.slice(startIndex, endIndex + end.length);
+};
 
 const blockFrom = (start: string, end: string): string => {
   const startIndex = appSource.indexOf(start);
@@ -27,13 +42,13 @@ const blockFrom = (start: string, end: string): string => {
 
 describe("queueing", () => {
   it("Enter during a run queues — in its own branch, leaving the send path pinned", () => {
-    const branch = blockFrom(
-      "// Enter during a run queues the draft as a follow-up",
-      "queueFollowup();"
-    );
-    expect(branch).toMatch(/activeSending/);
-    expect(branch).toMatch(/!event\.nativeEvent\.isComposing/);
-    expect(branch).toMatch(/!event\.shiftKey/);
+    // Plain Enter reaches the composer only outside IME composition and without
+    // Shift (the editor's gate); the composer's own branch queues during a run.
+    const enter = blockFromComposer("const handleEnter = useCallback", "}, []);");
+    expect(enter).toMatch(/if \(state\.running\) \{\s*state\.onQueue\(\);\s*return true;/);
+    expect(editorSource).toMatch(/!event\.shiftKey &&\s*!event\.altKey &&\s*!event\.isComposing/);
+    expect(appSource).toMatch(/running=\{activeSending\}/);
+    expect(appSource).toMatch(/onQueue=\{queueFollowup\}/);
   });
 
   it("grows ONE queued message instead of stacking a run-per-message queue", () => {
@@ -105,7 +120,7 @@ describe("queueing", () => {
       /slashMenuOpen\s+\|\|\s+composerResourcePickerOpen\s+\|\|\s+composerNotePickerOpen/
     );
     expect(appSource).toMatch(
-      /activePrompt\.trim\(\)\s+&&\s+!slashMenuOpen\s+&&\s+!composerResourcePickerOpen\s+&&\s+!composerNotePickerOpen\s+\? \(/
+      /const composerCanSteer =\s*activePrompt\.trim\(\)\.length > 0 &&\s*!slashMenuOpen &&\s*!composerResourcePickerOpen &&\s*!composerNotePickerOpen;/
     );
   });
 
@@ -114,7 +129,7 @@ describe("queueing", () => {
   });
 
   it("offers a visible queue button beside Stop, with Stop anchored in place", () => {
-    const running = blockFrom("{activeSending ? (", 'aria-label="Stop response"');
+    const running = blockFromComposer("{running ? (", 'aria-label="Stop response"');
     expect(running).toMatch(/aria-label="Queue follow-up"/);
     expect(running).toMatch(/variant="ghost"/);
     // Queue renders BEFORE Stop in source = left of it visually; Stop's slot
@@ -130,8 +145,11 @@ describe("the composer is typable during a run — the whole point", () => {
     // Review-critical: isLoading={activeSending || ...} disabled the textarea
     // for the entire run, making mid-run follow-ups unreachable for real
     // keyboards. Only script-dispatched events ever reached it.
-    expect(appSource).toMatch(/isLoading=\{!activeConversationHydrated\}/);
-    expect(appSource).not.toMatch(/isLoading=\{activeSending/);
+    // Hydration is the ONLY thing that disables typing; the run state reaches
+    // the composer as its own prop and never touches the editor's disabled flag.
+    expect(composerSource).toMatch(/disabled: !hydrated,/);
+    expect(composerSource).not.toMatch(/disabled: [^\n]*running/);
+    expect(appSource).toMatch(/hydrated=\{activeConversationHydrated\}/);
   });
 });
 
@@ -249,8 +267,15 @@ describe("the queued bubble", () => {
   });
 
   it("uses the non-submit tooltip class and a WCAG-passing eyebrow", () => {
-    const running = blockFrom("{activeSending ? (", 'aria-label="Stop response"');
-    expect(running).toContain('className="app-composer-tooltip"');
+    const running = blockFromComposer("{running ? (", 'aria-label="Stop response"');
+    // Steer and Queue take the plain composer tooltip (ComposerTooltip's
+    // default), never the send button's own class.
+    expect(running).not.toContain("app-composer-submit-tooltip");
+    const tooltipSource = readFileSync(
+      path.join(process.cwd(), "src/components/composer/ComposerTooltip.tsx"),
+      "utf8"
+    );
+    expect(tooltipSource).toMatch(/className = "app-composer-tooltip"/);
     expect(styles).toMatch(/\.chat-queued-followup-eyebrow \{[^}]*color: color-mix\(in oklab, var\(--text-muted\) 72%, var\(--text-main\) 28%\)/s);
   });
 

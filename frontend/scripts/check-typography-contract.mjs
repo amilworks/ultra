@@ -581,7 +581,7 @@ for (const [pattern, message] of [
   [/@media \(max-width: 640px\)[\s\S]*--line-height-reading:\s*1\.68;/, "Phone reading line-height must remain 1.68"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
-  [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
+  [/\.composer-editor\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
   [/\.blank-chat-welcome-hero\s*\{[^}]*font-size:\s*1\.625rem;[^}]*font-weight:\s*var\(--font-weight-desktop-invitation\);/s, "Desktop welcome must use the 26px/300 invitation role"],
   [/\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Mobile welcome must use the invitation role"],
   // Mono surfaces must pin their weight so code and data never inherit the
@@ -606,7 +606,7 @@ for (const [token, value] of [
   );
 }
 check(
-  /\.app-composer-textarea\s*\{[^}]*letter-spacing:\s*0;/s.test(stylesCss),
+  /\.composer-field\s*\{[^}]*letter-spacing:\s*0;/s.test(stylesCss),
   "Composer must use Ultra Sans native tracking at its rendered 15px size"
 );
 check(

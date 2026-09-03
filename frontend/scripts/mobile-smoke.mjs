@@ -62,7 +62,7 @@ async function requireAuthenticatedMockShell(page) {
     );
   }
   await page.waitForSelector(".app-shell", { timeout: 10_000 });
-  await page.waitForSelector(".pk-prompt-input-textarea", { timeout: 10_000 });
+  await page.waitForSelector(".composer-editor", { timeout: 10_000 });
 }
 
 async function openMobileDrawer(page) {
@@ -78,7 +78,7 @@ async function captureCommonMetrics(page) {
   return page.evaluate(() => {
     const query = (selector) => document.querySelector(selector);
     const title = query(".app-header-title-text") ?? query(".hero-title");
-    const composer = query(".app-composer-textarea");
+    const composer = query(".composer-field");
     const bodyStyles = getComputedStyle(document.body);
     const composerStyles = composer ? getComputedStyle(composer) : null;
     return {
@@ -218,12 +218,12 @@ async function captureTypographyMetrics(page, testCase) {
       },
       roles: {
         body: readStyle(document.body),
-        composer: readStyle(document.querySelector(".pk-prompt-input-textarea")),
+        composer: readStyle(document.querySelector(".composer-editor")),
         invitation: readStyle(
           document.querySelector(".blank-chat-welcome-hero, .mobile-chat-hero-title")
         ),
         action: readStyle(
-          document.querySelector(".app-new-chat-button, .app-composer-submit-button")
+          document.querySelector(".app-new-chat-button, .composer-send")
         ),
         account: readStyle(document.querySelector(".app-sidebar-account-name")),
         label: readStyle(

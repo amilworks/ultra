@@ -56,7 +56,7 @@ const emphasize = (text: string, query: string): ReactNode => {
       parts.push(text.slice(cursor, range.start));
     }
     parts.push(
-      <strong key={index} className="brief-mention-match">
+      <strong key={index} className="composer-mention-match">
         {text.slice(range.start, range.end)}
       </strong>
     );
@@ -88,16 +88,16 @@ export function ResourceMentionPicker({
 
   return (
     <div
-      className={cn("brief-mention-picker", `brief-mention-picker-${variant}`)}
+      className={cn("composer-mention-picker", `composer-mention-picker-${variant}`)}
       style={style}
-      data-testid="brief-mention-picker"
+      data-testid="composer-mention-picker"
       onMouseDown={preventBlur}
     >
       <div
         id={listboxId}
         role="listbox"
         aria-label="Files in your library"
-        className="brief-mention-list"
+        className="composer-mention-list"
       >
         {results.map((resource) => {
           const active = resource.file_id === activeFileId;
@@ -111,20 +111,20 @@ export function ResourceMentionPicker({
               id={resourceMentionOptionId(listboxId, resource.file_id)}
               role="option"
               aria-selected={active}
-              className={cn("brief-mention-option", active && "brief-mention-option-active")}
+              className={cn("composer-mention-option", active && "composer-mention-option-active")}
               onMouseEnter={() => onActivate(resource.file_id)}
               onClick={() => onPick(resource)}
             >
-              <span className="brief-mention-kind">{resourceMentionKindLabel(resource)}</span>
-              <span className="brief-mention-body">
-                <span className="brief-mention-name">{emphasize(name, trimmedQuery)}</span>
-                {meta ? <span className="brief-mention-meta">{meta}</span> : null}
+              <span className="composer-mention-kind">{resourceMentionKindLabel(resource)}</span>
+              <span className="composer-mention-body">
+                <span className="composer-mention-name">{emphasize(name, trimmedQuery)}</span>
+                {meta ? <span className="composer-mention-meta">{meta}</span> : null}
               </span>
             </div>
           );
         })}
         {results.length === 0 ? (
-          <div className="brief-mention-empty" role="presentation">
+          <div className="composer-mention-empty" role="presentation">
             {error
               ? "Your library could not be searched right now."
               : loading
@@ -135,14 +135,14 @@ export function ResourceMentionPicker({
           </div>
         ) : null}
       </div>
-      <div className="brief-mention-footer">
-        <span className="brief-mention-hint" aria-hidden="true">
+      <div className="composer-mention-footer">
+        <span className="composer-mention-hint" aria-hidden="true">
           ↵ bring in · ↑↓ move · esc
         </span>
         {onUploadInstead ? (
           <button
             type="button"
-            className="brief-mention-upload"
+            className="composer-mention-upload"
             onClick={onUploadInstead}
             tabIndex={-1}
           >

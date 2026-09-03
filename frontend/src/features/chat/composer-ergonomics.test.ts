@@ -51,7 +51,7 @@ describe("paste-to-focus", () => {
   });
 
   it("does not run against a composer that cannot accept it", () => {
-    expect(effect()).toMatch(/textarea\.disabled/);
+    expect(effect()).toMatch(/composer\.disabled/);
   });
 });
 
@@ -85,7 +85,10 @@ describe("ArrowUp recalls the last prompt", () => {
 
   it("stays away from modifiers, IME, and the resource picker", () => {
     const body = branch();
-    expect(body).toMatch(/!event\.nativeEvent\.isComposing/);
+    // IME composition is refused once, at the top of the app's key handler,
+    // before any branch — the recall branch inherits it.
+    const handler = blockFrom("const handleComposerKeyDown = (event: KeyboardEvent): boolean => {", "return false;");
+    expect(handler).toMatch(/if \(event\.isComposing\) \{\s*return false;/);
     expect(body).toMatch(/!event\.metaKey/);
     expect(body).toMatch(/!event\.shiftKey/);
     expect(body).toMatch(/!composerResourcePickerOpen/);
@@ -169,7 +172,7 @@ describe("ask-about-selection", () => {
     const measure = blockFrom("const measureSelection = ", "const reveal =");
     expect(measure).toMatch(/rect\.bottom < 0/);
     expect(measure).toMatch(/hasBlockingOverlay\(\)/);
-    expect(measure).toMatch(/composerTextareaRef\.current\?\.disabled/);
+    expect(measure).toMatch(/composerRef\.current\?\.disabled/);
   });
 
   it("sits below every Radix overlay and selects only KaTeX's visible layer", () => {

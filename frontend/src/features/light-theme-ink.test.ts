@@ -357,7 +357,7 @@ describe("response reading typography", () => {
       /\.pk-markdown > :where\(h3\)\s*\{[^}]*letter-spacing:\s*var\(--tracking-reading-h3\);/s
     );
     expect(stylesSource).toMatch(
-      /\.app-composer-textarea\s*\{[^}]*letter-spacing:\s*0;/s
+      /\.composer-field\s*\{[^}]*letter-spacing:\s*0;/s
     );
   });
 

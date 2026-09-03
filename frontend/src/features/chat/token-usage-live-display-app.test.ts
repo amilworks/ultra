@@ -39,8 +39,10 @@ describe("assistant token usage live display wiring", () => {
   });
 
   it("keeps the live token ticker in the composer, and keeps it calm", () => {
-    const composerStart = appSource.search(/<div className="composer-running"/);
-    const composerEnd = appSource.indexOf("<PromptInputTextarea", composerStart);
+    // The app hands the composed label to the composer, which draws it as the
+    // running eyebrow; the animated counter never reaches it.
+    const composerStart = appSource.indexOf("<Composer\n");
+    const composerEnd = appSource.indexOf("onOpenNotes=", composerStart);
     expect(composerStart).toBeGreaterThan(-1);
     expect(composerEnd).toBeGreaterThan(composerStart);
 
@@ -48,11 +50,16 @@ describe("assistant token usage live display wiring", () => {
     // The composer renders the composed label and never the animated counter:
     // a number animating next to the stop button is motion the user did not ask
     // for, in the one place they are already waiting.
-    expect(composerRunning).toContain("composerRunningLabel");
+    expect(composerRunning).toContain("runningLabel={composerRunningLabel}");
     expect(composerRunning).not.toContain("AnimatedTokenCount");
     // The breakdown tooltip is what stops a cumulative total like "616K tokens"
     // from reading as conversation size.
-    expect(composerRunning).toContain("title={composerRunningTitle}");
+    expect(composerRunning).toContain("runningTitle={composerRunningTitle}");
+    const composerSource = readFileSync(
+      path.join(process.cwd(), "src/components/composer/Composer.tsx"),
+      "utf8"
+    );
+    expect(composerSource).toMatch(/<div className="composer-eyebrow" title=\{runningTitle\}>/);
 
     const labelStart = appSource.indexOf("const composerRunningLabel = useMemo");
     expect(labelStart).toBeGreaterThan(-1);
@@ -88,7 +95,7 @@ describe("composer running line stays quiet", () => {
   const styles = readFileSync(path.join(process.cwd(), "src/styles.css"), "utf8");
 
   it("renders the running telemetry muted, small, and in tabular figures", () => {
-    const start = styles.indexOf(".composer-running {");
+    const start = styles.indexOf(".composer-eyebrow {");
     expect(start).toBeGreaterThan(-1);
     const rule = styles.slice(start, styles.indexOf("}", start));
 

@@ -46,10 +46,14 @@ describe("the welcome stage flag", () => {
   it("keeps the composer expanded on the welcome stage — no idle pill under the hero", () => {
     // Both collapse attributes must be suppressed while the composer is the
     // welcome stage's primary element.
-    const slim = blockFrom("data-composer-slim={", "}");
-    expect(slim).toContain("!welcomeStageActive &&");
-    const idle = blockFrom("data-composer-idle={", "}");
-    expect(idle).toContain("!welcomeStageActive &&");
+    // The composer learns about the stage as a prop, and its state model
+    // treats the welcome stage as "composing" — never the resting line.
+    expect(appSource).toMatch(/welcomeStage=\{welcomeStageActive\}/);
+    const model = readFileSync(
+      path.join(process.cwd(), "src/components/composer/composerModel.ts"),
+      "utf8"
+    );
+    expect(model).toMatch(/inputs\.welcomeStage\s*\) \{\s*return "composing";/);
   });
 });
 

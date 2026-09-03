@@ -2868,7 +2868,7 @@ export function ImageViewerShell({
   };
 
   const renderScalarRenderingControl = () => (
-    <TooltipProvider delayDuration={120}>
+    <>
       <div className="viewer-inline-control-group">
         <div className="viewer-inline-control" data-viewer-scalar-render-mode="true">
           <Select
@@ -2892,21 +2892,6 @@ export function ImageViewerShell({
               </SelectGroup>
             </SelectContent>
           </Select>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="About scalar rendering"
-              >
-                <Info />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top">
-              Auto follows source semantics. Mask uses raw values above the threshold.
-            </TooltipContent>
-          </Tooltip>
         </div>
         {channelNames.length > 1 ? (
           <div className="viewer-inline-control" data-viewer-mask-channel="true">
@@ -2932,7 +2917,7 @@ export function ImageViewerShell({
           </div>
         ) : null}
       </div>
-    </TooltipProvider>
+    </>
   );
 
   const renderIntensityHistogramPanel = () => (

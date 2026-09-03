@@ -2819,7 +2819,9 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   overscroll-behavior: contain;
   /* (control − one line box) / 2: a one-line brief sits on the controls' axis. */
   padding: calc((var(--composer-control) - 1em * var(--composer-line-height)) / 2) 0.35rem;
-  font-size: clamp(1rem, 0.97rem + 0.18vw, 1.08rem);
+  /* The body register — 15px on desktop, 16px on phones (never smaller: iOS
+     zooms a field under 16px). The composer speaks in the product's own size. */
+  font-size: var(--font-size-body);
   line-height: var(--composer-line-height);
   letter-spacing: 0;
   color: var(--text-main);

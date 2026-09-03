@@ -33,12 +33,16 @@ const setup = (overrides: Partial<ComposerEditorProps> = {}) => {
 };
 
 describe("ComposerEditor", () => {
-  it("mounts a labelled textbox with the placeholder as decoration", () => {
+  it("mounts a labelled textbox that names its placeholder but never draws it", () => {
+    // A placeholder widget before ProseMirror's trailing <br> made an empty
+    // editor two lines tall; the layout draws the hint instead.
     const { container } = setup();
     const editor = container.querySelector(".ProseMirror");
     expect(editor?.getAttribute("role")).toBe("textbox");
     expect(editor?.getAttribute("aria-label")).toBe("Ask Ultra");
-    expect(container.querySelector(".composer-placeholder")?.textContent).toBe("Ask Ultra");
+    expect(editor?.getAttribute("aria-placeholder")).toBe("Ask Ultra");
+    expect(container.querySelector(".composer-placeholder")).toBeNull();
+    expect(container.querySelectorAll(".ProseMirror p").length).toBe(1);
   });
 
   it("emits the serialised text and the tokens it holds, and reports the @ mention", () => {

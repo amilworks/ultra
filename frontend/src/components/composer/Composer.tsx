@@ -189,6 +189,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const [editorReady, setEditorReady] = useState(false);
   const [dismissedQuery, setDismissedQuery] = useState<string | null>(null);
   const [mentionAnchor, setMentionAnchor] = useState<number | null>(null);
+  const prefixRef = useRef<HTMLSpanElement | null>(null);
+  const [prefixWidth, setPrefixWidth] = useState(0);
   const listboxId = useId();
   const { openFilePicker } = useFileUploadContext();
 
@@ -263,6 +265,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
     setMentionAnchor(clampMentionAnchor(rect.left - surface.left, surface.width));
   }, [mentionOpen, phone, mention?.query, current]);
+
+  /* The placeholder sits on the first line after the chips. Their width is
+     measured, never guessed, and written as a variable the sheet reads. */
+  useLayoutEffect(() => {
+    const node = prefixRef.current;
+    if (!node) {
+      setPrefixWidth(0);
+      return;
+    }
+    const report = () => setPrefixWidth(node.getBoundingClientRect().width);
+    report();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(report);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [workflow?.label, mode, hydrated]);
 
   const handleFocusChange = useCallback((next: boolean) => {
     focusedRef.current = next;
@@ -489,8 +509,16 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 current()?.focus();
               }}
             />
-            <div className="composer-field">
-              <span className="composer-prefix">
+            <div
+              className="composer-field"
+              style={{ "--composer-prefix-width": `${prefixWidth}px` } as React.CSSProperties}
+            >
+              {value.length === 0 ? (
+                <span className="composer-placeholder" aria-hidden="true">
+                  {placeholder}
+                </span>
+              ) : null}
+              <span ref={prefixRef} className="composer-prefix">
                 {workflow ? (
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>

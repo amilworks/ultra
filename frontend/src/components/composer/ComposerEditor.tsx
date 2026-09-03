@@ -24,7 +24,6 @@ import {
   findTokenPosition,
   insertMultilineText,
   insertTokenAt,
-  isDocEmpty,
   mentionAtSelection,
   removeTokenNode,
   reopenMentionAt,
@@ -38,28 +37,17 @@ import {
    It owns the text and the tokens; the app owns everything around them.
    Loaded as its own chunk — ComposerFallbackEditor covers the first paint. */
 
-type DecorationState = { placeholder: string; goneFileIds: readonly string[] };
+type DecorationState = { goneFileIds: readonly string[] };
 
 const decorationKey = new PluginKey<DecorationState>("composer-decorations");
 const EXTERNAL = "composer-external";
 
+/* The placeholder is NOT a widget: a widget before ProseMirror's trailing
+   <br> wraps the break onto a second line, so an empty editor measured two
+   line boxes and pushed the controls off the text's axis. The layout draws
+   the placeholder beside the editor instead (see Composer.tsx). */
 const buildDecorations = (doc: PMNode, config: DecorationState): DecorationSet => {
   const decorations: Decoration[] = [];
-  if (isDocEmpty(doc) && config.placeholder) {
-    decorations.push(
-      Decoration.widget(
-        1,
-        () => {
-          const span = document.createElement("span");
-          span.className = "composer-placeholder";
-          span.setAttribute("aria-hidden", "true");
-          span.textContent = config.placeholder;
-          return span;
-        },
-        { side: 1, ignoreSelection: true, key: `placeholder:${config.placeholder}` }
-      )
-    );
-  }
   if (config.goneFileIds.length > 0) {
     const gone = new Set(config.goneFileIds);
     doc.descendants((node, pos) => {
@@ -198,6 +186,7 @@ const ariaAttributes = (props: ComposerEditorProps): Record<string, string> => {
     "aria-multiline": "true",
     "aria-label": props.ariaLabel,
     "aria-autocomplete": "list",
+    "aria-placeholder": props.placeholder,
     "aria-expanded": props.mentionOpen ? "true" : "false",
     "aria-disabled": props.disabled ? "true" : "false",
   };
@@ -244,7 +233,7 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
     const state = EditorState.create({
       doc: docFromText(initial.value, initial.tokens),
       plugins: [
-        decorationPlugin({ placeholder: initial.placeholder, goneFileIds: initial.goneFileIds }),
+        decorationPlugin({ goneFileIds: initial.goneFileIds }),
         history(),
         keymap({
           "Shift-Enter": splitBlock,
@@ -401,13 +390,8 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
     if (!view) {
       return;
     }
-    view.dispatch(
-      view.state.tr.setMeta(decorationKey, {
-        placeholder: props.placeholder,
-        goneFileIds: props.goneFileIds,
-      })
-    );
-  }, [props.placeholder, props.goneFileIds]);
+    view.dispatch(view.state.tr.setMeta(decorationKey, { goneFileIds: props.goneFileIds }));
+  }, [props.goneFileIds]);
 
   useEffect(() => {
     for (const tokenView of tokenViews.current) {
@@ -415,7 +399,7 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
     }
   }, [props.tokenDetails, props.goneFileIds]);
 
-  const { ariaLabel, mentionOpen, listboxId, activeOptionId, disabled } = props;
+  const { ariaLabel, mentionOpen, listboxId, activeOptionId, disabled, placeholder } = props;
   useEffect(() => {
     viewRef.current?.setProps({
       attributes: ariaAttributes({
@@ -425,9 +409,10 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(fu
         listboxId,
         activeOptionId,
         disabled,
+        placeholder,
       }),
     });
-  }, [ariaLabel, mentionOpen, listboxId, activeOptionId, disabled]);
+  }, [ariaLabel, mentionOpen, listboxId, activeOptionId, disabled, placeholder]);
 
   useImperativeHandle(
     ref,

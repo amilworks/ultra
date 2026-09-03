@@ -88,7 +88,7 @@ export function ResourceMentionPicker({
 
   return (
     <div
-      className={cn("composer-mention-picker", `composer-mention-picker-${variant}`)}
+      className={cn("composer-menu composer-mention-picker", `composer-mention-picker-${variant}`)}
       style={style}
       data-testid="composer-mention-picker"
       onMouseDown={preventBlur}
@@ -97,7 +97,7 @@ export function ResourceMentionPicker({
         id={listboxId}
         role="listbox"
         aria-label="Files in your library"
-        className="composer-mention-list"
+        className="composer-menu-list"
       >
         {results.map((resource) => {
           const active = resource.file_id === activeFileId;
@@ -111,20 +111,20 @@ export function ResourceMentionPicker({
               id={resourceMentionOptionId(listboxId, resource.file_id)}
               role="option"
               aria-selected={active}
-              className={cn("composer-mention-option", active && "composer-mention-option-active")}
+              className={cn("composer-menu-row", active && "composer-menu-row-active")}
               onMouseEnter={() => onActivate(resource.file_id)}
               onClick={() => onPick(resource)}
             >
-              <span className="composer-mention-kind">{resourceMentionKindLabel(resource)}</span>
-              <span className="composer-mention-body">
-                <span className="composer-mention-name">{emphasize(name, trimmedQuery)}</span>
-                {meta ? <span className="composer-mention-meta">{meta}</span> : null}
+              <span className="composer-menu-kind">{resourceMentionKindLabel(resource)}</span>
+              <span className="composer-menu-body">
+                <span className="composer-menu-title">{emphasize(name, trimmedQuery)}</span>
               </span>
+              {meta ? <span className="composer-menu-aside">{meta}</span> : null}
             </div>
           );
         })}
         {results.length === 0 ? (
-          <div className="composer-mention-empty" role="presentation">
+          <div className="composer-menu-empty" role="presentation">
             {error
               ? "Your library could not be searched right now."
               : loading
@@ -135,14 +135,14 @@ export function ResourceMentionPicker({
           </div>
         ) : null}
       </div>
-      <div className="composer-mention-footer">
-        <span className="composer-mention-hint" aria-hidden="true">
+      <div className="composer-menu-footer">
+        <span className="composer-menu-hint" aria-hidden="true">
           ↵ bring in · ↑↓ move · esc
         </span>
         {onUploadInstead ? (
           <button
             type="button"
-            className="composer-mention-upload"
+            className="composer-menu-foot-action"
             onClick={onUploadInstead}
             tabIndex={-1}
           >

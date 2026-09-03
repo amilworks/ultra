@@ -1,24 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
-import {
-  Check,
-  FolderSearch,
-  ImageIcon,
-  Link2,
-  Loader2,
-} from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
-import { cn } from "@/lib/utils";
+import { resourceMentionKindLabel } from "@/features/chat/resource-mention";
+import { resourceDisplayName } from "@/features/resources/presentation";
 import { formatBytes } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import type { ResourceRecord } from "@/types";
 
 import type {
@@ -26,6 +13,11 @@ import type {
   ComposerWorkflowId,
   ComposerWorkflowPresetState,
 } from "./composer-workflows";
+
+/* The / menu and the library picker, inside the composer's card, in the one
+   popover language the @ picker also speaks (see the composer's menu rules in
+   styles.css). Deliberately dumb: the app owns the query, the active row and
+   every keystroke; this component draws them and reports pointer intent. */
 
 export type ComposerWorkflowGroup = {
   category: ComposerWorkflowDefinition["category"];
@@ -51,48 +43,62 @@ type ComposerSlashMenuProps = {
   onCancelResourcePicker?: () => void;
 };
 
-const resourceKindLabel = (kind: string): string => {
-  const normalized = String(kind || "").trim().toLowerCase();
-  if (!normalized) {
-    return "resource";
+/** The typeable shortcut shown in each row's margin — "/image", "/pro". The
+    filter matches keywords, so a keyword is a truthful slug; the first one
+    that no sibling workflow also claims is the one that names this row
+    unambiguously ("/download", not a third "/bisque"). */
+export const workflowSlugs = (
+  workflows: readonly ComposerWorkflowDefinition[]
+): Map<ComposerWorkflowId, string> => {
+  const slugs = new Map<ComposerWorkflowId, string>();
+  const claimed = new Map<string, number>();
+  for (const workflow of workflows) {
+    for (const keyword of workflow.keywords ?? []) {
+      claimed.set(keyword, (claimed.get(keyword) ?? 0) + 1);
+    }
   }
-  return normalized;
+  for (const workflow of workflows) {
+    const keywords = workflow.keywords ?? [];
+    const own = keywords.find((keyword) => claimed.get(keyword) === 1) ?? keywords[0] ?? workflow.id;
+    slugs.set(workflow.id, `/${own.replace(/\s+/g, "-").toLowerCase()}`);
+  }
+  return slugs;
 };
+
+const countLabel = (verb: string, count: number): string =>
+  count > 0 ? `${verb} ${count} resource${count === 1 ? "" : "s"}` : `${verb} resources`;
 
 const formatResourceDate = (value: string): string => {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) {
-    return "Unknown date";
+    return "";
   }
-  return new Date(timestamp).toLocaleDateString();
+  return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-const ACTIVE_COMMAND_ITEM_SELECTOR = '[data-composer-active="true"]';
-const COMMAND_ITEM_SCROLL_PADDING = 12;
+const ACTIVE_ROW_SELECTOR = '[data-composer-active="true"]';
+const ROW_SCROLL_PADDING = 12;
 
-const scrollActiveCommandItemIntoView = (container: HTMLDivElement | null): void => {
+const scrollActiveRowIntoView = (container: HTMLDivElement | null): void => {
   if (!container) {
     return;
   }
-  const activeItem = container.querySelector<HTMLElement>(ACTIVE_COMMAND_ITEM_SELECTOR);
+  const activeItem = container.querySelector<HTMLElement>(ACTIVE_ROW_SELECTOR);
   if (!activeItem) {
     return;
   }
-
   const containerRect = container.getBoundingClientRect();
   const activeItemRect = activeItem.getBoundingClientRect();
   const containerTop = container.scrollTop;
   const containerBottom = containerTop + container.clientHeight;
   const itemTop = activeItemRect.top - containerRect.top + container.scrollTop;
   const itemBottom = itemTop + activeItemRect.height;
-
-  if (itemTop < containerTop + COMMAND_ITEM_SCROLL_PADDING) {
-    container.scrollTop = Math.max(itemTop - COMMAND_ITEM_SCROLL_PADDING, 0);
+  if (itemTop < containerTop + ROW_SCROLL_PADDING) {
+    container.scrollTop = Math.max(itemTop - ROW_SCROLL_PADDING, 0);
     return;
   }
-  if (itemBottom > containerBottom - COMMAND_ITEM_SCROLL_PADDING) {
-    container.scrollTop =
-      itemBottom - container.clientHeight + COMMAND_ITEM_SCROLL_PADDING;
+  if (itemBottom > containerBottom - ROW_SCROLL_PADDING) {
+    container.scrollTop = itemBottom - container.clientHeight + ROW_SCROLL_PADDING;
   }
 };
 
@@ -121,234 +127,217 @@ export function ComposerSlashMenu({
     () => workflowGroups.flatMap((group) => group.items),
     [workflowGroups]
   );
+  const slugs = useMemo(() => workflowSlugs(orderedWorkflows), [orderedWorkflows]);
 
   useEffect(() => {
     if (mode !== "workflow" || !activeWorkflowId) {
       return;
     }
-    scrollActiveCommandItemIntoView(workflowListRef.current);
+    scrollActiveRowIntoView(workflowListRef.current);
   }, [mode, activeWorkflowId, orderedWorkflows]);
 
   useEffect(() => {
     if (mode !== "resource_picker" || !activeResourceId) {
       return;
     }
-    scrollActiveCommandItemIntoView(resourceListRef.current);
+    scrollActiveRowIntoView(resourceListRef.current);
   }, [mode, activeResourceId, resources]);
 
   if (mode === "workflow") {
+    const count = orderedWorkflows.length;
     return (
-      <div
-        className="absolute right-0 bottom-[calc(100%+0.75rem)] left-0 z-30"
-        data-testid="composer-slash-menu"
-      >
-        <div className="overflow-hidden rounded-[1.1rem] border border-border/70 bg-popover/95 p-1.5 shadow-xl backdrop-blur">
-          <Command
-            aria-label="Slash workflows"
-            className="h-auto bg-transparent"
-            shouldFilter={false}
-          >
-            <CommandList ref={workflowListRef} className="max-h-[360px] p-0">
-              <CommandEmpty className="py-5 text-sm text-muted-foreground">
-                No workflows matched that slash query.
-              </CommandEmpty>
-              {workflowGroups.map((group) => (
-                <CommandGroup key={group.category}>
-                  {group.items.map((workflow) => {
-                    const Icon = workflow.icon;
-                    const comingSoon = workflow.comingSoon === true;
-                    const active = !comingSoon && workflow.id === activeWorkflowId;
-                    const selectWorkflow = () => {
-                      if (!comingSoon) {
-                        onSelectWorkflow?.(workflow);
-                      }
-                    };
-                    return (
-                      <CommandItem
-                        key={workflow.id}
-                        value={workflow.id}
-                        disabled={comingSoon}
-                        data-testid={`composer-workflow-${workflow.id}`}
-                        data-composer-active={active ? "true" : undefined}
-                        className={cn(
-                          "min-h-12 items-center gap-3 rounded-xl px-3 py-2.5",
-                          active && "bg-muted text-foreground",
-                          comingSoon && "cursor-not-allowed opacity-55"
-                        )}
-                        onMouseDown={(event) => {
-                          event.preventDefault();
-                          selectWorkflow();
-                        }}
-                        onSelect={selectWorkflow}
-                      >
-                        <Icon
-                          className={cn(
-                            "size-5 shrink-0",
-                            active ? "text-foreground" : "text-muted-foreground"
-                          )}
-                        />
-                        <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                          <span className="shrink-0 text-sm font-medium text-foreground">
-                            {workflow.label}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                            {workflow.description}
-                          </span>
-                        </div>
-                        {comingSoon ? (
-                          <Badge
-                            variant="outline"
-                            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide"
-                          >
-                            Soon
-                          </Badge>
-                        ) : null}
-                      </CommandItem>
-                    );
-                  })}
-                </CommandGroup>
-              ))}
-            </CommandList>
-          </Command>
+      <div className="composer-menu composer-slash-menu" data-testid="composer-slash-menu">
+        <div
+          ref={workflowListRef}
+          className="composer-menu-list"
+          role="listbox"
+          aria-label="Workflows"
+        >
+          {count === 0 ? (
+            <div className="composer-menu-empty" role="presentation">
+              No workflow matches that.
+            </div>
+          ) : null}
+          {workflowGroups.map((group) => (
+            <div
+              key={group.category}
+              className="composer-menu-group"
+              role="group"
+              aria-label={group.category}
+            >
+              <div className="composer-menu-eyebrow" aria-hidden="true">
+                {group.category}
+              </div>
+              {group.items.map((workflow) => {
+                const Icon = workflow.icon;
+                const comingSoon = workflow.comingSoon === true;
+                const active = !comingSoon && workflow.id === activeWorkflowId;
+                const selectWorkflow = () => {
+                  if (!comingSoon) {
+                    onSelectWorkflow?.(workflow);
+                  }
+                };
+                return (
+                  <div
+                    key={workflow.id}
+                    role="option"
+                    aria-selected={active}
+                    aria-disabled={comingSoon || undefined}
+                    data-testid={`composer-workflow-${workflow.id}`}
+                    data-composer-active={active ? "true" : undefined}
+                    className={cn(
+                      "composer-menu-row",
+                      active && "composer-menu-row-active",
+                      comingSoon && "composer-menu-row-disabled"
+                    )}
+                    onMouseDown={(event) => {
+                      // Select on mousedown, before the click can blur the editor.
+                      event.preventDefault();
+                      selectWorkflow();
+                    }}
+                    onClick={selectWorkflow}
+                  >
+                    <Icon className="composer-menu-icon" aria-hidden="true" />
+                    <div className="composer-menu-body">
+                      <span className="composer-menu-title">{workflow.label}</span>
+                      <span className="composer-menu-detail">{workflow.description}</span>
+                    </div>
+                    <span className="composer-menu-aside">
+                      {comingSoon ? "soon" : slugs.get(workflow.id)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        <div className="composer-menu-footer">
+          <span className="composer-menu-hint" aria-hidden="true">
+            ↵ choose · ↑↓ move · esc
+          </span>
+          <span>{`${count} workflow${count === 1 ? "" : "s"}`}</span>
         </div>
       </div>
     );
   }
 
   const selectedCount = selectedResourceIds.size;
-  const resourceTitle = preset?.id === "find_resource" ? "Find resources" : `Choose resources for ${preset?.label ?? "this workflow"}`;
-  const resourceDescription =
-    preset?.id === "find_resource"
-      ? "Search your resource catalog and stage files into this chat."
-      : "Select one or more resources to stage before sending the workflow-backed prompt.";
+  const finding = preset?.id === "find_resource";
+  const resourceTitle = finding
+    ? "Find resources"
+    : `Choose resources for ${preset?.label ?? "this workflow"}`;
+  const resourceDescription = finding
+    ? "Search your library and stage files into this chat."
+    : "Stage one or more files before sending the workflow-backed prompt.";
 
   return (
     <div
-      className="absolute right-0 bottom-[calc(100%+0.75rem)] left-0 z-30"
+      className="composer-menu composer-resource-picker"
       data-testid="composer-resource-picker"
     >
-      <div className="overflow-hidden rounded-[1.4rem] border border-border/70 bg-popover/95 shadow-2xl backdrop-blur">
-        <div className="flex items-start justify-between gap-3 border-b border-border/60 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-foreground flex items-center gap-2 text-sm font-medium">
-              <FolderSearch className="size-4 text-primary" />
-              {resourceTitle}
-            </p>
-            <p className="text-muted-foreground text-xs">{resourceDescription}</p>
-          </div>
-          {selectedCount > 0 ? (
-            <Badge variant="secondary" className="shrink-0 rounded-full px-2.5 py-0.5 text-[11px]">
-              {selectedCount} selected
-            </Badge>
-          ) : null}
+      <div className="composer-menu-header">
+        <div className="composer-menu-body">
+          <span className="composer-menu-title">{resourceTitle}</span>
+          <span className="composer-menu-detail">{resourceDescription}</span>
         </div>
-        <Command className="h-auto bg-transparent" shouldFilter={false}>
-          <CommandInput
-            autoFocus
-            value={resourceQuery}
-            onValueChange={onResourceQueryChange}
-            onKeyDown={onResourceInputKeyDown}
-            placeholder="Search files, BisQue IDs, or URLs"
-            aria-label="Find resources"
-          />
-          <CommandList ref={resourceListRef} className="max-h-[340px] px-2 py-2">
-            {resourcesError ? (
-              <div className="px-3 py-4 text-sm text-destructive">{resourcesError}</div>
-            ) : null}
-            {resourcesLoading ? (
-              <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                Loading resources…
-              </div>
-            ) : null}
-            {!resourcesLoading && !resourcesError ? (
-              <CommandEmpty className="py-5 text-sm text-muted-foreground">
-                No resources matched that search.
-              </CommandEmpty>
-            ) : null}
-            {!resourcesLoading && !resourcesError ? (
-              <CommandGroup heading="Resources">
-                {resources.map((resource) => {
-                  const selected = selectedResourceIds.has(resource.file_id);
-                  const active = resource.file_id === activeResourceId;
-                  return (
-                    <CommandItem
-                      key={resource.file_id}
-                      value={`${resource.original_name} ${resource.file_id} ${resource.source_uri ?? ""}`}
-                      data-composer-active={active ? "true" : undefined}
-                      className={cn(
-                        "items-start gap-3 rounded-xl px-3 py-3",
-                        active && "bg-accent/70 text-accent-foreground",
-                        selected && "bg-accent text-accent-foreground"
-                      )}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onSelect={() => onToggleResource?.(resource)}
-                    >
-                      <div
-                        aria-hidden="true"
-                        className={cn(
-                          "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md border transition-colors",
-                          selected
-                            ? "border-primary bg-primary text-primary-foreground"
-                            : "border-border/70 bg-background text-transparent"
-                        )}
-                      >
-                        <Check className="size-3.5" />
-                      </div>
-                      <div className="flex min-w-0 flex-1 items-start gap-3">
-                        <div className="flex size-9 shrink-0 items-center justify-center rounded-full border border-border/70 bg-background text-muted-foreground">
-                          <ImageIcon className="size-4" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium">{resource.original_name}</p>
-                          <p className="text-muted-foreground text-xs">
-                            {formatBytes(resource.size_bytes)} • {formatResourceDate(resource.created_at)}
-                          </p>
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            <Badge variant="outline" className="rounded-full px-2 py-0 text-[10px]">
-                              {resource.source_type}
-                            </Badge>
-                            <Badge variant="outline" className="rounded-full px-2 py-0 text-[10px]">
-                              {resourceKindLabel(resource.resource_kind)}
-                            </Badge>
-                          </div>
-                          {resource.source_uri ? (
-                            <p className="text-muted-foreground mt-2 flex items-center gap-1 text-[11px]">
-                              <Link2 className="size-3" />
-                              <span className="truncate">{resource.source_uri}</span>
-                            </p>
-                          ) : null}
-                        </div>
-                      </div>
-                    </CommandItem>
-                  );
-                })}
-              </CommandGroup>
-            ) : null}
-          </CommandList>
-        </Command>
-        <div className="flex items-center justify-between gap-3 border-t border-border/60 px-4 py-3">
-          <p className="text-muted-foreground text-xs">
-            {preset?.id === "find_resource"
-              ? "Selected resources will be staged into the current chat."
-              : "Stage resources first, then send the workflow-backed prompt."}
-          </p>
-          <div className="flex items-center gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={onCancelResourcePicker}>
-              Close
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={selectedCount === 0}
-              onClick={onConfirmResources}
-            >
-              {preset?.id === "find_resource"
-                ? `Add ${selectedCount || ""} resource${selectedCount === 1 ? "" : "s"}`
-                : `Use ${selectedCount || ""} resource${selectedCount === 1 ? "" : "s"}`}
-            </Button>
+        {selectedCount > 0 ? (
+          <span className="composer-menu-aside">{`${selectedCount} selected`}</span>
+        ) : null}
+      </div>
+      <input
+        autoFocus
+        type="text"
+        className="composer-menu-search"
+        value={resourceQuery}
+        onChange={(event) => onResourceQueryChange?.(event.target.value)}
+        onKeyDown={onResourceInputKeyDown}
+        placeholder="Search files, BisQue IDs, or URLs"
+        aria-label="Find resources"
+        autoComplete="off"
+        spellCheck={false}
+      />
+      <div
+        ref={resourceListRef}
+        className="composer-menu-list"
+        role="listbox"
+        aria-label="Resources"
+        aria-multiselectable="true"
+      >
+        {resourcesError ? (
+          <div className="composer-menu-empty composer-menu-error" role="presentation">
+            {resourcesError}
           </div>
-        </div>
+        ) : null}
+        {resourcesLoading ? (
+          <div className="composer-menu-empty" role="presentation">
+            <Loader2 className="composer-menu-icon composer-menu-spin" aria-hidden="true" />
+            Searching your library…
+          </div>
+        ) : null}
+        {!resourcesLoading && !resourcesError && resources.length === 0 ? (
+          <div className="composer-menu-empty" role="presentation">
+            {resourceQuery.trim()
+              ? `Nothing in your library matches “${resourceQuery.trim()}”.`
+              : "Your library is empty."}
+          </div>
+        ) : null}
+        {!resourcesLoading && !resourcesError
+          ? resources.map((resource) => {
+              const selected = selectedResourceIds.has(resource.file_id);
+              const active = resource.file_id === activeResourceId;
+              const meta = [formatBytes(resource.size_bytes), formatResourceDate(resource.created_at)]
+                .filter((part) => part && part.length > 0)
+                .join(" · ");
+              return (
+                <div
+                  key={resource.file_id}
+                  role="option"
+                  aria-selected={selected}
+                  data-composer-active={active ? "true" : undefined}
+                  className={cn(
+                    "composer-menu-row",
+                    active && "composer-menu-row-active",
+                    selected && "composer-menu-row-selected"
+                  )}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => onToggleResource?.(resource)}
+                >
+                  <span
+                    className={cn("composer-menu-check", selected && "composer-menu-check-on")}
+                    aria-hidden="true"
+                  >
+                    <Check />
+                  </span>
+                  <span className="composer-menu-kind">{resourceMentionKindLabel(resource)}</span>
+                  <div className="composer-menu-body">
+                    <span className="composer-menu-title">{resourceDisplayName(resource)}</span>
+                    {resource.source_uri ? (
+                      <span className="composer-menu-detail">{resource.source_uri}</span>
+                    ) : null}
+                  </div>
+                  {meta ? <span className="composer-menu-aside">{meta}</span> : null}
+                </div>
+              );
+            })
+          : null}
+      </div>
+      <div className="composer-menu-footer">
+        <span className="composer-menu-hint" aria-hidden="true">
+          ↵ select · ↑↓ move · esc
+        </span>
+        <span className="composer-menu-actions">
+          <Button type="button" variant="ghost" size="sm" onClick={onCancelResourcePicker}>
+            Close
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            disabled={selectedCount === 0}
+            onClick={onConfirmResources}
+          >
+            {countLabel(finding ? "Add" : "Use", selectedCount)}
+          </Button>
+        </span>
       </div>
     </div>
   );

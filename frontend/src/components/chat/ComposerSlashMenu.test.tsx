@@ -1,10 +1,12 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { ComposerSlashMenu } from "./ComposerSlashMenu";
+import { ComposerSlashMenu, workflowSlugs } from "./ComposerSlashMenu";
 import {
   COMPOSER_WORKFLOW_GROUP_ORDER,
   filterComposerWorkflows,
+  getComposerWorkflowById,
+  toComposerWorkflowPresetState,
   type ComposerWorkflowDefinition,
 } from "./composer-workflows";
 
@@ -82,5 +84,36 @@ describe("ComposerSlashMenu", () => {
     expect(onSelectWorkflow.mock.calls[0]?.[0]).toMatchObject({
       id: "quantitative_analysis",
     });
+  });
+
+  it("gives every row a slug no sibling shares, in the mono margin", () => {
+    render(
+      <ComposerSlashMenu
+        mode="workflow"
+        workflowGroups={workflowGroupsForQuery("")}
+        activeWorkflowId={null}
+        onSelectWorkflow={vi.fn()}
+      />
+    );
+    const asides = [...document.querySelectorAll(".composer-slash-menu .composer-menu-aside")]
+      .map((node) => node.textContent ?? "")
+      .filter((text) => text.startsWith("/"));
+    expect(asides.length).toBeGreaterThan(5);
+    expect(new Set(asides).size).toBe(asides.length);
+    expect(asides).toContain("/image");
+    const slugs = workflowSlugs(filterComposerWorkflows(""));
+    expect(slugs.get("bisque_download_resource")).not.toBe(slugs.get("find_bisque_assets"));
+  });
+
+  it("labels the confirm without a count until something is chosen", () => {
+    render(
+      <ComposerSlashMenu
+        mode="resource_picker"
+        preset={toComposerWorkflowPresetState(getComposerWorkflowById("image_analysis")!)}
+        resources={[]}
+        selectedResourceIds={new Set()}
+      />
+    );
+    expect(screen.getByText("Use resources")).toBeInTheDocument();
   });
 });

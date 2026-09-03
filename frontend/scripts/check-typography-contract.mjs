@@ -543,6 +543,7 @@ for (const [token, weight] of [
   // remains lighter during sustained reading.
   ["body", "430"],
   ["reading-body", "400"],
+  ["desktop-invitation", "300"],
   ["invitation", "350"],
   ["nav", "500"],
   ["action", "500"],
@@ -581,7 +582,7 @@ for (const [pattern, message] of [
   [/@media \(max-width: 640px\)[\s\S]*--font-size-body:\s*1rem;/, "Phone body must remain 16px"],
   [/@media \(max-width: 640px\)[\s\S]*--font-size-reading:\s*1rem;/, "Phone reading must remain 16px"],
   [/\.pk-prompt-input-textarea\s*\{[^}]*font:\s*inherit;/s, "Composer must inherit the 16px phone font"],
-  [/\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Desktop welcome must use the invitation role"],
+  [/\.blank-chat-welcome-hero\s*\{[^}]*font-size:\s*1\.625rem;[^}]*font-weight:\s*var\(--font-weight-desktop-invitation\);/s, "Desktop welcome must use the 26px/300 invitation role"],
   [/\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s, "Mobile welcome must use the invitation role"],
   // Mono surfaces must pin their weight so code and data never inherit the
   // proportional reading grade.
@@ -609,9 +610,9 @@ check(
   "Composer must use Ultra Sans native tracking at its rendered 15px size"
 );
 check(
-  /\.blank-chat-welcome-hero\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s.test(stylesCss) &&
+  /\.blank-chat-welcome-hero\s*\{[^}]*font-size:\s*1\.625rem;[^}]*font-weight:\s*var\(--font-weight-desktop-invitation\);/s.test(stylesCss) &&
     /\.mobile-chat-hero-title\s*\{[^}]*font-weight:\s*var\(--font-weight-invitation\);/s.test(stylesCss),
-  "Desktop and mobile New Chat invitations must consume the light invitation role"
+  "Desktop and mobile New Chat invitations must consume their light invitation roles"
 );
 
 check(appSource.includes("<BrandWordmark"), "Sidebar must use the shared BrandWordmark");
@@ -631,10 +632,10 @@ check(
   /\.brand-wordmark__bisque\s*\{[^}]*color:\s*var\(--brand-wordmark-context\);[^}]*font-weight:\s*400;/s.test(
     typographyCss
   ) &&
-    /\.brand-wordmark__ultra\s*\{[^}]*color:\s*var\(--brand-wordmark-emphasis\);[^}]*font-weight:\s*600;/s.test(
+    /\.brand-wordmark__ultra\s*\{[^}]*color:\s*var\(--brand-wordmark-emphasis\);[^}]*font-weight:\s*500;/s.test(
       typographyCss
     ),
-  "Wordmark must keep BisQue context 400 and Ultra emphasis 600"
+  "Wordmark must keep BisQue context 400 and Ultra emphasis 500"
 );
 check(
   wordmarkSource.includes('aria-label": ariaLabel = "BisQue Ultra"') &&

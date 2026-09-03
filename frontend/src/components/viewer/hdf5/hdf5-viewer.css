@@ -336,8 +336,10 @@
 
 .viewer-hdf-navigator-content {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
+  /* CardContent owns one Command child. Give that child the bounded track;
+     an AUTO track here sizes to cmdk's primitive cap and strands the 1fr
+     track as empty space below the dataset browser. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .viewer-hdf-inspector-content {
@@ -395,25 +397,35 @@
 
 .viewer-hdf-search-results {
   min-height: 260px;
+  /* CommandList ships with max-h-[320px]. This navigator is the rail's real
+     scroll surface, so its local layout — not the shared primitive — owns the
+     available height. */
+  max-height: none;
   padding: 6px;
 }
 
 .viewer-hdf-command-item {
   margin: 2px 0;
   border: 1px solid transparent;
+  border-radius: var(--sidebar-radius-row);
 }
 
+.viewer-hdf-command-item:hover,
 .viewer-hdf-command-item.is-active,
-.viewer-hdf-command-item[data-selected="true"],
-.viewer-hdf-command-item.is-selected {
-  border-color: color-mix(in oklab, var(--accent) 28%, var(--line) 72%);
-  background-color: color-mix(in oklab, var(--accent-soft) 82%, white 18%);
+.viewer-hdf-command-item[data-selected="true"] {
+  border-color: transparent;
+  background-color: color-mix(in oklab, var(--bg-sunk) 72%, transparent);
 }
 
 .viewer-hdf-command-item.is-selected {
-  box-shadow:
-    inset 3px 0 0 color-mix(in oklab, var(--accent) 88%, black 12%),
-    0 0 0 1px color-mix(in oklab, var(--accent) 18%, transparent 82%);
+  border-color: transparent;
+  background-color: var(--bg-sunk);
+  box-shadow: none;
+}
+
+.viewer-hdf-command-item:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 
 .viewer-hdf-command-item-copy {
@@ -433,7 +445,7 @@
 
 .viewer-hdf-node-name {
   font-size: 0.85rem;
-  font-weight: 600;
+  font-weight: var(--font-weight-action);
   color: var(--text-main);
   word-break: break-word;
 }
@@ -902,7 +914,6 @@
   color: var(--text-main);
 }
 
-.viewer-hdf-preview-note,
 .viewer-hdf-provenance-note {
   border: 1px solid color-mix(in oklab, var(--line) 88%, transparent 12%);
   border-radius: 10px;
@@ -912,20 +923,11 @@
   gap: 4px;
 }
 
-.viewer-hdf-preview-note {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.viewer-hdf-preview-note strong,
 .viewer-hdf-provenance-note strong {
   font-size: 0.78rem;
   color: var(--text-main);
 }
 
-.viewer-hdf-preview-note span,
 .viewer-hdf-provenance-note span {
   font-size: 0.82rem;
   line-height: 1.5;
@@ -1334,10 +1336,6 @@
   display: none;
 }
 
-.viewer-hdf-material-map-stage .viewer-hdf-preview-note {
-  display: none;
-}
-
 .viewer-hdf-material-map-stage .viewer-hdf-inline-field.viewer-hdf-slider-field {
   gap: 8px;
 }
@@ -1588,28 +1586,15 @@
     height: auto;
   }
 
-  /* The navigator card is capped at min(420px, 46dvh) in this regime. Its
-     content grid declares two rows but holds ONE child (the command box),
-     which therefore lands in the unbounded auto row — the bounded 1fr track
-     sits empty below it. Collapse to a single bounded track so the cap can
-     actually reach the dataset list. */
-  .viewer-hdf-navigator-content {
-    grid-template-rows: minmax(0, 1fr);
-  }
-
-  /* Desktop floors these scrollports at 260px so short columns stay usable,
-     and the primitive caps the list at 320px. Inside the capped card the
-     floor + toolbar + header exceed the cap on phones — the overflow clipped
-     the search input in half. The bounded track governs instead. */
+  /* Desktop floors these scrollports at 260px so short columns stay usable.
+     Inside the capped card that floor plus the toolbar and header exceeds the
+     cap on phones and clips the search input. The bounded track governs here. */
   .viewer-hdf-tree-scroll,
   .viewer-hdf-detail-scroll,
   .viewer-hdf-search-results {
     min-height: 120px;
   }
 
-  .viewer-hdf-search-results {
-    max-height: none;
-  }
 }
 
 /* Two-pane desktop: the preview fills the inspector column instead of

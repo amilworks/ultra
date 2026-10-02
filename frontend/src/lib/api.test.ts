@@ -6988,6 +6988,7 @@ describe("ApiClient V2 chat bridge", () => {
         });
       }
       if (url === "https://ultra.example.org/v2/bisque/unlink") {
+        expect(init?.method).toBe("POST");
         return new Response(JSON.stringify({ authenticated: false, user: null, bisque_linked: false }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
@@ -7015,6 +7016,9 @@ describe("ApiClient V2 chat bridge", () => {
     expect(urls.some((url) => url.includes("/v1/"))).toBe(false);
     expect(urls).toContain("https://ultra.example.org/v2/auth/request-account");
     expect(urls).not.toContain("https://ultra.example.org/v2/auth/guest");
+    expect(
+      urls.filter((url) => url === "https://ultra.example.org/v2/bisque/unlink")
+    ).toHaveLength(1);
   });
 
   it("uses V2 run and artifact recovery endpoints without legacy fallbacks", async () => {

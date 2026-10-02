@@ -71,6 +71,13 @@ describe("sidebar settings menu", () => {
     expect(settingsDialog).toMatch(/BisQue account linked/);
     expect(settingsDialog).toMatch(/Open BisQue/);
     expect(settingsDialog).toMatch(/Unlink account/);
+    const settingsLinkHandler = app.match(
+      /const linkBisqueAccountFromSettings = useCallback\([\s\S]*?\n {2}\);\n\n {2}const requestAccount/
+    )?.[0];
+    expect(settingsLinkHandler, "Settings BisQue link handler is missing").toBeDefined();
+    expect(settingsLinkHandler).toMatch(
+      /const imageCount = await loadOptionalBisqueImageCount\(\(options\) =>\s*apiClient\.searchBisqueResources\(options\)\s*\)/s
+    );
     expect(app).toMatch(/showSuccessToast\("Successfully linked BisQue account"/);
     expect(deferredToaster).toMatch(/<LazyToaster/);
     expect(accountButton).toMatch(/app-sidebar-user-menu/);

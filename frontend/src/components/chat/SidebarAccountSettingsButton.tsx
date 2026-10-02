@@ -4,6 +4,9 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuItemIndicator,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -111,33 +114,44 @@ export function SidebarAccountSettingsButton({
           sideOffset={8}
           className="app-sidebar-account-menu"
         >
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("system")}>
-            <Laptop data-icon="inline-start" aria-hidden="true" />
-            <span>System</span>
-            {themePreference === "system" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("light")}>
-            <Sun data-icon="inline-start" aria-hidden="true" />
-            <span>Light</span>
-            {themePreference === "light" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => onThemePreferenceChange("dark")}>
-            <Moon data-icon="inline-start" aria-hidden="true" />
-            <span>Dark</span>
-            {themePreference === "dark" ? (
-              <span className="app-sidebar-account-menu-current" aria-hidden="true">
-                •
-              </span>
-            ) : null}
-          </DropdownMenuItem>
+          <DropdownMenuRadioGroup value={themePreference}>
+            <DropdownMenuRadioItem
+              value="system"
+              onSelect={() => onThemePreferenceChange("system")}
+            >
+              <Laptop data-icon="inline-start" aria-hidden="true" />
+              <span>System</span>
+              <DropdownMenuItemIndicator asChild>
+                <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                  •
+                </span>
+              </DropdownMenuItemIndicator>
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem
+              value="light"
+              onSelect={() => onThemePreferenceChange("light")}
+            >
+              <Sun data-icon="inline-start" aria-hidden="true" />
+              <span>Light</span>
+              <DropdownMenuItemIndicator asChild>
+                <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                  •
+                </span>
+              </DropdownMenuItemIndicator>
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem
+              value="dark"
+              onSelect={() => onThemePreferenceChange("dark")}
+            >
+              <Moon data-icon="inline-start" aria-hidden="true" />
+              <span>Dark</span>
+              <DropdownMenuItemIndicator asChild>
+                <span className="app-sidebar-account-menu-current" aria-hidden="true">
+                  •
+                </span>
+              </DropdownMenuItemIndicator>
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
           <DropdownMenuItem onClick={onOpenUsage} {...mobileSidebarCloseProps}>
             <Activity data-icon="inline-start" aria-hidden="true" />
             <span>Usage</span>

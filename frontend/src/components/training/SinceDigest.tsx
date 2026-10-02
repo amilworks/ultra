@@ -1,6 +1,7 @@
 // The since-your-last-visit digest (§14.4-G): 1-3 muted delta lines from the
 // recent-events echo, plus one line per priority-rule demotion (nothing is
-// hidden, only demoted). Zero events renders nothing - not an empty state.
+// hidden, only demoted). An empty first visit gets neutral orientation copy;
+// later zero-event visits render nothing, never an all-time activity claim.
 
 import type { TrainingRecentEvent } from "../../types";
 import type { TrainingDemotedNote } from "../../features/training/state";
@@ -20,7 +21,7 @@ export function SinceDigest({
   if (firstVisit && events.length === 0 && demoted.length === 0) {
     return (
       <div className="training-digest">
-        <span>This page tracks your detector's retraining. Nothing has run yet.</span>
+        <span>This page tracks your detector's retraining.</span>
       </div>
     );
   }

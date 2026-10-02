@@ -6,6 +6,7 @@ import {
   type UIEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -828,10 +829,12 @@ function CollectionAccessList({
 }) {
   const [grants, setGrants] = useState<ResourceCollectionShareGrantRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
+    setLoadFailed(false);
     load(collection)
       .then((records) => {
         if (!cancelled) {
@@ -842,6 +845,7 @@ function CollectionAccessList({
       .catch(() => {
         if (!cancelled) {
           setGrants([]);
+          setLoadFailed(true);
           setLoading(false);
         }
       });
@@ -866,7 +870,22 @@ function CollectionAccessList({
   return (
     <div className="resource-browser-share-access" aria-label="People with access">
       <p className="resource-browser-share-access-title">People with access</p>
-      {grants.length === 0 ? (
+      {loadFailed ? (
+        <>
+          <p className="resource-browser-share-error" role="alert">
+            Unable to load folder access.
+          </p>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-label="Retry loading folder access"
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Retry
+          </Button>
+        </>
+      ) : grants.length === 0 ? (
         <p className="resource-browser-share-access-empty">Only you</p>
       ) : (
         grants.map((grant) => (
@@ -958,6 +977,30 @@ export function ResourceBrowser({
 }: ResourceBrowserProps) {
   const isMobileView = useBreakpoint(721);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const activeFolderButtonRef = useRef<HTMLButtonElement | null>(null);
+  const folderButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingFolderFocusRef = useRef<{
+    destinationId: string;
+    departedId?: string;
+    source: HTMLButtonElement;
+  } | null>(null);
+  const activeFolderId = activeResourceCollection?.collection_id ?? "";
+  useLayoutEffect(() => {
+    const pending = pendingFolderFocusRef.current;
+    pendingFolderFocusRef.current = null;
+    if (!pending || pending.destinationId !== activeFolderId) return;
+    // Only replace focus lost by this navigation. Loading/refetching and
+    // externally restored folder state must not take focus from the user.
+    const focused = document.activeElement;
+    if (focused !== pending.source && focused !== document.body) return;
+    const departedButton = pending.departedId
+      ? folderButtonRefs.current.get(pending.departedId)
+      : null;
+    const target = departedButton ?? activeFolderButtonRef.current ?? searchInputRef.current;
+    target?.focus();
+  }, [activeFolderId]);
+  const resourceContentRef = useRef<HTMLDivElement | null>(null);
+  const newMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
   // Seeded with the mount-time value, so a signal that was already spent before
   // this mount is not replayed. The counter lives in App and never resets, and
   // this panel unmounts on every panel switch — without the latch, one tap of the
@@ -976,6 +1019,7 @@ export function ResourceBrowser({
     input.focus();
   }, [focusSearchSignal]);
   const [resourceFiltersOpen, setResourceFiltersOpen] = useState(false);
+  const resourceFiltersTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [expiredUploadDetailsOpen, setExpiredUploadDetailsOpen] = useState(false);
   const [resourceViewMode, setResourceViewMode] = useState<ResourceViewMode>(
     readStoredResourceViewMode
@@ -1227,9 +1271,11 @@ export function ResourceBrowser({
     ? activeCollectionName
       ? `Loading ${activeCollectionName}...`
       : "Searching resources..."
-    : activeCollectionName
-      ? `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources in ${activeCollectionName}`
-      : `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources`;
+    : error && visibleCount === 0
+      ? null
+      : activeCollectionName
+        ? `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources in ${activeCollectionName}`
+        : `${visibleCount.toLocaleString()} of ${safeTotalCount.toLocaleString()} resources`;
   const visibleUploadProgress = uploadProgress.filter(
     (item) => item.status !== "completed" && item.status !== "canceled"
   );
@@ -1594,12 +1640,28 @@ export function ResourceBrowser({
     setBulkShareError(null);
   };
 
-  const navigateToAllResources = (): void => {
+  const prepareFolderFocus = (
+    source: HTMLButtonElement,
+    destinationId: string,
+    departedId?: string
+  ): void => {
+    pendingFolderFocusRef.current = document.activeElement === source
+      ? { destinationId, departedId, source }
+      : null;
+  };
+
+  const navigateToAllResources = (event: MouseEvent<HTMLButtonElement>): void => {
+    prepareFolderFocus(event.currentTarget, "", activeFolderId);
     clearSelection();
     onClearActiveCollection?.();
   };
 
-  const navigateFromActiveFolder = (): void => {
+  const navigateFromActiveFolder = (event: MouseEvent<HTMLButtonElement>): void => {
+    prepareFolderFocus(
+      event.currentTarget,
+      activeParentCollection && onOpenCollection ? activeParentCollection.collection_id : "",
+      activeFolderId
+    );
     clearSelection();
     if (activeParentCollection && onOpenCollection) {
       onOpenCollection(activeParentCollection);
@@ -2353,7 +2415,7 @@ export function ResourceBrowser({
           <div className="resource-browser-header-row">
             <div className="resource-browser-heading">
               <CardTitle className="resource-browser-title">Resources</CardTitle>
-              <p className="resource-browser-result-summary">{resultSummary}</p>
+              {resultSummary ? <p className="resource-browser-result-summary">{resultSummary}</p> : null}
             </div>
             <div className="resource-browser-header-actions">
               <input
@@ -2394,6 +2456,7 @@ export function ResourceBrowser({
                     variant="outline"
                     size="sm"
                     className="resource-browser-new-menu"
+                    ref={newMenuTriggerRef}
                     aria-label="New"
                     disabled={uploading || loading || newFolderSaving}
                   >
@@ -2467,6 +2530,7 @@ export function ResourceBrowser({
                 type="button"
                 variant="outline"
                 className="resource-browser-filter-trigger"
+                ref={resourceFiltersTriggerRef}
                 aria-label="More filters"
                 onClick={() => setResourceFiltersOpen(true)}
               >
@@ -2483,10 +2547,12 @@ export function ResourceBrowser({
                 className="resource-browser-refresh"
                 aria-label="Refresh resources"
                 onClick={() => {
+                  if (loading || loadingMore) return;
                   clearSelection();
                   onRefresh();
                 }}
-                disabled={loading || loadingMore}
+                // Keep keyboard focus on the trigger while its request is pending.
+                aria-disabled={loading || loadingMore}
               >
                 <RefreshCw data-icon="icon" className={cn((loading || loadingMore) && "animate-spin")} />
               </Button>
@@ -2507,6 +2573,7 @@ export function ResourceBrowser({
           </div>
         </CardHeader>
         <CardContent
+          ref={resourceContentRef}
           className="resource-browser-content"
           data-file-drop-active={fileDropTargetId === "resources" ? "true" : undefined}
           onDragLeave={(event) => {
@@ -2522,7 +2589,7 @@ export function ResourceBrowser({
           }}
           onKeyDown={handleResourceBrowserKeyDown}
         >
-          {error ? <p className="resource-browser-error">{error}</p> : null}
+          {error ? <p className="resource-browser-error" role="alert">{error}</p> : null}
           {activeResourceCollection ? (
             <ContextMenu>
               <ContextMenuTrigger asChild>
@@ -2573,6 +2640,7 @@ export function ResourceBrowser({
                         <button
                           type="button"
                           className="resource-browser-active-collection-current"
+                          ref={activeFolderButtonRef}
                           aria-label={activeFolderNavigationLabel}
                           onClick={navigateFromActiveFolder}
                         >
@@ -2669,8 +2737,13 @@ export function ResourceBrowser({
                           variant="ghost"
                           className="resource-browser-collection-button"
                           aria-label={`Open folder ${collection.name}`}
+                          ref={(element) => {
+                            if (element) folderButtonRefs.current.set(collection.collection_id, element);
+                            else folderButtonRefs.current.delete(collection.collection_id);
+                          }}
                           onKeyDown={(event) => handleCollectionKeyDown(event, collection)}
-                          onClick={() => {
+                          onClick={(event) => {
+                            prepareFolderFocus(event.currentTarget, collection.collection_id);
                             clearSelection();
                             onOpenCollection(collection);
                           }}
@@ -2985,7 +3058,14 @@ export function ResourceBrowser({
                   variant="ghost"
                   size="sm"
                   className="resource-browser-bulk-clear"
-                  onClick={clearSelection}
+                  onClick={() => {
+                    // Clear removes its own toolbar; keep keyboard focus in Resources.
+                    const selectedCheckbox = resourceContentRef.current?.querySelector<HTMLElement>(
+                      '[role="checkbox"][aria-checked="true"]'
+                    );
+                    (selectedCheckbox ?? searchInputRef.current)?.focus();
+                    clearSelection();
+                  }}
                   disabled={organizingSelection || deletingSelection || restoringSelection}
                   aria-label="Clear"
                 >
@@ -3009,7 +3089,7 @@ export function ResourceBrowser({
               ))}
             </div>
           ) : cardResources.length === 0 ? (
-            <p className="resource-browser-empty">No resources match the current filters.</p>
+            error ? null : <p className="resource-browser-empty">No resources match the current filters.</p>
           ) : (
             <>
               {effectiveResourceViewMode === "table" ? (
@@ -3438,7 +3518,14 @@ export function ResourceBrowser({
           }
         }}
       >
-        <DialogContent className="resource-browser-rename-dialog sm:max-w-md">
+        <DialogContent
+          className="resource-browser-rename-dialog sm:max-w-md"
+          onCloseAutoFocus={(event) => {
+            // The menu item unmounts on selection; return to its persistent trigger.
+            event.preventDefault();
+            newMenuTriggerRef.current?.focus();
+          }}
+        >
           <DialogHeader>
             <DialogTitle>New folder</DialogTitle>
             <DialogDescription className="sr-only">Create a folder in Resources.</DialogDescription>
@@ -3906,6 +3993,11 @@ export function ResourceBrowser({
       <Sheet open={resourceFiltersOpen} onOpenChange={setResourceFiltersOpen}>
         <SheetContent
           side={isMobileView ? "bottom" : "right"}
+          onCloseAutoFocus={(event) => {
+            // The toolbar opener lives outside this Sheet's Radix trigger scope.
+            event.preventDefault();
+            resourceFiltersTriggerRef.current?.focus();
+          }}
           className={cn(
             "resource-browser-filter-sheet",
             isMobileView
@@ -3955,6 +4047,7 @@ export function ResourceBrowser({
                   key={item.value}
                   type="button"
                   variant={kindFilter === item.value ? "secondary" : "outline"}
+                  aria-pressed={kindFilter === item.value}
                   size="sm"
                   onClick={() => {
                     clearSelection();
@@ -3975,6 +4068,7 @@ export function ResourceBrowser({
                   key={item.value}
                   type="button"
                   variant={sourceFilter === item.value ? "secondary" : "outline"}
+                  aria-pressed={sourceFilter === item.value}
                   size="sm"
                   onClick={() => {
                     clearSelection();
@@ -3995,6 +4089,7 @@ export function ResourceBrowser({
                   key={item.value}
                   type="button"
                   variant={sharingFilter === item.value ? "secondary" : "outline"}
+                  aria-pressed={sharingFilter === item.value}
                   size="sm"
                   onClick={() => {
                     clearSelection();
@@ -4015,6 +4110,7 @@ export function ResourceBrowser({
                   key={item.value}
                   type="button"
                   variant={statusFilter === item.value ? "secondary" : "outline"}
+                  aria-pressed={statusFilter === item.value}
                   size="sm"
                   onClick={() => {
                     clearSelection();

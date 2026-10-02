@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Activity,
   Check,
@@ -87,6 +87,7 @@ export type AppSettingsDialogProps = {
   authMode: AuthMode | null;
   authIsAdmin: boolean;
   bisqueCredentialsLinked: boolean;
+  bisqueUnlinkPending?: boolean;
   themePreference: ThemePreference;
   resolvedTheme: "light" | "dark";
   bisqueNavLinks: BisqueNavLinks | null;
@@ -95,7 +96,7 @@ export type AppSettingsDialogProps = {
   onLogout: () => Promise<void>;
   onUnlinkBisqueAccount: () => Promise<void>;
   onLinkBisqueAccount: (payload: LinkBisqueAccountPayload) => Promise<{
-    imageCount: number;
+    imageCount: number | null;
   }>;
   loadProfile?: () => Promise<CurrentUserResponse>;
   saveProfile?: (profile: CurrentUserProfile) => Promise<CurrentUserResponse>;
@@ -185,6 +186,47 @@ const getAccountInitials = (displayName: string): string => {
   return source.trim().toUpperCase() || "BU";
 };
 
+function AppSettingsTabsList({ children }: { children: ReactNode }) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) {
+      return;
+    }
+    const keepSelectedTabVisible = (): void => {
+      const selectedTab = list.querySelector<HTMLElement>(
+        '[role="tab"][aria-selected="true"]'
+      );
+      if (!selectedTab) {
+        return;
+      }
+      const selectedBounds = selectedTab.getBoundingClientRect();
+      const listBounds = list.getBoundingClientRect();
+      if (selectedBounds.left < listBounds.left) {
+        list.scrollLeft += Math.floor(selectedBounds.left - listBounds.left);
+      } else if (selectedBounds.right > listBounds.right) {
+        list.scrollLeft += Math.ceil(selectedBounds.right - listBounds.right);
+      }
+    };
+
+    keepSelectedTabVisible();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", keepSelectedTabVisible);
+      return () => window.removeEventListener("resize", keepSelectedTabVisible);
+    }
+    const observer = new ResizeObserver(keepSelectedTabVisible);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <TabsList ref={listRef} className="app-settings-nav-list" aria-label="Settings sections">
+      {children}
+    </TabsList>
+  );
+}
+
 export function AppSettingsDialog({
   open,
   onOpenChange,
@@ -193,6 +235,7 @@ export function AppSettingsDialog({
   authMode,
   authIsAdmin,
   bisqueCredentialsLinked,
+  bisqueUnlinkPending = false,
   themePreference,
   resolvedTheme,
   bisqueNavLinks,
@@ -225,10 +268,21 @@ export function AppSettingsDialog({
   const [bisquePassword, setBisquePassword] = useState("");
   const [bisqueLinking, setBisqueLinking] = useState(false);
   const [bisqueUnlinking, setBisqueUnlinking] = useState(false);
+  const bisqueUnlinkBusy = bisqueUnlinking || bisqueUnlinkPending;
   const [bisqueLinkError, setBisqueLinkError] = useState<string | null>(null);
   const [bisqueImageCount, setBisqueImageCount] = useState<number | null>(null);
   const bisqueLinked = Boolean(bisqueCredentialsLinked && authUser);
+  const bisqueUsernameInputRef = useRef<HTMLInputElement>(null);
+  const previousBisqueLinkedRef = useRef(bisqueLinked);
   const bisqueRootHref = bisqueNavLinks?.home ?? DEFAULT_BISQUE_BROWSER_URL;
+
+  useEffect(() => {
+    const wasBisqueLinked = previousBisqueLinkedRef.current;
+    previousBisqueLinkedRef.current = bisqueLinked;
+    if (open && wasBisqueLinked && !bisqueLinked) {
+      bisqueUsernameInputRef.current?.focus();
+    }
+  }, [bisqueLinked, open]);
 
   const profileEnabled = Boolean(loadProfile && saveProfile);
   const usageEnabled = Boolean(loadTokenUsage);
@@ -339,6 +393,9 @@ export function AppSettingsDialog({
 
   const submitBisqueLink = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
+    if (bisqueLinking) {
+      return;
+    }
     const username = bisqueUsername.trim();
     if (!username || !bisquePassword) {
       setBisqueLinkError("Enter your BisQue username and password.");
@@ -359,14 +416,13 @@ export function AppSettingsDialog({
       toast.error("Could not link BisQue account", {
         description: message,
       });
-      setBisquePassword("");
     } finally {
       setBisqueLinking(false);
     }
   };
 
   const unlinkBisqueAccount = async (): Promise<void> => {
-    if (bisqueUnlinking) {
+    if (bisqueUnlinkBusy) {
       return;
     }
     setBisqueUnlinking(true);
@@ -408,7 +464,7 @@ export function AppSettingsDialog({
                 Tune the interface and account shortcuts for this workspace.
               </DialogDescription>
             </DialogHeader>
-            <TabsList className="app-settings-nav-list" aria-label="Settings sections">
+            <AppSettingsTabsList>
               <TabsTrigger value="general" className="app-settings-nav-item">
                 <Settings data-icon="inline-start" aria-hidden="true" />
                 General
@@ -437,7 +493,7 @@ export function AppSettingsDialog({
                 <Info data-icon="inline-start" aria-hidden="true" />
                 About
               </TabsTrigger>
-            </TabsList>
+            </AppSettingsTabsList>
           </aside>
 
           <section className="app-settings-content-pane">
@@ -713,11 +769,14 @@ export function AppSettingsDialog({
                     <div className="app-settings-field">
                       <Label htmlFor="settings-bisque-username">Username</Label>
                       <Input
+                        ref={bisqueUsernameInputRef}
                         id="settings-bisque-username"
                         value={bisqueUsername}
                         onChange={(event) => setBisqueUsername(event.target.value)}
                         autoComplete="username"
-                        disabled={bisqueLinking}
+                        readOnly={bisqueLinking}
+                        aria-disabled={bisqueLinking || undefined}
+                        className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                       />
                     </div>
                     <div className="app-settings-field">
@@ -728,7 +787,9 @@ export function AppSettingsDialog({
                         value={bisquePassword}
                         onChange={(event) => setBisquePassword(event.target.value)}
                         autoComplete="current-password"
-                        disabled={bisqueLinking}
+                        readOnly={bisqueLinking}
+                        aria-disabled={bisqueLinking || undefined}
+                        className="aria-disabled:cursor-not-allowed aria-disabled:opacity-50"
                       />
                     </div>
                   </div>
@@ -750,20 +811,22 @@ export function AppSettingsDialog({
                     <Button
                       type="button"
                       variant="outline"
-                      aria-disabled={bisqueUnlinking || undefined}
+                      aria-disabled={bisqueUnlinkBusy || undefined}
                       className="aria-disabled:pointer-events-none aria-disabled:opacity-50"
                       onClick={() => {
                         void unlinkBisqueAccount();
                       }}
                     >
                       <Unlink data-icon="inline-start" aria-hidden="true" />
-                      {bisqueUnlinking ? "Unlinking..." : "Unlink account"}
+                      {bisqueUnlinkBusy ? "Unlinking..." : "Unlink account"}
                     </Button>
                   ) : (
                     <Button
                       type="submit"
                       variant="outline"
-                      disabled={bisqueLinking || !bisqueUsername.trim() || !bisquePassword}
+                      disabled={!bisqueUsername.trim() || !bisquePassword}
+                      aria-disabled={bisqueLinking || undefined}
+                      className="aria-disabled:pointer-events-none aria-disabled:opacity-50"
                     >
                       <Link2 data-icon="inline-start" aria-hidden="true" />
                       {bisqueLinking ? "Testing account..." : "Link account"}

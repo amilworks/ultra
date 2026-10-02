@@ -1,9 +1,16 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { NotesEditorAnchor } from "./notes/MarkdownNoteEditor";
 import { NotesPage } from "./NotesPage";
 import { ApiError, type ApiClient, type NoteRecord, type NoteWritePayload } from "@/lib/api";
 import { writeNoteDraftRecovery } from "@/lib/noteDraftRecovery";
+
+const editorSelection = vi.hoisted(() => ({
+  change: null as ((anchor: NotesEditorAnchor | null) => void) | null,
+}));
+
+const editorReadiness = vi.hoisted(() => ({ delay: 0 }));
 
 vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
   const React = await import("react");
@@ -12,11 +19,13 @@ vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
     defaultMarkdown,
     onMarkdownChange,
     onBlur,
+    onSelectionAnchorChange,
     bindApi,
   }: {
     defaultMarkdown: string;
     onMarkdownChange: (markdown: string) => void;
-    onBlur: () => void;
+    onBlur: (event: FocusEvent) => void;
+    onSelectionAnchorChange: (anchor: { left: number; top: number; bottom: number } | null) => void;
     bindApi: (api: {
       exec: () => void;
       applyLink: () => void;
@@ -25,12 +34,13 @@ vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
       focus: () => void;
     } | null) => void;
   }) {
+    editorSelection.change = onSelectionAnchorChange;
     const [value, setValue] = React.useState(defaultMarkdown);
     const valueRef = React.useRef(defaultMarkdown);
     const bodyRef = React.useRef<HTMLTextAreaElement | null>(null);
 
     React.useEffect(() => {
-      bindApi({
+      const bind = () => bindApi({
         exec: () => undefined,
         applyLink: () => undefined,
         removeLink: () => undefined,
@@ -42,7 +52,12 @@ vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
         },
         focus: () => bodyRef.current?.focus(),
       });
-      return () => bindApi(null);
+      const timer = editorReadiness.delay > 0 ? setTimeout(bind, editorReadiness.delay) : null;
+      if (timer === null) bind();
+      return () => {
+        if (timer !== null) clearTimeout(timer);
+        bindApi(null);
+      };
     }, [bindApi, onMarkdownChange]);
 
     return (
@@ -50,7 +65,8 @@ vi.mock("@/components/notes/MarkdownNoteEditor", async () => {
         ref={bodyRef}
         aria-label="Note body"
         value={value}
-        onBlur={onBlur}
+        onSelect={() => onSelectionAnchorChange({ left: 100, top: 100, bottom: 120 })}
+        onBlur={(event) => onBlur(event.nativeEvent)}
         onChange={(event) => {
           const next = event.target.value;
           valueRef.current = next;
@@ -161,6 +177,7 @@ const startDraft = async () => {
 
 describe("NotesPage writing flow", () => {
   beforeEach(() => {
+    editorReadiness.delay = 0;
     vi.useFakeTimers();
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
       callback(0);
@@ -182,6 +199,194 @@ describe("NotesPage writing flow", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps the selection toolbar mounted while keyboard focus moves through its controls", async () => {
+    const { api, mocks } = apiFor([note("toolbar")]);
+    render(<NotesPage apiClient={api} initialNoteId="toolbar" />);
+    await advance();
+    const body = screen.getByRole("textbox", { name: "Note body" });
+    act(() => body.focus());
+    fireEvent.select(body);
+
+    const bold = screen.getByRole("button", { name: "Bold" });
+    act(() => bold.focus());
+    expect(bold).toHaveFocus();
+    expect(screen.getByRole("toolbar", { name: "Text formatting" })).toBeVisible();
+    const italic = screen.getByRole("button", { name: "Italic" });
+    act(() => italic.focus());
+    expect(italic).toHaveFocus();
+    expect(mocks.updateNote).not.toHaveBeenCalled();
+
+    const search = screen.getByRole("searchbox", { name: "Search notes" });
+    act(() => search.focus());
+    expect(search).toHaveFocus();
+    expect(screen.queryByRole("toolbar", { name: "Text formatting" })).not.toBeInTheDocument();
+  });
+
+  it("returns toolbar Escape to the editor without leaving note focus mode", async () => {
+    const { api } = apiFor([note("toolbar")]);
+    render(<NotesPage apiClient={api} initialNoteId="toolbar" />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Focus on this note" }));
+    const body = screen.getByRole("textbox", { name: "Note body" });
+    act(() => body.focus());
+    fireEvent.select(body);
+    const bold = screen.getByRole("button", { name: "Bold" });
+    act(() => bold.focus());
+    fireEvent.keyDown(bold, { key: "Escape" });
+    expect(body).toHaveFocus();
+    expect(screen.queryByRole("toolbar", { name: "Text formatting" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show note list" })).toBeInTheDocument();
+  });
+
+  it("dismisses selection controls when focus leaves the editor for another field", async () => {
+    const { api } = apiFor([note("toolbar")]);
+    render(<NotesPage apiClient={api} initialNoteId="toolbar" />);
+    await advance();
+    const body = screen.getByRole("textbox", { name: "Note body" });
+    act(() => body.focus());
+    fireEvent.select(body);
+    const title = screen.getByRole("textbox", { name: "Note title, optional" });
+    act(() => title.focus());
+    expect(title).toHaveFocus();
+    expect(screen.queryByRole("toolbar", { name: "Text formatting" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { label: "phone left edge", viewport: 390, width: 238, height: 54, anchor: { left: 55, top: 240, bottom: 260 } },
+    { label: "phone right edge", viewport: 390, width: 238, height: 54, anchor: { left: 380, top: 240, bottom: 260 } },
+    { label: "desktop center", viewport: 1280, width: 178, height: 42, anchor: { left: 640, top: 240, bottom: 260 } },
+    { label: "near top edge", viewport: 390, width: 238, height: 54, anchor: { left: 55, top: 60, bottom: 80 } },
+  ])("places the measured formatting toolbar within the $label", async ({ viewport, width, height, anchor }) => {
+    vi.stubGlobal("innerWidth", viewport);
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const measurement = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("role") === "toolbar"
+        ? new DOMRect(0, 0, width, height)
+        : original.call(this);
+    });
+    try {
+      const { api } = apiFor([note("first")]);
+      render(<NotesPage apiClient={api} />);
+      await advance();
+      await advance();
+      act(() => editorSelection.change!(anchor));
+      const toolbar = screen.getByRole("toolbar", { name: "Text formatting" });
+      const center = Number.parseFloat(toolbar.style.left);
+      const top = Number.parseFloat(toolbar.style.top);
+      expect(center - width / 2).toBeGreaterThanOrEqual(8);
+      expect(center + width / 2).toBeLessThanOrEqual(viewport - 8);
+      if (anchor.top >= height + 16) {
+        expect(top + height).toBe(anchor.top - 8);
+      } else {
+        expect(top).toBe(anchor.bottom + 8);
+      }
+    } finally {
+      measurement.mockRestore();
+    }
+  });
+
+  it("repositions when the rendered toolbar grows and stops observing when dismissed", async () => {
+    vi.stubGlobal("innerWidth", 390);
+    let resize: (() => void) | undefined;
+    const disconnect = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: () => void) { resize = callback; }
+      observe() {}
+      disconnect = disconnect;
+    });
+    let width = 178;
+    let height = 42;
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    const measurement = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this.getAttribute("role") === "toolbar"
+        ? new DOMRect(0, 0, width, height)
+        : original.call(this);
+    });
+    try {
+      const { api } = apiFor([note("first")]);
+      render(<NotesPage apiClient={api} />);
+      await advance();
+      await advance();
+      act(() => editorSelection.change!({ left: 55, top: 240, bottom: 260 }));
+      const toolbar = screen.getByRole("toolbar", { name: "Text formatting" });
+      width = 238;
+      height = 54;
+      act(() => resize!());
+      expect(Number.parseFloat(toolbar.style.left) - width / 2).toBe(8);
+      expect(Number.parseFloat(toolbar.style.top) + height).toBe(232);
+      act(() => editorSelection.change!(null));
+      expect(screen.queryByRole("toolbar", { name: "Text formatting" })).not.toBeInTheDocument();
+      expect(disconnect).toHaveBeenCalled();
+    } finally {
+      measurement.mockRestore();
+    }
+  });
+
+  const openLinkEditor = async () => {
+    const body = screen.getByLabelText("Note body");
+    act(() => body.focus());
+    fireEvent.keyDown(body, { key: "k", metaKey: true });
+    return screen.getByRole("textbox", { name: "Link URL" });
+  };
+
+  it("dismisses the link editor on an outside pointer without stealing destination focus", async () => {
+    const { api, mocks } = apiFor([note("a")]);
+    render(<NotesPage apiClient={api} initialNoteId="a" />);
+    await advance();
+    await openLinkEditor();
+    const title = screen.getByLabelText("Note title, optional");
+
+    fireEvent.pointerDown(title);
+    act(() => title.focus());
+
+    expect(screen.queryByRole("textbox", { name: "Link URL" })).not.toBeInTheDocument();
+    expect(title).toHaveFocus();
+    expect(mocks.updateNote).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the link editor when keyboard focus leaves its controls", async () => {
+    const { api, mocks } = apiFor([note("a")]);
+    render(<NotesPage apiClient={api} initialNoteId="a" />);
+    await advance();
+    await openLinkEditor();
+    const search = screen.getByRole("searchbox", { name: "Search notes" });
+
+    act(() => search.focus());
+
+    expect(screen.queryByRole("textbox", { name: "Link URL" })).not.toBeInTheDocument();
+    expect(search).toHaveFocus();
+    expect(mocks.updateNote).not.toHaveBeenCalled();
+  });
+
+  it("dismisses the link editor on a non-focusable outside surface", async () => {
+    const { api } = apiFor([note("a")]);
+    render(<NotesPage apiClient={api} initialNoteId="a" />);
+    await advance();
+    await openLinkEditor();
+
+    fireEvent.pointerDown(screen.getByRole("heading", { name: "Notes" }));
+
+    expect(screen.queryByRole("textbox", { name: "Link URL" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the link editor open for internal pointer and focus changes and restores the body on Escape", async () => {
+    const { api } = apiFor([note("a")]);
+    render(<NotesPage apiClient={api} initialNoteId="a" />);
+    await advance();
+    const input = await openLinkEditor();
+    fireEvent.change(input, { target: { value: "https://example.org/research" } });
+    fireEvent.pointerDown(input);
+    const apply = screen.getByRole("button", { name: "Apply" });
+    fireEvent.pointerDown(apply);
+    act(() => apply.focus());
+
+    expect(input).toHaveValue("https://example.org/research");
+    expect(apply).toHaveFocus();
+    fireEvent.keyDown(apply, { key: "Escape" });
+    expect(screen.queryByRole("textbox", { name: "Link URL" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Note body")).toHaveFocus();
   });
 
   it("focuses the body and creates nothing until the draft has meaningful text", async () => {
@@ -319,6 +524,85 @@ describe("NotesPage writing flow", () => {
     fireEvent.keyDown(body, { key: "Escape" });
     expect(fireEvent.keyDown(body, { key: "Tab" })).toBe(true);
     expect(body).toHaveValue("  Raw body");
+  });
+
+  it("does not reclaim focus moved away while a new formatted note initializes", async () => {
+    const { api } = apiFor();
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    editorReadiness.delay = 100;
+    await startDraft();
+    const search = screen.getByRole("searchbox", { name: "Search notes" });
+    search.focus();
+    await advance(100);
+    expect(search).toHaveFocus();
+  });
+
+  it.each([0, 100])("focuses the formatted body after returning from source with %i ms initialization", async (delay) => {
+    const { api, mocks } = apiFor([note("first", { editor_mode: "plaintext" })]);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    await advance();
+    editorReadiness.delay = delay;
+
+    const exit = screen.getByRole("button", { name: "Return to formatted editor" });
+    exit.focus();
+    fireEvent.click(exit);
+    await advance(delay);
+
+    expect(screen.getByLabelText("Note body")).toHaveFocus();
+    expect(screen.getByLabelText("Note body")).toHaveValue("Body first");
+    expect(mocks.updateNote).toHaveBeenCalledWith("first", expect.objectContaining({
+      editor_mode: "markdown", body_markdown: "Body first",
+    }));
+  });
+
+  it.each([false, true])("preserves moved focus while the formatted editor initializes (blur: %s)", async (blur) => {
+    const { api } = apiFor([note("first", { editor_mode: "plaintext" })]);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    await advance();
+    editorReadiness.delay = 100;
+
+    const exit = screen.getByRole("button", { name: "Return to formatted editor" });
+    exit.focus();
+    fireEvent.click(exit);
+    await advance();
+    const title = screen.getByLabelText("Note title, optional");
+    title.focus();
+    if (blur) title.blur();
+    await advance(100);
+
+    expect(screen.getByLabelText("Note body")).not.toHaveFocus();
+    expect(blur ? document.body : title).toHaveFocus();
+  });
+
+  it("does not carry source-return focus into another note", async () => {
+    const { api } = apiFor([
+      note("first", { editor_mode: "plaintext" }), note("second"),
+    ]);
+    const { rerender } = render(<NotesPage apiClient={api} initialNoteId="first" />);
+    await advance();
+    await advance();
+    editorReadiness.delay = 100;
+    const exit = screen.getByRole("button", { name: "Return to formatted editor" });
+    exit.focus();
+    fireEvent.click(exit);
+    await advance();
+    rerender(<NotesPage apiClient={api} initialNoteId="second" />);
+    await advance();
+    await advance(100);
+
+    expect(screen.getByLabelText("Note body")).toHaveValue("Body second");
+    expect(screen.getByLabelText("Note body")).not.toHaveFocus();
+  });
+
+  it("does not focus the body when simply opening a saved formatted note", async () => {
+    const { api } = apiFor([note("first")]);
+    render(<NotesPage apiClient={api} initialNoteId="first" />);
+    await advance();
+    await advance();
+    expect(screen.getByLabelText("Note body")).not.toHaveFocus();
   });
 
   it("updates the visible Edited time from content_updated_at after autosave", async () => {
@@ -1229,6 +1513,202 @@ describe("NotesPage writing flow", () => {
 
     expect(screen.getByLabelText("Note body")).toHaveValue("Recovered body");
     expect(mocks.getNote).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])("returns compact Back focus to the departed row (listed: %s)", async (listed) => {
+    const media = window.matchMedia("");
+    vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+    const first = note("first");
+    const { api } = apiFor(listed ? [first] : []);
+    const onActiveNoteChange = vi.fn();
+    render(<NotesPage apiClient={api} initialNoteId="first" onActiveNoteChange={onActiveNoteChange} />);
+    await advance();
+
+    const back = screen.getByRole("button", { name: "Notes" });
+    back.focus();
+    fireEvent.click(back);
+    await advance();
+
+    expect(screen.getByTestId("notes-page")).toHaveAttribute("data-mobile-list", "true");
+    expect(listed
+      ? screen.getByRole("button", { name: /^Note first,/ })
+      : screen.getByRole("searchbox", { name: "Search notes" })
+    ).toHaveFocus();
+    expect(onActiveNoteChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it.each(["saved", "failed", "moved"])("respects a pending save when returning compact Back focus: %s", async (outcome) => {
+    const media = window.matchMedia("");
+    vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+    const first = note("first");
+    const { api, mocks } = apiFor([first]);
+    let resolveSave!: (record: NoteRecord) => void;
+    let rejectSave!: (error: Error) => void;
+    mocks.updateNote.mockImplementationOnce(() => new Promise<NoteRecord>((resolve, reject) => {
+      resolveSave = resolve;
+      rejectSave = reject;
+    }));
+    const onActiveNoteChange = vi.fn();
+    render(<><button>Outside Notes</button><NotesPage apiClient={api} initialNoteId="first" onActiveNoteChange={onActiveNoteChange} /></>);
+    await advance();
+    fireEvent.change(screen.getByLabelText("Note body"), { target: { value: "Edited body" } });
+    const back = screen.getByRole("button", { name: "Notes" });
+    back.focus();
+    fireEvent.click(back);
+    await advance();
+    expect(mocks.updateNote).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("notes-page")).not.toHaveAttribute("data-mobile-list");
+    expect(back).toHaveFocus();
+
+    const outside = screen.getByRole("button", { name: "Outside Notes" });
+    if (outcome === "moved") outside.focus();
+    await act(async () => {
+      if (outcome === "failed") rejectSave(new Error("offline"));
+      else resolveSave(note("first", { body_markdown: "Edited body", revision: 2 }));
+    });
+    await advance();
+    if (outcome === "failed") {
+      expect(screen.getByTestId("notes-page")).not.toHaveAttribute("data-mobile-list");
+      expect(back).toHaveFocus();
+      expect(onActiveNoteChange).not.toHaveBeenCalledWith(null);
+    } else {
+      expect(screen.getByTestId("notes-page")).toHaveAttribute("data-mobile-list", "true");
+      expect(outcome === "moved" ? outside : screen.getByRole("button", { name: /^Note first,/ })).toHaveFocus();
+    }
+  });
+
+  it("returns a failed compact Note's Back focus to its list row", async () => {
+    const media = window.matchMedia("");
+    vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+    const { api, mocks } = apiFor([note("first")]);
+    mocks.getNote.mockRejectedValue(new Error("offline"));
+    render(<NotesPage apiClient={api} initialNoteId="first" />);
+    await advance();
+    const back = screen.getByRole("button", { name: "Back to notes" });
+    back.focus();
+    fireEvent.click(back);
+    await advance();
+    expect(screen.getByRole("button", { name: /^Note first,/ })).toHaveFocus();
+  });
+
+  it.each([true, false])("returns compact Back focus after a new draft (meaningful: %s)", async (meaningful) => {
+    const media = window.matchMedia("");
+    vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+    const { api, mocks } = apiFor();
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    const body = await startDraft();
+    if (meaningful) fireEvent.change(body, { target: { value: "New finding" } });
+    const back = screen.getByRole("button", { name: "Notes" });
+    back.focus();
+    fireEvent.click(back);
+    await advance();
+    expect(mocks.createNote).toHaveBeenCalledTimes(meaningful ? 1 : 0);
+    expect(meaningful
+      ? screen.getByRole("button", { name: /^New finding,/ })
+      : screen.getByRole("searchbox", { name: "Search notes" })
+    ).toHaveFocus();
+  });
+
+  const useCompactNotesLayout = () => {
+    const media = window.matchMedia("(max-width: 960px)");
+    vi.stubGlobal("matchMedia", () => ({ ...media, matches: true }));
+  };
+
+  it.each([false, true])("focuses the compact reader while opening a note (load fails: %s)", async (fails) => {
+    useCompactNotesLayout();
+    const first = note("first", { title: "First note" });
+    const { api, mocks } = apiFor([first]);
+    let resolveLoad!: (record: NoteRecord) => void;
+    let rejectLoad!: (error: Error) => void;
+    mocks.getNote.mockReturnValue(new Promise((resolve, reject) => {
+      resolveLoad = resolve;
+      rejectLoad = reject;
+    }));
+    render(<NotesPage apiClient={api} />);
+    await advance();
+
+    const row = screen.getByRole("button", { name: /First note/ });
+    row.focus();
+    fireEvent.click(row);
+    await advance();
+
+    const reader = screen.getByTestId("notes-page").querySelector(".notes-editor");
+    expect(reader).toHaveFocus();
+    expect(reader).toHaveAccessibleName("Note reader");
+    expect(reader).toHaveAttribute("aria-busy", "true");
+    await act(async () => {
+      if (fails) rejectLoad(new Error("request timed out"));
+      else resolveLoad(first);
+    });
+    await advance();
+    expect(reader).toHaveFocus();
+    expect(reader).toHaveAttribute("aria-busy", "false");
+    if (fails) expect(screen.getByRole("alert")).toHaveTextContent("Couldn’t open this note");
+    else expect(screen.getByLabelText("Note body")).toHaveValue("Body first");
+  });
+
+  it("focuses the compact reader when reopening the warm note without another fetch", async () => {
+    useCompactNotesLayout();
+    const { api, mocks } = apiFor([note("first", { title: "First note" })]);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: /First note/ }));
+    await advance();
+    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    await advance();
+    const row = screen.getByRole("button", { name: /First note/ });
+    row.focus();
+    fireEvent.click(row);
+    await advance();
+
+    expect(screen.getByTestId("notes-page").querySelector(".notes-editor")).toHaveFocus();
+    expect(mocks.getNote).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reclaim reader focus when a pending note load completes", async () => {
+    useCompactNotesLayout();
+    const first = note("first", { title: "First note" });
+    const { api, mocks } = apiFor([first]);
+    let resolveLoad!: (record: NoteRecord) => void;
+    mocks.getNote.mockReturnValue(new Promise((resolve) => { resolveLoad = resolve; }));
+    render(<><button>Outside Notes</button><NotesPage apiClient={api} /></>);
+    await advance();
+    const row = screen.getByRole("button", { name: /First note/ });
+    row.focus();
+    fireEvent.click(row);
+    await advance();
+    expect(screen.getByTestId("notes-page").querySelector(".notes-editor")).toHaveFocus();
+    const outside = screen.getByRole("button", { name: "Outside Notes" });
+    outside.focus();
+    await act(async () => { resolveLoad(first); });
+    await advance();
+    expect(outside).toHaveFocus();
+  });
+
+  it("preserves desktop row focus when selecting a different note", async () => {
+    const { api } = apiFor([note("first"), note("second")]);
+    render(<NotesPage apiClient={api} />);
+    await advance();
+    const row = screen.getByRole("button", { name: /Note second/ });
+    row.focus();
+    fireEvent.click(row);
+    await advance();
+    expect(screen.getByLabelText("Note body")).toHaveValue("Body second");
+    expect(row).toHaveFocus();
+  });
+
+  it("preserves existing focus when a compact note opens through a deep link", async () => {
+    useCompactNotesLayout();
+    const { api } = apiFor([note("first")]);
+    const view = render(<><button>Outside Notes</button><NotesPage apiClient={api} /></>);
+    await advance();
+    const outside = screen.getByRole("button", { name: "Outside Notes" });
+    outside.focus();
+    view.rerender(<><button>Outside Notes</button><NotesPage apiClient={api} initialNoteId="first" /></>);
+    await advance();
+    expect(screen.getByLabelText("Note body")).toHaveValue("Body first");
+    expect(outside).toHaveFocus();
   });
 
   it("clears the specific-note deep link when mobile navigation returns to the list", async () => {

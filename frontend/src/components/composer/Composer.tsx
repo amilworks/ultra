@@ -21,9 +21,11 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuItemIndicator,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { OneTimeNotice } from "@/components/ui/one-time-notice";
@@ -486,23 +488,35 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         }}
       >
         <DropdownMenuLabel>Intelligence</DropdownMenuLabel>
-        <DropdownMenuGroup>
-          <DropdownMenuItem
+        <DropdownMenuRadioGroup
+          aria-label="Intelligence"
+          value={mode}
+          onValueChange={(nextMode) => {
+            if (nextMode === "high" || nextMode === "pro") {
+              props.onChangeMode(nextMode);
+            }
+          }}
+        >
+          <DropdownMenuRadioItem
+            value="high"
             data-active={mode === "high" ? "true" : undefined}
-            onClick={() => props.onChangeMode("high")}
           >
             <span>High</span>
-            {mode === "high" ? <Check data-icon="inline-end" aria-hidden="true" /> : null}
-          </DropdownMenuItem>
-          <DropdownMenuItem
+            <DropdownMenuItemIndicator asChild>
+              <Check data-icon="inline-end" aria-hidden="true" />
+            </DropdownMenuItemIndicator>
+          </DropdownMenuRadioItem>
+          <DropdownMenuRadioItem
+            value="pro"
             data-intelligence-mode="pro"
             data-active={mode === "pro" ? "true" : undefined}
-            onClick={() => props.onChangeMode("pro")}
           >
             <span>Pro</span>
-            {mode === "pro" ? <Check data-icon="inline-end" aria-hidden="true" /> : null}
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
+            <DropdownMenuItemIndicator asChild>
+              <Check data-icon="inline-end" aria-hidden="true" />
+            </DropdownMenuItemIndicator>
+          </DropdownMenuRadioItem>
+        </DropdownMenuRadioGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   );

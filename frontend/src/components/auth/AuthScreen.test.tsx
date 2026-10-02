@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { AuthScreen } from "./AuthScreen";
@@ -51,14 +51,53 @@ describe("AuthScreen", () => {
       />
     );
 
-    expect(screen.getByRole("button", { name: "Request an Account" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Request an Account" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /continue as guest/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Request an Account" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Request an Account" }));
 
     expect(screen.getAllByText("Request an Account").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/administrator can review access/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/affiliation/i)).toBeInTheDocument();
+  });
+
+  it("exposes authentication modes as keyboard-navigable tabs", () => {
+    render(
+      <AuthScreen
+        bisqueRoot="https://bisque.example.org"
+        loading={false}
+        onAuthenticate={vi.fn()}
+        onRequestAccount={vi.fn()}
+      />
+    );
+
+    const tablist = screen.getByRole("tablist", { name: "Authentication mode" });
+    const signInTab = within(tablist).getByRole("tab", { name: "Sign in" });
+    const requestAccountTab = within(tablist).getByRole("tab", {
+      name: "Request an Account",
+    });
+
+    expect(signInTab).toHaveAttribute("aria-selected", "true");
+    expect(signInTab).toHaveAttribute("tabindex", "0");
+    expect(requestAccountTab).toHaveAttribute("aria-selected", "false");
+    expect(requestAccountTab).toHaveAttribute("tabindex", "-1");
+    const authPanel = screen.getByRole("tabpanel", { name: "Sign in" });
+    expect(signInTab).toHaveAttribute("aria-controls", authPanel.id);
+    expect(requestAccountTab).toHaveAttribute("aria-controls", authPanel.id);
+
+    signInTab.focus();
+    fireEvent.keyDown(signInTab, { key: "ArrowRight" });
+
+    expect(requestAccountTab).toHaveFocus();
+    expect(requestAccountTab).toHaveAttribute("aria-selected", "true");
+    expect(signInTab).toHaveAttribute("tabindex", "-1");
+    expect(screen.getByRole("tabpanel", { name: "Request an Account" })).toBe(authPanel);
+    expect(screen.getByLabelText("Affiliation")).toBeInTheDocument();
+
+    fireEvent.keyDown(requestAccountTab, { key: "Home" });
+
+    expect(signInTab).toHaveFocus();
+    expect(signInTab).toHaveAttribute("aria-selected", "true");
   });
 
   it("submits account requests instead of creating a guest session", () => {
@@ -72,7 +111,7 @@ describe("AuthScreen", () => {
       />
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Request an Account" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Request an Account" }));
     fireEvent.change(screen.getByLabelText("Name"), {
       target: { value: "Ada Lovelace" },
     });
@@ -82,8 +121,7 @@ describe("AuthScreen", () => {
     fireEvent.change(screen.getByLabelText("Affiliation"), {
       target: { value: "Analytical Engine Lab" },
     });
-    const requestButtons = screen.getAllByRole("button", { name: "Request an Account" });
-    fireEvent.click(requestButtons[requestButtons.length - 1]);
+    fireEvent.click(screen.getByRole("button", { name: "Request an Account" }));
 
     expect(onRequestAccount).toHaveBeenCalledWith({
       name: "Ada Lovelace",

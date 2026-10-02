@@ -408,7 +408,11 @@ export function TrainingDashboard({
 
         {busyMessage ? <p className="training-inline-busy">{busyMessage}</p> : null}
         {transientNote ? <p className="training-inline-busy">{transientNote}</p> : null}
-        {errorMessage ? <p className="training-inline-error">{errorMessage}</p> : null}
+        {errorMessage ? (
+          <p className="training-inline-error" role="alert">
+            {errorMessage}
+          </p>
+        ) : null}
 
         <Separator className="mt-5" />
 

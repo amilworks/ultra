@@ -493,8 +493,61 @@ export function NotesPage({
       : false
   );
 
+  const readerRef = useRef<HTMLElement | null>(null);
+  const pendingReaderFocusRef = useRef<{ noteId: string; origin: HTMLButtonElement } | null>(null);
+  useLayoutEffect(() => {
+    const pending = pendingReaderFocusRef.current;
+    pendingReaderFocusRef.current = null;
+    if (
+      !pending || mobileListOpen || activeNoteId !== pending.noteId ||
+      !window.matchMedia?.(COMPACT_NOTES_MEDIA).matches
+    ) return;
+    if (document.activeElement === pending.origin || document.activeElement === document.body) {
+      readerRef.current?.focus({ preventScroll: true });
+    }
+  }, [activeNoteId, mobileListOpen]);
+
   const titleRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingListFocusRef = useRef<{
+    origin: HTMLButtonElement;
+    noteId: string | null;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const pending = pendingListFocusRef.current;
+    pendingListFocusRef.current = null;
+    if (
+      !mobileListOpen || !pending ||
+      !window.matchMedia(COMPACT_NOTES_MEDIA).matches ||
+      (document.activeElement !== pending.origin && document.activeElement !== document.body)
+    ) return;
+    // The reader has just become hidden. Restore the departed Note only after
+    // the list is visible, without pulling focus back from another control.
+    (rowRefs.current.get(pending.noteId ?? "") ?? searchRef.current)?.focus();
+  }, [mobileListOpen]);
+
+  const selectionToolbarRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const toolbar = selectionToolbarRef.current;
+    if (!toolbar || !selectionAnchor) return;
+
+    // Touch targets and borders change the rendered size. Measure before paint
+    // so clamping and the gap above the selection use the actual toolbar bounds.
+    const positionToolbar = () => {
+      const { width, height } = toolbar.getBoundingClientRect();
+      const { left, top } = centeredFloatingPosition(selectionAnchor, width, height);
+      toolbar.style.left = `${left}px`;
+      toolbar.style.top = `${top}px`;
+    };
+    positionToolbar();
+    const observer = new ResizeObserver(positionToolbar);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, [selectionAnchor, activeNote?.editor_mode]);
+  const linkPopoverRef = useRef<HTMLDivElement | null>(null);
   const plaintextTabExitArmedRef = useRef(false);
   const itemsRef = useRef(items);
   useLayoutEffect(() => {
@@ -530,6 +583,24 @@ export function NotesPage({
   const editorApiRef = useRef<NotesEditorHandle | null>(null);
   const editorActiveRef = useRef<NotesActiveStates>(EDITOR_IDLE);
   const pendingBodyFocusRef = useRef(false);
+  const pendingFormattedFocusRef = useRef<{
+    generation: number;
+    origin: Element | null;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const cancelMovedFocus = (event: FocusEvent) => {
+      pendingBodyFocusRef.current = false;
+      if (event.target !== pendingFormattedFocusRef.current?.origin) {
+        pendingFormattedFocusRef.current = null;
+      }
+    };
+    document.addEventListener("focusin", cancelMovedFocus);
+    return () => {
+      document.removeEventListener("focusin", cancelMovedFocus);
+      pendingFormattedFocusRef.current = null;
+    };
+  }, [editorSessionKey, recoveryScope]);
   const refreshVersionRef = useRef(refreshVersion);
   const listRequestVersionRef = useRef(listRequestVersion);
 
@@ -1187,9 +1258,19 @@ export function NotesPage({
   }, [flushRecoveryNow, flushSave]);
 
   const openNote = useCallback(
-    async (noteId: string) => {
-      if (draftRef.current?.noteId === noteId) {
+    async (noteId: string, focusOrigin?: HTMLButtonElement) => {
+      const revealReader = () => {
+        // Transfer focus at the pane swap, including a warm note's no-fetch
+        // path. A pending save must not reclaim focus the user has moved.
+        pendingReaderFocusRef.current =
+          focusOrigin && document.activeElement === focusOrigin &&
+          window.matchMedia?.(COMPACT_NOTES_MEDIA).matches
+            ? { noteId, origin: focusOrigin }
+            : null;
         setMobileListOpen(false);
+      };
+      if (draftRef.current?.noteId === noteId) {
+        revealReader();
         return;
       }
       if (draftRef.current && draftRef.current.noteId !== noteId) {
@@ -1217,7 +1298,7 @@ export function NotesPage({
       setEditorActive(EDITOR_IDLE);
       setEditorError(null);
       setRecoveredMissingOriginal(false);
-      setMobileListOpen(false);
+      revealReader();
       const recovery = readRecovery(noteId);
       try {
         const record = await apiClient.getNote(noteId);
@@ -1539,7 +1620,7 @@ export function NotesPage({
   /* The mode is a deliberate, sticky choice — flip the surface immediately
      and persist without waiting for the debounce. */
   const switchEditorMode = useCallback(
-    (nextMode: NoteEditorMode) => {
+    (nextMode: NoteEditorMode, restoreBodyFocus = false) => {
       const draft = draftRef.current;
       if (!draft || draft.editorMode === nextMode) {
         return;
@@ -1556,6 +1637,11 @@ export function NotesPage({
       setSlashOpen(false);
       setSlashQuery("");
       void flushSave();
+      // Only the source banner removes its own focus target. The actions
+      // menu retains its trigger and keeps the normal Radix focus return.
+      pendingFormattedFocusRef.current = restoreBodyFocus && nextMode === "markdown"
+        ? { generation: noteGenerationRef.current, origin: document.activeElement }
+        : null;
     },
     [flushSave, persistRecovery]
   );
@@ -2043,9 +2129,20 @@ export function NotesPage({
 
   const bindEditorApi = useCallback((api: NotesEditorHandle | null) => {
     editorApiRef.current = api;
+    if (api && pendingFormattedFocusRef.current) {
+      const intent = pendingFormattedFocusRef.current;
+      pendingFormattedFocusRef.current = null;
+      if (
+        intent.generation === noteGenerationRef.current &&
+        draftRef.current?.editorMode === "markdown" &&
+        (document.activeElement === document.body || document.activeElement === intent.origin)
+      ) {
+        api.focus();
+      }
+    }
     if (api && pendingBodyFocusRef.current) {
       pendingBodyFocusRef.current = false;
-      window.requestAnimationFrame(() => api.focus());
+      api.focus();
     }
   }, []);
 
@@ -2096,7 +2193,12 @@ export function NotesPage({
     [updateDraft]
   );
 
-  const handleEditorBlur = useCallback(() => {
+  const handleEditorBlur = useCallback((event: FocusEvent) => {
+    // Keep the selected range's controls mounted during keyboard handoff.
+    if (!(event.relatedTarget instanceof Node) ||
+        !selectionToolbarRef.current?.contains(event.relatedTarget)) {
+      setSelectionAnchor(null);
+    }
     flushRecoveryNow();
     void flushSave();
   }, [flushRecoveryNow, flushSave]);
@@ -2236,8 +2338,11 @@ export function NotesPage({
     [insertSlashBlock, slashIndex, slashOpen, updateDraft]
   );
 
-  const returnToList = useCallback(async () => {
+  const returnToList = useCallback(async (focusTrigger?: HTMLButtonElement) => {
+    const restoreFocus = focusTrigger && document.activeElement === focusTrigger &&
+      typeof window.matchMedia === "function" && window.matchMedia(COMPACT_NOTES_MEDIA).matches;
     const draft = draftRef.current;
+    const departedNoteId = draft?.noteId ?? activeNoteId;
     if (draft?.noteId === LOCAL_DRAFT_ID && !meaningfulDraft(draft)) {
       clearRecovery(draft.noteId);
       draftRef.current = null;
@@ -2257,9 +2362,15 @@ export function NotesPage({
     setLinkOpen(false);
     setLinkAnchor(null);
     setResourcePickerOpen(false);
+    if (restoreFocus && document.activeElement === focusTrigger) {
+      pendingListFocusRef.current = {
+        origin: focusTrigger,
+        noteId: departedNoteId === LOCAL_DRAFT_ID ? draftRef.current?.noteId ?? null : departedNoteId,
+      };
+    }
     setMobileListOpen(true);
     onActiveNoteChange?.(null);
-  }, [clearRecovery, flushSave, onActiveNoteChange]);
+  }, [activeNoteId, clearRecovery, flushSave, onActiveNoteChange]);
 
   // App-level Back/Forward owns the URL, while this component owns the mobile
   // split-pane state. A monotonic request bridges “?view=notes” back to the
@@ -2291,6 +2402,9 @@ export function NotesPage({
   );
 
   const dismissFloatingTools = useCallback(() => {
+    if (selectionToolbarRef.current?.contains(document.activeElement)) {
+      editorApiRef.current?.focus();
+    }
     setSelectionAnchor(null);
     setCaretAnchor(null);
     setSlashOpen(false);
@@ -2305,6 +2419,26 @@ export function NotesPage({
     window.addEventListener("resize", dismissFloatingTools);
     return () => window.removeEventListener("resize", dismissFloatingTools);
   }, [dismissFloatingTools]);
+
+  useEffect(() => {
+    if (!linkOpen) return;
+    const dismissOutsideLink = (event: Event) => {
+      const popover = linkPopoverRef.current;
+      if (!popover || !(event.target instanceof Node) || popover.contains(event.target)) {
+        return;
+      }
+      // Outside interaction owns its destination focus; only Escape returns
+      // to the editor's saved selection.
+      setLinkOpen(false);
+      setLinkAnchor(null);
+    };
+    document.addEventListener("pointerdown", dismissOutsideLink, true);
+    document.addEventListener("focusin", dismissOutsideLink, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutsideLink, true);
+      document.removeEventListener("focusin", dismissOutsideLink, true);
+    };
+  }, [linkOpen]);
 
   // Keyboard paths stay complete without turning the UI into a shortcut
   // legend. Raw Markdown remains an explicit expert preference.
@@ -2405,9 +2539,6 @@ export function NotesPage({
   );
 
   const richSlashBlocks = useMemo(() => matchingSlashBlocks(slashQuery), [slashQuery]);
-  const selectionPosition = selectionAnchor
-    ? centeredFloatingPosition(selectionAnchor, 190, 40)
-    : null;
   const linkPosition = linkAnchor
     ? centeredFloatingPosition(linkAnchor, 480, 48)
     : null;
@@ -2470,6 +2601,7 @@ export function NotesPage({
         <label className="notes-search">
           <Search aria-hidden="true" />
           <input
+            ref={searchRef}
             type="search"
             value={searchQuery}
             placeholder="Search notes"
@@ -2507,11 +2639,15 @@ export function NotesPage({
                 {group.rows.map((item) => (
                   <button
                     key={item.note_id}
+                    ref={(element) => {
+                      if (element) rowRefs.current.set(item.note_id, element);
+                      else rowRefs.current.delete(item.note_id);
+                    }}
                     type="button"
                     className="notes-row"
                     data-active={item.note_id === activeNoteId ? "true" : undefined}
                     aria-label={`${item.pinned ? "Pinned, " : ""}${listTitle(item)}, ${relativeTime(noteContentUpdatedAt(item))}`}
-                    onClick={() => void openNote(item.note_id)}
+                    onClick={(event) => void openNote(item.note_id, event.currentTarget)}
                   >
                     <span className="notes-row-title">
                       {item.pinned ? <Pin className="notes-row-pin" aria-label="Pinned" /> : null}
@@ -2558,7 +2694,14 @@ export function NotesPage({
         </div>
       </aside>
 
-      <section className="notes-editor" onScroll={dismissFloatingTools}>
+      <section
+        ref={readerRef}
+        className="notes-editor"
+        aria-label="Note reader"
+        aria-busy={noteLoading}
+        tabIndex={-1}
+        onScroll={dismissFloatingTools}
+      >
         <FileUpload
           onFilesAdded={(files) => void handleNoteFilesAdded(files)}
           multiple
@@ -2572,7 +2715,7 @@ export function NotesPage({
                 <button
                   type="button"
                   className="notes-mobile-back"
-                  onClick={() => void returnToList()}
+                  onClick={(event) => void returnToList(event.currentTarget)}
                 >
                   <ChevronLeft aria-hidden="true" />
                   Notes
@@ -2837,7 +2980,7 @@ export function NotesPage({
               <div className="notes-body-shell">
                 <div className="notes-source-banner">
                   <span>Markdown source</span>
-                  <button type="button" onClick={() => switchEditorMode("markdown")}>
+                  <button type="button" onClick={() => switchEditorMode("markdown", true)}>
                     Return to formatted editor
                   </button>
                 </div>
@@ -2906,6 +3049,7 @@ export function NotesPage({
                 ) : null}
                 {linkOpen ? (
                   <div
+                    ref={linkPopoverRef}
                     className="notes-link-pop notes-link-pop-contextual"
                     style={
                       linkPosition
@@ -2986,14 +3130,23 @@ export function NotesPage({
 
             {selectionAnchor && activeNote.editor_mode !== "plaintext" ? (
               <div
+                ref={selectionToolbarRef}
                 className="notes-selection-toolbar"
+                onBlurCapture={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) {
+                    setSelectionAnchor(null);
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    editorApiRef.current?.focus();
+                    setSelectionAnchor(null);
+                  }
+                }}
                 role="toolbar"
                 aria-label="Text formatting"
-                style={
-                  selectionPosition
-                    ? { left: `${selectionPosition.left}px`, top: `${selectionPosition.top}px` }
-                    : undefined
-                }
               >
                 <button
                   type="button"
@@ -3199,7 +3352,7 @@ export function NotesPage({
                 variant="outline"
                 size="sm"
                 className="notes-load-back"
-                onClick={() => void returnToList()}
+                onClick={(event) => void returnToList(event.currentTarget)}
               >
                 <ChevronLeft data-icon="inline-start" aria-hidden="true" /> Back to notes
               </Button>

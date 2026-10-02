@@ -96,14 +96,85 @@ describe("WorkOS hosted auth redirect", () => {
     const start = source.indexOf("const leaveAuthenticatedAccount");
     const end = source.indexOf("const logoutBisque", start);
     const departure = source.slice(start, end);
+    const quiesce = departure.indexOf("quiesceOwnerBoundNotes");
+    const purge = departure.indexOf("purgePreparedOwnerState");
     const request = departure.indexOf("requestAuthenticatedAccountDeparture");
     const failureReturn = departure.indexOf("return;", request);
     const clear = departure.indexOf("clearAuthViewState();", request);
 
-    expect(departure).toContain("enableNoteDraftRecoveryScope(logoutScope)");
+    expect(departure).toContain(
+      "enableNoteDraftRecoveryScope(prepared.recoveryScope)"
+    );
     expect(departure).toContain("You’re still signed in; try again.");
+    expect(quiesce).toBeGreaterThan(-1);
+    expect(purge).toBeGreaterThan(quiesce);
+    expect(request).toBeGreaterThan(purge);
     expect(request).toBeGreaterThan(-1);
     expect(failureReturn).toBeGreaterThan(request);
     expect(clear).toBeGreaterThan(failureReturn);
+  });
+
+  it("keeps the WorkOS workspace mounted when only BisQue credentials are unlinked", () => {
+    const source = readSource("src/App.tsx");
+    const start = source.indexOf("const unlinkBisqueAccount = useCallback");
+    const end = source.indexOf("const promptBisqueAuthentication", start);
+    const unlink = source.slice(start, end);
+    const localDeparture = unlink.indexOf('await leaveAuthenticatedAccount("unlink"');
+    const localReturn = unlink.indexOf("return;", localDeparture);
+    const quiesce = unlink.indexOf("quiesceOwnerBoundNotes");
+    const workosRequest = unlink.indexOf("performAuthenticatedBisqueUnlink(");
+    const indeterminateStart = unlink.indexOf('result.kind === "indeterminate"');
+    const signedOutStart = unlink.indexOf('result.kind === "signed-out"');
+    const principalChangedStart = unlink.indexOf('result.kind === "principal-changed"');
+    const preservedStart = unlink.indexOf("// WorkOS remains the account authority");
+    const indeterminateBranch = unlink.slice(indeterminateStart, signedOutStart);
+    const signedOutBranch = unlink.slice(signedOutStart, principalChangedStart);
+    const principalChangedBranch = unlink.slice(principalChangedStart, preservedStart);
+    const preservedBranch = unlink.slice(preservedStart);
+
+    expect(unlink).toMatch(
+      /if \(authProvider !== "workos"\) \{\s*await leaveAuthenticatedAccount\("unlink", discardUnconfirmed\);\s*return;\s*\}/
+    );
+    expect(unlink).toContain("bisqueUnlinkTransitionInFlightRef.current");
+    expect(unlink).toContain("setBisqueUnlinkTransitionPending(true)");
+    expect(unlink).toContain("setBisqueUnlinkTransitionPending(false)");
+    expect(localDeparture).toBeGreaterThan(-1);
+    expect(localReturn).toBeGreaterThan(localDeparture);
+    expect(quiesce).toBeGreaterThan(localReturn);
+    expect(unlink).toContain("prepareOwnerState: () => quiesceOwnerBoundNotes(");
+    expect(quiesce).toBeGreaterThan(workosRequest);
+    expect(workosRequest).toBeGreaterThan(-1);
+    expect(unlink.match(/performAuthenticatedBisqueUnlink\(/g)).toHaveLength(1);
+    expect(unlink).toContain("const ownerScope = notesRecoveryScopeRef.current");
+    expect(unlink).toContain("currentOwnerScope: () => notesRecoveryScopeRef.current");
+    expect(indeterminateBranch).toContain("clearAuthViewState()");
+    expect(indeterminateBranch).not.toContain("purgePreparedOwnerState");
+    expect(signedOutBranch).toContain("purgePreparedOwnerState(prepared)");
+    expect(signedOutBranch).toContain("clearAuthViewState()");
+    expect(signedOutBranch.indexOf("purgePreparedOwnerState(prepared)")).toBeLessThan(
+      signedOutBranch.indexOf("clearAuthViewState()")
+    );
+    expect(principalChangedBranch).toContain("purgePreparedOwnerState(prepared)");
+    expect(principalChangedBranch).toContain("clearAuthViewState()");
+    expect(principalChangedBranch).toContain("applyAuthenticatedSession(result.session)");
+    expect(principalChangedBranch.indexOf("purgePreparedOwnerState(prepared)")).toBeLessThan(
+      principalChangedBranch.indexOf("clearAuthViewState()")
+    );
+    expect(principalChangedBranch.indexOf("clearAuthViewState()")).toBeLessThan(
+      principalChangedBranch.indexOf("applyAuthenticatedSession(result.session)")
+    );
+    expect(preservedBranch).toContain("setBisqueCredentialsLinked(false)");
+    expect(preservedBranch).toContain(
+      'setBisqueResourceCountsState({ requestKey: "", counts: null })'
+    );
+    expect(preservedBranch).not.toContain("clearAuthViewState()");
+    expect(source).toContain('departure === "workos-unlink"');
+    expect(source).toContain("void unlinkBisqueAccount(true)");
+    expect(source).toContain("bisqueUnlinkPending={bisqueUnlinkTransitionPending}");
+    expect(source).toContain("open={unsafeNotesDepartureOpen}");
+    expect(source).toContain("const departure = unsafeNotesDepartureKind");
+    expect(source).toContain("Unlink BisQue anyway");
+    expect(source).toContain("Couldn’t unlink this account.");
+    expect(source).toContain("onUnlinkBisqueAccount={unlinkBisqueAccount}");
   });
 });

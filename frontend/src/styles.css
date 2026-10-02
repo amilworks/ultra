@@ -1354,6 +1354,11 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
   color: var(--popover-foreground);
 }
 
+.app-settings-nav-item[data-slot="tabs-trigger"]:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 .app-settings-nav-item[data-slot="tabs-trigger"] svg[data-icon] {
   width: 1rem;
   height: 1rem;
@@ -1544,8 +1549,25 @@ body:has([data-slot="sidebar"][data-state="collapsed"]) .app-settings-dialog[dat
 }
 
 .app-settings-bisque-linked-alert [data-slot="alert-description"] {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
   color: color-mix(in oklab, var(--popover-foreground) 72%, var(--muted-foreground) 28%);
   font-size: 0.8125rem;
+}
+
+.app-settings-bisque-linked-alert [data-slot="alert-description"] > span {
+  min-width: 0;
+  flex: 1 1 12rem;
+  overflow-wrap: anywhere;
+}
+
+.app-settings-bisque-linked-alert [data-slot="alert-action"] {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 .app-settings-bisque-linked-alert [data-slot="alert-action"] [data-slot="button"] {
@@ -3809,9 +3831,28 @@ textarea.composer-editor::placeholder {
   background: color-mix(in oklab, var(--bg-sunk) 90%, var(--text-main) 10%);
 }
 
+.resource-browser-new-menu:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.resource-browser-filter-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 .resource-browser-refresh {
   width: 2.55rem;
   height: 2.55rem;
+}
+
+.resource-browser-refresh:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.resource-browser-refresh[aria-disabled="true"] {
+  cursor: wait;
 }
 
 .resource-browser-title {
@@ -4181,6 +4222,11 @@ textarea.composer-editor::placeholder {
   border-radius: 8px 0 0 8px;
   background: transparent;
   box-shadow: none;
+}
+
+.resource-browser-collection-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
 }
 
 .resource-browser-collection-item .resource-browser-collection-button:hover {
@@ -11443,13 +11489,18 @@ details {
 }
 
 .resource-quick-peek {
+  display: flex;
+  flex-direction: column;
   width: min(30rem, 88vw);
+  /* Leave room for Popper's device-pixel rounding at the collision edge. */
+  max-height: calc(var(--radix-popover-content-available-height) - 1px);
   padding: 0;
   overflow: hidden;
 }
 
 .resource-quick-peek-head {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 0.5rem;
   padding: 0.55rem 0.7rem;
@@ -11480,6 +11531,7 @@ details {
 
 .resource-quick-peek-body {
   margin: 0;
+  min-height: 0;
   max-height: 16rem;
   overflow: auto;
   padding: 0.6rem 0.75rem;
@@ -11490,8 +11542,15 @@ details {
   color: var(--text-main);
 }
 
+.resource-quick-peek-body:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 .resource-quick-peek-status {
   display: flex;
+  min-height: 0;
+  overflow: auto;
   align-items: center;
   gap: 0.5rem;
   padding: 1rem 0.75rem;

@@ -11,9 +11,40 @@ function ContextMenu({
 }
 
 function ContextMenuTrigger({
+  disabled,
+  onKeyDown,
   ...props
 }: React.ComponentProps<typeof ContextMenuPrimitive.Trigger>) {
-  return <ContextMenuPrimitive.Trigger data-slot="context-menu-trigger" {...props} />
+  return (
+    <ContextMenuPrimitive.Trigger
+      data-slot="context-menu-trigger"
+      {...props}
+      disabled={disabled}
+      onKeyDown={(event) => {
+        onKeyDown?.(event)
+        if (
+          disabled || event.defaultPrevented || event.target !== event.currentTarget ||
+          event.nativeEvent.isComposing || event.key !== "F10" || !event.shiftKey ||
+          event.altKey || event.ctrlKey || event.metaKey
+        ) return
+
+        const trigger = event.currentTarget
+        const view = trigger.ownerDocument.defaultView
+        if (!view) return
+        const rect = trigger.getBoundingClientRect()
+        // Some platforms do not emit contextmenu for Shift+F10. Reuse Radix's
+        // native opening path, retaining keyboard focus and suppressing a duplicate.
+        event.preventDefault()
+        trigger.dispatchEvent(new view.MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          button: 2,
+          clientX: Math.max(0, Math.min(rect.left + Math.min(8, rect.width / 2), view.innerWidth - 1)),
+          clientY: Math.max(0, Math.min(rect.top + Math.min(8, rect.height / 2), view.innerHeight - 1)),
+        }))
+      }}
+    />
+  )
 }
 
 function ContextMenuPortal({

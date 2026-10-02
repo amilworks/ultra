@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { ArrowUpRight, LockKeyhole, UserRound } from "lucide-react";
 
 import { BrandWordmark } from "@/components/BrandWordmark";
@@ -64,6 +72,9 @@ export function AuthScreen({
   onStartHostedAuth,
   onRequestAccount,
 }: AuthScreenProps) {
+  const authModeId = useId();
+  const loginModeTabRef = useRef<HTMLButtonElement>(null);
+  const guestModeTabRef = useRef<HTMLButtonElement>(null);
   const [mode, setMode] = useState<AuthMode>("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -82,6 +93,11 @@ export function AuthScreen({
     return `${bisqueRoot}/client_service/`;
   }, [bisqueHomeUrl, bisqueRoot]);
   const hostedAuth = authProvider === "workos";
+  const authModePanelId = `${authModeId}-panel`;
+  const authModeTabIds: Record<AuthMode, string> = {
+    login: `${authModeId}-login-tab`,
+    guest: `${authModeId}-request-account-tab`,
+  };
   const effectiveMode: AuthMode = hostedAuth || (!allowGuest && mode === "guest") ? "login" : mode;
   const activeHeroPhrase = prefersReducedMotion ? heroPhrases[0] : heroPhrases[heroPhraseIndex];
   const { displayedText: streamedHeroText, isComplete: heroTextComplete } = useTextStream({
@@ -120,6 +136,29 @@ export function AuthScreen({
       : requestAccountLabel;
   const visibleLocalError = effectiveMode === mode ? localError : null;
   const mergedError = visibleLocalError || errorMessage || null;
+
+  const selectMode = (nextMode: AuthMode): void => {
+    setMode(nextMode);
+    setLocalError(null);
+  };
+
+  const handleAuthModeKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    let nextMode: AuthMode | null = null;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      nextMode = mode === "login" ? "guest" : "login";
+    } else if (event.key === "Home") {
+      nextMode = "login";
+    } else if (event.key === "End") {
+      nextMode = "guest";
+    }
+    if (!nextMode) {
+      return;
+    }
+
+    event.preventDefault();
+    selectMode(nextMode);
+    (nextMode === "login" ? loginModeTabRef : guestModeTabRef).current?.focus();
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -214,130 +253,147 @@ export function AuthScreen({
           </CardHeader>
           <CardContent>
             {allowGuest && !hostedAuth ? (
-              <div className="auth-mode-toggle" role="tablist" aria-label="Authentication mode">
+              <div
+                className="auth-mode-toggle"
+                role="tablist"
+                aria-label="Authentication mode"
+                onKeyDown={handleAuthModeKeyDown}
+              >
                 <Button
+                  ref={loginModeTabRef}
+                  id={authModeTabIds.login}
                   type="button"
+                  role="tab"
+                  aria-controls={authModePanelId}
+                  aria-selected={mode === "login"}
+                  tabIndex={mode === "login" ? 0 : -1}
                   variant={mode === "login" ? "default" : "ghost"}
                   className={cn("h-9 rounded-lg", mode === "login" ? "" : "text-muted-foreground")}
-                  onClick={() => {
-                    setMode("login");
-                    setLocalError(null);
-                  }}
+                  onClick={() => selectMode("login")}
                 >
                   Sign in
                 </Button>
                 <Button
+                  ref={guestModeTabRef}
+                  id={authModeTabIds.guest}
                   type="button"
+                  role="tab"
+                  aria-controls={authModePanelId}
+                  aria-selected={mode === "guest"}
+                  tabIndex={mode === "guest" ? 0 : -1}
                   variant={mode === "guest" ? "default" : "ghost"}
                   className={cn("h-9 rounded-lg", mode === "guest" ? "" : "text-muted-foreground")}
-                  onClick={() => {
-                    setMode("guest");
-                    setLocalError(null);
-                  }}
+                  onClick={() => selectMode("guest")}
                 >
                   {requestAccountLabel}
                 </Button>
               </div>
             ) : null}
 
-            <form className="auth-form" onSubmit={handleSubmit}>
-              {hostedAuth ? (
-                <Button
-                  type="submit"
-                  className="h-9 w-full rounded-xl"
-                  disabled={loading}
-                >
-                  <LockKeyhole className="size-4" />
-                  {loading ? "Opening sign in..." : submitLabel}
-                </Button>
-              ) : effectiveMode === "login" ? (
-                <>
-                  <label className="auth-label" htmlFor="bisque-username">
-                    <UserRound className="size-4" />
-                    Username
-                  </label>
-                  <Input
-                    id="bisque-username"
-                    autoComplete="username"
-                    placeholder="your.username"
-                    value={username}
-                    onChange={(event) => setUsername(event.target.value)}
+            <div
+              id={allowGuest && !hostedAuth ? authModePanelId : undefined}
+              role={allowGuest && !hostedAuth ? "tabpanel" : undefined}
+              aria-labelledby={allowGuest && !hostedAuth ? authModeTabIds[mode] : undefined}
+            >
+              <form className="auth-form" onSubmit={handleSubmit}>
+                {hostedAuth ? (
+                  <Button
+                    type="submit"
+                    className="h-9 w-full rounded-xl"
                     disabled={loading}
-                  />
-
-                  <label className="auth-label" htmlFor="bisque-password">
+                  >
                     <LockKeyhole className="size-4" />
-                    Password
-                  </label>
-                  <Input
-                    id="bisque-password"
-                    type="password"
-                    autoComplete="current-password"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    disabled={loading}
-                  />
-                </>
-              ) : (
-                <>
-                  <label className="auth-label" htmlFor="guest-name">
-                    <UserRound className="size-4" />
-                    Name
-                  </label>
-                  <Input
-                    id="guest-name"
-                    autoComplete="name"
-                    placeholder="Your full name"
-                    value={guestName}
-                    onChange={(event) => setGuestName(event.target.value)}
-                    disabled={loading}
-                  />
+                    {loading ? "Opening sign in..." : submitLabel}
+                  </Button>
+                ) : effectiveMode === "login" ? (
+                  <>
+                    <label className="auth-label" htmlFor="bisque-username">
+                      <UserRound className="size-4" />
+                      Username
+                    </label>
+                    <Input
+                      id="bisque-username"
+                      autoComplete="username"
+                      placeholder="your.username"
+                      value={username}
+                      onChange={(event) => setUsername(event.target.value)}
+                      disabled={loading}
+                    />
 
-                  <label className="auth-label" htmlFor="guest-email">
-                    <UserRound className="size-4" />
-                    Email
-                  </label>
-                  <Input
-                    id="guest-email"
-                    type="email"
-                    autoComplete="email"
-                    placeholder="you@institution.edu"
-                    value={guestEmail}
-                    onChange={(event) => setGuestEmail(event.target.value)}
-                    disabled={loading}
-                  />
+                    <label className="auth-label" htmlFor="bisque-password">
+                      <LockKeyhole className="size-4" />
+                      Password
+                    </label>
+                    <Input
+                      id="bisque-password"
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="••••••••"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      disabled={loading}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <label className="auth-label" htmlFor="guest-name">
+                      <UserRound className="size-4" />
+                      Name
+                    </label>
+                    <Input
+                      id="guest-name"
+                      autoComplete="name"
+                      placeholder="Your full name"
+                      value={guestName}
+                      onChange={(event) => setGuestName(event.target.value)}
+                      disabled={loading}
+                    />
 
-                  <label className="auth-label" htmlFor="guest-affiliation">
-                    <UserRound className="size-4" />
-                    Affiliation
-                  </label>
-                  <Input
-                    id="guest-affiliation"
-                    autoComplete="organization"
-                    placeholder="Research lab, company, or university"
-                    value={guestAffiliation}
-                    onChange={(event) => setGuestAffiliation(event.target.value)}
-                    disabled={loading}
-                  />
-                </>
-              )}
+                    <label className="auth-label" htmlFor="guest-email">
+                      <UserRound className="size-4" />
+                      Email
+                    </label>
+                    <Input
+                      id="guest-email"
+                      type="email"
+                      autoComplete="email"
+                      placeholder="you@institution.edu"
+                      value={guestEmail}
+                      onChange={(event) => setGuestEmail(event.target.value)}
+                      disabled={loading}
+                    />
 
-              {mergedError ? <p className="auth-error">{mergedError}</p> : null}
-              {!mergedError && statusMessage ? (
-                <p className="auth-status-message">{statusMessage}</p>
-              ) : null}
+                    <label className="auth-label" htmlFor="guest-affiliation">
+                      <UserRound className="size-4" />
+                      Affiliation
+                    </label>
+                    <Input
+                      id="guest-affiliation"
+                      autoComplete="organization"
+                      placeholder="Research lab, company, or university"
+                      value={guestAffiliation}
+                      onChange={(event) => setGuestAffiliation(event.target.value)}
+                      disabled={loading}
+                    />
+                  </>
+                )}
 
-              {!hostedAuth ? (
-                <Button type="submit" disabled={loading} className="w-full rounded-xl">
-                  {loading
-                    ? effectiveMode === "guest"
-                      ? "Submitting request…"
-                      : "Authenticating…"
-                    : submitLabel}
-                </Button>
-              ) : null}
-            </form>
+                {mergedError ? <p className="auth-error">{mergedError}</p> : null}
+                {!mergedError && statusMessage ? (
+                  <p className="auth-status-message">{statusMessage}</p>
+                ) : null}
+
+                {!hostedAuth ? (
+                  <Button type="submit" disabled={loading} className="w-full rounded-xl">
+                    {loading
+                      ? effectiveMode === "guest"
+                        ? "Submitting request…"
+                        : "Authenticating…"
+                      : submitLabel}
+                  </Button>
+                ) : null}
+              </form>
+            </div>
           </CardContent>
         </Card>
       </section>

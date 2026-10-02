@@ -289,3 +289,29 @@ describe("Ultra monochrome identity contract", () => {
     expect(typographySource).not.toContain("--brand-wordmark-accent");
   });
 });
+
+describe("Settings responsive layout contract", () => {
+  it("wraps the linked BisQue action before it can overflow a narrow alert", () => {
+    const descriptionRules = blockBody(
+      stylesSource,
+      '.app-settings-bisque-linked-alert [data-slot="alert-description"]'
+    );
+    expect(descriptionRules).toContain("display: flex");
+    expect(descriptionRules).toContain("min-width: 0");
+    expect(descriptionRules).toContain("flex-wrap: wrap");
+
+    const copyRules = blockBody(
+      stylesSource,
+      '.app-settings-bisque-linked-alert [data-slot="alert-description"] > span'
+    );
+    expect(copyRules).toContain("flex: 1 1 12rem");
+    expect(copyRules).toContain("overflow-wrap: anywhere");
+
+    const actionRules = blockBody(
+      stylesSource,
+      '.app-settings-bisque-linked-alert [data-slot="alert-action"]'
+    );
+    expect(actionRules).toContain("flex: 0 0 auto");
+    expect(actionRules).toContain("margin-top: 0");
+  });
+});

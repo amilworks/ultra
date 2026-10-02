@@ -20,7 +20,6 @@ import { useEffect, useMemo, useRef } from "react";
 import {
   commandsCtx,
   defaultValueCtx,
-  editorStateCtx,
   editorViewCtx,
   editorViewOptionsCtx,
   remarkStringifyOptionsCtx,
@@ -66,7 +65,7 @@ import { listener, listenerCtx } from "@milkdown/kit/plugin/listener";
 import { trailing } from "@milkdown/kit/plugin/trailing";
 import { exitCode } from "@milkdown/kit/prose/commands";
 import type { MarkType, Node as ProseNode } from "@milkdown/kit/prose/model";
-import { Plugin, TextSelection } from "@milkdown/kit/prose/state";
+import { type EditorState, Plugin, TextSelection } from "@milkdown/kit/prose/state";
 import { deleteColumn, deleteRow, deleteTable } from "@milkdown/kit/prose/tables";
 import {
   Decoration,
@@ -157,7 +156,7 @@ export type MarkdownNoteEditorProps = {
   /** Resolves a Resources file id to its download URL (apiClient-bound). */
   resourceUrl: (fileId: string) => string;
   onMarkdownChange: (markdown: string) => void;
-  onBlur: () => void;
+  onBlur: (event: FocusEvent) => void;
   onActiveStatesChange: (states: NotesActiveStates) => void;
   onSelectionAnchorChange: (anchor: NotesEditorAnchor | null) => void;
   onCaretAnchorChange: (anchor: NotesEditorAnchor | null) => void;
@@ -235,11 +234,10 @@ const notesKeymap = $useKeymap("ultraNotesKeymap", {
   },
 });
 
-const markIsActive = (ctx: Ctx, type: MarkType | undefined): boolean => {
+const markIsActive = (state: EditorState, type: MarkType | undefined): boolean => {
   if (!type) {
     return false;
   }
-  const state = ctx.get(editorStateCtx);
   const { empty, from, to, $from } = state.selection;
   if (empty) {
     return Boolean(type.isInSet(state.storedMarks ?? $from.marks()));
@@ -247,8 +245,7 @@ const markIsActive = (ctx: Ctx, type: MarkType | undefined): boolean => {
   return state.doc.rangeHasMark(from, to, type);
 };
 
-const readActiveStates = (ctx: Ctx): NotesActiveStates => {
-  const state = ctx.get(editorStateCtx);
+const readActiveStates = (ctx: Ctx, state: EditorState): NotesActiveStates => {
   const { $from } = state.selection;
   let block: NotesActiveStates["block"] = "body";
   let inTable = false;
@@ -263,18 +260,29 @@ const readActiveStates = (ctx: Ctx): NotesActiveStates => {
     }
   }
   const linkType = linkSchema.type(ctx);
-  const linkActive = markIsActive(ctx, linkType);
+  const linkActive = markIsActive(state, linkType);
   let linkHref: string | null = null;
   if (linkActive) {
-    const mark = linkType.isInSet(state.storedMarks ?? $from.marks());
-    linkHref = mark ? String(mark.attrs.href ?? "") : null;
+    if (state.selection.empty) {
+      const mark = linkType.isInSet(state.storedMarks ?? $from.marks());
+      linkHref = mark ? String(mark.attrs.href ?? "") : null;
+    } else {
+      // At a link's left boundary, $from.marks() can describe the preceding
+      // plain text. Read the selected content that made the link active.
+      state.doc.nodesBetween(state.selection.from, state.selection.to, (node) => {
+        const mark = linkType.isInSet(node.marks);
+        if (linkHref === null && mark) {
+          linkHref = String(mark.attrs.href ?? "");
+        }
+      });
+    }
   }
   return {
-    bold: markIsActive(ctx, strongSchema.type(ctx)),
-    italic: markIsActive(ctx, emphasisSchema.type(ctx)),
-    strike: markIsActive(ctx, strikethroughSchema.type(ctx)),
-    code: markIsActive(ctx, inlineCodeSchema.type(ctx)),
-    highlight: markIsActive(ctx, highlightSchema.type(ctx)),
+    bold: markIsActive(state, strongSchema.type(ctx)),
+    italic: markIsActive(state, emphasisSchema.type(ctx)),
+    strike: markIsActive(state, strikethroughSchema.type(ctx)),
+    code: markIsActive(state, inlineCodeSchema.type(ctx)),
+    highlight: markIsActive(state, highlightSchema.type(ctx)),
     link: linkActive,
     linkHref,
     block,
@@ -477,9 +485,38 @@ function MarkdownNoteEditorCore({
     []
   );
 
-  const { get } = useEditor(
-    (root) =>
-      Editor.make()
+  const { get, loading } = useEditor(
+    (root) => {
+      const activeStatesPlugin = $prose(
+        (ctx) => new Plugin({
+          view: (view) => {
+            const publish = (state: EditorState) => {
+              const states = readActiveStates(ctx, state);
+              if (import.meta.env.DEV) {
+                (window as unknown as { __notesLastStates?: unknown }).__notesLastStates = states;
+              }
+              callbacksRef.current.onActiveStatesChange(states);
+            };
+            publish(view.state);
+            return {
+              update: (nextView, previousState) => {
+                const state = nextView.state;
+                if (
+                  state.doc !== previousState.doc ||
+                  !state.selection.eq(previousState.selection) ||
+                  state.storedMarks !== previousState.storedMarks
+                ) {
+                  // Marks can change without moving the selection. Publish from
+                  // the committed view before a following command opens its UI.
+                  publish(state);
+                }
+              },
+            };
+          },
+        })
+      );
+
+      return Editor.make()
         .config((ctx) => {
           ctx.set(rootCtx, root);
           ctx.set(defaultValueCtx, initialMarkdownRef.current);
@@ -503,6 +540,20 @@ function MarkdownNoteEditorCore({
                 autocapitalize: "sentences",
                 autocorrect: "on",
                 "aria-label": "Note body",
+              },
+              handleDOMEvents: {
+                ...options.handleDOMEvents,
+                blur: (view, event) => {
+                  // A queued selection update must not reopen tools after
+                  // focus has moved to the toolbar or another field.
+                  if (activeFrameRef.current !== null) {
+                    window.clearTimeout(activeFrameRef.current);
+                    activeFrameRef.current = null;
+                  }
+                  callbacksRef.current.onCaretAnchorChange(null);
+                  callbacksRef.current.onBlur(event);
+                  return options.handleDOMEvents?.blur?.(view, event) ?? false;
+                },
               },
               handleKeyDown: (view, event) => {
                 if (callbacksRef.current.onMenuKeyDown(event)) {
@@ -539,26 +590,26 @@ function MarkdownNoteEditorCore({
           ctx
             .get(listenerCtx)
             .markdownUpdated((_listenerCtx, markdown, prevMarkdown) => {
-              if (markdown !== prevMarkdown) {
+              // The trailing plugin appends an empty paragraph after terminal
+              // tables/lists/code so the caret can escape. Its one-newline
+              // hydration delta is editor structure, not a durable note edit.
+              if (markdown !== prevMarkdown && markdown !== `${prevMarkdown}\n`) {
                 callbacksRef.current.onMarkdownChange(markdown);
               }
-            })
-            .blur(() => {
-              callbacksRef.current.onSelectionAnchorChange(null);
-              callbacksRef.current.onCaretAnchorChange(null);
-              callbacksRef.current.onBlur();
             })
             .selectionUpdated((listenerInnerCtx) => {
               if (activeFrameRef.current !== null) {
                 return;
               }
               // A short timeout, not requestAnimationFrame: rAF freezes in
-              // hidden tabs, which would stall contextual control state until the next
+              // hidden tabs, which would stall contextual geometry until the next
               // visible frame. A timer coalesces bursts just as well.
               activeFrameRef.current = window.setTimeout(() => {
                 activeFrameRef.current = null;
-                const states = readActiveStates(listenerInnerCtx);
                 const view = listenerInnerCtx.get(editorViewCtx);
+                if (!view.hasFocus()) {
+                  return;
+                }
                 const selection = view.state.selection;
                 const caretCoords = view.coordsAtPos(selection.from);
                 const caretAnchor: NotesEditorAnchor = {
@@ -576,11 +627,6 @@ function MarkdownNoteEditorCore({
                     bottom: Math.max(start.bottom, end.bottom),
                   };
                 }
-                if (import.meta.env.DEV) {
-                  // Stress-harness breadcrumb, dev builds only.
-                  (window as unknown as { __notesLastStates?: unknown }).__notesLastStates = states;
-                }
-                callbacksRef.current.onActiveStatesChange(states);
                 callbacksRef.current.onSelectionAnchorChange(anchor);
                 callbacksRef.current.onCaretAnchorChange(caretAnchor);
               }, 32);
@@ -599,11 +645,16 @@ function MarkdownNoteEditorCore({
         .use(notesMath)
         .use(notesKeymap)
         .use(taskTogglePlugin)
-        .use(mediaView),
+        .use(activeStatesPlugin)
+        .use(mediaView);
+    },
     []
   );
 
   useEffect(() => {
+    // A non-null handle must be usable immediately, including during a
+    // source-to-formatted focus handoff after asynchronous initialization.
+    if (loading || !get()) return;
     const api: NotesEditorHandle = {
       exec: (action) => {
         const editor = get();
@@ -679,7 +730,9 @@ function MarkdownNoteEditorCore({
         if (!editor) {
           return;
         }
-        const hasLink = editor.action((ctx) => markIsActive(ctx, linkSchema.type(ctx)));
+        const hasLink = editor.action((ctx) =>
+          markIsActive(ctx.get(editorViewCtx).state, linkSchema.type(ctx))
+        );
         editor.action(
           callCommand(hasLink ? updateLinkCommand.key : toggleLinkCommand.key, { href })
         );
@@ -690,7 +743,47 @@ function MarkdownNoteEditorCore({
         if (!editor) {
           return;
         }
-        editor.action(callCommand(toggleLinkCommand.key, {}));
+        editor.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const { state } = view;
+          const { empty, $from, ranges } = state.selection;
+          const linkType = linkSchema.type(ctx);
+          const tr = state.tr;
+          if (empty) {
+            // A mark toggle at a caret only changes future typing. Remove
+            // the contiguous document link, including other formatting splits.
+            const link = linkType.isInSet($from.marks());
+            if (link) {
+              const parent = $from.parent;
+              let child = parent.childBefore($from.parentOffset);
+              if (!child.node || !link.isInSet(child.node.marks)) {
+                child = parent.childAfter($from.parentOffset);
+              }
+              if (child.node && link.isInSet(child.node.marks)) {
+                let start = $from.start() + child.offset;
+                let end = start + child.node.nodeSize;
+                for (let i = child.index - 1; i >= 0; i -= 1) {
+                  const sibling = parent.child(i);
+                  if (!link.isInSet(sibling.marks)) break;
+                  start -= sibling.nodeSize;
+                }
+                for (let i = child.index + 1; i < parent.childCount; i += 1) {
+                  const sibling = parent.child(i);
+                  if (!link.isInSet(sibling.marks)) break;
+                  end += sibling.nodeSize;
+                }
+                tr.removeMark(start, end, link);
+              }
+            }
+            tr.setStoredMarks(linkType.removeFromSet(state.storedMarks ?? $from.marks()));
+          } else {
+            // Table selections have a separate range for each selected cell.
+            for (const range of ranges) {
+              tr.removeMark(range.$from.pos, range.$to.pos, linkType);
+            }
+          }
+          view.dispatch(tr);
+        });
         api.focus();
       },
       insertMarkdown: (markdown) => {
@@ -716,7 +809,7 @@ function MarkdownNoteEditorCore({
         delete (window as unknown as { __notesEditorView?: unknown }).__notesEditorView;
       }
     };
-  }, [bindApi, get]);
+  }, [bindApi, get, loading]);
 
   useEffect(() => {
     return () => {

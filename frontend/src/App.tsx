@@ -176,7 +176,11 @@ import {
   inferBisqueRootFromUrl,
   type BisqueNavLinks,
 } from "./features/auth/bisqueNavigation";
-import { requestAuthenticatedAccountDeparture } from "./features/auth/accountDeparture";
+import { loadOptionalBisqueImageCount } from "./features/auth/bisqueLinking";
+import {
+  requestAuthenticatedAccountDeparture,
+  performAuthenticatedBisqueUnlink,
+} from "./features/auth/accountDeparture";
 import {
   createAdminOrganization,
   createAdminUser,
@@ -413,6 +417,11 @@ type ThemePreference = "system" | "light" | "dark";
 type AuthMode = "bisque" | "guest" | "workos";
 type AuthProvider = "local" | "workos";
 type AuthStatus = "checking" | "authenticated" | "unauthenticated";
+type UnsafeNotesDeparture = "logout" | "unlink" | "workos-unlink";
+type PreparedOwnerState = {
+  captureScope: string | null;
+  recoveryScope: string | null;
+};
 type OwnedNoteSelectionCapture = NoteSelectionCapture & {
   ownerScope: string | null;
 };
@@ -5351,9 +5360,12 @@ export function App() {
   const [authError, setAuthError] = useState<string | null>(() => readAuthErrorFromLocation());
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
-  const [unsafeNotesDeparturePending, setUnsafeNotesDeparturePending] = useState<
-    "logout" | "unlink" | null
-  >(null);
+  const [unsafeNotesDepartureKind, setUnsafeNotesDepartureKind] =
+    useState<UnsafeNotesDeparture>("logout");
+  const [unsafeNotesDepartureOpen, setUnsafeNotesDepartureOpen] = useState(false);
+  const [bisqueUnlinkTransitionPending, setBisqueUnlinkTransitionPending] =
+    useState(false);
+  const bisqueUnlinkTransitionInFlightRef = useRef(false);
   const [authGuestEnabled, setAuthGuestEnabled] = useState(true);
   // Private Notes never enter a model turn until the server explicitly
   // advertises the production read path. Missing/unreachable config is off.
@@ -7922,7 +7934,7 @@ export function App() {
     setAuthSubmitting(true);
     setAuthError(null);
     setAuthNotice(null);
-    setUnsafeNotesDeparturePending(null);
+    setUnsafeNotesDepartureOpen(false);
     try {
       const session = await apiClient.loginBisque(payload);
       if (!session.authenticated) {
@@ -8018,7 +8030,9 @@ export function App() {
   );
 
   const linkBisqueAccountFromSettings = useCallback(
-    async (payload: { username: string; password: string }): Promise<{ imageCount: number }> => {
+    async (
+      payload: { username: string; password: string }
+    ): Promise<{ imageCount: number | null }> => {
       const session = await apiClient.loginBisque(payload);
       if (!session.authenticated) {
         throw new Error("Authentication did not complete.");
@@ -8041,18 +8055,18 @@ export function App() {
       setAuthStatus("authenticated");
       setAuthError(null);
 
-      const search = await apiClient.searchBisqueResources({
-        resourceType: "image",
-        scope: "owner",
-        limit: 1,
-        countAll: true,
-      });
-      const imageCount = Math.max(0, Number(search.count) || 0);
-      showSuccessToast("Successfully linked BisQue account", {
-        description: `Found ${imageCount.toLocaleString()} image${
-          imageCount === 1 ? "" : "s"
-        } on BisQue.`,
-      });
+      const imageCount = await loadOptionalBisqueImageCount((options) =>
+        apiClient.searchBisqueResources(options)
+      );
+      const linkSuccessToastOptions =
+        imageCount == null
+          ? { description: "Image count is currently unavailable." }
+          : {
+              description: `Found ${imageCount.toLocaleString()} image${
+                imageCount === 1 ? "" : "s"
+              } on BisQue.`,
+            };
+      showSuccessToast("Successfully linked BisQue account", linkSuccessToastOptions);
       return { imageCount };
     },
     [apiClient]
@@ -8117,7 +8131,7 @@ export function App() {
     setBisqueCredentialsLinked(false);
     setAuthError(null);
     setAuthNotice(null);
-    setUnsafeNotesDeparturePending(null);
+    setUnsafeNotesDepartureOpen(false);
     setBisqueResourceCountsState({ requestKey: "", counts: null });
     setComposerDraftsByConversationId({});
     setComposerDraftExcludedNoteIntentTextByConversationId({});
@@ -8151,6 +8165,37 @@ export function App() {
     setAdminDeletingConversationKey(null);
   }, [conversationSnapshotWriter]);
 
+  const applyAuthenticatedSession = useCallback(
+    (session: BisqueAuthSessionResponse): void => {
+      const sessionUser =
+        String(session.username ?? "").trim() ||
+        String(session.user?.email ?? "").trim() ||
+        String(session.user?.username ?? "").trim() ||
+        String(session.user?.id ?? "").trim() ||
+        null;
+      setNotesRecoveryScope(noteRecoveryScopeFromSession(session));
+      setAuthUser(sessionUser);
+      setAuthStatus("authenticated");
+      setAuthMode(
+        session.mode === "guest"
+          ? "guest"
+          : session.mode === "workos"
+            ? "workos"
+            : "bisque"
+      );
+      setAuthProvider(
+        session.provider === "workos" || session.mode === "workos"
+          ? "workos"
+          : "local"
+      );
+      setAuthIsAdmin(Boolean(session.is_admin));
+      setBisqueCredentialsLinked(Boolean(session.bisque_linked));
+      setAuthError(null);
+      setAuthNotice(null);
+    },
+    []
+  );
+
   // Re-validate the session when the user returns to a long-idle tab so an
   // expired or revoked WorkOS session routes back to sign-in instead of
   // surfacing as scattered request failures. Only a definitive
@@ -8179,29 +8224,7 @@ export function App() {
               // bound cache/view before applying B so A's transcript,
               // resources, admin data, and Note affordances never flash in B.
               clearAuthViewState();
-              setNotesRecoveryScope(nextScope);
-              const sessionUser =
-                String(session.username ?? "").trim() ||
-                String(session.user?.email ?? "").trim() ||
-                String(session.user?.username ?? "").trim() ||
-                String(session.user?.id ?? "").trim() ||
-                null;
-              setAuthUser(sessionUser);
-              setAuthStatus("authenticated");
-              setAuthMode(
-                session.mode === "guest"
-                  ? "guest"
-                  : session.mode === "workos"
-                    ? "workos"
-                    : "bisque"
-              );
-              setAuthProvider(
-                session.provider === "workos" || session.mode === "workos"
-                  ? "workos"
-                  : "local"
-              );
-              setAuthIsAdmin(Boolean(session.is_admin));
-              setBisqueCredentialsLinked(Boolean(session.bisque_linked));
+              applyAuthenticatedSession(session);
             }
             return;
           }
@@ -8214,56 +8237,83 @@ export function App() {
     return () => {
       document.removeEventListener("visibilitychange", revalidateSession);
     };
-  }, [apiClient, authStatus, clearAuthViewState, notesRecoveryScope]);
+  }, [
+    apiClient,
+    applyAuthenticatedSession,
+    authStatus,
+    clearAuthViewState,
+    notesRecoveryScope,
+  ]);
 
-  const leaveAuthenticatedAccount = useCallback(async (
-    departure: "logout" | "unlink",
+  const quiesceOwnerBoundNotes = useCallback(async (
+    pendingDeparture: UnsafeNotesDeparture,
     discardUnconfirmed = false
-  ): Promise<void> => {
-    const logoutScope = notesRecoveryScope;
+  ): Promise<PreparedOwnerState | null> => {
+    const recoveryScope = notesRecoveryScope;
+    if (notesRecoveryScopeRef.current !== recoveryScope) return null;
     const selectionSnapshot = activeNoteSelectionCapture;
     if (selectionSnapshot?.attempt) {
       try {
         const reconcileAndClear = discardSelectionAppendAttemptRef.current;
-        if (!reconcileAndClear) return;
+        if (!reconcileAndClear) return null;
         await reconcileAndClear(selectionSnapshot, true);
       } catch (error) {
+        if (notesRecoveryScopeRef.current !== recoveryScope) return null;
         setNoteSelectionDialogOpen(true);
         showErrorToast(
           error instanceof Error
             ? `Couldn’t safely finish the paused Note add — ${error.message}`
             : "Couldn’t safely finish the paused Note add. Stay signed in and retry."
         );
-        return;
+        return null;
       }
-    } else {
-      clearNoteSelectionCaptureRecovery(
-        resolveBrowserSessionStorage(),
-        selectionSnapshot?.ownerScope ?? logoutScope
-      );
     }
+    if (notesRecoveryScopeRef.current !== recoveryScope) return null;
 
     let noteDraftsConfirmed = discardUnconfirmed || !notesLogoutFlushRef.current;
     const flushNotes = notesLogoutFlushRef.current;
     if (!discardUnconfirmed && flushNotes) {
       try {
-        // Account departure cannot race an uncancelable create/PATCH. Await
-        // the real serialized writer so purge is never authorized while a
-        // response may still arrive and change the server outcome.
+        // An account-changing request cannot race an uncancelable create or
+        // PATCH. Await the serialized writer while the current principal still
+        // owns the session used by that mutation.
         noteDraftsConfirmed = await flushNotes();
       } catch {
         noteDraftsConfirmed = false;
       }
     }
-    if (noteDraftsConfirmed) {
-      purgeAndDisableNoteDraftRecovery(resolveBrowserLocalStorage(), logoutScope);
-    }
+    if (notesRecoveryScopeRef.current !== recoveryScope) return null;
     if (!noteDraftsConfirmed) {
-      setUnsafeNotesDeparturePending(departure);
-      return;
+      setUnsafeNotesDepartureKind(pendingDeparture);
+      setUnsafeNotesDepartureOpen(true);
+      return null;
     }
 
-    setUnsafeNotesDeparturePending(null);
+    setUnsafeNotesDepartureOpen(false);
+    return {
+      captureScope: selectionSnapshot?.ownerScope ?? recoveryScope,
+      recoveryScope,
+    };
+  }, [activeNoteSelectionCapture, notesRecoveryScope]);
+
+  const purgePreparedOwnerState = useCallback((prepared: PreparedOwnerState): void => {
+    clearNoteSelectionCaptureRecovery(
+      resolveBrowserSessionStorage(),
+      prepared.captureScope
+    );
+    purgeAndDisableNoteDraftRecovery(
+      resolveBrowserLocalStorage(),
+      prepared.recoveryScope
+    );
+  }, []);
+
+  const leaveAuthenticatedAccount = useCallback(async (
+    departure: "logout" | "unlink",
+    discardUnconfirmed = false
+  ): Promise<void> => {
+    const prepared = await quiesceOwnerBoundNotes(departure, discardUnconfirmed);
+    if (!prepared) return;
+    purgePreparedOwnerState(prepared);
 
     let logoutUrl: string;
     try {
@@ -8272,7 +8322,7 @@ export function App() {
       // The server may still hold a valid session. Keep the protected account
       // view mounted, re-enable device recovery for subsequent edits, and let
       // the person retry instead of presenting a false signed-out state.
-      enableNoteDraftRecoveryScope(logoutScope);
+      enableNoteDraftRecoveryScope(prepared.recoveryScope);
       showErrorToast(
         departure === "logout"
           ? "Couldn’t sign out. You’re still signed in; try again."
@@ -8284,16 +8334,82 @@ export function App() {
     if (logoutUrl && typeof window !== "undefined") {
       window.location.assign(logoutUrl);
     }
-  }, [activeNoteSelectionCapture, apiClient, clearAuthViewState, notesRecoveryScope]);
+  }, [
+    apiClient,
+    clearAuthViewState,
+    purgePreparedOwnerState,
+    quiesceOwnerBoundNotes,
+  ]);
 
   const logoutBisque = useCallback(
     async (): Promise<void> => await leaveAuthenticatedAccount("logout"),
     [leaveAuthenticatedAccount]
   );
 
-  const unlinkBisqueAccount = useCallback(async (): Promise<void> => {
-    await leaveAuthenticatedAccount("unlink");
-  }, [leaveAuthenticatedAccount]);
+  const unlinkBisqueAccount = useCallback(async (
+    discardUnconfirmed = false
+  ): Promise<void> => {
+    if (bisqueUnlinkTransitionInFlightRef.current) return;
+    const ownerScope = notesRecoveryScopeRef.current;
+    bisqueUnlinkTransitionInFlightRef.current = true;
+    setBisqueUnlinkTransitionPending(true);
+    try {
+      if (authProvider !== "workos") {
+        await leaveAuthenticatedAccount("unlink", discardUnconfirmed);
+        return;
+      }
+
+      await performAuthenticatedBisqueUnlink({
+        apiClient,
+        ownerScope,
+        currentOwnerScope: () => notesRecoveryScopeRef.current,
+        prepareOwnerState: () => quiesceOwnerBoundNotes(
+          "workos-unlink",
+          discardUnconfirmed
+        ),
+        applyResult: (result, prepared) => {
+          if (result.kind === "indeterminate") {
+            // Neither response could prove which principal now owns the cookie.
+            // Hide A while retaining its scope-isolated device recovery.
+            clearAuthViewState();
+            setAuthError(
+              "Ultra couldn’t verify whether BisQue was unlinked or which account is active. Sign in again."
+            );
+            return;
+          }
+          if (result.kind === "signed-out") {
+            purgePreparedOwnerState(prepared);
+            clearAuthViewState();
+            setAuthNotice(accountApprovalMessageFromSession(result.session));
+            return;
+          }
+          if (result.kind === "principal-changed") {
+            purgePreparedOwnerState(prepared);
+            clearAuthViewState();
+            applyAuthenticatedSession(result.session);
+            return;
+          }
+
+          // WorkOS remains the account authority after its linked BisQue
+          // credentials are removed. Keep the protected workspace and owner-bound
+          // Notes state mounted; only clear the now-invalid BisQue projection.
+          setBisqueCredentialsLinked(false);
+          setBisqueResourceCountsState({ requestKey: "", counts: null });
+        },
+      });
+    } finally {
+      bisqueUnlinkTransitionInFlightRef.current = false;
+      setBisqueUnlinkTransitionPending(false);
+    }
+  }, [
+    apiClient,
+    applyAuthenticatedSession,
+    authProvider,
+    clearAuthViewState,
+    leaveAuthenticatedAccount,
+    purgePreparedOwnerState,
+    quiesceOwnerBoundNotes,
+  ]);
 
   const promptBisqueAuthentication = useCallback(async (message: string): Promise<void> => {
     const nextMessage = message.trim() || "BisQue authentication is required.";
@@ -15475,6 +15591,7 @@ export function App() {
             authMode={authMode}
             authIsAdmin={authIsAdmin}
             bisqueCredentialsLinked={bisqueCredentialsLinked}
+            bisqueUnlinkPending={bisqueUnlinkTransitionPending}
             themePreference={themePreference}
             resolvedTheme={resolvedTheme}
             bisqueNavLinks={bisqueNavLinks}
@@ -16537,10 +16654,8 @@ export function App() {
           </Suspense>
         ) : null}
         <AlertDialog
-          open={unsafeNotesDeparturePending !== null}
-          onOpenChange={(open) => {
-            if (!open) setUnsafeNotesDeparturePending(null);
-          }}
+          open={unsafeNotesDepartureOpen}
+          onOpenChange={setUnsafeNotesDepartureOpen}
         >
           <AlertDialogContent size="default">
             <AlertDialogHeader>
@@ -16549,21 +16664,38 @@ export function App() {
               </AlertDialogMedia>
               <AlertDialogTitle>Some Note changes aren’t confirmed</AlertDialogTitle>
               <AlertDialogDescription>
-                Ultra couldn’t finish syncing or reconciling a Note change before sign-out.
-                Stay signed in to retry, or discard the device recovery copy and continue.
+                {unsafeNotesDepartureKind === "workos-unlink"
+                  ? "Ultra couldn’t confirm a Note change before unlinking BisQue. Keep BisQue linked and retry, or unlink anyway. Device recovery is retained if this WorkOS account remains active or Ultra cannot verify the result; it is removed only after confirmed sign-out or account change."
+                  : "Ultra couldn’t finish syncing or reconciling a Note change before leaving this account. Stay signed in to retry, or discard the device recovery copy and continue."}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>Stay signed in</AlertDialogCancel>
+              <AlertDialogCancel>
+                {unsafeNotesDepartureKind === "workos-unlink"
+                  ? "Keep BisQue linked"
+                  : "Stay signed in"}
+              </AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
                 onClick={() => {
-                  const departure = unsafeNotesDeparturePending;
-                  setUnsafeNotesDeparturePending(null);
-                  if (departure) void leaveAuthenticatedAccount(departure, true);
+                  const departure = unsafeNotesDepartureKind;
+                  setUnsafeNotesDepartureOpen(false);
+                  if (departure === "workos-unlink") {
+                    void unlinkBisqueAccount(true).catch((error) => {
+                      showErrorToast(
+                        `Couldn’t unlink this account. ${normalizeApiError(error)}`
+                      );
+                    });
+                  } else if (departure) {
+                    void leaveAuthenticatedAccount(departure, true);
+                  }
                 }}
               >
-                Discard unsaved changes &amp; continue
+                {unsafeNotesDepartureKind === "workos-unlink"
+                  ? "Unlink BisQue anyway"
+                  : unsafeNotesDepartureKind === "logout"
+                    ? "Discard changes & sign out"
+                    : "Discard changes & unlink account"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ResourceBrowser } from "./ResourceBrowser";
 import type {
   ResourceCollectionRecord,
+  ResourceCollectionShareGrantRecord,
   ResourceRecord,
   ResourceShareGrantRecord,
 } from "../types";
@@ -393,6 +394,185 @@ describe("ResourceBrowser", () => {
     clearStoredResourceViewMode();
   });
 
+  it.each(["loading", "loadingMore"] as const)(
+    "keeps Refresh focusable during %s and ignores repeat activation",
+    (pendingProp) => {
+      const onRefresh = vi.fn();
+      const props = { ...baseProps, onRefresh };
+      const { rerender } = render(<ResourceBrowser {...props} />);
+      const refresh = screen.getByRole("button", { name: "Refresh resources" });
+      refresh.focus();
+      fireEvent.click(refresh);
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+
+      rerender(<ResourceBrowser {...props} {...{ [pendingProp]: true }} />);
+      expect(refresh).not.toBeDisabled();
+      expect(refresh).toHaveAttribute("aria-disabled", "true");
+      expect(refresh).toHaveFocus();
+      fireEvent.click(refresh);
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+
+      rerender(<ResourceBrowser {...props} />);
+      expect(refresh).toHaveFocus();
+      expect(refresh).toHaveAttribute("aria-disabled", "false");
+      fireEvent.click(refresh);
+      expect(onRefresh).toHaveBeenCalledTimes(2);
+
+      rerender(<ResourceBrowser {...props} {...{ [pendingProp]: true }} />);
+      const search = screen.getByRole("textbox", { name: "Search resources" });
+      search.focus();
+      rerender(<ResourceBrowser {...props} />);
+      expect(search).toHaveFocus();
+    }
+  );
+
+  it("does not clear the resource selection when Refresh is busy", () => {
+    const onRefresh = vi.fn();
+    const props = { ...baseProps, onRefresh, onDeleteSelectedResources: vi.fn() };
+    const { rerender } = render(<ResourceBrowser {...props} />);
+    const selected = screen.getByRole("checkbox", { name: `Select ${imageResource.original_name}` });
+    fireEvent.click(selected);
+    rerender(<ResourceBrowser {...props} loadingMore />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh resources" }));
+    expect(selected).toBeChecked();
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    rerender(<ResourceBrowser {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh resources" }));
+    expect(selected).not.toBeChecked();
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands folder navigation focus to the destination before resources load, only once", () => {
+    const props = {
+      ...baseProps,
+      resourceCollections: [nphFolder],
+      onOpenCollection: vi.fn(),
+      onClearActiveCollection: vi.fn(),
+    };
+    const { rerender } = render(<ResourceBrowser {...props} />);
+    const opener = screen.getByRole("button", { name: "Open folder NPH review folder" });
+    opener.focus();
+    fireEvent.click(opener);
+    expect(props.onOpenCollection).toHaveBeenCalledWith(nphFolder);
+
+    rerender(<ResourceBrowser {...props} activeResourceCollection={nphFolder} loading />);
+    expect(screen.getByRole("button", { name: "Leave folder NPH review folder" })).toHaveFocus();
+    const search = screen.getByRole("textbox", { name: "Search resources" });
+    search.focus();
+    rerender(<ResourceBrowser {...props} activeResourceCollection={{ ...nphFolder }} />);
+    expect(search).toHaveFocus();
+  });
+
+  it.each(["Leave folder NPH review folder", "Go to all resources", "All resources"])(
+    "restores folder navigation focus to the departed tile through %s",
+    (name) => {
+      const props = {
+        ...baseProps,
+        resourceCollections: [nphFolder],
+        onOpenCollection: vi.fn(),
+        onClearActiveCollection: vi.fn(),
+      };
+      const { rerender } = render(<ResourceBrowser {...props} activeResourceCollection={nphFolder} />);
+      const back = screen.getByRole("button", { name });
+      back.focus();
+      fireEvent.click(back);
+      expect(props.onClearActiveCollection).toHaveBeenCalledTimes(1);
+      rerender(<ResourceBrowser {...props} loading />);
+      expect(screen.getByRole("button", { name: "Open folder NPH review folder" })).toHaveFocus();
+    }
+  );
+
+  it("restores folder navigation focus to the child when going up to its parent", () => {
+    const child = {
+      ...nphFolder,
+      collection_id: "child",
+      parent_collection_id: nphFolder.collection_id,
+      name: "Child",
+    };
+    const props = {
+      ...baseProps,
+      resourceCollections: [nphFolder, child],
+      onOpenCollection: vi.fn(),
+      onClearActiveCollection: vi.fn(),
+    };
+    const { rerender } = render(<ResourceBrowser {...props} activeResourceCollection={child} />);
+    const back = screen.getByRole("button", { name: "Go up from folder Child" });
+    back.focus();
+    fireEvent.click(back);
+    expect(props.onOpenCollection).toHaveBeenCalledWith(nphFolder);
+    rerender(<ResourceBrowser {...props} activeResourceCollection={nphFolder} />);
+    expect(screen.getByRole("button", { name: "Open folder Child" })).toHaveFocus();
+  });
+
+  it("uses search as the folder navigation fallback when the departed tile is unavailable", () => {
+    const props = { ...baseProps, onOpenCollection: vi.fn(), onClearActiveCollection: vi.fn() };
+    const { rerender } = render(<ResourceBrowser {...props} activeResourceCollection={nphFolder} />);
+    const back = screen.getByRole("button", { name: "All resources" });
+    back.focus();
+    fireEvent.click(back);
+    rerender(<ResourceBrowser {...props} />);
+    expect(screen.getByRole("textbox", { name: "Search resources" })).toHaveFocus();
+  });
+
+  it("does not steal folder navigation focus after the user moves elsewhere", () => {
+    const props = {
+      ...baseProps,
+      resourceCollections: [nphFolder],
+      onOpenCollection: vi.fn(),
+      onClearActiveCollection: vi.fn(),
+    };
+    const { rerender } = render(<ResourceBrowser {...props} />);
+    const opener = screen.getByRole("button", { name: "Open folder NPH review folder" });
+    opener.focus();
+    fireEvent.click(opener);
+    const search = screen.getByRole("textbox", { name: "Search resources" });
+    search.focus();
+    rerender(<ResourceBrowser {...props} activeResourceCollection={nphFolder} />);
+    expect(search).toHaveFocus();
+    rerender(<ResourceBrowser {...props} />);
+    expect(search).toHaveFocus();
+  });
+
+  it("distinguishes a failed search from a successful empty result and allows refresh", () => {
+    const onRefresh = vi.fn();
+    const props = {
+      ...baseProps,
+      resources: [],
+      totalCount: 0,
+      query: "connectivity",
+      onRefresh,
+    };
+    const { rerender } = render(<ResourceBrowser {...props} error="Failed to fetch" />);
+
+    expect(screen.queryByText("0 of 0 resources")).not.toBeInTheDocument();
+    expect(screen.queryByText("No resources match the current filters.")).not.toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to fetch");
+    expect(screen.getByRole("textbox", { name: "Search resources" })).toHaveValue("connectivity");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh resources" }));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+
+    rerender(<ResourceBrowser {...props} loading error={null} />);
+    expect(screen.getByText("Searching resources...")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("No resources match the current filters.")).not.toBeInTheDocument();
+
+    rerender(<ResourceBrowser {...props} />);
+    expect(screen.getByText("0 of 0 resources")).toBeInTheDocument();
+    expect(screen.getByText("No resources match the current filters.")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps loaded results visible when a later resource request fails", () => {
+    render(<ResourceBrowser {...baseProps} error="Unable to load more resources." />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Unable to load more resources.");
+    expect(screen.getByText("2 of 2 resources")).toBeInTheDocument();
+    expect(screen.getByLabelText(`Resource ${imageResource.original_name}`)).toBeInTheDocument();
+    expect(screen.getByLabelText(`Resource ${fileResource.original_name}`)).toBeInTheDocument();
+  });
+
   it("previews Python source and identifies scientific fallback formats", async () => {
     const quickPeekFetch = vi.fn().mockResolvedValue({
       file_id: pythonResource.file_id,
@@ -716,6 +896,23 @@ describe("ResourceBrowser", () => {
     expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
   });
 
+  it.each(["cards", "table"])("opens %s resource actions with Shift+F10 without selecting or opening the resource", async (view) => {
+    localStorage.setItem("bisque.resources.view_mode", view);
+    const onOpenResource = vi.fn();
+    render(<ResourceBrowser {...baseProps} onOpenResource={onOpenResource} onDeleteSelectedResources={vi.fn()} />);
+    const resource = screen.getByLabelText("Resource prairie-cell-image.png");
+    expect(resource.tagName).toBe(view === "table" ? "TR" : "ARTICLE");
+    resource.focus();
+    fireEvent.keyDown(resource, { key: "F10", shiftKey: true });
+    const viewAction = await screen.findByRole("menuitem", { name: "View" });
+    await waitFor(() => expect(viewAction).toHaveFocus());
+    expect(onOpenResource).not.toHaveBeenCalled();
+    expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
+    fireEvent.keyDown(viewAction, { key: "Escape" });
+    await waitFor(() => expect(resource).toHaveFocus());
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
   it("supports select-all, clear, and move-to-trash keyboard shortcuts from the grid", async () => {
     const onDeleteSelectedResources = vi.fn().mockResolvedValue(undefined);
     render(
@@ -750,6 +947,102 @@ describe("ResourceBrowser", () => {
     });
   });
 
+  it.each(["Card view", "Table view"])(
+    "returns focus to a deselected resource after Clear in %s",
+    (view) => {
+      const onOpenResource = vi.fn();
+      render(
+        <ResourceBrowser
+          {...baseProps}
+          onOpenResource={onOpenResource}
+          onDeleteSelectedResources={vi.fn()}
+        />
+      );
+      if (view === "Table view") {
+        openResourceFilters();
+        fireEvent.click(screen.getByRole("radio", { name: view }));
+        fireEvent.click(screen.getByRole("button", { name: "Done" }));
+      }
+      const selected = screen.getByRole("checkbox", { name: "Select NPH_shunt_002_70yo.nii.gz" });
+      fireEvent.click(selected);
+      const clear = screen.getByRole("button", { name: "Clear" });
+      clear.focus();
+      fireEvent.click(clear);
+
+      expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
+      expect(selected).not.toBeChecked();
+      expect(selected).toHaveFocus();
+      expect(onOpenResource).not.toHaveBeenCalled();
+    }
+  );
+
+  it("returns Clear focus to Search when selected rows are not rendered", () => {
+    const props = { ...baseProps, onDeleteSelectedResources: vi.fn() };
+    const { rerender } = render(<ResourceBrowser {...props} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select NPH_shunt_002_70yo.nii.gz" }));
+    rerender(<ResourceBrowser {...props} loading />);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    const clear = screen.getByRole("button", { name: "Clear" });
+    clear.focus();
+    fireEvent.click(clear);
+    expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Search resources" })).toHaveFocus();
+  });
+
+  it("keeps focus on the resource when Escape clears selection", () => {
+    render(<ResourceBrowser {...baseProps} onDeleteSelectedResources={vi.fn()} />);
+    const resource = screen.getByLabelText("Resource NPH_shunt_002_70yo.nii.gz");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select NPH_shunt_002_70yo.nii.gz" }));
+    resource.focus();
+    fireEvent.keyDown(resource, { key: "Escape" });
+    expect(screen.queryByText("1 selected")).not.toBeInTheDocument();
+    expect(resource).toHaveFocus();
+  });
+
+  it("returns toolbar Clear focus to search when selected rows are virtualized away", () => {
+    const resources = Array.from({ length: 250 }, (_, index): ResourceRecord => ({
+      ...fileResource,
+      file_id: `file_${index}`,
+      original_name: `volume_${index}.nii.gz`,
+      sha256: `sha-${index}`,
+    }));
+    render(<ResourceBrowser {...baseProps} resources={resources} totalCount={250} onDeleteSelectedResources={vi.fn()} />);
+    openResourceFilters();
+    fireEvent.click(screen.getByRole("radio", { name: "Table view" }));
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select volume_0.nii.gz" }));
+    const shell = document.querySelector(".resource-browser-table-shell");
+    if (!(shell instanceof HTMLElement)) throw new Error("Missing table scrollport");
+    Object.defineProperty(shell, "clientHeight", { value: 420, configurable: true });
+    Object.defineProperty(shell, "scrollTop", { value: 250 * 68, configurable: true });
+    fireEvent.scroll(shell);
+    expect(screen.queryByLabelText("Resource volume_0.nii.gz")).not.toBeInTheDocument();
+    const clear = screen.getByRole("button", { name: "Clear" });
+    clear.focus();
+    fireEvent.click(clear);
+
+    expect(screen.getByRole("textbox", { name: "Search resources" })).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "Clear" })).not.toBeInTheDocument();
+  });
+
+  it("keeps focus in place when Escape or search clears resource selection", () => {
+    render(<ResourceBrowser {...baseProps} onDeleteSelectedResources={vi.fn()} />);
+    const checkbox = screen.getByRole("checkbox", { name: `Select ${fileResource.original_name}` });
+    const resource = screen.getByLabelText(`Resource ${imageResource.original_name}`);
+    fireEvent.click(checkbox);
+    resource.focus();
+    fireEvent.keyDown(resource, { key: "Escape" });
+    expect(resource).toHaveFocus();
+    expect(checkbox).not.toBeChecked();
+
+    fireEvent.click(checkbox);
+    const search = screen.getByRole("textbox", { name: "Search resources" });
+    search.focus();
+    fireEvent.change(search, { target: { value: "subject" } });
+    expect(search).toHaveFocus();
+    expect(checkbox).not.toBeChecked();
+  });
+
   it("keeps resource keyboard shortcuts out of the search field", () => {
     const onDeleteSelectedResources = vi.fn().mockResolvedValue(undefined);
     const onQueryChange = vi.fn();
@@ -769,6 +1062,29 @@ describe("ResourceBrowser", () => {
     expect(screen.queryByText("2 selected")).not.toBeInTheDocument();
     expect(onDeleteSelectedResources).not.toHaveBeenCalled();
   });
+
+  it.each(["Escape", "Done", "Close"])(
+    "returns focus to More filters after dismissing with %s",
+    async (dismissal) => {
+      render(<ResourceBrowser {...baseProps} />);
+      const trigger = screen.getByRole("button", { name: "More filters" });
+      trigger.focus();
+      fireEvent.click(trigger);
+
+      const dialog = screen.getByRole("dialog", { name: "Resource filters and view" });
+      await waitFor(() => expect(dialog).toContainElement(document.activeElement as HTMLElement));
+      if (dismissal === "Escape") {
+        fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+      } else {
+        fireEvent.click(within(dialog).getByRole("button", { name: dismissal }));
+      }
+
+      await waitFor(() => {
+        expect(screen.queryByRole("dialog", { name: "Resource filters and view" })).not.toBeInTheDocument();
+        expect(trigger).toHaveFocus();
+      });
+    }
+  );
 
   it("keeps the default Resources controls and filter sheet focused", () => {
     render(
@@ -1132,6 +1448,35 @@ describe("ResourceBrowser", () => {
     fireEvent.click(chip);
 
     expect(onTagFilterChange).toHaveBeenCalledWith("");
+  });
+
+  it.each([
+    { prop: "kindFilter", callback: "onKindFilterChange", initial: "All", next: "Images", value: "image", reset: "all" },
+    { prop: "sourceFilter", callback: "onSourceFilterChange", initial: "All sources", next: "Uploads", value: "upload", reset: "all" },
+    { prop: "sharingFilter", callback: "onSharingFilterChange", initial: "All sharing", next: "Public", value: "public", reset: "all" },
+    { prop: "statusFilter", callback: "onStatusFilterChange", initial: "Active", next: "Deleted", value: "deleted", reset: "active" },
+  ] as const)("exposes the controlled $prop selection through changes and Reset", ({ prop, callback, initial, next, value, reset }) => {
+    const onChange = vi.fn();
+    const props = { ...baseProps, [callback]: onChange };
+    const { rerender } = render(<ResourceBrowser {...props} />);
+    openResourceFilters();
+
+    expect(screen.getByRole("button", { name: initial, pressed: true })).toBeInTheDocument();
+    const nextButton = screen.getByRole("button", { name: next, pressed: false });
+    fireEvent.click(nextButton);
+    expect(onChange).toHaveBeenCalledWith(value);
+    // The parent owns the filter; the accessible state follows its accepted value.
+    expect(nextButton).toHaveAttribute("aria-pressed", "false");
+
+    rerender(<ResourceBrowser {...props} {...{ [prop]: value }} />);
+    expect(screen.getByRole("button", { name: next, pressed: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: initial, pressed: false })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reset" }));
+    expect(onChange).toHaveBeenLastCalledWith(reset);
+    rerender(<ResourceBrowser {...props} />);
+    expect(screen.getByRole("button", { name: initial, pressed: true })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: next, pressed: false })).toBeInTheDocument();
   });
 
   it("resets the simple filters from the filter sheet", () => {
@@ -1934,6 +2279,38 @@ describe("ResourceBrowser", () => {
     });
   });
 
+  it.each(["Escape", "Cancel", "Close"])(
+    "returns focus to New after dismissing New folder with %s",
+    async (dismissal) => {
+      const onCreateCollectionFromSelection = vi.fn();
+      render(
+        <ResourceBrowser
+          {...baseProps}
+          onCreateCollectionFromSelection={onCreateCollectionFromSelection}
+        />
+      );
+
+      const opener = screen.getByRole("button", { name: "New" });
+      act(() => opener.focus());
+      fireEvent.keyDown(opener, { key: "Enter" });
+      fireEvent.click(await screen.findByRole("menuitem", { name: "New folder" }));
+      const dialog = await screen.findByRole("dialog", { name: "New folder" });
+      const input = within(dialog).getByLabelText("Folder name");
+      await waitFor(() => expect(input).toHaveFocus());
+
+      if (dismissal === "Escape") {
+        fireEvent.keyDown(input, { key: "Escape" });
+      } else {
+        fireEvent.click(within(dialog).getByRole("button", { name: dismissal }));
+      }
+
+      await waitFor(() => expect(dialog).not.toBeInTheDocument());
+      await waitFor(() => expect(opener).toHaveFocus());
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+      expect(onCreateCollectionFromSelection).not.toHaveBeenCalled();
+    }
+  );
+
   it("creates an empty folder from the Resources header", async () => {
     const onCreateCollectionFromSelection = vi.fn().mockResolvedValue(undefined);
     render(
@@ -1966,6 +2343,9 @@ describe("ResourceBrowser", () => {
     });
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "New folder" })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "New" })).toHaveFocus();
     });
   });
 
@@ -2974,6 +3354,76 @@ describe("ResourceBrowser", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Share NPH review folder" })).not.toBeInTheDocument();
     });
+  });
+
+  it.each(["private", "shared"])("retries failed folder access reads before reporting %s access", async (access) => {
+    let resolveRetry!: (grants: ResourceCollectionShareGrantRecord[]) => void;
+    const onLoadCollectionShareGrants = vi.fn()
+      .mockRejectedValueOnce(new Error("Service unavailable"))
+      .mockImplementationOnce(() => new Promise<ResourceCollectionShareGrantRecord[]>((resolve) => {
+        resolveRetry = resolve;
+      }));
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resourceCollections={[nphFolder]}
+        onOpenCollection={vi.fn()}
+        onLoadCollectionShareGrants={onLoadCollectionShareGrants}
+        onCreateResourceCollectionShareGrants={vi.fn()}
+      />
+    );
+    fireEvent.contextMenu(screen.getByRole("button", { name: "Open folder NPH review folder" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Share" }));
+    const dialog = await screen.findByRole("dialog", { name: "Share NPH review folder" });
+
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Unable to load folder access.");
+    expect(within(dialog).queryByText("Only you")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Retry loading folder access" }));
+    expect(await within(dialog).findByText("Loading access…")).toBeInTheDocument();
+    expect(within(dialog).queryByText("Only you")).not.toBeInTheDocument();
+
+    const grant: ResourceCollectionShareGrantRecord = {
+      ...activeShareGrant,
+      collection_id: nphFolder.collection_id,
+    };
+    await act(async () => resolveRetry(access === "shared" ? [grant] : []));
+    expect(await within(dialog).findByText(access === "shared" ? "bob" : "Only you")).toBeInTheDocument();
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(onLoadCollectionShareGrants).toHaveBeenCalledTimes(2);
+    expect(onLoadCollectionShareGrants).toHaveBeenLastCalledWith(nphFolder);
+  });
+
+  it("does not let a dismissed folder access failure replace a reopened result", async () => {
+    let rejectDismissed!: (error: Error) => void;
+    const onLoadCollectionShareGrants = vi.fn()
+      .mockImplementationOnce(() => new Promise<ResourceCollectionShareGrantRecord[]>((_resolve, reject) => {
+        rejectDismissed = reject;
+      }))
+      .mockResolvedValueOnce([{ ...activeShareGrant, collection_id: nphFolder.collection_id }]);
+    render(
+      <ResourceBrowser
+        {...baseProps}
+        resourceCollections={[nphFolder]}
+        onOpenCollection={vi.fn()}
+        onLoadCollectionShareGrants={onLoadCollectionShareGrants}
+        onCreateResourceCollectionShareGrants={vi.fn()}
+      />
+    );
+    const openShare = async () => {
+      fireEvent.contextMenu(screen.getByRole("button", { name: "Open folder NPH review folder" }));
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Share" }));
+      return screen.findByRole("dialog", { name: "Share NPH review folder" });
+    };
+    const dismissed = await openShare();
+    expect(await within(dismissed).findByText("Loading access…")).toBeInTheDocument();
+    fireEvent.click(within(dismissed).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(dismissed).not.toBeInTheDocument());
+    const reopened = await openShare();
+    expect(await within(reopened).findByText("bob")).toBeInTheDocument();
+    await act(async () => rejectDismissed(new Error("Late failure")));
+    expect(within(reopened).getByText("bob")).toBeInTheDocument();
+    expect(within(reopened).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(reopened).queryByText("Only you")).not.toBeInTheDocument();
   });
 
   it("shows fixed-card skeletons while loading", () => {

@@ -940,6 +940,16 @@ segmentation mask — call bisque_module_runs(mex_uri=<the run's uri>) to get it
 take the output's resource_uri and call bisque_download_resource to materialize it into Ultra
 for analysis, or report the output's client_view_url so the user can view it on BisQue. Do not
 treat a mex as an image; its results live in its outputs.
+BisQue also hosts analysis modules that run on BisQue's own engine. When the user asks which
+BisQue module or analysis fits a task, or what BisQue can do, call bisque_list_modules with
+task=<their goal>, then bisque_describe_module on the best candidates, and recommend from the
+returned descriptions, inputs, and example_run — never invent a module, and say when the
+one-line descriptions are too thin to be sure. When a registered module covers the task and
+the data is already on BisQue, prefer running the module (bisque_run_module, only when the run
+is authorized for it) over downloading the data into Ultra: the module analyses the data in
+place and writes results back to BisQue. Pass inputs by BisQue resource URI; take values such
+as a weights file from example_run. Modules can run for tens of minutes, so report the run's
+client_view_url and check later with bisque_module_runs rather than waiting.
 Never expose or ask for BisQue credentials in the answer; the control plane owns account auth.
 """
 
@@ -1517,6 +1527,8 @@ _PROGRAM_BISQUE_TOOLS = {
     "bisque_dataset_annotation_summary": ToolConcurrency.PARALLEL,
     "bisque_download_resource": ToolConcurrency.EXCLUSIVE,
     "bisque_module_runs": ToolConcurrency.PARALLEL,
+    "bisque_list_modules": ToolConcurrency.PARALLEL,
+    "bisque_describe_module": ToolConcurrency.PARALLEL,
 }
 _PROGRAM_EPISODIC_TOOLS = {
     "search_past_research": ToolConcurrency.PARALLEL,
@@ -2064,6 +2076,8 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
             mutation_tools.extend(["bisque_upload_files", "bisque_upload_workspace_files"])
         if "bisque.create_dataset" in context.remote_mutation_intents:
             mutation_tools.append("bisque_create_dataset")
+        if "bisque.run_module" in context.remote_mutation_intents:
+            mutation_tools.append("bisque_run_module")
         mutation_note = (
             f"; authorized remote mutation tools for this run: {', '.join(mutation_tools)}"
             if mutation_tools
@@ -2071,7 +2085,8 @@ def build_run_context_brief(context: AgentRunContext, *, max_artifacts: int = 8)
         )
         lines.append(
             "- linked BisQue account available: use bisque_search_resources, "
-            "bisque_download_resource, and bisque_module_runs through the control plane"
+            "bisque_download_resource, bisque_module_runs, bisque_list_modules, and "
+            "bisque_describe_module through the control plane"
             f"{mutation_note}; "
             "use scope='owner' for the user's own BisQue resources, sort='recent' for newest-first "
             "queries, extensions=['png'] or extensions=['nii','nii.gz','nifti'] for file-type "

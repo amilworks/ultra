@@ -55,6 +55,19 @@ _BISQUE_DATASET_DENIAL = re.compile(
     rf"[^.!?\n]{{0,32}}\bdataset\b",
     re.IGNORECASE,
 )
+_BISQUE_RUN_MODULE_VERB = (
+    r"(?:run(?:s|ning)?|ran|execut(?:e|es|ed|ing)|launch(?:es|ed|ing)?|"
+    r"start(?:s|ed|ing)?|appl(?:y|ies|ied|ying))"
+)
+_BISQUE_RUN_MODULE_INTENT = re.compile(
+    rf"\b{_BISQUE_RUN_MODULE_VERB}\b[^.!?\n]{{0,120}}"
+    rf"(?:\bmodule\b|\b(?:on|in|via|using)\s+{_BISQUE_REMOTE_DESTINATION}\b)",
+    re.IGNORECASE,
+)
+_BISQUE_RUN_MODULE_DENIAL = re.compile(
+    rf"\b{_BISQUE_NEGATION}\b[^.!?\n]{{0,48}}\b{_BISQUE_RUN_MODULE_VERB}\b",
+    re.IGNORECASE,
+)
 _BISQUE_NON_CONSENT = re.compile(
     r"\b(?:if\s+(?:i|we)|explain\s+how|how\s+(?:do|can|could|would)|"
     r"can\s+(?:ultra|you)|could\s+(?:ultra|you)|would\s+(?:ultra|you)|"
@@ -71,6 +84,7 @@ def _bisque_mutation_authorized(context: AgentRunContext | None, action: str) ->
     required = {
         "upload": "bisque.upload",
         "create_dataset": "bisque.create_dataset",
+        "run_module": "bisque.run_module",
     }.get(action)
     return bool(required and required in tuple(context.remote_mutation_intents))
 
@@ -85,6 +99,10 @@ def bisque_mutation_goal_authorized(goal: str, action: str) -> bool:
         return not _BISQUE_UPLOAD_DENIAL.search(goal) and bool(_BISQUE_UPLOAD_INTENT.search(goal))
     if action == "create_dataset":
         return not _BISQUE_DATASET_DENIAL.search(goal) and bool(_BISQUE_DATASET_INTENT.search(goal))
+    if action == "run_module":
+        return not _BISQUE_RUN_MODULE_DENIAL.search(goal) and bool(
+            _BISQUE_RUN_MODULE_INTENT.search(goal)
+        )
     return False
 
 
@@ -612,6 +630,150 @@ def create_bisque_dataset(
     return response
 
 
+_BISQUE_MODULE_TERMINAL_STATUSES = frozenset({"FINISHED", "FAILED"})
+_BISQUE_MODULE_MAX_WAIT_SECONDS = 600
+
+
+def _control_post_json_or_error(
+    settings: RuntimeSettings,
+    path: str,
+    payload: dict[str, Any],
+    *,
+    context: AgentRunContext | None,
+    timeout: float = 120.0,
+) -> dict[str, Any]:
+    """Like control_post_json, but return a 4xx/5xx as data so the agent sees
+    the control plane's explanation (e.g. which module input is missing)."""
+    import httpx
+
+    try:
+        return control_post_json(settings, path, payload, context=context, timeout=timeout)
+    except httpx.HTTPStatusError as exc:
+        detail: Any = exc.response.text
+        try:
+            detail = exc.response.json()
+        except ValueError:
+            pass
+        if isinstance(detail, dict):
+            detail = detail.get("error") or detail.get("message") or detail
+        return {"ok": False, "status_code": exc.response.status_code, "error": detail}
+
+
+def _module_input_map(inputs: dict[str, Any] | str | None) -> dict[str, str]:
+    if isinstance(inputs, str):
+        text = inputs.strip()
+        if not text:
+            return {}
+        try:
+            inputs = json.loads(text)
+        except ValueError:
+            return {}
+    if not isinstance(inputs, dict):
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, value in inputs.items():
+        name = str(key or "").strip()
+        if name and value is not None:
+            cleaned[name] = str(value).strip()
+    return cleaned
+
+
+def list_bisque_modules(
+    settings: RuntimeSettings,
+    *,
+    task: str = "",
+    limit: int = 0,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """List the analysis modules registered on BisQue, ranked against a task."""
+    payload: dict[str, Any] = {"query": str(task or "").strip()}
+    if int(limit or 0) > 0:
+        payload["limit"] = int(limit)
+    response = _control_post_json_or_error(settings, "/v2/bisque/modules", payload, context=context)
+    if isinstance(response, dict) and "ok" not in response:
+        response["ok"] = isinstance(response.get("modules"), list)
+    return response
+
+
+def describe_bisque_module(
+    settings: RuntimeSettings,
+    *,
+    name: str,
+    context: AgentRunContext | None = None,
+) -> dict[str, Any]:
+    """Describe one BisQue module: definition, help text, and an example run."""
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        return {"ok": False, "error": "module_name_required"}
+    return _control_post_json_or_error(
+        settings, "/v2/bisque/module", {"name": cleaned}, context=context
+    )
+
+
+def run_bisque_module(
+    settings: RuntimeSettings,
+    *,
+    module_name: str,
+    inputs: dict[str, Any] | str | None = None,
+    wait_seconds: int = 20,
+    poll_interval: float = 5.0,
+    context: AgentRunContext | None = None,
+    sleep: Any = None,
+) -> dict[str, Any]:
+    """Launch a BisQue module on BisQue's engine, inputs passed by reference.
+
+    Returns as soon as the run reaches a terminal state or wait_seconds elapses;
+    BisQue modules commonly run for tens of minutes, so callers report the run
+    link and check back with bisque_module_runs rather than blocking.
+    """
+    import time
+
+    if not _bisque_mutation_authorized(context, "run_module"):
+        return json.loads(_blocked_bisque_mutation("run_module"))
+    cleaned_name = str(module_name or "").strip()
+    if not cleaned_name:
+        return {"ok": False, "error": "module_name_required"}
+    started = _control_post_json_or_error(
+        settings,
+        "/v2/bisque/module-execute",
+        {"module_name": cleaned_name, "inputs": _module_input_map(inputs)},
+        context=context,
+    )
+    if not started.get("ok"):
+        return started
+    mex_uri = str(started.get("mex_uri") or "").strip()
+    run = started.get("run") if isinstance(started.get("run"), dict) else {}
+    status = str(started.get("status") or run.get("status") or "").strip().upper()
+    budget = max(0, min(int(wait_seconds or 0), _BISQUE_MODULE_MAX_WAIT_SECONDS))
+    pause = sleep or time.sleep
+    deadline = time.monotonic() + budget
+    while mex_uri and budget and status not in _BISQUE_MODULE_TERMINAL_STATUSES:
+        if time.monotonic() >= deadline:
+            break
+        pause(max(0.5, float(poll_interval)))
+        polled = get_bisque_module_run(settings, mex_uri=mex_uri, context=context)
+        if polled.get("ok"):
+            run = polled
+            status = str(polled.get("status") or "").strip().upper() or status
+    finished = status in _BISQUE_MODULE_TERMINAL_STATUSES
+    return {
+        "ok": True,
+        "module_name": started.get("module_name") or cleaned_name,
+        "mex_uri": mex_uri,
+        "mex_uniq": started.get("mex_uniq"),
+        "status": status,
+        "finished": finished,
+        "client_view_url": started.get("client_view_url") or run.get("client_view_url"),
+        "run": run,
+        "next_step": (
+            "Report the outputs; resource outputs carry client_view_url."
+            if finished
+            else "The module is running on BisQue. Give the user client_view_url and check "
+            "progress later with bisque_module_runs(mex_uri=...)."
+        ),
+    }
+
+
 def build_bisque_tools(
     settings: RuntimeSettings,
     *,
@@ -885,6 +1047,70 @@ def build_bisque_tools(
             )
         )
 
+    @tool
+    def bisque_list_modules(
+        runtime: ToolRuntime[AgentRunContext],
+        task: str = "",
+        limit: int = 0,
+    ) -> str:
+        """List the analysis modules registered on the linked BisQue server.
+
+        Call this FIRST whenever the user asks which BisQue module, analysis, or tool
+        to use for a task, what BisQue can do, or before running any module. Pass
+        task= the user's goal in plain words (e.g. "detect prairie dogs in aerial
+        images") to rank modules by match_score. Each module carries its description
+        and typed inputs (and template.accepted_type, e.g. "image, dataset").
+        Recommend only modules returned here — never invent one — and say when the
+        one-line descriptions are too thin to be sure. Follow up with
+        bisque_describe_module on the best candidates.
+        """
+        return _json_text(
+            list_bisque_modules(settings, task=task, limit=limit, context=runtime.context)
+        )
+
+    @tool
+    def bisque_describe_module(
+        runtime: ToolRuntime[AgentRunContext],
+        name: str,
+    ) -> str:
+        """Describe one BisQue module before recommending or running it.
+
+        Returns its input definitions (name, type, default, accepted types), the help
+        page text, and example_run: the inputs of its most recent finished run. Use
+        example_run to find concrete values the module expects, such as a model
+        weights file already stored on BisQue, and tell the user which inputs a run
+        needs.
+        """
+        return _json_text(describe_bisque_module(settings, name=name, context=runtime.context))
+
+    @tool
+    def bisque_run_module(
+        runtime: ToolRuntime[AgentRunContext],
+        module_name: str,
+        inputs: dict[str, str] | str | None = None,
+        wait_seconds: int = 20,
+    ) -> str:
+        """Run a BisQue module ON BisQue: its engine computes and the data never leaves BisQue.
+
+        Prefer this over bisque_download_resource whenever a registered module covers
+        the task. inputs maps the module's input names (from bisque_describe_module)
+        to values: BisQue resource URIs or resource_uniq values for resource inputs
+        such as "Input Image" or "weights", plain strings for options such as
+        "Annotation Name". Returns immediately with the run's mex_uri, status, and
+        client_view_url — modules often take tens of minutes — so report the link and
+        check progress later with bisque_module_runs(mex_uri=...). Results are written
+        back to BisQue (e.g. annotations on the input image, output files).
+        """
+        return _json_text(
+            run_bisque_module(
+                settings,
+                module_name=module_name,
+                inputs=inputs,
+                wait_seconds=wait_seconds,
+                context=runtime.context,
+            )
+        )
+
     resolved = [
         bisque_search_resources,
         bisque_dataset_members,
@@ -892,11 +1118,15 @@ def build_bisque_tools(
         bisque_dataset_annotation_summary,
         bisque_download_resource,
         bisque_module_runs,
+        bisque_list_modules,
+        bisque_describe_module,
     ]
     if _bisque_mutation_authorized(context, "upload"):
         resolved.extend([bisque_upload_files, bisque_upload_workspace_files])
     if _bisque_mutation_authorized(context, "create_dataset"):
         resolved.append(bisque_create_dataset)
+    if _bisque_mutation_authorized(context, "run_module"):
+        resolved.append(bisque_run_module)
     return resolved
 
 

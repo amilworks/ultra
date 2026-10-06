@@ -21,7 +21,7 @@ func TestRunCreateRemoteMutationEnumsAreBounded(t *testing.T) {
 	}
 	for _, required := range []string{
 		"remote_mutation_intents:",
-		"enum: [bisque.upload, bisque.create_dataset]",
+		"enum: [bisque.upload, bisque.create_dataset, bisque.run_module]",
 		"Protected evaluation profiles forbid it",
 	} {
 		if !strings.Contains(string(document), required) {

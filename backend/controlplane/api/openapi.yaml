@@ -3289,6 +3289,99 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/modules:
+    post:
+      operationId: listBisqueModules
+      description: >-
+        List the analysis modules currently registered with BisQue's module_service,
+        each with its description and typed inputs/outputs. An optional query ranks
+        modules by keyword match against name, description, and input names.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query: { type: string }
+                limit: { type: integer }
+      responses:
+        "200":
+          description: Registered BisQue modules
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/module:
+    post:
+      operationId: describeBisqueModule
+      description: >-
+        Describe one registered BisQue module: definition, help text, and the
+        inputs of its most recent finished run as a concrete example.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                module_name: { type: string }
+      responses:
+        "200":
+          description: The module description
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
+  /v2/bisque/module-execute:
+    post:
+      operationId: executeBisqueModule
+      description: >-
+        Launch a BisQue module on BisQue's engine with BisQue resource URIs as
+        inputs, so data is analysed in place. Worker calls require the run-bound
+        bisque.run_module remote mutation intent. Returns the new module run
+        (mex) immediately; poll /v2/bisque/module-run for status and outputs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [module_name]
+              properties:
+                module_name: { type: string }
+                inputs:
+                  type: object
+                  additionalProperties: { type: string }
+      responses:
+        "200":
+          description: The launched module run
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "501":
+          description: BisQue integration is not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2NotConfiguredResponse"
   /v2/bisque/download:
     post:
       operationId: downloadBisqueResources
@@ -6543,7 +6636,7 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [bisque.upload, bisque.create_dataset]
+            enum: [bisque.upload, bisque.create_dataset, bisque.run_module]
           description: >-
             Explicit authenticated current-turn authorization for bounded
             worker-side external mutations. The control plane validates and

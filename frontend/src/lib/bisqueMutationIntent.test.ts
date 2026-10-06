@@ -14,6 +14,26 @@ describe("remoteMutationIntentsForUserText", () => {
     ).toEqual(["bisque.upload", "bisque.create_dataset"]);
   });
 
+  it("grants bisque.run_module only for an explicit request to run a module", () => {
+    for (const text of [
+      "Run the PrairieDogDetection module on my survey image.",
+      "Please run PrairieDogDetection on BisQue on image 00-rb2hvCcDh2B7CRXKkGF45H.",
+      "Find my prairie dog image, then launch the prairie dog module in my BisQue account.",
+    ]) {
+      expect(remoteMutationIntentsForUserText(text)).toEqual(["bisque.run_module"]);
+    }
+    for (const text of [
+      "Which BisQue module should I run for prairie dogs?",
+      "How do I run a module on BisQue?",
+      "Can you run a module on BisQue?",
+      "Do not run any module on BisQue.",
+      "Run the analysis locally.",
+      "The module ran yesterday.",
+    ]) {
+      expect(remoteMutationIntentsForUserText(text)).toEqual([]);
+    }
+  });
+
   it("rejects explanatory, hypothetical, and negated text", () => {
     for (const text of [
       "Explain how users upload files to BisQue.",

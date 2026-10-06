@@ -179,7 +179,7 @@ def _remote_mutation_intents(value: Any) -> tuple[str, ...]:
     if any(not isinstance(item, str) for item in value):
         return ()
     requested = {item.strip().lower() for item in value}
-    allowed_order = ("bisque.upload", "bisque.create_dataset")
+    allowed_order = ("bisque.upload", "bisque.create_dataset", "bisque.run_module")
     if any(item not in allowed_order for item in requested):
         return ()
     return tuple(item for item in allowed_order if item in requested)

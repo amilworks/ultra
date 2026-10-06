@@ -540,7 +540,7 @@ def _run_remote_mutation_intents(run: dict[str, Any]) -> tuple[list[str], bool]:
         return [], True
     if not isinstance(raw, list):
         return [], False
-    allowed_order = ("bisque.upload", "bisque.create_dataset")
+    allowed_order = ("bisque.upload", "bisque.create_dataset", "bisque.run_module")
     if any(not isinstance(item, str) or item not in allowed_order for item in raw):
         return [], False
     requested = set(raw)

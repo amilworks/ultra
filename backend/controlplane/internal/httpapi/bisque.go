@@ -1829,7 +1829,9 @@ func (service *BisqueService) GetModuleRun(ctx context.Context, mexRef string, c
 	if mex == nil {
 		return BisqueResource{}, bisqueClientError("the requested BisQue resource is not a module run (mex)")
 	}
-	return *mex, nil
+	run := *mex
+	run.Inputs = withoutSystemMexParams(run.Inputs)
+	return run, nil
 }
 
 func (service *BisqueService) deepViewURL(resourceURI string) (string, error) {

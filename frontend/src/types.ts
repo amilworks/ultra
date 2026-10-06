@@ -103,7 +103,7 @@ export type SelectionContext = {
   note_access?: NoteAccessContext;
 };
 
-export type RemoteMutationIntent = "bisque.upload" | "bisque.create_dataset";
+export type RemoteMutationIntent = "bisque.upload" | "bisque.create_dataset" | "bisque.run_module";
 
 export type ChatRequest = {
   messages: ChatMessage[];

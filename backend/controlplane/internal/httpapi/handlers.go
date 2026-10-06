@@ -231,7 +231,8 @@ func isWorkerBisqueEndpointPath(path string) bool {
 	switch path {
 	case "/v2/bisque/search", "/v2/bisque/dataset-members", "/v2/bisque/image-annotations",
 		"/v2/bisque/dataset-annotations", "/v2/bisque/module-run", "/v2/bisque/download",
-		"/v2/bisque/upload", "/v2/bisque/datasets", "/v2/uploads":
+		"/v2/bisque/upload", "/v2/bisque/datasets", "/v2/uploads",
+		"/v2/bisque/modules", "/v2/bisque/module", "/v2/bisque/module-execute":
 		return true
 	default:
 		return false
@@ -698,6 +699,9 @@ func NewRouter(deps ServerDeps) http.Handler {
 			r.Post("/bisque/image-annotations", deps.handleBisqueImageAnnotations)
 			r.Post("/bisque/dataset-annotations", deps.handleBisqueDatasetAnnotations)
 			r.Post("/bisque/module-run", deps.handleBisqueModuleRun)
+			r.Post("/bisque/modules", deps.handleBisqueModules)
+			r.Post("/bisque/module", deps.handleBisqueModuleDescribe)
+			r.Post("/bisque/module-execute", deps.handleBisqueModuleExecute)
 			r.Post("/bisque/download", deps.handleImportBisqueResources)
 			r.Post("/bisque/upload", deps.handleBisqueUpload)
 			r.Post("/bisque/datasets", deps.handleBisqueCreateDataset)

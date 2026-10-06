@@ -10,6 +10,7 @@ type RemoteMutationIntent string
 const (
 	RemoteMutationIntentBisqueUpload        RemoteMutationIntent = "bisque.upload"
 	RemoteMutationIntentBisqueCreateDataset RemoteMutationIntent = "bisque.create_dataset"
+	RemoteMutationIntentBisqueRunModule     RemoteMutationIntent = "bisque.run_module"
 
 	// RemoteMutationIntentsMetadataKey is reserved control-plane metadata. HTTP
 	// callers may request intents through the typed create-run field, never by
@@ -24,6 +25,7 @@ const (
 var remoteMutationIntentOrder = []RemoteMutationIntent{
 	RemoteMutationIntentBisqueUpload,
 	RemoteMutationIntentBisqueCreateDataset,
+	RemoteMutationIntentBisqueRunModule,
 }
 
 // ParseRemoteMutationIntents validates, de-duplicates, and canonicalizes a
@@ -33,7 +35,8 @@ func ParseRemoteMutationIntents(values []string) ([]RemoteMutationIntent, bool) 
 	for _, raw := range values {
 		intent := RemoteMutationIntent(strings.ToLower(strings.TrimSpace(raw)))
 		switch intent {
-		case RemoteMutationIntentBisqueUpload, RemoteMutationIntentBisqueCreateDataset:
+		case RemoteMutationIntentBisqueUpload, RemoteMutationIntentBisqueCreateDataset,
+			RemoteMutationIntentBisqueRunModule:
 			wanted[intent] = true
 		default:
 			return nil, false

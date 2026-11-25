@@ -26,6 +26,7 @@ import type { ApiClient } from "@/lib/api";
 import type { ResourceCsvRows, ResourceTextHead, UploadedFileRecord } from "@/types";
 
 import { highlightLine } from "./text-highlight";
+import { stringifyYamlPreview } from "./yaml-preview";
 
 const HEAD_BYTES_DESKTOP = 2_000_000;
 const HEAD_BYTES_PHONE = 1_000_000;
@@ -326,9 +327,8 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
-      setConvertError(false);
       setConverted(null);
-      if (!head || (kind !== "json" && kind !== "yaml") || view === kind) {
+      if (!head || head.truncated || (kind !== "json" && kind !== "yaml") || view === kind) {
         return;
       }
       try {
@@ -341,7 +341,7 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
           }
         } else if (kind === "yaml" && view === "json") {
           const parsed = yaml.load(head.text, { json: true });
-          const dumped = JSON.stringify(parsed, null, 2);
+          const dumped = stringifyYamlPreview(parsed, headBytes);
           if (!cancelled) {
             setConverted({ view, text: dumped });
           }
@@ -349,6 +349,7 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
       } catch {
         if (!cancelled) {
           setConvertError(true);
+          setView(kind);
         }
       }
     };
@@ -356,7 +357,7 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [head, kind, view]);
+  }, [head, headBytes, kind, view]);
 
   // The text + format the code surface should render for the current view.
   const display = useMemo<{ text: string; format: TextResourceKind }>(() => {
@@ -452,7 +453,7 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
             {options.map((option) => {
               const isConvertTarget =
                 (kind === "json" || kind === "yaml") && option.value !== kind;
-              const disabled = isConvertTarget && convertError;
+              const disabled = isConvertTarget && (!head || head.truncated || convertError);
               return (
                 <ToggleGroupItem
                   key={option.value}
@@ -497,6 +498,12 @@ export function TextResourceViewer({ file, kind, apiClient }: Props) {
           <Download aria-hidden="true" />
         </a>
       </div>
+
+      {convertError && (
+        <div className="text-viewer-banner" role="status">
+          Unable to convert this document for preview. Showing the original.
+        </div>
+      )}
 
       <TruncationBanner
         kind={kind}

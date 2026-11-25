@@ -23,6 +23,7 @@ import type { ApiClient } from "@/lib/api";
 import type { ResourceCsvRows, ResourceTextHead, UploadedFileRecord } from "@/types";
 
 import { TextResourceViewer } from "./TextResourceViewer";
+import { stringifyYamlPreview } from "./yaml-preview";
 
 function file(overrides: Partial<UploadedFileRecord>): UploadedFileRecord {
   return {
@@ -41,6 +42,36 @@ function fakeClient(overrides: Partial<ApiClient>): ApiClient {
     resourceDownloadUrl: (id: string) => `/v2/resources/${id}/download`,
     ...overrides,
   } as unknown as ApiClient;
+}
+
+async function renderYaml(source: string, truncated = false) {
+  const name = "calibration.yaml";
+  const contentType = "application/yaml";
+  const lineCount = source.split("\n").length;
+  const bytes = new TextEncoder().encode(source).length;
+  const head: ResourceTextHead = {
+    file_id: "f1",
+    original_name: name,
+    content_type: contentType,
+    format: "yaml",
+    total_size_bytes: bytes + (truncated ? 10 : 0),
+    returned_bytes: bytes,
+    offset: 0,
+    next_offset: bytes,
+    truncated,
+    encoding: "utf-8",
+    eol: "lf",
+    line_count: lineCount,
+    approx_total_lines: lineCount,
+    text: source,
+  };
+  const apiClient = fakeClient({ resourceTextHead: vi.fn().mockResolvedValue(head) });
+  const { container } = render(
+    <TextResourceViewer file={file({ original_name: name, content_type: contentType })} kind="yaml" apiClient={apiClient} />
+  );
+  const visibleLines = () => Array.from(container.querySelectorAll(".text-viewer-line"), line => line.textContent).join("\n");
+  await waitFor(() => expect(visibleLines()).toBe(source));
+  return { json: screen.getByRole("radio", { name: "JSON" }), visibleLines };
 }
 
 describe("TextResourceViewer", () => {
@@ -106,6 +137,33 @@ describe("TextResourceViewer", () => {
       const surface = document.querySelector(".text-viewer-surface");
       expect(surface?.textContent ?? "").toContain("model: deepseek_v4");
     });
+  });
+
+  it("converts a complete YAML resource with shared calibration values to JSON", async () => {
+    const { json, visibleLines } = await renderYaml("base: &spacing [2, 4]\npixels: *spacing");
+    fireEvent.click(json);
+    await waitFor(() => expect(JSON.parse(visibleLines())).toEqual({ base: [2, 4], pixels: [2, 4] }));
+  });
+
+  it("keeps a valid YAML prefix in its source format when the rest of the file is absent", async () => {
+    const { json } = await renderYaml("pixels: [2, 4]", true);
+    expect(json).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "YAML" })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("returns to the source view and explains an unsuccessful conversion", async () => {
+    const { json, visibleLines } = await renderYaml("pixels: [");
+    fireEvent.click(json);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Showing the original"));
+    expect(json).toBeDisabled();
+    expect(screen.getByRole("radio", { name: "YAML" })).toHaveAttribute("aria-checked", "true");
+    expect(visibleLines()).toBe("pixels: [");
+  });
+
+  it("accounts for repeated values when budgeting the YAML preview", () => {
+    const calibration = { name: "microscopy calibration", units: "micrometers" };
+    expect(JSON.parse(stringifyYamlPreview([calibration], 80))).toEqual([calibration]);
+    expect(() => stringifyYamlPreview([calibration, calibration], 80)).toThrow(RangeError);
   });
 
   it("caps the wrapped <pre> so enabling wrap on a large head cannot freeze the main thread", async () => {

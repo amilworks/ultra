@@ -40,7 +40,7 @@ export default defineConfig({
     },
     rolldownOptions: {
       output: {
-        // Chunking is expressed entirely as advancedChunks groups rather than
+        // Chunking is expressed entirely as codeSplitting groups rather than
         // manualChunks. The two are mutually exclusive — supplying groups disables
         // the manualChunks compat layer — and groups are what we actually need:
         //
@@ -48,10 +48,10 @@ export default defineConfig({
         // For such a shared module, a manualChunks name is only a hint. Rolldown
         // hoisted three's core into vendor-spark and left vendor-three a 32 KB addons
         // stub that imported it, so opening any NIfTI volume pulled the whole 5.5 MB
-        // splat runtime. An advancedChunks group is a hard split, and the higher
+        // splat runtime. A codeSplitting group is a hard split, and the higher
         // priority on vendor-three is what keeps three's core out of Spark's chunk.
         // check-bundle-budgets.mjs asserts the isolation so it cannot silently regress.
-        advancedChunks: {
+        codeSplitting: {
           groups: [
             {
               name: "vendor-three",
@@ -164,7 +164,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   server: {

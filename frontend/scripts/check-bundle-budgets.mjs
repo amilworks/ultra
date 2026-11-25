@@ -137,7 +137,7 @@ for (const rule of isolationRules) {
   if (staticImport.test(source)) {
     failures.push(
       `${match.file} must not import ${rule.mustNotImport}: ${rule.why}. ` +
-        `Check the advancedChunks group priorities in vite.config.ts.`
+        `Check the codeSplitting group priorities in vite.config.ts.`
     );
   }
 }

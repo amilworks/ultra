@@ -11,6 +11,8 @@ Type=simple
 User=ultra
 Group=ultra
 WorkingDirectory=/srv/ultra/current/backend/controlplane
+# Leave headroom in the shipped broker configuration (5 GiB file store).
+Environment=ULTRA_CONTROL_NATS_STREAM_MAX_BYTES=4294967296
 EnvironmentFile=/etc/ultra/ultra-backend.env
 Environment=ULTRA_CONTROL_HTTP_ADDR=127.0.0.1:8000
 ExecStart=/srv/ultra/current/bin/ultra-control serve

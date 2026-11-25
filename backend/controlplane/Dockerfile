@@ -6,7 +6,7 @@
 # go:embed), so the runtime image needs only the binary — no migrations dir.
 
 # ---------- build ----------
-FROM golang:1.25-bookworm AS build
+FROM golang:1.27.4-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

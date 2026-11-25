@@ -11,6 +11,8 @@ on:
       - "backend/deepagents_runtime/**"
       - "backend/deepagents_runtime/tests/test_live_trace.py"
       - "backend/deepagents_runtime/tests/test_runner_paper_preload.py"
+      - "docker-compose.yml"
+      - "deploy/systemd/ultra-nats.service"
       - "deploy/caddy/**"
       - "deploy/env/ultra-backend.env.example"
       - "deploy/nginx/**"
@@ -33,6 +35,8 @@ on:
       - "backend/deepagents_runtime/**"
       - "backend/deepagents_runtime/tests/test_live_trace.py"
       - "backend/deepagents_runtime/tests/test_runner_paper_preload.py"
+      - "docker-compose.yml"
+      - "deploy/systemd/ultra-nats.service"
       - "deploy/caddy/**"
       - "deploy/env/ultra-backend.env.example"
       - "deploy/nginx/**"
@@ -80,7 +84,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25.x"
+          go-version-file: backend/controlplane/go.mod
           cache-dependency-path: backend/controlplane/go.sum
 
       - uses: actions/setup-python@v5
@@ -104,9 +108,10 @@ jobs:
 
       - name: Start NATS JetStream
         run: |
-          docker run -d --name ultra-autonomy-nats -p 4222:4222 nats:2-alpine -js
+          nats_image=$(docker compose --env-file .env.docker.example config --images nats)
+          docker run -d --name ultra-autonomy-nats -p 127.0.0.1:4222:4222 "$nats_image" -js -m 8222
           for i in $(seq 1 30); do
-            if nc -z 127.0.0.1 4222; then
+            if docker exec ultra-autonomy-nats wget -q -O /dev/null "http://127.0.0.1:8222/healthz?js-enabled-only=true"; then
               exit 0
             fi
             sleep 1

@@ -18,7 +18,7 @@ ExecStart=/bin/sh -lc '/usr/bin/docker run --rm --name ultra-nats \
   -p 127.0.0.1:8222:8222 \
   -v ${ULTRA_NATS_DATA_DIR:-/srv/ultra-local/nats-control}:/data \
   -v /etc/ultra/nats-server.conf:/etc/nats/nats-server.conf:ro \
-  nats:2.10-alpine -c /etc/nats/nats-server.conf'
+  nats:2.15.3-alpine -c /etc/nats/nats-server.conf'
 ExecStop=/usr/bin/docker stop ultra-nats
 Restart=always
 RestartSec=5

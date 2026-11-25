@@ -45,12 +45,18 @@ Production startup verifies that the Postgres control-plane schema is present be
 ## NATS Integration
 
 ```bash
-docker run --rm -p 4223:4222 nats:2-alpine -js
+docker run --rm -p 4223:4222 nats:2.15.3-alpine -js
 cd backend/controlplane
 ULTRA_CONTROL_TEST_NATS_URL=nats://127.0.0.1:4223 go test ./internal/eventbus -run TestNATSBusPublishesJobAndRunEvent -count=1
 ```
 
 The NATS integration gate also verifies deterministic `Nats-Msg-Id` retry deduplication for jobs, worker events, and cancellation signals so uncertain publish retries do not enqueue duplicate autonomous work.
+
+### Existing JetStream stores
+
+The supplied systemd units allocate 4 GiB to the control stream inside a 5 GiB broker store. For a different storage budget, set `ULTRA_CONTROL_NATS_STREAM_MAX_BYTES` in `ultra-backend.env` and provision sufficient broker capacity. Lowering an existing stream limit can expire old messages.
+
+For a 2.10 store, back up the streams and consumer state before changing broker images. On a replicated deployment, roll one node at a time through 2.11, 2.12 and 2.14, waiting for the stream and durable consumer replicas to catch up at each step. Enter 2.15 from 2.14.7 or later. Verify the stored message count, durable ACK floor, pending work and retry deduplication after the roll. The native dev launcher reuses an existing named broker. Migrate its stored data before replacing that container. Keep the backup until those checks pass. [NATS upgrade guide](https://docs.nats.io/release-notes/upgrade-to-2.15)
 
 ## Contract
 

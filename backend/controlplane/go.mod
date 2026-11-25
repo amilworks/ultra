@@ -1,6 +1,6 @@
 module github.com/amilworks/bisque-ultra/backend/controlplane
 
-go 1.25.0
+go 1.27.4
 
 require (
 	github.com/getkin/kin-openapi v0.135.0

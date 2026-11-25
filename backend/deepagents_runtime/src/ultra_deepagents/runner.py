@@ -1913,6 +1913,10 @@ async def _stream_agent_attempt(
                 event,
                 dynamic_namespace_subagent_names,
             )
+            if tool_event.get("event_kind") == "tool_call.progress":
+                # A delayed output fragment is activity, not a new lifecycle boundary.
+                await publish_event(sequencer.stamp(tool_event))
+                continue
             tool_event = _annotate_task_delegation_failure(tool_event)
             _track_delegation_evidence(delegation_evidence, tool_event)
             _track_active_tool_call(active_tool_calls, tool_event)

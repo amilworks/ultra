@@ -856,6 +856,18 @@ def test_model_output_idle_watchdog_rearms_after_last_tool_completes():
                     "data": {"output": "42"},
                     "metadata": {},
                 }
+                yield {
+                    "method": "tools",
+                    "params": {
+                        "namespace": [],
+                        "data": {
+                            "event": "tool-output-delta",
+                            "name": "execute",
+                            "tool_call_id": "tool-call-then-dead-open",
+                            "delta": "delayed output",
+                        },
+                    },
+                }
                 # The provider never resumes after receiving the tool result.
                 await asyncio.Event().wait()
                 yield {}  # unreachable
@@ -882,7 +894,7 @@ def test_model_output_idle_watchdog_rearms_after_last_tool_completes():
         event["event_kind"]
         for event in published
         if str(event.get("event_kind") or "").startswith("tool_call.")
-    ] == ["tool_call.started", "tool_call.completed"]
+    ] == ["tool_call.started", "tool_call.completed", "tool_call.progress"]
 
 
 def test_model_output_idle_watchdog_tracks_continuing_raw_reasoning():

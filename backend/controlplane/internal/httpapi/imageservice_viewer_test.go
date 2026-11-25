@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3204,6 +3205,40 @@ func TestRenderNiftiThumbnailPreservesNegativeSlopeContrast(t *testing.T) {
 	second := color.GrayModel.Convert(decoded.At(1, 0)).(color.Gray).Y
 	if first != 255 || second != 0 {
 		t.Fatalf("negative-slope pixels = %d/%d, want physical high/low = 255/0", first, second)
+	}
+}
+
+func TestLosslessWebPThumbnailPreservesPixelValues(t *testing.T) {
+	t.Parallel()
+	// A 2×2 VP8L image independently encoded with Pillow/libwebp.
+	source, err := hex.DecodeString("524946462c000000574542505650384c1f0000002f014000001f201048de1f3a8df9171014fc1fddfc47640fe0060c11fd0f0100")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "colors.webp")
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := renderBoundedRasterThumbnailPNG(path, newByteAdmissionBudget(4*thumbnailDecodeBytesPerPixel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumb, err := png.Decode(bytes.NewReader(result))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if thumb.Bounds().Dx() != 2 || thumb.Bounds().Dy() != 2 {
+		t.Fatalf("unexpected thumbnail bounds %v", thumb.Bounds())
+	}
+	want := []color.RGBA{
+		{R: 255, A: 255}, {G: 255, A: 255},
+		{B: 255, A: 255}, {R: 255, G: 255, B: 255, A: 255},
+	}
+	for index, expected := range want {
+		x, y := index%2, index/2
+		if got := color.RGBAModel.Convert(thumb.At(x, y)); got != expected {
+			t.Errorf("pixel (%d, %d) = %v, want %v", x, y, got, expected)
+		}
 	}
 }
 

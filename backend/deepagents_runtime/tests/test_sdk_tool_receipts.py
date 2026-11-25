@@ -32,9 +32,7 @@ def test_child_tool_lifecycles_keep_names_failures_and_private_deltas_separate()
     assert event("child-a", "tool-started", name="execute")["event_kind"] == "tool_call.started"
     assert event("child-b", "tool-started", name="read_file")["event_kind"] == "tool_call.started"
     assert event("child-b", "unrecognized") is None
-    progress = event("child-a", "tool-output-delta", delta="private partial result")
-    assert progress["event_kind"] == "tool_call.progress"
-    assert "private partial result" not in str(progress)
+    assert event("child-a", "tool-output-delta", delta="private partial result") is None
     error = ToolMessage(content="read failed", status="error", tool_call_id="same")
     failed = event("child-b", "tool-finished", output=error)
     assert (failed["event_kind"], failed["payload"]["tool_name"]) == (

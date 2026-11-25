@@ -1913,10 +1913,6 @@ async def _stream_agent_attempt(
                 event,
                 dynamic_namespace_subagent_names,
             )
-            if tool_event.get("event_kind") == "tool_call.progress":
-                # A delayed output fragment is activity, not a new lifecycle boundary.
-                await publish_event(sequencer.stamp(tool_event))
-                continue
             tool_event = _annotate_task_delegation_failure(tool_event)
             _track_delegation_evidence(delegation_evidence, tool_event)
             _track_active_tool_call(active_tool_calls, tool_event)
@@ -3977,12 +3973,6 @@ def _tool_event_from_deepagents_tools_protocol(
         tool_names_by_call_id.pop(key, None)
     if not tool_name:
         return None
-    if status == "progress":
-        # SDK tool deltas can contain arbitrary file or command output. Preserve
-        # lifecycle activity without copying those chunks into durable events.
-        return _normalize_stream_tool_call(
-            context, tool_name=tool_name, status=status, payload={"tool_call_id": tool_call_id}
-        )
     if tool_name in NOTE_TOOL_NAMES:
         return _normalize_stream_tool_call(
             context,
@@ -4522,8 +4512,8 @@ def _normalize_tool_status(status: str) -> str:
         return "failed"
     if normalized in {"start", "started", "tool-started"}:
         return "started"
-    if normalized == "tool-output-delta":
-        return "progress"
+    # Raw SDK output deltas count as stream activity on receipt. Only the
+    # bounded, typed execute-progress sink publishes partial tool output.
     return ""
 
 

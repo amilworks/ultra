@@ -839,35 +839,28 @@ def test_model_output_idle_watchdog_rearms_after_last_tool_completes():
                             chunk=_reasoning_chunk("I should run the long calculation. " * 8),
                             run_id=run_id,
                         )
-                yield {
-                    "event": "on_tool_start",
-                    "name": "execute",
-                    "run_id": "tool-call-then-dead-open",
-                    "data": {"input": {"command": "python calculation.py"}},
-                    "metadata": {},
-                }
-                # This exceeds the short deadline but remains protected while
-                # the tool is active.
-                await asyncio.sleep(0.08)
-                yield {
-                    "event": "on_tool_end",
-                    "name": "execute",
-                    "run_id": "tool-call-then-dead-open",
-                    "data": {"output": "42"},
-                    "metadata": {},
-                }
-                yield {
-                    "method": "tools",
-                    "params": {
-                        "namespace": [],
-                        "data": {
-                            "event": "tool-output-delta",
-                            "name": "execute",
-                            "tool_call_id": "tool-call-then-dead-open",
-                            "delta": "delayed output",
+                def frame(kind: str, **fields: Any) -> dict[str, Any]:
+                    return {
+                        "method": "tools",
+                        "params": {
+                            "namespace": [],
+                            "data": {
+                                "event": kind,
+                                "name": "execute",
+                                "tool_call_id": "tool-call-then-dead-open",
+                                **fields,
+                            },
                         },
-                    },
-                }
+                    }
+
+                yield frame("tool-started", input={"command": "python calculation.py"})
+                # Streaming fragments keep the tool active without allocating
+                # a durable sequence number for every chunk.
+                for _ in range(128):
+                    yield frame("tool-output-delta", delta="private raw output")
+                await asyncio.sleep(0.08)
+                yield frame("tool-finished", output="42")
+                yield frame("tool-output-delta", delta="delayed output")
                 # The provider never resumes after receiving the tool result.
                 await asyncio.Event().wait()
                 yield {}  # unreachable
@@ -894,7 +887,9 @@ def test_model_output_idle_watchdog_rearms_after_last_tool_completes():
         event["event_kind"]
         for event in published
         if str(event.get("event_kind") or "").startswith("tool_call.")
-    ] == ["tool_call.started", "tool_call.completed", "tool_call.progress"]
+    ] == ["tool_call.started", "tool_call.completed"]
+    assert "private raw output" not in str(published)
+    assert "delayed output" not in str(published)
 
 
 def test_model_output_idle_watchdog_tracks_continuing_raw_reasoning():

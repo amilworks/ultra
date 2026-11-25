@@ -80,8 +80,7 @@ class RareSpotTrainExecutor:
                 "yolov5_path": str(YOLOV5_PATH),
                 "new_tile_count": int(spec.get("new_tile_count") or 0),
                 "batch_size": int(spec.get("batch_size") or 16),
-                # The image ships python3.10 (no bare `python`); run yolov5 with the
-                # interpreter that has torch installed.
+                # Run yolov5 with the interpreter that has torch installed.
                 "python": sys.executable,
             }
         )

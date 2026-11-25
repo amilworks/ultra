@@ -46,8 +46,8 @@ def build_deepagents_07_middleware(
         custom_tool_descriptions={
             "write_file": DEEPAGENTS_WRITE_FILE_DESCRIPTION,
         },
-        # Pinned 0.7 bridge: replacing the SDK's default FilesystemMiddleware
+        # Replacing the SDK's default FilesystemMiddleware
         # otherwise discards the top-level permission denies.
-        _permissions=list(permissions),
+        permissions=list(permissions),
     )
     return [TodoListMiddleware(), filesystem]

@@ -72,8 +72,11 @@ class ToolCallingFakeOpenAIModel(FakeMessagesListChatModel):
         return {"ls_provider": "openai", "ls_model_name": "fake-ultra-model"}
 
 
-def test_runtime_installs_exact_deepagents_075():
-    assert version("deepagents") == "0.7.5"
+def test_runtime_installs_pinned_deepagents():
+    from tomllib import loads
+
+    manifest = loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    assert f"deepagents=={version('deepagents')}" in manifest["project"]["dependencies"]
 
 
 def test_resolve_user_memory_root_is_scoped_and_path_safe(tmp_path):
@@ -427,6 +430,11 @@ def test_protected_profile_rejects_write_and_edit_without_changing_exact_bytes()
                         "id": "write-protected",
                         "type": "tool_call",
                     },
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
                     {
                         "name": "edit_file",
                         "args": {
@@ -951,7 +959,7 @@ def test_configured_async_subagent_tools_persist_task_state_across_followup(monk
 
         def get(self, **kwargs):
             self.checked.append(kwargs)
-            return {"status": "success"}
+            return {"status": "success", "run_id": kwargs["run_id"]}
 
     class FakeAgentProtocolClient:
         def __init__(self) -> None:

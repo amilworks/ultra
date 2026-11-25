@@ -45,7 +45,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PRAIRIE = REPO_ROOT / "test-prairie"
 FRAME = "EnrNE_Day2_Run1__0211"
 
-pytestmark = pytest.mark.skipif(
+requires_prairie = pytest.mark.skipif(
     not (TEST_PRAIRIE / f"{FRAME}.JPG").is_file(),
     reason="test-prairie fixtures not present",
 )
@@ -65,6 +65,8 @@ def _gt2_pdib_boxes() -> list[dict]:
 
 @pytest.fixture(scope="module")
 def materialized(tmp_path_factory) -> tuple[dict, Path]:
+    if not (TEST_PRAIRIE / f"{FRAME}.JPG").is_file():
+        pytest.skip("test-prairie fixtures not present")
     source_root = tmp_path_factory.mktemp("frames")
     for suffix in (".JPG", ".JPG.xml"):
         os.symlink(TEST_PRAIRIE / f"{FRAME}{suffix}", source_root / f"{FRAME}{suffix}")
@@ -81,6 +83,7 @@ def materialized(tmp_path_factory) -> tuple[dict, Path]:
 # -------------------------------------------------------------- frame source
 
 
+@requires_prairie
 def test_local_directory_frame_source_lists_gt_frames() -> None:
     source = LocalDirectoryFrameSource(TEST_PRAIRIE)
     frames = source.list_frames()
@@ -1014,10 +1017,13 @@ def _train_workdir(tmp_path: Path) -> Path:
     return workdir
 
 
-def test_train_assembles_and_runs_the_gpu_recipe(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("gpu_image", ["", "custom-cuda:py311"])
+def test_train_assembles_and_runs_the_gpu_recipe(tmp_path, monkeypatch, gpu_image) -> None:
     workdir = _train_workdir(tmp_path)
     monkeypatch.setenv("ULTRA_TRAINING_GPU_SSH_HOST", "user@gpu.example.edu")
     monkeypatch.setenv("ULTRA_TRAINING_GPU_DEVICE", "4")
+
+    monkeypatch.setenv("ULTRA_TRAINING_GPU_IMAGE", gpu_image)
 
     recorded: list[list[str]] = []
 
@@ -1061,9 +1067,11 @@ def test_train_assembles_and_runs_the_gpu_recipe(tmp_path, monkeypatch) -> None:
     assert "--gpus device=4" in docker
     assert "--shm-size 8g" in docker
     assert "GIT_PYTHON_REFRESH=quiet" in docker
-    assert "pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime" in docker
-    assert "pillow<10" in docker and "tensorboard" in docker
-    assert "DejaVuSans.ttf" in docker  # font pre-seed; check_font's download 404s
+    if gpu_image:
+        assert gpu_image in docker and "pillow>=13,<14" in docker and "pip install" in docker
+        assert "Python 3.11+" in docker and "Arial.ttf" in docker
+    else:
+        assert "ultra-compute:current" in docker and "pip install" not in docker
     # The exact plan-6.2 command against container paths.
     assert "/workspace/yolov5/train.py" in docker
     assert "/workspace/warmstart.pt" in docker
@@ -1108,6 +1116,7 @@ def test_train_translates_store_weights_to_the_models_mount(tmp_path, monkeypatc
     assert not (workdir / "warmstart.pt").exists()
 
 
+@requires_prairie
 def test_assemble_finetune_dataset_layout_exclusion_and_identity(tmp_path) -> None:
     source_root = tmp_path / "frames"
     source_root.mkdir()

@@ -56,13 +56,9 @@ def _chunky_output(command: str, nth: int) -> ExecuteResponse:
 
 
 def test_permanent_compaction_regime_retains_constraints(tmp_path) -> None:
-    """Hardest compaction case: a window BELOW the fixed per-call overhead
-    (system prompt + tool schemas, which the deepagents trigger counts), so the
-    middleware summarizes on essentially every turn. Even in this regime the
-    canary must survive and events must stay gapless — this is the maximum-churn
-    stress on the summarize -> keep -> next-prompt transport."""
+    """Exercise frequent compaction with enough room for the fixed tool schema."""
     world = LongHorizonWorld(tmp=tmp_path, behavior=_chunky_output)
-    config = CompressedConfig(context_window_tokens=3000)
+    config = CompressedConfig(context_window_tokens=14_000)
     canary = "ULTRA_CONSTRAINT_ALPHA7"
     policy = staged_pipeline_policy(
         world,
@@ -81,7 +77,6 @@ def test_permanent_compaction_regime_retains_constraints(tmp_path) -> None:
     assert "40 stages nominal" in response
     assert_terminal_success(world.log)
     assert_event_stream_integrity(world.log)
-    # Window < fixed overhead => near-every-turn summarization by design.
     assert_compaction_cycled(world, minimum_cycles=20)
     assert_conversation_bounded(world, window_tokens=config.context_window_tokens)
     assert_canary_retained_after_compaction(world, canary)
@@ -91,6 +86,18 @@ def test_permanent_compaction_regime_retains_constraints(tmp_path) -> None:
         f"final durable checkpoint is {encoded} bytes — compaction should keep the "
         f"thread slice small at any turn count"
     )
+
+
+def test_compaction_refuses_impossible_budget_before_running_tools(tmp_path) -> None:
+    from langchain_core.exceptions import ContextOverflowError
+
+    world = LongHorizonWorld(tmp=tmp_path, behavior=_chunky_output)
+    policy = staged_pipeline_policy(world, rounds=1, final_answer="Completed")
+    with pytest.raises(ContextOverflowError):
+        world.run_sync(
+            policy, goal="Run the diagnostic", config=CompressedConfig(context_window_tokens=3000)
+        )
+    assert world.sandbox.calls == []
 
 
 def test_worker_crash_and_redelivery_resume_without_duplicate_work(tmp_path) -> None:

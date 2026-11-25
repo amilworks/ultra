@@ -266,3 +266,16 @@ def test_map_task_offloads_bulk_results_to_workspace_jsonl(tmp_path) -> None:
         f"map_task returned {len(seen_result['payload'])} chars into context — "
         f"bulk results must live in the JSONL, not the transcript"
     )
+
+
+def test_batched_child_reports_only_the_final_assistant_text():
+    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+    from ultra_deepagents.map_task import _result_text
+
+    transcript = [
+        HumanMessage(content="private request"),
+        ToolMessage(content="raw bytes", tool_call_id="probe"),
+    ]
+    blocks = [{"type": "reasoning", "reasoning": "internal"}, {"type": "text", "text": "14 nuclei"}]
+    assert _result_text({"messages": [*transcript, AIMessage(content=blocks)]}) == "14 nuclei"
+    assert _result_text({"messages": transcript}) == "Subagent returned no assistant response."

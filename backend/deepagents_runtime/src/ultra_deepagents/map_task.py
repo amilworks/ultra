@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from deepagents.middleware import subagents as deepagents_subagents
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from pydantic import BaseModel, Field
 
@@ -112,11 +112,11 @@ def _result_text(result: Any) -> str:
                 return json.dumps(structured, ensure_ascii=False, default=str)
             except (TypeError, ValueError):
                 return str(structured)
-        messages = result.get("messages") or []
-        for message in reversed(messages):
-            content = getattr(message, "content", None)
-            if isinstance(content, str) and content.strip():
-                return content
+        if "messages" in result:
+            for message in reversed(result["messages"] or []):
+                if isinstance(message, AIMessage):
+                    return message.text.strip() or "Subagent returned no text response."
+            return "Subagent returned no assistant response."
     return str(result)
 
 

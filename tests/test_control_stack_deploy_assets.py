@@ -136,14 +136,17 @@ def test_worker_lock_is_hashed_and_carries_qualified_runtime_versions() -> None:
 
     assert "numpy==1.26.4" in constraints
     assert "#    make deepagents-worker-lock" in lock
-    for requirement in (
-        "deepagents==0.7.5",
-        "hatchling==1.28.0",
-        "langchain-core==1.5.2",
-        "numpy==1.26.4",
-    ):
-        start = lock.index(requirement)
-        assert "--hash=sha256:" in lock[start : start + 1000]
+    worker = parse_worker_lock_versions()
+    project = tomllib.loads(read_repo_file("backend/deepagents_runtime/pyproject.toml"))
+    assert f"deepagents=={worker['deepagents']}" in project["project"]["dependencies"]
+    assert worker["numpy"] == "1.26.4"
+    assert {"deepagents", "langchain-core", "hatchling", "pillow", "numpy"} <= worker.keys()
+    # The hash must belong to the pinned distribution, including for short records.
+    records = lock.replace("\\\n", " ").splitlines()
+    hashed = {
+        record.split()[0] for record in records if "--hash=sha256:" in record
+    }
+    assert hashed == {f"{name}=={version}" for name, version in worker.items()}
 
 
 def test_worker_lock_matches_canonical_runtime_except_qualified_numpy() -> None:
@@ -324,7 +327,9 @@ def test_only_pr_and_release_ci_check_the_pinned_worker_lock() -> None:
     assert "deepagents-worker-lock-check:" in makefile
     assert "deepagents-worker-env-check:" in makefile
     assert "--python-platform x86_64-manylinux_2_28" in makefile
-    assert makefile.count("uv run --frozen --python 3.11 --extra dev pytest") == 3
+    for target in ("deepagents-test", "deepagents-worker-test", "deepagents-autonomy-test"):
+        recipe = makefile.split(f"\n{target}:", 1)[1].split("\n\n", 1)[0]
+        assert "uv run --frozen --python 3.11 --extra dev pytest" in recipe
     lock_recipe = makefile.split("deepagents-worker-lock:", 1)[1].split(
         "\ndeepagents-worker-lock-check:", 1
     )[0]

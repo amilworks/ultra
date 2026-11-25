@@ -1,27 +1,38 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import math
 import os
+import posixpath
 import queue
 import re
 import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
-from deepagents.backends.protocol import ExecuteResponse, FileDownloadResponse, FileUploadResponse
-from deepagents.backends.sandbox import BaseSandbox
+from deepagents.backends.protocol import (
+    EditResult,
+    ExecuteResponse,
+    FileDownloadResponse,
+    FileUploadResponse,
+    GlobResult,
+)
+from deepagents.backends.sandbox import BaseSandbox, _build_edit_tmpfile_cmd, _parse_edit_output
 
 from ultra_deepagents.code_execution.paths import resolve_workspace_file
 from ultra_deepagents.code_execution.progress import (
     ExecuteProgressEvent,
     current_execute_progress_sink,
 )
+from ultra_deepagents.safe_storage import open_directory_chain_no_follow
 
 MATPLOTLIBRC = """\
 backend: Agg
@@ -172,6 +183,23 @@ class DockerSandboxConfig:
     # ultra.sandbox=1 label plus the per-container ultra.sandbox.cap (= timeout_seconds).
     worker_id: str = ""
     run_id: str = ""
+
+
+@contextmanager
+def _edit_operand(directory_fd: int, content: str) -> Iterator[str]:
+    """Keep SDK edit operands on the run mount across short-lived containers."""
+    name = f".sdk-edit-{uuid.uuid4().hex}"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
+    fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content.encode("utf-8"))
+            # Docker runs as a separate unprivileged user.
+            os.fchmod(stream.fileno(), 0o644)
+        yield f".tmp/{name}"
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(name, dir_fd=directory_fd)
 
 
 class DockerSandboxBackend(BaseSandbox):
@@ -370,6 +398,47 @@ class DockerSandboxBackend(BaseSandbox):
             docker_command.extend(["--label", f"ultra.sandbox.run={self.config.run_id.strip()}"])
         docker_command.extend([self.config.image, "bash", "-lc", command])
         return docker_command
+
+    def glob(self, pattern: str, path: str | None = None) -> GlobResult:
+        root = posixpath.normpath("/" + (path or "").lstrip("/"))
+        if not _path_is_within_allowed_roots(root):
+            return GlobResult(error=_root_search_message())
+        return super().glob(pattern, root)
+
+    async def aglob(self, pattern: str, path: str | None = None) -> GlobResult:
+        root = posixpath.normpath("/" + (path or "").lstrip("/"))
+        if not _path_is_within_allowed_roots(root):
+            return GlobResult(error=_root_search_message())
+        return await super().aglob(pattern, root)
+
+    def _edit_via_upload(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool
+    ) -> EditResult:
+        # The SDK normally transfers large operands into a persistent sandbox /tmp.
+        # Each Ultra invocation gets its own /tmp and shares only the run mounts.
+        workspace = self.workspace_dir.absolute()
+        try:
+            with (
+                open_directory_chain_no_follow(
+                    workspace.parent, (workspace.name, ".tmp")
+                ) as directory,
+                _edit_operand(directory, old_string) as old,
+                _edit_operand(directory, new_string) as new,
+            ):
+                command = _build_edit_tmpfile_cmd(file_path, old, new, replace_all=replace_all)
+                result = self.execute(command)
+        except OSError as exc:
+            return EditResult(error=f"Could not stage edit operands: {exc.strerror}")
+        if result.exit_code != 0:
+            return EditResult(error=f"Sandbox edit failed: {result.output[:200]}")
+        return _parse_edit_output(result.output, file_path, old_string)
+
+    async def _aedit_via_upload(
+        self, file_path: str, old_string: str, new_string: str, replace_all: bool
+    ) -> EditResult:
+        return await asyncio.to_thread(
+            self._edit_via_upload, file_path, old_string, new_string, replace_all
+        )
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         # A simple leading `timeout N cmd` is TRANSLATED into the tool's own
@@ -831,7 +900,7 @@ def _decode_base64_string_literals(command: str) -> list[str]:
 
 
 def _path_is_within_allowed_roots(path: str) -> bool:
-    normalized = "/" + path.strip().strip("/")
+    normalized = posixpath.normpath("/" + path.strip().lstrip("/"))
     if normalized == "/":
         return False
     return any(

@@ -217,7 +217,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			t.Fatalf("AppendRunEventIfRunActive: %v", err)
 		}
 		if outcome != RunEventAppendOutcomeAppended {
-			t.Fatalf("outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+			t.Fatalf("outcome = %d, want %d", outcome, RunEventAppendOutcomeAppended)
 		}
 		mutatePayload(t, event.Payload)
 		assertStoredPayload(t, store, event.EventID, "active")
@@ -237,7 +237,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			t.Fatalf("AppendRunEventIfRunActive: %v", err)
 		}
 		if outcome != RunEventAppendOutcomeAppended {
-			t.Fatalf("outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+			t.Fatalf("outcome = %d, want %d", outcome, RunEventAppendOutcomeAppended)
 		}
 		mutatePayload(t, payload)
 		assertStoredPayload(t, store, event.EventID, "active input")
@@ -256,7 +256,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			t.Fatalf("AppendRunEventIfRunActive append: %v", err)
 		}
 		if outcome != RunEventAppendOutcomeAppended {
-			t.Fatalf("append outcome = %q, want %q", outcome, RunEventAppendOutcomeAppended)
+			t.Fatalf("append outcome = %d, want %d", outcome, RunEventAppendOutcomeAppended)
 		}
 		duplicate, outcome, err := store.AppendRunEventIfRunActive(ctx, domain.AppendRunEventInput{
 			EventID:   original.EventID,
@@ -269,7 +269,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			t.Fatalf("AppendRunEventIfRunActive duplicate: %v", err)
 		}
 		if outcome != RunEventAppendOutcomeDuplicate {
-			t.Fatalf("duplicate outcome = %q, want %q", outcome, RunEventAppendOutcomeDuplicate)
+			t.Fatalf("duplicate outcome = %d, want %d", outcome, RunEventAppendOutcomeDuplicate)
 		}
 		mutatePayload(t, duplicate.Payload)
 		assertStoredPayload(t, store, original.EventID, "duplicate")
@@ -622,7 +622,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			Payload:   payloadFor("duplicate cycle"),
 		})
 		if err != nil || outcome != RunEventAppendOutcomeAppended {
-			t.Fatalf("initial append = (_, %q, %v), want appended", outcome, err)
+			t.Fatalf("initial append = (_, %d, %v), want appended", outcome, err)
 		}
 		if _, err := store.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID}); err != nil {
 			t.Fatalf("CompleteRun: %v", err)
@@ -637,7 +637,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			Payload:   domain.JSONMap{"cycle": cycle},
 		})
 		if err != nil || outcome != RunEventAppendOutcomeDuplicate {
-			t.Fatalf("duplicate replay = (_, %q, %v), want duplicate", outcome, err)
+			t.Fatalf("duplicate replay = (_, %d, %v), want duplicate", outcome, err)
 		}
 		if !reflect.DeepEqual(duplicate.Payload, original.Payload) {
 			t.Fatalf("duplicate payload = %#v, want %#v", duplicate.Payload, original.Payload)
@@ -657,7 +657,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			EventKind: "payload.test",
 			Payload:   cyclePayload(),
 		}); err != nil || outcome != RunEventAppendOutcomeDropped {
-			t.Fatalf("missing run append = (_, %q, %v), want dropped", outcome, err)
+			t.Fatalf("missing run append = (_, %d, %v), want dropped", outcome, err)
 		}
 		if _, err := store.CompleteRun(ctx, domain.CompleteRunInput{RunID: run.RunID}); err != nil {
 			t.Fatalf("CompleteRun: %v", err)
@@ -669,7 +669,7 @@ func TestMemoryStoreRunEventPayloadIsImmutableAcrossBoundaries(t *testing.T) {
 			EventKind: "payload.test",
 			Payload:   cyclePayload(),
 		}); err != nil || outcome != RunEventAppendOutcomeDropped {
-			t.Fatalf("terminal run append = (_, %q, %v), want dropped", outcome, err)
+			t.Fatalf("terminal run append = (_, %d, %v), want dropped", outcome, err)
 		}
 	})
 }

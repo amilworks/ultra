@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from openai import APIConnectionError
 from PIL import Image, UnidentifiedImageError
 
@@ -1702,7 +1702,7 @@ async def _stream_agent_attempt(
     response_parts: list[str] = []
     post_tool_response_parts: list[str] = []
     final_state: dict[str, Any] | None = None
-    tool_names_by_call_id: dict[str, str] = {}
+    tool_names_by_call_id: dict[tuple[tuple[str, ...], str], str] = {}
     config = run_config or {"recursion_limit": max(1, int(langgraph_recursion_limit))}
     notes_content_boundary = note_access_from_selection_context(context.selection_context).enabled
     # Thinking deltas never reach the graph event stream (the content-block
@@ -3885,7 +3885,7 @@ def _tool_event_name(tool_event: dict[str, Any]) -> str:
 def _tool_event_from_stream_event(
     context: AgentRunContext,
     event: dict[str, Any],
-    tool_names_by_call_id: dict[str, str] | None = None,
+    tool_names_by_call_id: dict[tuple[tuple[str, ...], str], str] | None = None,
 ) -> dict[str, Any] | None:
     raw_event = str(event.get("event") or event.get("method") or "").strip()
     if event.get("method") == "tools":
@@ -3908,11 +3908,14 @@ def _tool_event_from_stream_event(
         tool_name = _tool_name_from_event(event)
         if not tool_name:
             return None
+        data = event.get("data")
+        failed = isinstance(data, dict) and _failed_tool_receipt(data.get("output"))
+        status = "failed" if failed else "completed"
         return _normalize_stream_tool_call(
             context,
             tool_name=tool_name,
-            status="completed",
-            payload=_tool_end_payload(event),
+            status=status,
+            payload=_tool_end_payload(event, status),
         )
     if raw_event == "on_tool_error":
         tool_name = _tool_name_from_event(event)
@@ -3927,10 +3930,21 @@ def _tool_event_from_stream_event(
     return None
 
 
+def _failed_tool_receipt(output: Any) -> bool:
+    if isinstance(output, ToolMessage):
+        return output.status == "error"
+    return (
+        isinstance(output, dict)
+        and output.get("type") == "tool"
+        and isinstance(output.get("tool_call_id"), str)
+        and output.get("status") == "error"
+    )
+
+
 def _tool_event_from_deepagents_tools_protocol(
     context: AgentRunContext,
     event: dict[str, Any],
-    tool_names_by_call_id: dict[str, str],
+    tool_names_by_call_id: dict[tuple[tuple[str, ...], str], str],
 ) -> dict[str, Any] | None:
     params = event.get("params")
     if not isinstance(params, dict):
@@ -3940,16 +3954,23 @@ def _tool_event_from_deepagents_tools_protocol(
         return None
     raw_status = _first_nonempty_string(data.get("event"), data.get("status"))
     status = _normalize_tool_status(raw_status)
+    if not status:
+        return None
+    if status == "completed" and _failed_tool_receipt(data.get("output")):
+        status = "failed"
     tool_call_id = _first_nonempty_string(
         data.get("tool_call_id"), data.get("id"), data.get("run_id")
     )
+    key = (tuple(str(part) for part in _event_namespace_list(event)), tool_call_id)
     tool_name = _first_nonempty_string(
         data.get("tool_name"),
         data.get("name"),
-        tool_names_by_call_id.get(tool_call_id),
+        tool_names_by_call_id.get(key),
     )
-    if tool_call_id and tool_name:
-        tool_names_by_call_id[tool_call_id] = tool_name
+    if tool_call_id and tool_name and status == "started":
+        tool_names_by_call_id[key] = tool_name
+    elif status in {"failed", "completed"}:
+        tool_names_by_call_id.pop(key, None)
     if not tool_name:
         return None
     if tool_name in NOTE_TOOL_NAMES:
@@ -4027,7 +4048,7 @@ def _tool_start_payload(event: dict[str, Any]) -> dict[str, Any]:
     return _drop_empty_payload_values(payload)
 
 
-def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
+def _tool_end_payload(event: dict[str, Any], status: str) -> dict[str, Any]:
     raw_data = event.get("data")
     data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     output = data.get("output")
@@ -4040,7 +4061,7 @@ def _tool_end_payload(event: dict[str, Any]) -> dict[str, Any]:
     if tool_name in NOTE_TOOL_NAMES:
         return _notes_tool_event_payload(
             tool_name,
-            "completed",
+            status,
             tool_call_id=str(payload.get("tool_call_id") or ""),
             tool_output=output,
         )
@@ -4489,7 +4510,11 @@ def _normalize_tool_status(status: str) -> str:
         return "completed"
     if normalized in {"error", "errored", "failed", "failure", "tool-error", "tool-failed"}:
         return "failed"
-    return "started"
+    if normalized in {"start", "started", "tool-started"}:
+        return "started"
+    # Raw SDK output deltas count as stream activity on receipt. Only the
+    # bounded, typed execute-progress sink publishes partial tool output.
+    return ""
 
 
 def _subagent_message_event_from_stream_event(

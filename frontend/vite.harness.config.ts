@@ -8,19 +8,19 @@ import { defineConfig } from "vite";
  * fixture over an ephemeral port and drives it with Playwright.
  */
 export default defineConfig({
-  root: __dirname,
+  root: import.meta.dirname,
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(import.meta.dirname, "./src"),
     },
   },
   build: {
-    outDir: process.env.HARNESS_OUT_DIR ?? path.resolve(__dirname, "../.tmp/scene3d-harness"),
+    outDir: process.env.HARNESS_OUT_DIR ?? path.resolve(import.meta.dirname, "../.tmp/scene3d-harness"),
     emptyOutDir: true,
     // The harness is a debugging tool; readable output beats small output.
     minify: false,
     rollupOptions: {
-      input: path.resolve(__dirname, "scene3d-harness.html"),
+      input: path.resolve(import.meta.dirname, "scene3d-harness.html"),
     },
   },
 });

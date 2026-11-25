@@ -16,7 +16,8 @@ permissions:
 jobs:
   build-release-artifact:
     name: Build Immutable Release
-    runs-on: ubuntu-latest
+    # Playwright 1.60 provides Chromium system dependencies for Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4

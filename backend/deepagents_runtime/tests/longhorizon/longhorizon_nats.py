@@ -34,9 +34,10 @@ import socket
 import subprocess
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import nats
 from longhorizon_harness import (
@@ -56,7 +57,8 @@ from ultra_deepagents.nats_worker import (
 from ultra_deepagents.runner import run_job
 from ultra_deepagents.schemas import RunJobEnvelope
 
-NATS_IMAGE = "nats:2.10-alpine"
+DEPLOY_DIR = Path(__file__).resolve().parents[4] / "deploy"
+NATS_IMAGE = "nats:2.15.3-alpine"
 _namespace_counter = itertools.count(1)
 
 
@@ -88,7 +90,8 @@ class NatsServerContainer:
     def __init__(self) -> None:
         self.port = _free_port()
         self.name = f"ultra-chaos-nats-{self.port}"
-        self.url = f"nats://127.0.0.1:{self.port}"
+        self.token = uuid.uuid4().hex
+        self.url = f"nats://{self.token}@127.0.0.1:{self.port}"
 
     def start(self) -> None:
         subprocess.run(
@@ -100,9 +103,14 @@ class NatsServerContainer:
                 "--name",
                 self.name,
                 "-p",
-                f"{self.port}:4222",
+                f"127.0.0.1:{self.port}:4222",
+                "-e",
+                f"ULTRA_NATS_TOKEN={self.token}",
+                "-v",
+                f"{DEPLOY_DIR / 'nats/nats-server.conf'}:/broker.conf:ro",
                 NATS_IMAGE,
-                "-js",
+                "-c",
+                "/broker.conf",
             ],
             check=True,
             capture_output=True,

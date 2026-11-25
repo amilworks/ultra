@@ -851,3 +851,43 @@ def test_translate_shell_timeout_prefix_forms():
     assert translate_shell_timeout_prefix("cd /w && timeout 5 x") is None
     assert translate_shell_timeout_prefix("timeout 60 timeout 5 x") is None
     assert translate_shell_timeout_prefix("python v.py") is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_large_sdk_edits_round_trip_and_clean_the_run_mount(tmp_path, monkeypatch, asynchronous):
+    import asyncio
+
+    from deepagents.backends.protocol import ExecuteResponse
+
+    backend = DockerSandboxBackend(workspace_dir=tmp_path, config=DockerSandboxConfig(image="test"))
+    old = "µ-run\r\n" * 7000
+    new = "δ-result\r\n" * 6000
+    dest = tmp_path / "large.txt"
+    dest.write_bytes(("start\r\n" + old + "end\r\n").encode())
+
+    def run_sdk_helper(command, **kwargs):
+        proc = subprocess.run(
+            ["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, check=False
+        )
+        return ExecuteResponse(exit_code=proc.returncode, output=proc.stdout + proc.stderr)
+
+    monkeypatch.setattr(backend, "execute", run_sdk_helper)
+    if asynchronous:
+        result = asyncio.run(backend.aedit("large.txt", old, new))
+    else:
+        result = backend.edit("large.txt", old, new)
+    assert result.error is None and result.occurrences == 1
+    assert dest.read_bytes() == ("start\r\n" + new + "end\r\n").encode()
+    assert not list((tmp_path / ".tmp").glob(".sdk-edit-*"))
+
+
+def test_recursive_sdk_glob_stays_on_run_mounts(tmp_path, monkeypatch):
+    import asyncio
+
+    backend = DockerSandboxBackend(workspace_dir=tmp_path, config=DockerSandboxConfig(image="test"))
+    monkeypatch.setattr(
+        backend, "execute", lambda *_a, **_k: pytest.fail("unexpected sandbox scan")
+    )
+    for path in [None, "/", "/workspace/../opt"]:
+        assert backend.glob("*.tif", path).error
+        assert asyncio.run(backend.aglob("*.tif", path)).error

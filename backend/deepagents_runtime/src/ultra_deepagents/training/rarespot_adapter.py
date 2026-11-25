@@ -1316,17 +1316,16 @@ class RareSpotAdapter(ModelAdapter):
         gpu_host: str,
         hyp_path: Path,
     ) -> Path:
-        """The validated GPU-node recipe (proven on a V100): a CUDA-12.1 torch
-        runtime image (a driver older than the image's CUDA refuses it —
-        match the image to the node), GIT_PYTHON_REFRESH=quiet (no git binary),
-        tensorboard + Pillow<10 pips (vendored loggers import tensorboard
-        unguarded; Pillow>=10 removed getsize and kills the plot thread), and
-        matplotlib's DejaVuSans as Arial.ttf (check_font's download 404s
-        inside the container). All host-specific values are env-configured."""
+        """Train with the compute-service image on the GPU host.
+
+        The default image includes CUDA, the patched plotting stack and the offline
+        font. Operator image overrides keep the dependency bootstrap and must
+        provide Python 3.11+ and CUDA PyTorch.
+        """
         device = _config_value(params.get("gpu_device"), "ULTRA_TRAINING_GPU_DEVICE") or "0"
         image = (
             _config_value(params.get("gpu_image"), "ULTRA_TRAINING_GPU_IMAGE")
-            or "pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime"
+            or "ultra-compute:current"
         )
         remote_root = (
             _config_value(params.get("gpu_remote_root"), "ULTRA_TRAINING_GPU_REMOTE_ROOT")
@@ -1389,20 +1388,26 @@ class RareSpotAdapter(ModelAdapter):
             encoding="utf-8",
         )
 
-        pip_deps = (
-            "tensorboard opencv-python-headless pandas matplotlib seaborn scipy tqdm "
-            "pyyaml requests psutil gitpython thop 'pillow<10'"
-        )
-        font_setup = (
-            "mkdir -p /root/.config/Ultralytics && python -c \""
-            "import matplotlib, pathlib, shutil; "
-            "shutil.copy(pathlib.Path(matplotlib.__file__).parent/'mpl-data'/'fonts'/'ttf'/'DejaVuSans.ttf', "
-            "'/root/.config/Ultralytics/Arial.ttf')\""
-        )
-        container_script = (
-            f"pip install --no-cache-dir -q {pip_deps} && {font_setup} && "
-            + " ".join(shlex.quote(part) for part in container_command)
-        )
+        container_script = " ".join(shlex.quote(part) for part in container_command)
+        if image != "ultra-compute:current":
+            # External CUDA images previously received the training dependencies
+            # at launch. Preserve that contract while requiring the patched decoder.
+            check_python = (
+                "import sys; sys.exit(0 if sys.version_info >= (3, 11) else "
+                "'Custom training images require Python 3.11+ for Pillow 13')"
+            )
+            seed_font = (
+                "from pathlib import Path; import matplotlib, shutil; "
+                "target = Path('/root/.config/Ultralytics/Arial.ttf'); "
+                "target.parent.mkdir(parents=True, exist_ok=True); "
+                "shutil.copy(Path(matplotlib.get_data_path()) / 'fonts/ttf/DejaVuSans.ttf', target)"
+            )
+            container_script = (
+                f"python -c {shlex.quote(check_python)} && "
+                "python -m pip install --no-cache-dir -q tensorboard opencv-python-headless "
+                "pandas matplotlib seaborn scipy tqdm pyyaml requests psutil gitpython thop "
+                f"'pillow>=13,<14' && python -c {shlex.quote(seed_font)} && {container_script}"
+            )
         models_mount_arg = (
             f"-v {shlex.quote(models_mount.rstrip('/'))}:/models:ro " if models_mount else ""
         )

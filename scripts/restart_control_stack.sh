@@ -295,7 +295,7 @@ ensure_nats() {
     fi
   else
     log "Creating NATS JetStream container ultra-nats-dev"
-    docker run -d --name ultra-nats-dev -p "$nats_port:4222" nats:2-alpine -js >/dev/null
+    docker run -d --name ultra-nats-dev -p "$nats_port:4222" nats:2.15.3-alpine -js >/dev/null
   fi
   wait_for_tcp 127.0.0.1 "$nats_port" "NATS"
 }

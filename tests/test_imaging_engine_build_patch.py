@@ -102,6 +102,6 @@ def test_dev_image_service_launcher_can_use_local_libbioimage_source_tree() -> N
 
     assert "PYTHONPATH=/app/src:/build/python/src" in script
     assert "[ -f /build/python/pyproject.toml ]" in script
-    assert "pip install --quiet pillow fastapi uvicorn nats-py numpy lxml xarray" in script
+    assert 'pip install --quiet "pillow>=13,<14" fastapi uvicorn nats-py numpy lxml xarray' in script
     assert "import libbioimage.libbioimage as bim" in script
     assert '"czi" not in formats' in script

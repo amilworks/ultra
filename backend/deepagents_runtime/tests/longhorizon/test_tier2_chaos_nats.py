@@ -23,6 +23,7 @@ import threading
 import time
 from unittest import mock
 
+import nats
 import pytest
 from deepagents.backends.protocol import ExecuteResponse
 from longhorizon_harness import TurnDecision, TurnRequest
@@ -31,6 +32,7 @@ from longhorizon_invariants import (
     assert_terminal_success,
 )
 from longhorizon_nats import (
+    DEPLOY_DIR,
     ChaosControlPlane,
     ChaosNamespace,
     ChaosWorker,
@@ -44,6 +46,7 @@ from longhorizon_nats import (
     start_worker,
     stop_worker,
 )
+from nats.js.api import ConsumerConfig
 from ultra_deepagents.schemas import RunJobEnvelope
 
 pytestmark = [
@@ -405,6 +408,78 @@ def test_nats_server_restart_mid_run_recovers_and_completes(tmp_path, nats_serve
     assert_event_stream_integrity(log)
     ack_pending, _redelivered = asyncio.run(consumer_state(nats_server, settings))
     assert ack_pending == 0, "job left unacked after the restart recovery"
+
+
+def test_deployed_broker_accepts_systemd_control_stream_budget(nats_server) -> None:
+    unit = (DEPLOY_DIR / "systemd/ultra-control.service").read_text()
+    defaults = dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in unit.splitlines()
+        if line.startswith("Environment=")
+    )
+    max_bytes = int(defaults["ULTRA_CONTROL_NATS_STREAM_MAX_BYTES"])
+    assert max_bytes > 0
+    ns = ChaosNamespace.fresh()
+
+    async def scenario():
+        connection = await nats.connect(nats_server.url)
+        try:
+            js = connection.jetstream()
+            stream = await js.add_stream(
+                name=ns.stream, subjects=[ns.jobs_subject], max_bytes=max_bytes
+            )
+            assert stream.config.max_bytes == max_bytes
+            await js.delete_stream(ns.stream)
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
+
+
+def test_restart_preserves_job_deduplication_and_consumer_ack_floor(nats_server) -> None:
+    """A lost publish receipt and a lost delivery ACK recover independently."""
+    ns = ChaosNamespace.fresh()
+
+    async def scenario():
+        connection = await nats.connect(nats_server.url)
+        try:
+            js = connection.jetstream()
+            await js.add_stream(name=ns.stream, subjects=[ns.jobs_subject])
+            await js.add_consumer(
+                ns.stream, config=ConsumerConfig(durable_name=ns.durable, ack_wait=1)
+            )
+            for index in (1, 2):
+                await js.publish(
+                    ns.jobs_subject, str(index).encode(), headers={"Nats-Msg-Id": f"job:{index}"}
+                )
+            subscription = await js.pull_subscribe_bind(stream=ns.stream, consumer=ns.durable)
+            confirmed, outstanding = await subscription.fetch(2, timeout=5)
+            assert (confirmed.data, outstanding.data) == (b"1", b"2")
+            await confirmed.ack_sync()
+        finally:
+            await connection.close()
+
+        await nats_server.restart()
+        connection = await nats.connect(nats_server.url)
+        try:
+            js = connection.jetstream()
+            replay = await js.publish(ns.jobs_subject, b"2", headers={"Nats-Msg-Id": "job:2"})
+            assert replay.duplicate and replay.seq == 2
+            assert (await js.stream_info(ns.stream)).state.messages == 2
+            state = await js.consumer_info(ns.stream, ns.durable)
+            assert (state.ack_floor.stream_seq, state.num_ack_pending) == (1, 1)
+            subscription = await js.pull_subscribe_bind(stream=ns.stream, consumer=ns.durable)
+            (remaining,) = await subscription.fetch(1, timeout=5)
+            assert remaining.data == outstanding.data
+            assert remaining.metadata.num_delivered == 2
+            await remaining.ack_sync()
+            state = await js.consumer_info(ns.stream, ns.durable)
+            assert state.ack_floor.stream_seq == 2
+            assert (state.num_ack_pending, state.num_pending) == (0, 0)
+        finally:
+            await connection.close()
+
+    asyncio.run(scenario())
 
 
 def test_cancel_subject_aborts_run_and_publishes_canceled(tmp_path, nats_server) -> None:

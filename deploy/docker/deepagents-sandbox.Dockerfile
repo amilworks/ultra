@@ -110,7 +110,7 @@ RUN python -m pip install --no-cache-dir \
         opencv-python-headless==4.10.0.84 \
         openslide-python \
         "pandas<3" \
-        pillow \
+        "pillow>=13.0.0,<14" \
         pyarrow \
         pydicom \
         pylibjpeg \

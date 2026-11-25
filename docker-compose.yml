@@ -61,7 +61,7 @@ services:
       retries: 20
 
   nats:
-    image: nats:2.10-alpine
+    image: nats:2.15.3-alpine
     # -sd persists JetStream to a named volume so durable run/job state survives
     # `docker compose down` (without a store dir + volume it is lost on restart).
     # --auth mirrors production, where NATS requires a token. Clients MUST use the

@@ -3,7 +3,7 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.6
 python-multipart==0.0.20
 numpy==1.26.4
-Pillow==10.4.0
+Pillow==13.0.0
 tifffile==2024.8.30
 scikit-image==0.22.0
 s3fs==2024.9.0

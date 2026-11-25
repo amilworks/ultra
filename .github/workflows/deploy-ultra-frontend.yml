@@ -91,7 +91,8 @@ jobs:
         run: pnpm --dir frontend test:unit
 
   build-smoke:
-    runs-on: ubuntu-latest
+    # Playwright 1.60 provides Chromium system dependencies for Ubuntu 24.04.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
